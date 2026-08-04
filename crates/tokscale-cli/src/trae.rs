@@ -1112,64 +1112,66 @@ pub mod sync {
 
     // ── Sync lock ──────────────────────────────────────────────────────────
 
-    const SYNC_LOCK_ACQUIRE_ATTEMPTS: usize = 3;
-
     #[derive(Debug)]
     struct SyncLockGuard {
-        path: PathBuf,
+        _file: std::fs::File,
     }
 
     impl SyncLockGuard {
+        /// Take exclusive ownership of the Trae sync for as long as the
+        /// returned guard lives.
+        ///
+        /// Ownership is the kernel's exclusive lock on the file, not the
+        /// bytes inside it. The previous protocol created the lock file, then
+        /// wrote its pid, then probed that pid's liveness to decide whether to
+        /// unlink and retry — a read-decide-unlink sequence that is not
+        /// atomic, so two contenders could find the same dead owner and both
+        /// proceed, and a contender arriving before the pid was written read
+        /// an empty file and evicted a live owner. The kernel releases the
+        /// lock on process death, so no stale-lock recovery is needed (#1010).
+        ///
+        /// The lock file is deliberately left on disk: unlinking it would let
+        /// a contender create a fresh file and lock that instead.
         fn acquire(cache_dir: &std::path::Path) -> Result<Self> {
-            let lock_path = cache_dir.join("sync.lock");
+            use std::io::Write;
+
             if !cache_dir.exists() {
                 std::fs::create_dir_all(cache_dir)?;
             }
-            let mut stale_recoveries = 0usize;
-            loop {
-                match std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&lock_path)
-                {
-                    Ok(mut file) => {
-                        use std::io::Write;
-                        let _ = writeln!(file, "{} {}", std::process::id(), Utc::now().timestamp());
-                        return Ok(Self { path: lock_path });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        // Only evict the lock when its owner is provably
-                        // dead. Live syncs MUST keep exclusive access for as
-                        // long as they hold the PID — otherwise two
-                        // processes overlap on the manifest and delete each
-                        // other's session artifacts.
-                        if let Some((existing_pid, _)) = read_sync_lock(&lock_path) {
-                            if pid_is_alive(existing_pid) {
-                                return Err(anyhow::anyhow!(
-                                    "another trae sync is in progress (pid {existing_pid}); aborting"
-                                ));
-                            }
-                        }
-                        if stale_recoveries >= SYNC_LOCK_ACQUIRE_ATTEMPTS {
-                            return Err(anyhow::anyhow!(
-                                "could not acquire trae sync lock after {SYNC_LOCK_ACQUIRE_ATTEMPTS} stale-lock recoveries; another process keeps recreating the lock file"
-                            ));
-                        }
-                        stale_recoveries += 1;
-                        let _ = std::fs::remove_file(&lock_path);
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(anyhow::Error::new(e).context("failed to acquire sync lock"));
-                    }
+
+            let lock_path = cache_dir.join("sync.lock");
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .with_context(|| format!("failed to open sync lock at {}", lock_path.display()))?;
+
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(e) if crate::commands::autosubmit::is_lock_contention(&e) => {
+                    // Best effort: name the owner when its pid is recorded and
+                    // still alive. Windows refuses reads of a range another
+                    // handle has locked, so the pid is often unavailable there.
+                    let owner = read_sync_lock(&lock_path)
+                        .filter(|(pid, _)| pid_is_alive(*pid))
+                        .map(|(pid, _)| format!(" (pid {pid})"))
+                        .unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "another trae sync is in progress{owner}; aborting"
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("failed to acquire sync lock"));
                 }
             }
-        }
-    }
 
-    impl Drop for SyncLockGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
+            // Recorded for diagnostics only — the lock above is what excludes.
+            let _ = file.set_len(0);
+            let _ = writeln!(file, "{} {}", std::process::id(), Utc::now().timestamp());
+
+            Ok(Self { _file: file })
         }
     }
 
@@ -1389,43 +1391,73 @@ pub mod sync {
         // Liveness probe coverage moved to `crate::process_liveness`, which
         // now owns the single implementation both sync locks share.
 
+        /// A lock file left behind by a crashed run must not block anyone:
+        /// the kernel drops the lock when its owner dies, so the leftover
+        /// bytes are inert and the next sync takes the file over.
         #[test]
-        fn test_acquire_recovers_from_stale_lock_with_dead_pid() {
-            // PID 0 is reserved by the kernel and never represents a live
-            // user-space process — perfect stand-in for a crashed sync.
+        fn test_acquire_takes_over_a_lock_file_nobody_holds() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
             std::fs::write(cache_dir.join("sync.lock"), "0 1\n").unwrap();
-            // Should evict the stale lock and acquire a fresh one.
-            let guard = SyncLockGuard::acquire(cache_dir).expect("stale lock is recovered");
+
+            drop(SyncLockGuard::acquire(cache_dir).expect("an unheld lock file is taken over"));
+
+            // The file stays: unlinking it would let a contender lock a
+            // different file and defeat the exclusion.
             assert!(cache_dir.join("sync.lock").exists());
-            drop(guard);
-            // Drop releases the lock.
-            assert!(!cache_dir.join("sync.lock").exists());
         }
 
+        /// Regression (#1010): the old protocol decided ownership from the
+        /// bytes in the lock file, so a lock held by a live process that had
+        /// not yet written its pid looked unowned and was evicted.
         #[test]
-        #[cfg(unix)]
-        fn test_acquire_rejects_when_owner_is_alive() {
-            // Use our own PID — guaranteed alive. acquire() must refuse.
+        fn test_acquire_refuses_a_held_lock_that_has_no_pid_written_yet() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
-            let alive_pid = std::process::id();
-            std::fs::write(cache_dir.join("sync.lock"), format!("{alive_pid} 1\n")).unwrap();
+            let lock_path = cache_dir.join("sync.lock");
+
+            let holder = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&holder).unwrap();
+
+            let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+            assert!(
+                err.to_string().contains("another trae sync is in progress"),
+                "a held lock must never be evicted, got: {err:#}"
+            );
+
+            fs2::FileExt::unlock(&holder).unwrap();
+        }
+
+        /// A second sync is refused for as long as the first guard lives, and
+        /// succeeds once it is dropped.
+        #[test]
+        fn test_acquire_excludes_a_second_sync_until_the_first_is_dropped() {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache_dir = tmp.path();
+
+            let guard = SyncLockGuard::acquire(cache_dir).expect("first acquire");
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
             assert!(err.to_string().contains("another trae sync is in progress"));
-            // Lock file must remain untouched so the live owner can release it.
-            assert!(cache_dir.join("sync.lock").exists());
+
+            drop(guard);
+            SyncLockGuard::acquire(cache_dir).expect("the lock is free once the guard is dropped");
         }
 
         #[test]
         fn test_acquire_writes_pid_and_timestamp() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
-            let guard = SyncLockGuard::acquire(cache_dir).expect("first acquire");
+            // Read back after the guard is dropped: Windows refuses reads of a
+            // range another handle has locked.
+            drop(SyncLockGuard::acquire(cache_dir).expect("first acquire"));
             let (pid, _) = read_sync_lock(&cache_dir.join("sync.lock")).expect("readable");
             assert_eq!(pid, std::process::id());
-            drop(guard);
         }
 
         #[test]

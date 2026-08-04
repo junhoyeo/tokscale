@@ -509,7 +509,7 @@ const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
 /// Only `WouldBlock` used to count, so on Windows a second scheduled run hit
 /// the error arm and the caller's `unwrap` panicked — a run that found another
 /// already in progress failed instead of stepping aside.
-fn is_lock_contention(err: &std::io::Error) -> bool {
+pub(crate) fn is_lock_contention(err: &std::io::Error) -> bool {
     err.kind() == ErrorKind::WouldBlock || err.raw_os_error() == Some(WINDOWS_ERROR_LOCK_VIOLATION)
 }
 
