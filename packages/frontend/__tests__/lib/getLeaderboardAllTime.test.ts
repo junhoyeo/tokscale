@@ -176,6 +176,51 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("SUM(s.total_tokens) AS total_tokens");
     expect(query()).toContain("GROUP BY s.user_id");
     expect(query()).toContain("COUNT(*) FROM (");
+    const final = finalQuery();
+    expect(final.indexOf("GROUP BY s.user_id")).toBeLessThan(
+      final.indexOf("RANK() OVER (ORDER BY total_tokens DESC)"),
+    );
+  });
+
+  it("keeps primary-metric ties at the same rank and orders their display deterministically", async () => {
+    state.results.push([
+      {
+        users: [
+          {
+            rank: 1,
+            userId: "alice",
+            username: "alice",
+            displayName: null,
+            avatarUrl: null,
+            totalTokens: 300,
+            totalCost: 3,
+          },
+          {
+            rank: 1,
+            userId: "bob",
+            username: "bob",
+            displayName: null,
+            avatarUrl: null,
+            totalTokens: 300,
+            totalCost: 2,
+          },
+        ],
+        totalUsers: 2,
+        totalTokens: 600,
+        totalCost: 5,
+        uniqueUsers: 2,
+      },
+    ]);
+    const data = await getLeaderboardData("all");
+    expect(data.users.map((user) => [user.username, user.rank])).toEqual([
+      ["alice", 1],
+      ["bob", 1],
+    ]);
+    const final = finalQuery();
+    expect(final).toContain("RANK() OVER (ORDER BY total_tokens DESC)");
+    expect(final).toContain(
+      "ORDER BY rank ASC, total_cost DESC, LOWER(username) ASC, user_id ASC",
+    );
   });
 
   it("returns one all-time user rank after aggregating that user's submissions", async () => {
