@@ -1239,7 +1239,6 @@ TOKSCALE_UID=$(id -u) TOKSCALE_GID=$(id -g) \
 ```bash
 make down         # 모든 서비스 중지
 make logs/app     # 앱 로그 추적
-make db/migrate   # 보류 중인 마이그레이션 수동 실행
 make help         # 전체 대상 목록
 ```
 

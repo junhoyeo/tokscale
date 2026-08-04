@@ -1270,7 +1270,6 @@ Add equivalent `-v` flags for the clients you use. This keeps the default comman
 ```bash
 make down         # stop all services
 make logs/app     # tail app logs
-make db/migrate   # run pending migrations manually
 make help         # full target list
 ```
 
