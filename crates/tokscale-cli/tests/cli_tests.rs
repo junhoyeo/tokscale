@@ -224,8 +224,28 @@ fn headless_capture_slow_command_times_out() {
         .code(124);
     let elapsed = started.elapsed();
 
+    // The discriminating fact is that the *parent's* 10s timeout ended this run,
+    // not the child's own 20s sleep. The lower bound proves the parent waited for
+    // its deadline instead of failing early; the upper bound proves it did not
+    // simply outlive the child.
+    //
+    // The upper bound is set against the child's 20s sleep, not against a
+    // teardown budget. The previous 14s left only 4s for everything outside the
+    // deadline — `tokscale`'s own process startup, `child.kill()`, `child.wait()`
+    // and joining the stdout pump — and on a Windows runner startup alone can
+    // consume most of that. It failed at 14.83s in CI (job 92167428621) while
+    // still killing the child correctly, so the bound was measuring runner speed
+    // rather than the behaviour this test is named for.
+    //
+    // 18s keeps a 2s margin below the child's sleep, so a parent that hung until
+    // the child exited on its own is still caught.
+    //
+    // Note this test cannot catch #1049: the stand-in spawns nothing, so its pipe
+    // closes the moment it is killed, and the unbounded `output_handle.join()`
+    // after the kill is never exercised. Widening the bound does not hide that —
+    // it was never covered.
     assert!(
-        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(14),
+        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(18),
         "slow command timeout duration was unexpected: {elapsed:?}"
     );
 }
