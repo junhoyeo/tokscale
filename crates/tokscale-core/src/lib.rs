@@ -4354,17 +4354,8 @@ mod tests {
         crate::paths::test_env::EnvGuard::capture(&["HOME"])
     }
 
-    /// What [`redirect_cache_home`] replaces, so a test can put it back.
-    type CacheHomeEnv = (Option<String>, Option<String>);
-
-    fn capture_cache_home() -> CacheHomeEnv {
-        (
-            std::env::var("HOME").ok(),
-            std::env::var("TOKSCALE_CONFIG_DIR").ok(),
-        )
-    }
-
-    /// Point the message-cache root at a scratch directory.
+    /// Point the message-cache root at a scratch directory for as long as the
+    /// returned guard is alive.
     ///
     /// Redirecting `HOME` is enough on Unix and does nothing on Windows:
     /// `paths::get_config_dir` resolves the Windows root through
@@ -4380,9 +4371,33 @@ mod tests {
     /// already produced, so nothing moves there; it also pins the root against a
     /// globally-set `XDG_CONFIG_HOME`, which a `HOME`-only redirect leaks past
     /// on Linux runners.
-    fn redirect_cache_home(home: &std::path::Path) {
-        std::env::set_var("HOME", home);
-        std::env::set_var("TOKSCALE_CONFIG_DIR", home.join(".config").join("tokscale"));
+    ///
+    /// That reach is exactly why the restore has to be a `Drop` guard rather
+    /// than a trailing call. The `HOME`-only redirect this replaced was inert
+    /// on Windows, so leaking it past a panicking assertion cost nothing there;
+    /// `TOKSCALE_CONFIG_DIR` is consulted first on *every* platform, so a leaked
+    /// one points every later test in the binary at a `TempDir` that has already
+    /// been dropped — the cross-test contamination this redirect exists to
+    /// remove, reintroduced one layer down. `serial_test` does not help: it
+    /// prevents overlap, not inheritance.
+    #[must_use = "the redirect is undone as soon as the guard drops; bind it to a \
+                  named variable that outlives the test body"]
+    fn redirect_cache_home(home: &std::path::Path) -> crate::paths::test_env::EnvGuard {
+        let mut env = crate::paths::test_env::EnvGuard::capture(&["HOME", "TOKSCALE_CONFIG_DIR"]);
+        point_cache_home(&mut env, home);
+        env
+    }
+
+    /// Re-aim a live [`redirect_cache_home`] at a different scratch directory.
+    ///
+    /// The tests that compare a warm cache against a cold one switch roots
+    /// mid-body, and one switches back again to assert on the first root. They
+    /// want a re-point, not a nested guard: the guard already holds the values
+    /// from before the *first* redirect, and restoring those once at scope exit
+    /// is the correct end state no matter how many times the root moved.
+    fn point_cache_home(env: &mut crate::paths::test_env::EnvGuard, home: &std::path::Path) {
+        env.set("HOME", home);
+        env.set("TOKSCALE_CONFIG_DIR", home.join(".config").join("tokscale"));
     }
 
     /// A client's scan root under `home`, spelled the way a scan will spell it.
@@ -4407,15 +4422,6 @@ mod tests {
                 .data()
                 .resolve_path_with_env_strategy(&home.to_string_lossy(), false),
         )
-    }
-
-    fn restore_cache_home(previous: CacheHomeEnv) {
-        for (key, value) in [("HOME", previous.0), ("TOKSCALE_CONFIG_DIR", previous.1)] {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 
     /// An explicit `--home` outranks every environment lookup. Pinned so the
@@ -5565,8 +5571,7 @@ mod tests {
     fn test_micode_authoritative_cost_is_not_repriced_on_first_parse_or_cache_hit() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let micode_dir = source_home.path().join(".local/share/mimocode");
@@ -5637,8 +5642,6 @@ mod tests {
                 second[0].cost
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -5646,8 +5649,7 @@ mod tests {
     fn test_micode_cross_database_dedup_prefers_explicit_zero_cost() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let micode_dir = source_home.path().join(".local/share/mimocode");
@@ -5702,8 +5704,6 @@ mod tests {
             assert!(messages[0].has_authoritative_cost());
             assert!(validate_priced_messages(&messages, Some(&pricing)).is_ok());
         }
-
-        restore_cache_home(original_home);
     }
 
     /// Claude Code rewrites a session transcript in place on resume/compact:
@@ -5717,8 +5717,7 @@ mod tests {
     fn test_claude_in_place_rewrite_preserves_previously_seen_messages() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = source_home.path().join(".claude/projects/myproject");
@@ -5797,8 +5796,6 @@ mod tests {
                 before_output
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     /// Retention is only sound because a retained message still collapses
@@ -5816,8 +5813,7 @@ mod tests {
     fn test_claude_retained_message_collapses_against_a_forked_transcript() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = source_home.path().join(".claude/projects/myproject");
@@ -5869,8 +5865,6 @@ mod tests {
             );
             assert_eq!(after.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
         }
-
-        restore_cache_home(original_home);
     }
 
     /// A Claude tool-result key embeds the session id, which is the
@@ -5883,8 +5877,7 @@ mod tests {
     fn test_claude_path_scoped_tool_result_is_not_retained_across_a_rewrite() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = source_home.path().join(".claude/projects/myproject");
@@ -5927,8 +5920,6 @@ mod tests {
             );
             assert_eq!(after.iter().map(|m| m.tokens.input).sum::<i64>(), 100);
         }
-
-        restore_cache_home(original_home);
     }
 
     /// The retention above must not resurrect a session the user deleted:
@@ -5944,8 +5935,7 @@ mod tests {
     fn test_claude_deleted_transcript_is_not_resurrected_by_retention() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = source_home.path().join(".claude/projects/myproject");
@@ -5993,8 +5983,6 @@ mod tests {
                 "a deleted transcript stays deleted, retained turns and all; local disk remains the source of truth"
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     fn write_kimi_repeated_status_fixture(source_home: &std::path::Path) {
@@ -6035,8 +6023,7 @@ mod tests {
     fn test_cline_cli_deduplicates_duplicate_records_in_cached_and_local_paths() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let duplicate = r#"{"id":"duplicate","role":"assistant","ts":1785320475705,"modelInfo":{"id":"cline-free/glm-5.2","provider":"cline-pass"},"metrics":{"inputTokens":100,"outputTokens":10}}"#;
@@ -6103,8 +6090,6 @@ mod tests {
             assert_eq!(local_inputs, vec![100, 200, 300]);
             assert_eq!(parsed.counts.get(ClientId::Cline), 3);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6112,8 +6097,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_prefers_grok_unified_log() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home
@@ -6147,8 +6131,6 @@ mod tests {
             assert_eq!(messages[0].tokens.reasoning, 5);
             assert_eq!(messages[0].tokens.total(), 125);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6156,8 +6138,7 @@ mod tests {
     fn test_parse_all_messages_reprices_grok_after_legacy_model_attribution() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home
@@ -6212,8 +6193,6 @@ mod tests {
             assert_eq!(second[0].model_id, "grok-code");
             assert!(second[0].cost > 0.0);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6268,8 +6247,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_kimi_deduplicates_repeated_status_updates() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_kimi_repeated_status_fixture(source_home.path());
@@ -6284,8 +6262,6 @@ mod tests {
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 40);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 5);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6293,8 +6269,7 @@ mod tests {
     fn test_parse_local_clients_kimi_deduplicates_repeated_status_updates() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_kimi_repeated_status_fixture(source_home.path());
@@ -6315,8 +6290,6 @@ mod tests {
             assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
             assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6324,8 +6297,7 @@ mod tests {
     fn test_kimchi_deduplicates_same_message_across_scan_roots() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         let default_path = source_home
             .path()
@@ -6371,8 +6343,6 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some("kimchi:kimchi-session:kimchi-message")
         );
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6387,8 +6357,7 @@ mod tests {
         // parse_local_clients test cannot catch this.
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home
@@ -6422,8 +6391,6 @@ mod tests {
                 100
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6431,8 +6398,7 @@ mod tests {
     fn test_source_cache_refreshes_stale_date_on_cache_hit() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let message_dir = source_home
@@ -6503,8 +6469,6 @@ mod tests {
                 .date
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6512,8 +6476,7 @@ mod tests {
     fn test_claude_warm_cache_removes_synthetic_placeholder_before_submit_validation() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
@@ -6591,8 +6554,6 @@ mod tests {
             assert_eq!(cached.messages.len(), 1);
             assert_eq!(cached.messages[0].dedup_key.as_deref(), Some("old:req_old"));
         }
-
-        restore_cache_home(original_home);
     }
 
     #[cfg(unix)]
@@ -6603,8 +6564,7 @@ mod tests {
 
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let message_dir = source_home
@@ -6648,8 +6608,6 @@ mod tests {
             );
             assert_eq!(second_messages.len(), 1);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6657,8 +6615,7 @@ mod tests {
     fn test_empty_cache_hits_are_reparsed_for_optional_file_sources() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let message_dir =
@@ -6699,8 +6656,6 @@ mod tests {
                 .unwrap();
             assert_eq!(repaired_entry.messages.len(), 1);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6708,8 +6663,7 @@ mod tests {
     fn test_sqlite_source_cache_invalidates_on_wal_change() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let db_dir = source_home.path().join(".local/share/opencode");
@@ -6773,8 +6727,6 @@ mod tests {
             );
             assert_eq!(refreshed_messages.len(), 2);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6785,8 +6737,7 @@ mod tests {
         // must only be counted once.
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let db_dir = source_home.path().join(".local/share/opencode");
@@ -6886,8 +6837,6 @@ mod tests {
                 "warm cache must also dedup shared message across channel dbs"
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6895,8 +6844,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let db_dir = source_home.path().join(".local/share/opencode");
@@ -6961,8 +6909,6 @@ mod tests {
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 250);
             assert_eq!(messages.iter().map(|m| m.cost).sum::<f64>(), 0.06);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -6970,8 +6916,7 @@ mod tests {
     fn test_parse_local_clients_opencode_sqlite_counts_deduplicated_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let db_dir = source_home.path().join(".local/share/opencode");
@@ -7041,8 +6986,6 @@ mod tests {
             assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 600);
             assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 250);
         }
-
-        restore_cache_home(original_home);
     }
 
     fn write_codex_forked_history_fixture(source_home: &std::path::Path) {
@@ -7194,8 +7137,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_forked_history_fixture(source_home.path());
@@ -7229,8 +7171,6 @@ mod tests {
                 33
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7238,8 +7178,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_codex_keeps_user_fork_own_turn() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_user_fork_replay_fixture(source_home.path());
@@ -7263,8 +7202,6 @@ mod tests {
             );
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 150);
         }
-
-        restore_cache_home(original_home);
     }
 
     /// Regression fixture for issue #779: Codex CLI moves aged sessions from
@@ -7335,8 +7272,7 @@ mod tests {
     {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_sessions_and_archived_sessions_fixture(source_home.path());
@@ -7371,8 +7307,6 @@ mod tests {
             // 5 (live-only) + 7 (archived-only) + 3 (shared, once) = 15.
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 15);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7380,8 +7314,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_parent_replay_fixture(source_home.path());
@@ -7405,8 +7338,6 @@ mod tests {
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
         }
-
-        restore_cache_home(original_home);
     }
 
     fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
@@ -7438,8 +7369,7 @@ mod tests {
     fn test_parse_all_messages_with_pricing_codex_keeps_twin_token_counts_at_distinct_timestamps() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_twin_token_count_fixture(source_home.path());
@@ -7478,8 +7408,6 @@ mod tests {
                 4,
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7487,8 +7415,7 @@ mod tests {
     fn test_parse_local_clients_codex_counts_deduplicated_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             write_codex_forked_history_fixture(source_home.path());
@@ -7531,8 +7458,6 @@ mod tests {
                 33
             );
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7541,8 +7466,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let codex_dir = client_scan_root(source_home.path(), ClientId::Codex);
@@ -7593,7 +7517,7 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -7606,8 +7530,6 @@ mod tests {
                 .iter()
                 .all(|message| message.model_id == "gpt-5.5"));
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7616,8 +7538,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let codex_dir = source_home.path().join(".codex/sessions");
@@ -7661,7 +7582,7 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -7670,8 +7591,6 @@ mod tests {
 
             assert_eq!(warm_messages, fresh_messages);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7680,8 +7599,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let codex_dir = source_home.path().join(".codex/sessions");
@@ -7734,7 +7652,7 @@ mod tests {
                 )
                 .is_none());
 
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -7743,8 +7661,6 @@ mod tests {
 
             assert_eq!(warm_messages, fresh_messages);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7752,8 +7668,7 @@ mod tests {
     fn test_exact_hit_codex_cache_repairs_fallback_timestamps_without_incremental_state() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home.path().join(".codex/sessions");
@@ -7797,8 +7712,6 @@ mod tests {
 
             assert_eq!(messages, expected);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7807,8 +7720,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home.path().join(".codex/sessions");
@@ -7838,7 +7750,7 @@ mod tests {
                 None,
             );
 
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -7848,8 +7760,6 @@ mod tests {
             assert_eq!(warm_messages, fresh_messages);
             assert_ne!(warm_messages[0].timestamp, initial_messages[0].timestamp);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7857,8 +7767,7 @@ mod tests {
     fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home.path().join(".codex/sessions");
@@ -7895,8 +7804,6 @@ mod tests {
                 )
                 .is_none());
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7905,8 +7812,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = client_scan_root(source_home.path(), ClientId::Codex);
@@ -7958,7 +7864,7 @@ mod tests {
                 None,
             );
 
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -7969,7 +7875,7 @@ mod tests {
             assert_eq!(resumed_messages.len(), 1);
             assert_eq!(resumed_messages[0].model_id, "gpt-5.5");
 
-            redirect_cache_home(cache_home.path());
+            point_cache_home(&mut cache_env, cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Codex),
@@ -7977,8 +7883,6 @@ mod tests {
                 )
                 .is_some());
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -7987,8 +7891,7 @@ mod tests {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let mut cache_env = redirect_cache_home(cache_home.path());
 
         {
             let session_dir = source_home.path().join(".codex/sessions");
@@ -8039,7 +7942,7 @@ mod tests {
                 None,
             );
 
-            redirect_cache_home(fresh_cache_home.path());
+            point_cache_home(&mut cache_env, fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
@@ -8049,8 +7952,6 @@ mod tests {
             assert_eq!(warm_messages, fresh_messages);
             assert_eq!(warm_messages.len(), 2);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -8058,8 +7959,7 @@ mod tests {
     fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
         let temp_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(temp_home.path());
+        let _cache_env = redirect_cache_home(temp_home.path());
         {
             let cursor_cache_dir = source_home.path().join(".config/tokscale/cursor-cache");
             std::fs::create_dir_all(&cursor_cache_dir).unwrap();
@@ -8097,8 +7997,6 @@ mod tests {
             assert_eq!(cached_messages.len(), 1);
             assert_eq!(cached_messages[0].cost, 0.0);
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -10362,8 +10260,7 @@ mod tests {
     fn test_parse_all_messages_refreshes_cc_mirror_provider_when_variant_metadata_changes() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let variant_dir = source_home.path().join(".cc-mirror/kimi-code");
@@ -10415,8 +10312,6 @@ mod tests {
             assert_eq!(refreshed_messages[0].client, "cc-mirror/kimi-code");
             assert_eq!(refreshed_messages[0].provider_id, "minimax");
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]
@@ -10424,8 +10319,7 @@ mod tests {
     fn test_parse_all_messages_keeps_normal_claude_when_cc_mirror_points_at_claude_config() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = capture_cache_home();
-        redirect_cache_home(cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let claude_dir = source_home.path().join(".claude");
@@ -10458,8 +10352,6 @@ mod tests {
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].client, "claude");
         }
-
-        restore_cache_home(original_home);
     }
 
     #[test]

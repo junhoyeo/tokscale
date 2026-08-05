@@ -1959,55 +1959,44 @@ mod tests {
     }
 
     /// Pin every env var the cache resolvers consult so the test stays
-    /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
-    /// `XDG_CACHE_HOME` from the host, which would resolve cache shards outside
-    /// the sandbox. Returns the previous values so the caller can restore.
-    fn sandbox_cache_env(
-        temp_home: &std::path::Path,
-    ) -> (
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-    ) {
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
-        let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
-        let prev_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            std::env::set_var("HOME", temp_home);
-            std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
-            std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
-            // The three above isolate the cache on Unix and none of them reach
-            // it on Windows: `paths::get_config_dir` resolves the Windows root
-            // with `dirs::config_dir()`, a known-folder lookup that reads no
-            // environment variable. Without this line every test here shared
-            // one real `%APPDATA%\tokscale\cache`, so `SourceMessageCache::load`
-            // returned its neighbours' shards along with its own and the entry
-            // counts came out too high. `TOKSCALE_CONFIG_DIR` is the override
-            // paths.rs documents for this case and is consulted first
-            // everywhere; on Unix it names the directory the redirects above
-            // already produced.
-            std::env::set_var(
-                "TOKSCALE_CONFIG_DIR",
-                temp_home.join(".config").join("tokscale"),
-            );
-        }
-        (prev_home, prev_xdg_config, prev_xdg_cache, prev_override)
-    }
-
-    fn restore_cache_env(
-        prev: (
-            Option<std::ffi::OsString>,
-            Option<std::ffi::OsString>,
-            Option<std::ffi::OsString>,
-            Option<std::ffi::OsString>,
-        ),
-    ) {
-        restore_env_var("HOME", prev.0);
-        restore_env_var("XDG_CONFIG_HOME", prev.1);
-        restore_env_var("XDG_CACHE_HOME", prev.2);
-        restore_env_var("TOKSCALE_CONFIG_DIR", prev.3);
+    /// inside `temp_home`, until the returned guard drops. CI runners can leak
+    /// `XDG_CONFIG_HOME` / `XDG_CACHE_HOME` from the host, which would resolve
+    /// cache shards outside the sandbox.
+    ///
+    /// The restore has to be a `Drop` guard rather than a trailing call. A
+    /// failing assertion panics before any trailing restore runs, and of the
+    /// four keys here `TOKSCALE_CONFIG_DIR` is consulted first on every
+    /// platform — so a leaked one aims every later test in this binary at a
+    /// `TempDir` that has already been dropped, which is the contamination this
+    /// sandbox exists to prevent. `serial_test` prevents overlap, not
+    /// inheritance.
+    #[must_use = "the sandbox is torn down as soon as the guard drops; bind it to a \
+                  named variable that outlives the test body"]
+    fn sandbox_cache_env(temp_home: &std::path::Path) -> crate::paths::test_env::EnvGuard {
+        let mut env = crate::paths::test_env::EnvGuard::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "TOKSCALE_CONFIG_DIR",
+        ]);
+        env.set("HOME", temp_home);
+        env.set("XDG_CONFIG_HOME", temp_home.join(".config"));
+        env.set("XDG_CACHE_HOME", temp_home.join(".cache"));
+        // The three above isolate the cache on Unix and none of them reach
+        // it on Windows: `paths::get_config_dir` resolves the Windows root
+        // with `dirs::config_dir()`, a known-folder lookup that reads no
+        // environment variable. Without this line every test here shared
+        // one real `%APPDATA%\tokscale\cache`, so `SourceMessageCache::load`
+        // returned its neighbours' shards along with its own and the entry
+        // counts came out too high. `TOKSCALE_CONFIG_DIR` is the override
+        // paths.rs documents for this case and is consulted first
+        // everywhere; on Unix it names the directory the redirects above
+        // already produced.
+        env.set(
+            "TOKSCALE_CONFIG_DIR",
+            temp_home.join(".config").join("tokscale"),
+        );
+        env
     }
 
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
@@ -2683,7 +2672,7 @@ mod tests {
     #[serial_test::serial]
     fn test_kimi_stale_parser_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_home = TempDir::new().unwrap();
         // Spelled the way the scan will spell it. `ClientDef::resolve_path`
         // joins the root with `/` and `WalkDir` appends the components below it
@@ -2803,8 +2792,6 @@ mod tests {
             &crate::scanner::ScannerSettings::default(),
         );
         assert_eq!(second, first);
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -3119,7 +3106,7 @@ mod tests {
     #[serial_test::serial]
     fn test_source_message_cache_round_trips_across_distinct_shards() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
         let identity = CacheIdentity::for_client(ClientId::Claude);
         let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
@@ -3138,8 +3125,6 @@ mod tests {
         assert_eq!(loaded.entries.len(), 2);
         assert!(loaded.get(identity, &path_one).is_some());
         assert!(loaded.get(identity, &path_two).is_some());
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -3148,7 +3133,7 @@ mod tests {
         const TEST_SHARD_LIMIT: u64 = 32 * 1024;
 
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
         let identity = CacheIdentity::for_client(ClientId::Claude);
         let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
@@ -3178,15 +3163,13 @@ mod tests {
         let loaded = SourceMessageCache::load();
         assert!(loaded.get(identity, &path_one).is_some());
         assert!(loaded.get(identity, &path_two).is_some());
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_corrupt_shard_does_not_hide_entries_from_other_shards() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
         let identity = CacheIdentity::for_client(ClientId::Claude);
         let (corrupt_path, valid_path) = write_sources_in_distinct_shards(&source_dir, identity);
@@ -3213,15 +3196,13 @@ mod tests {
             loaded.dirty,
             "the corrupt shard should be scheduled for rewrite"
         );
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_stale_parser_shard_is_skipped_before_decoding_garbage_payload() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"claude\n");
         let claude = CacheIdentity::for_client(ClientId::Claude);
         let codex = CacheIdentity::for_client(ClientId::Codex);
@@ -3272,15 +3253,13 @@ mod tests {
         assert!(SourceMessageCache::load()
             .get(claude, source.path())
             .is_some());
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_prior_cache_format_shard_is_skipped_before_decoding_payload() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let codex = CacheIdentity::for_client(ClientId::Codex);
         let stale_key = CacheShardKey {
             namespace: codex.namespace.to_string(),
@@ -3304,15 +3283,13 @@ mod tests {
             read_shard(&stale_path, codex),
             ShardReadStatus::Stale
         ));
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_copilot_stale_cache_is_rejected_and_rebuilt_with_root_agent() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
         let source_path = source_dir.path().join("copilot-otel.jsonl");
         std::fs::write(
@@ -3439,15 +3416,13 @@ mod tests {
                     && entries[0].messages[0].agent.as_deref()
                         == Some("github.copilot.default")
         ));
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_explicit_invalidation_of_existing_path_persists() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"still exists\n");
         let identity = CacheIdentity::for_client(ClientId::Claude);
 
@@ -3469,15 +3444,13 @@ mod tests {
         assert!(SourceMessageCache::load()
             .get(identity, source.path())
             .is_none());
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_stale_invalidation_preserves_concurrently_refreshed_entry() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
         let path = source_dir.path().join("session.jsonl");
         let identity = CacheIdentity::for_client(ClientId::Claude);
@@ -3502,8 +3475,6 @@ mod tests {
             loaded.get(identity, &path).unwrap().messages[0].session_id,
             "fresh-session"
         );
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -3542,7 +3513,7 @@ mod tests {
     #[serial_test::serial]
     fn test_save_if_dirty_marks_cache_clean() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         let mut cache = SourceMessageCache::default();
         assert!(!cache.dirty);
@@ -3556,15 +3527,13 @@ mod tests {
             cache.save_if_dirty();
             assert!(!cache.dirty);
         }
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_save_if_dirty_merges_concurrent_writers() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3588,15 +3557,13 @@ mod tests {
             assert!(loaded.get(identity, &path_one).is_some());
             assert!(loaded.get(identity, &path_two).is_some());
         }
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_save_if_dirty_preserves_recreated_path_from_concurrent_writer() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3625,8 +3592,6 @@ mod tests {
                 .expect("recreated source cache entry should survive stale delete");
             assert_eq!(entry.messages[0].session_id, "fresh-session");
         }
-
-        restore_cache_env(prev_env);
     }
 
     fn keyed_message(namespace: &str, session_id: &str, dedup_key: &str) -> UnifiedMessage {
@@ -3674,7 +3639,7 @@ mod tests {
     #[serial_test::serial]
     fn test_loading_claude_cache_removes_synthetic_placeholder_rows_without_retiring_history() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3732,15 +3697,13 @@ mod tests {
                             .all(|message| message.model_id != " <SYNTHETIC> ")
             ));
         }
-
-        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_claude_cache_save_does_not_restore_synthetic_history_from_another_writer() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3775,8 +3738,6 @@ mod tests {
                         && entries[0].messages[0].dedup_key.as_deref() == Some("live:req_live")
             ));
         }
-
-        restore_cache_env(prev_env);
     }
 
     /// A Claude entry can hold assistant turns the live transcript no longer
@@ -3788,7 +3749,7 @@ mod tests {
     #[serial_test::serial]
     fn test_save_if_dirty_unions_retained_history_for_the_same_path() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3832,8 +3793,6 @@ mod tests {
                 "and must not duplicate the shared turn"
             );
         }
-
-        restore_cache_env(prev_env);
     }
 
     /// The union is scoped to keys that stay valid wherever the message is
@@ -3844,7 +3803,7 @@ mod tests {
     #[serial_test::serial]
     fn test_save_if_dirty_does_not_union_path_scoped_keys() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3880,8 +3839,6 @@ mod tests {
                 "path-scoped keys must not outlive the bytes that produced them"
             );
         }
-
-        restore_cache_env(prev_env);
     }
 
     /// The union exists only for namespaces that retain history. Everywhere
@@ -3891,7 +3848,7 @@ mod tests {
     #[serial_test::serial]
     fn test_save_if_dirty_still_replaces_entries_for_non_retaining_clients() {
         let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+        let _cache_env = sandbox_cache_env(temp_home.path());
 
         {
             let source_dir = TempDir::new().unwrap();
@@ -3923,8 +3880,6 @@ mod tests {
             let entry = loaded.get(identity, &path).expect("entry should survive");
             assert_eq!(entry.messages.len(), 1);
         }
-
-        restore_cache_env(prev_env);
     }
 
     #[cfg(unix)]
