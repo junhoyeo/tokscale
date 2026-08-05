@@ -551,14 +551,30 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
-    // Seed all three locations so the test exercises the same fallback
-    // chain the binary uses post-#470: canonical
-    // <config_dir>/cache/, then legacy dirs::cache_dir()/tokscale, then
-    // ~/.cache/tokscale. Without the canonical path seeded, CI runners
-    // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
-    // some Linux runners with XDG_CACHE_HOME set globally) miss the
-    // pricing cache entirely and the report falls back to embedded
-    // source costs.
+    // Only the first of these is read back. Every caller of this helper runs
+    // the child through `offline_cmd_with_home`, which sets
+    // `TOKSCALE_CONFIG_DIR`, and `paths::legacy_dirs_cache_dir` and
+    // `paths::legacy_dot_cache_tokscale_dir` both return `None` whenever that
+    // override is set — deliberately, since the override means "this root and
+    // nothing outside it". `pricing::cache::legacy_cache_paths` therefore comes
+    // back empty and the canonical `<config_dir>/cache/` seed is the only one
+    // the binary can find. Deleting it makes all four
+    // `*_offline_uses_stale_pricing_cache_when_available` tests fail; deleting
+    // the other two changes nothing.
+    //
+    // So what these fixtures no longer exercise is the post-#470 legacy
+    // fallback chain itself: no CLI test in this file reaches it, because none
+    // of them run without the override. That path is covered at the unit level
+    // by `pricing::cache::tests::load_falls_back_to_legacy_dirs_cache_path`.
+    // The macOS *settings* half of the same consequence is disclosed on
+    // `sandbox_config_dir` and worked around in
+    // `test_auto_pinning_does_not_shadow_a_legacy_settings_file_it_cannot_open`,
+    // which clears `TOKSCALE_CONFIG_DIR` precisely because the override would
+    // leave it nothing to assert.
+    //
+    // The two legacy directories are still written: they cost nothing, and a
+    // fixture that clears the override the way that test does needs them
+    // present rather than absent.
     for dir in [
         base.join(".config/tokscale/cache"),
         base.join("Library/Caches/tokscale"),
