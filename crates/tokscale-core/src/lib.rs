@@ -3125,6 +3125,28 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 }
 
 pub async fn generate_submission_graph(options: ReportOptions) -> Result<GraphResult, String> {
+    // 当用户显式设置 TOKSCALE_SKIP_EXTERNAL_PRICING 时，跳过外部价格源的网络请求，
+    // 仅使用本地 custom pricing，并以 Lenient 模式生成报表，让未定价 token 用量
+    // 以 cost=0 的形式被批量上报，而不是直接报错。
+    let skip_external = std::env::var("TOKSCALE_SKIP_EXTERNAL_PRICING")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    if skip_external {
+        let pricing = pricing::PricingService::new_with_custom_and_models_dev(
+            pricing::custom::CustomPricing::load_from_default_path(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        return generate_graph_with_loaded_pricing(
+            options,
+            Some(&pricing),
+            GraphPricingRequirement::Lenient,
+        )
+        .await;
+    }
+
     let pricing = pricing::PricingService::get_or_init().await?;
     generate_graph_with_loaded_pricing(options, Some(&pricing), GraphPricingRequirement::Submission)
         .await
@@ -10541,5 +10563,55 @@ mod tests {
         // Without verified cross-source dedup, both messages are preserved.
         let filtered = filter_messages_for_report(messages, &ReportOptions::default());
         assert_eq!(filtered.len(), 2);
+    }
+
+    /// 当 TOKSCALE_SKIP_EXTERNAL_PRICING 启用时，未定价模型的 token 用量不应导致
+    /// generate_submission_graph 报错，而应返回 cost 为 0 的报表。
+    #[test]
+    #[serial]
+    fn skip_external_pricing_allows_unpriced_submission() {
+        // 设置跳过外部价格源的环境变量。
+        std::env::set_var("TOKSCALE_SKIP_EXTERNAL_PRICING", "true");
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir
+            .path()
+            .join(".config/tokscale/antigravity-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("unpriced.jsonl"),
+            r#"{"type":"usage","sessionId":"unpriced-session","modelId":"totally-unknown-unpriced-model","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-unpriced"}
+"#,
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let graph = rt
+            .block_on(super::generate_submission_graph(ReportOptions {
+                home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                use_env_roots: false,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                group_by: GroupBy::default(),
+                scanner_settings: scanner::ScannerSettings::default(),
+            }))
+            .expect("未定价 token 用量在跳过模式下应当成功生成报表");
+
+        // 清理环境变量，避免影响同进程中的其他测试。
+        std::env::remove_var("TOKSCALE_SKIP_EXTERNAL_PRICING");
+
+        assert!(
+            graph.summary.total_cost.abs() < 1e-9,
+            "未定价模型的 total_cost 应为 0，got {}",
+            graph.summary.total_cost
+        );
+        assert_eq!(graph.contributions.len(), 1, "应有一条日报贡献");
+        assert!(
+            graph.contributions[0].totals.cost.abs() < 1e-9,
+            "日报贡献的 cost 应为 0，got {}",
+            graph.contributions[0].totals.cost
+        );
     }
 }
