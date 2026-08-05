@@ -267,6 +267,8 @@ enum Commands {
             help = "Show what would be submitted without actually submitting"
         )]
         dry_run: bool,
+        #[arg(long, help = "Fail submission if any model lacks a known price")]
+        strict_pricing: bool,
     },
     #[command(about = "Manage periodic usage submission")]
     Autosubmit {
@@ -807,6 +809,7 @@ fn main() -> Result<()> {
             clients,
             date,
             dry_run,
+            strict_pricing,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
             let (since, until) = build_date_filter(&date, &cli.home);
@@ -823,6 +826,7 @@ fn main() -> Result<()> {
                 until,
                 year,
                 dry_run,
+                strict_pricing,
                 SubmitMode::Interactive,
             )
         }
@@ -5505,7 +5509,7 @@ fn report_unpriced_submission_exclusions(
         println!(
             "{}",
             format!(
-                "  Warning: excluded {} unpriced {}/{} message(s) ({} tokens): {}.{}",
+                "  Warning: skipped pricing for {} unpriced {}/{} message(s) ({} tokens): {}.{}",
                 row.message_count,
                 row.provider_id,
                 row.model_id,
@@ -5555,7 +5559,7 @@ fn run_autosubmit_command(subcommand: commands::autosubmit::AutosubmitSubcommand
             };
 
             let (clients, since, until, year) = commands::autosubmit::submit_filters(&settings);
-            match run_submit_command(clients, since, until, year, false, SubmitMode::Autosubmit) {
+            match run_submit_command(clients, since, until, year, false, false, SubmitMode::Autosubmit) {
                 Ok(()) => {
                     commands::autosubmit::record_run_success(
                         chrono::Utc::now().timestamp_millis(),
@@ -5578,12 +5582,19 @@ fn run_submit_command(
     until: Option<String>,
     year: Option<String>,
     dry_run: bool,
+    strict_pricing: bool,
     mode: SubmitMode,
 ) -> Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
     use tokio::runtime::Runtime;
     use tokscale_core::{generate_submission_graph, GroupBy, ReportOptions};
+
+    // 命令行参数或环境变量均可开启严格价格校验；默认使用宽松模式。
+    let strict_pricing = strict_pricing
+        || std::env::var("TOKSCALE_STRICT_PRICING")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
 
     let auth_token = match auth::resolve_api_token() {
         Some(token) => token,
@@ -5651,16 +5662,19 @@ fn run_submit_command(
     let rt = Runtime::new()?;
     let mut graph_result = rt
         .block_on(async {
-            generate_submission_graph(ReportOptions {
-                home_dir: None,
-                use_env_roots: true,
-                clients,
-                since,
-                until,
-                year,
-                group_by: GroupBy::default(),
-                scanner_settings: tui::settings::load_scanner_settings(),
-            })
+            generate_submission_graph(
+                ReportOptions {
+                    home_dir: None,
+                    use_env_roots: true,
+                    clients,
+                    since,
+                    until,
+                    year,
+                    group_by: GroupBy::default(),
+                    scanner_settings: tui::settings::load_scanner_settings(),
+                },
+                strict_pricing,
+            )
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;

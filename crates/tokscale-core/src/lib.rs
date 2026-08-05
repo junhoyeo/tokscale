@@ -2944,6 +2944,9 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 enum GraphPricingRequirement {
     Lenient,
     Submission,
+    /// 提交模式的宽松变体：未定价模型的 token 用量保留在 graph 中按 0 成本上报，
+    /// 同时把相关模型记录到 `unpriced_submission_exclusions` 用于打印警告。
+    SubmissionLenient,
 }
 
 async fn generate_graph_with_loaded_pricing(
@@ -3001,6 +3004,12 @@ fn build_graph_from_messages(
             validate_priced_messages(&submitted, pricing)?;
             (submitted, exclusions)
         }
+        GraphPricingRequirement::SubmissionLenient => {
+            // 宽松提交模式：不因为缺少价格而失败，未定价消息保留在 graph 中，
+            // 仅收集统计信息用于向用户展示警告。
+            let exclusions = collect_unpriced_submission_exclusions(&filtered, pricing);
+            (filtered, exclusions)
+        }
     };
 
     let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
@@ -3029,6 +3038,9 @@ fn build_graph_from_messages(
 
 const GEMINI_DEFAULT_UNPRICED_REASON: &str =
     "generic routing label has no authoritative model-to-price mapping";
+
+const MODEL_HAS_NO_KNOWN_PRICE_REASON: &str =
+    "model has no known price; reported at zero cost";
 
 fn exclude_generic_unpriced_submission_messages(
     messages: Vec<UnifiedMessage>,
@@ -3079,6 +3091,58 @@ fn exclude_generic_unpriced_submission_messages(
     (submitted, exclusions)
 }
 
+/// 在宽松提交模式下收集未定价的 token-bearing 消息，用于打印警告。
+/// 这些消息不会被从 graph 中移除，因此 tokens 仍会上报，cost 保持为 0。
+fn collect_unpriced_submission_exclusions(
+    messages: &[UnifiedMessage],
+    pricing: Option<&pricing::PricingService>,
+) -> Vec<UnpricedSubmissionExclusion> {
+    let Some(pricing) = pricing else {
+        return Vec::new();
+    };
+
+    let mut counts: std::collections::BTreeMap<(String, String), (usize, i64)> =
+        std::collections::BTreeMap::new();
+
+    for message in messages {
+        let tokens = &message.tokens;
+        let token_bearing = tokens.input > 0
+            || tokens.output > 0
+            || tokens.cache_read > 0
+            || tokens.cache_write > 0
+            || tokens.reasoning > 0;
+        let unpriced = token_bearing
+            && !message.has_authoritative_cost()
+            && !pricing.covers_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            );
+        if !unpriced {
+            continue;
+        }
+
+        let entry = counts
+            .entry((message.provider_id.clone(), message.model_id.clone()))
+            .or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.saturating_add(message.tokens.total());
+    }
+
+    counts
+        .into_iter()
+        .map(|((provider_id, model_id), (message_count, total_tokens))| {
+            UnpricedSubmissionExclusion {
+                provider_id,
+                model_id,
+                message_count,
+                total_tokens,
+                reason: MODEL_HAS_NO_KNOWN_PRICE_REASON,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimeMetricsReport {
     pub metrics: sessionize::TimeMetrics,
@@ -3124,13 +3188,22 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
         .await
 }
 
-pub async fn generate_submission_graph(options: ReportOptions) -> Result<GraphResult, String> {
+pub async fn generate_submission_graph(
+    options: ReportOptions,
+    strict_pricing: bool,
+) -> Result<GraphResult, String> {
     // 当用户显式设置 TOKSCALE_SKIP_EXTERNAL_PRICING 时，跳过外部价格源的网络请求，
-    // 仅使用本地 custom pricing，并以 Lenient 模式生成报表，让未定价 token 用量
+    // 仅使用本地 custom pricing，并以宽松模式生成报表，让未定价 token 用量
     // 以 cost=0 的形式被批量上报，而不是直接报错。
     let skip_external = std::env::var("TOKSCALE_SKIP_EXTERNAL_PRICING")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
+
+    let requirement = if skip_external || !strict_pricing {
+        GraphPricingRequirement::SubmissionLenient
+    } else {
+        GraphPricingRequirement::Submission
+    };
 
     if skip_external {
         let pricing = pricing::PricingService::new_with_custom_and_models_dev(
@@ -3139,17 +3212,11 @@ pub async fn generate_submission_graph(options: ReportOptions) -> Result<GraphRe
             HashMap::new(),
             HashMap::new(),
         );
-        return generate_graph_with_loaded_pricing(
-            options,
-            Some(&pricing),
-            GraphPricingRequirement::Lenient,
-        )
-        .await;
+        return generate_graph_with_loaded_pricing(options, Some(&pricing), requirement).await;
     }
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    generate_graph_with_loaded_pricing(options, Some(&pricing), GraphPricingRequirement::Submission)
-        .await
+    generate_graph_with_loaded_pricing(options, Some(&pricing), requirement).await
 }
 
 pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
@@ -4344,13 +4411,14 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, build_graph_from_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
-        generate_graph_with_loaded_pricing, get_home_dir_string, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, paths, pricing, retain_for_requested_clients,
-        scanner, select_local_parse_pricing, unified_to_parsed, validate_priced_messages, ClientId,
-        GraphPricingRequirement, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UnpricedSubmissionExclusion, GEMINI_DEFAULT_UNPRICED_REASON,
-        UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, generate_submission_graph, get_home_dir_string,
+        message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
+        unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement, GroupBy,
+        LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UnpricedSubmissionExclusion, GEMINI_DEFAULT_UNPRICED_REASON,
+        MODEL_HAS_NO_KNOWN_PRICE_REASON, UNKNOWN_WORKSPACE_LABEL,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
@@ -10587,16 +10655,19 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let graph = rt
-            .block_on(super::generate_submission_graph(ReportOptions {
-                home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
-                use_env_roots: false,
-                clients: None,
-                since: None,
-                until: None,
-                year: None,
-                group_by: GroupBy::default(),
-                scanner_settings: scanner::ScannerSettings::default(),
-            }))
+            .block_on(generate_submission_graph(
+                ReportOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    use_env_roots: false,
+                    clients: None,
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                false,
+            ))
             .expect("未定价 token 用量在跳过模式下应当成功生成报表");
 
         // 清理环境变量，避免影响同进程中的其他测试。
@@ -10612,6 +10683,59 @@ mod tests {
             graph.contributions[0].totals.cost.abs() < 1e-9,
             "日报贡献的 cost 应为 0，got {}",
             graph.contributions[0].totals.cost
+        );
+    }
+
+    /// 宽松提交模式下，未定价模型的 token 用量应保留在 graph 中按 0 成本上报，
+    /// 同时在 `unpriced_submission_exclusions` 中记录对应模型以便打印警告。
+    #[test]
+    fn lenient_submission_keeps_unpriced_models_at_zero_cost() {
+        let message = UnifiedMessage::new(
+            "opencode",
+            "totally-unknown-unpriced-model",
+            "unknown-provider",
+            "unpriced",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 12,
+                output: 4,
+                cache_read: 2,
+                cache_write: 0,
+                reasoning: 1,
+            },
+            0.0,
+        );
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::SubmissionLenient,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("宽松提交模式应保留未定价模型并按 0 成本上报");
+
+        assert_eq!(graph.summary.total_tokens, 19, "total tokens 应完整保留");
+        assert!(
+            graph.summary.total_cost.abs() < 1e-9,
+            "未定价模型的 total_cost 应为 0，got {}",
+            graph.summary.total_cost
+        );
+        assert_eq!(
+            graph.unpriced_submission_exclusions.len(),
+            1,
+            "应记录一条未定价提交警告"
+        );
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0],
+            UnpricedSubmissionExclusion {
+                provider_id: "unknown-provider".to_string(),
+                model_id: "totally-unknown-unpriced-model".to_string(),
+                message_count: 1,
+                total_tokens: 19,
+                reason: MODEL_HAS_NO_KNOWN_PRICE_REASON,
+            }
         );
     }
 }
