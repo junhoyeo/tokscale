@@ -19,7 +19,8 @@
 //! conversation):
 //!
 //! - `gen_metadata.#1`            → chatModel message
-//!   - `#19` (string)            → responseModel (e.g. `gemini-3-flash-a`)
+//!   - `#19` (string, optional)  → responseModel (e.g. `gemini-3-flash-a`)
+//!   - `#21` (string)            → model display label (`Gemini 3.6 Flash (High)`)
 //!   - `#9.#4` = `{#1: seconds, #2: nanos}` → per-generation wall-clock time
 //!   - `#4`                      → usage message
 //!     - `#1` (varint, const)    → fixed system-prompt tokens (≈1132)
@@ -30,12 +31,19 @@
 //!     - `#11` (string)          → responseId (dedup key)
 //! - `trajectory_metadata_blob.#2` = `{#1: seconds, #2: nanos}` → created-at
 //! - `trajectory_metadata_blob.#1.#1` (string)                  → workspace URI
+//!
+//! `#19` is optional in practice: some continuation turns omit it while still
+//! writing `#21`. [`SessionModels`] recovers the machine id for those rows from
+//! the rest of the same conversation. `#21` serves only as a join key between
+//! rows of one file and is never used as a pricing key — it is a server-supplied
+//! name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash (High)`) and
+//! could be localized.
 
 use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
@@ -61,14 +69,24 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
+    // Buffered rather than streamed so a row missing its own `#19` can borrow
+    // attribution from anywhere in the conversation, not just from rows that
+    // happen to precede it.
+    let blobs: Vec<Vec<u8>> = rows.flatten().collect();
+    let session_models = SessionModels::from_blobs(&blobs);
+
     let mut messages = Vec::new();
     let mut seen_response_ids: HashSet<String> = HashSet::new();
-    for blob in rows.flatten() {
+    for blob in &blobs {
         // `timestamp` is the session-created fallback; each row prefers its own
         // per-generation wall-clock stamp (see `parse_gen_metadata`).
-        if let Some(mut message) =
-            parse_gen_metadata(&blob, &session_id, timestamp, &mut seen_response_ids)
-        {
+        if let Some(mut message) = parse_gen_metadata(
+            blob,
+            &session_id,
+            timestamp,
+            &session_models,
+            &mut seen_response_ids,
+        ) {
             if workspace_key.is_some() {
                 message.set_workspace(workspace_key.clone(), workspace_label.clone());
             }
@@ -79,10 +97,90 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
+/// Model attribution recovered from the conversation as a whole, for rows whose
+/// `chatModel.#19` (responseModel) is missing.
+///
+/// Antigravity CLI leaves `#19` out of some generations — observed on
+/// continuation / tool turns, which also carry a large `cacheRead` and a tiny
+/// output — while still writing the `#21` display label. Those rows are not
+/// information-poor: sibling rows in the same database carry the machine id for
+/// the very same label, so the id is recoverable from the file itself. Without
+/// this the rows resolve to `antigravity/unknown`, which has no price, and a
+/// single such row aborts the whole submission.
+///
+/// The label is only ever a join key between rows of one file; the value handed
+/// back is always a `#19` machine id observed in that same file. Display labels
+/// are never used as pricing keys — see the alias table's note on renamed and
+/// localizable labels.
+#[derive(Default)]
+struct SessionModels {
+    /// `#21` display label → the `#19` machine id seen alongside it. Labels
+    /// that appear with more than one id are dropped: an ambiguous label is no
+    /// better evidence than no label at all.
+    by_display: HashMap<String, String>,
+    /// The file's only `#19` value, when every row carrying one agrees. Serves
+    /// rows that have neither `#19` nor `#21`.
+    sole_model: Option<String>,
+}
+
+impl SessionModels {
+    fn from_blobs(blobs: &[Vec<u8>]) -> Self {
+        let mut by_display: HashMap<&str, Option<&str>> = HashMap::new();
+        let mut distinct: HashSet<&str> = HashSet::new();
+
+        for blob in blobs {
+            let Some(chat_model) = message_field(blob, 1) else {
+                continue;
+            };
+            let Some(model) = non_empty_string_field(chat_model, 19) else {
+                continue;
+            };
+            distinct.insert(model);
+            if let Some(label) = non_empty_string_field(chat_model, 21) {
+                by_display
+                    .entry(label)
+                    .and_modify(|resolved| {
+                        if *resolved != Some(model) {
+                            *resolved = None;
+                        }
+                    })
+                    .or_insert(Some(model));
+            }
+        }
+
+        let sole_model = match distinct.len() {
+            1 => distinct.iter().next().map(|model| (*model).to_string()),
+            _ => None,
+        };
+
+        Self {
+            by_display: by_display
+                .into_iter()
+                .filter_map(|(label, model)| Some((label.to_string(), model?.to_string())))
+                .collect(),
+            sole_model,
+        }
+    }
+
+    /// Best available `#19` for a row that has none of its own.
+    fn recover(&self, chat_model: &[u8]) -> Option<&str> {
+        match non_empty_string_field(chat_model, 21) {
+            // A label joined elsewhere in this file resolves to its machine id.
+            // A label that never appeared next to a `#19` is positive evidence
+            // of a model this file never identified, so falling through to
+            // another row's model would be a guess against the evidence —
+            // `unknown` is the honest answer there.
+            Some(label) => self.by_display.get(label).map(String::as_str),
+            None => self.sole_model.as_deref(),
+        }
+    }
+}
+
 fn parse_gen_metadata(
     blob: &[u8],
     session_id: &str,
     session_timestamp: i64,
+    session_models: &SessionModels,
     seen_response_ids: &mut HashSet<String>,
 ) -> Option<UnifiedMessage> {
     let chat_model = message_field(blob, 1)?;
@@ -126,8 +224,8 @@ fn parse_gen_metadata(
         }
     }
 
-    let model_raw = string_field(chat_model, 19)
-        .filter(|text| !text.trim().is_empty())
+    let model_raw = non_empty_string_field(chat_model, 19)
+        .or_else(|| session_models.recover(chat_model))
         .unwrap_or("unknown");
     let model_id = pricing::aliases::resolve_alias(model_raw)
         .unwrap_or(model_raw)
@@ -375,6 +473,13 @@ fn string_field(buf: &[u8], field: u64) -> Option<&str> {
     message_field(buf, field).and_then(|bytes| std::str::from_utf8(bytes).ok())
 }
 
+/// [`string_field`], treating a blank value as absent. Antigravity writes the
+/// model fields either fully or not at all, but a blank string must not be
+/// mistaken for a usable model id or display label.
+fn non_empty_string_field(buf: &[u8], field: u64) -> Option<&str> {
+    string_field(buf, field).filter(|text| !text.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,11 +514,35 @@ mod tests {
         out
     }
 
+    /// Parse one row with no conversation-level attribution available, i.e. as
+    /// if it were the file's only row. Rows that carry their own `#19` are
+    /// unaffected by the session index, so most tests need nothing else.
+    fn parse_isolated_row(
+        blob: &[u8],
+        session_id: &str,
+        session_timestamp: i64,
+        seen_response_ids: &mut HashSet<String>,
+    ) -> Option<UnifiedMessage> {
+        parse_gen_metadata(
+            blob,
+            session_id,
+            session_timestamp,
+            &SessionModels::default(),
+            seen_response_ids,
+        )
+    }
+
     fn build_gen_metadata() -> Vec<u8> {
         build_gen_metadata_with_model("gemini-3-flash-a")
     }
 
     fn build_gen_metadata_with_model(model: &str) -> Vec<u8> {
+        build_row(Some(model), None, "resp-1")
+    }
+
+    /// One `gen_metadata` blob with either model field independently present or
+    /// absent, mirroring the real rows where `#19` is missing but `#21` is not.
+    fn build_row(model: Option<&str>, display: Option<&str>, response_id: &str) -> Vec<u8> {
         // usage message (#4 of chatModel)
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, 1132)); // fixed system prompt
@@ -421,14 +550,33 @@ mod tests {
         usage.extend(enc_varint(5, 16000)); // cacheRead
         usage.extend(enc_varint(9, 300)); // output
         usage.extend(enc_varint(10, 40)); // thinking
-        usage.extend(enc_len(11, b"resp-1")); // responseId
+        usage.extend(enc_len(11, response_id.as_bytes())); // responseId
 
         // chatModel message (#1 of gen_metadata)
         let mut chat_model = Vec::new();
         chat_model.extend(enc_len(4, &usage));
-        chat_model.extend(enc_len(19, model.as_bytes()));
+        if let Some(model) = model {
+            chat_model.extend(enc_len(19, model.as_bytes()));
+        }
+        if let Some(display) = display {
+            chat_model.extend(enc_len(21, display.as_bytes()));
+        }
 
         enc_len(1, &chat_model)
+    }
+
+    /// Build a conversation database from `gen_metadata` blobs in row order.
+    fn write_conversation(path: &Path, blobs: &[Vec<u8>]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        for (idx, blob) in blobs.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data, size) VALUES (?1, ?2, 0)",
+                params![idx as i64, blob],
+            )
+            .unwrap();
+        }
     }
 
     fn build_trajectory_meta() -> Vec<u8> {
@@ -460,7 +608,7 @@ mod tests {
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
-        let msg = parse_gen_metadata(&blob, "s", 1_000, &mut seen).expect("parses");
+        let msg = parse_isolated_row(&blob, "s", 1_000, &mut seen).expect("parses");
         assert_eq!(msg.tokens.output, i64::MAX);
         assert_eq!(msg.tokens.input, i64::MAX); // saturating_add, not negative
         assert!(msg.tokens.input >= 0 && msg.tokens.output >= 0);
@@ -520,7 +668,7 @@ mod tests {
         let blob = build_gen_metadata_with_model("gemini-3-flash-agent");
         let mut seen = HashSet::new();
 
-        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
+        let message = parse_isolated_row(&blob, "session", 1_000, &mut seen).unwrap();
 
         assert_eq!(message.model_id, "gemini-3.5-flash-high");
         assert_eq!(message.provider_id, "google");
@@ -533,10 +681,174 @@ mod tests {
         let blob = build_gen_metadata_with_model("gemini-default");
         let mut seen = HashSet::new();
 
-        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
+        let message = parse_isolated_row(&blob, "session", 1_000, &mut seen).unwrap();
 
         assert_eq!(message.model_id, "gemini-default");
         assert_eq!(message.provider_id, "google");
+    }
+
+    // Antigravity CLI omits `#19` on some continuation turns while still
+    // writing `#21`. Observed in three real conversations: every such row sat
+    // in a database whose other rows carried `#19` next to the identical `#21`
+    // label, so the machine id is recoverable and the row must not degrade to
+    // the unpriceable `antigravity/unknown`.
+    #[test]
+    fn missing_response_model_is_recovered_from_the_display_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("continuation.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(None, Some("Gemini 3.6 Flash (High)"), "resp-1"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        for message in &messages {
+            assert_eq!(message.model_id, "gemini-3.6-flash");
+            assert_eq!(message.provider_id, "google");
+        }
+    }
+
+    #[test]
+    fn recovery_reads_the_whole_conversation_not_just_earlier_rows() {
+        // The index is built from every row before any row is parsed, so a
+        // conversation whose first turn is the one missing `#19` recovers just
+        // as well as one where the gap comes later.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gap-first.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(None, Some("Gemini 3.6 Flash (High)"), "resp-0"),
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-1",
+                ),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "gemini-3.6-flash");
+    }
+
+    #[test]
+    fn recovered_model_still_resolves_through_the_alias_table() {
+        // The recovered value is the raw `#19` wire string, so it must take the
+        // same alias path as a directly-read one — otherwise recovery would
+        // hand pricing an id it cannot match.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aliased.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3-flash-a"),
+                    Some("Gemini 3.5 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(None, Some("Gemini 3.5 Flash (High)"), "resp-1"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].model_id, "gemini-3.5-flash-high");
+        assert_eq!(messages[1].provider_id, "google");
+    }
+
+    #[test]
+    fn a_display_label_no_row_identified_is_not_guessed_at() {
+        // The conversation switched models: the row missing `#19` is labelled
+        // Pro, and the only identified model is a Flash. Borrowing the Flash id
+        // would bill the turn at the wrong tier, so the row stays `unknown` —
+        // a label alone is not a model id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switched.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(None, Some("Gemini 3.1 Pro"), "resp-1"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "gemini-3.6-flash");
+        assert_eq!(messages[1].model_id, "unknown");
+        assert_eq!(messages[1].provider_id, "antigravity");
+    }
+
+    #[test]
+    fn a_display_label_used_by_two_models_is_not_used_for_recovery() {
+        // Should a label ever be reused across machine ids (a rename landing
+        // mid-conversation), it identifies nothing and must be discarded rather
+        // than resolved to whichever row happened to be indexed last.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ambiguous.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(Some("gemini-3-flash-a"), Some("Gemini Flash"), "resp-0"),
+                build_row(Some("gemini-3.6-flash"), Some("Gemini Flash"), "resp-1"),
+                build_row(None, Some("Gemini Flash"), "resp-2"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].model_id, "unknown");
+    }
+
+    #[test]
+    fn a_row_with_no_model_fields_falls_back_to_a_single_model_conversation() {
+        // Nothing joins a row that carries neither `#19` nor `#21`. When the
+        // whole conversation used one model there is only one answer it could
+        // have; when it used several, there is no answer and the row stays
+        // `unknown`.
+        let dir = tempfile::tempdir().unwrap();
+
+        let single = dir.path().join("single-model.db");
+        write_conversation(
+            &single,
+            &[
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(None, None, "resp-1"),
+            ],
+        );
+        let messages = parse_antigravity_cli_file(&single);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].model_id, "gemini-3.6-flash");
+
+        let mixed = dir.path().join("mixed-models.db");
+        write_conversation(
+            &mixed,
+            &[
+                build_row(Some("gemini-3.6-flash"), None, "resp-0"),
+                build_row(Some("gemini-3.1-pro"), None, "resp-1"),
+                build_row(None, None, "resp-2"),
+            ],
+        );
+        let messages = parse_antigravity_cli_file(&mixed);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].model_id, "unknown");
     }
 
     #[test]
@@ -566,7 +878,7 @@ mod tests {
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
-        let message = parse_gen_metadata(&blob, "s", session_fallback, &mut seen).unwrap();
+        let message = parse_isolated_row(&blob, "s", session_fallback, &mut seen).unwrap();
         assert_eq!(
             message.timestamp,
             1_781_000_000 * 1000 + 250,
@@ -577,7 +889,7 @@ mod tests {
         // (build_gen_metadata carries no #9.#4).
         let mut seen2 = HashSet::new();
         let fallback_msg =
-            parse_gen_metadata(&build_gen_metadata(), "s", session_fallback, &mut seen2).unwrap();
+            parse_isolated_row(&build_gen_metadata(), "s", session_fallback, &mut seen2).unwrap();
         assert_eq!(
             fallback_msg.timestamp, session_fallback,
             "a row without #9.#4 must use the session-created fallback"
@@ -659,7 +971,7 @@ mod tests {
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
-        let message = parse_gen_metadata(&blob, "session", 0, &mut seen).unwrap();
+        let message = parse_isolated_row(&blob, "session", 0, &mut seen).unwrap();
         assert_eq!(message.tokens.output, output as i64);
         assert_eq!(message.tokens.reasoning, thinking as i64);
         // The contract: the two component fields sum to the stored total.
@@ -673,19 +985,19 @@ mod tests {
     fn malformed_blob_returns_none_without_panic() {
         let mut seen = HashSet::new();
         // Empty buffer: no chatModel sub-message.
-        assert!(parse_gen_metadata(&[], "s", 0, &mut seen).is_none());
+        assert!(parse_isolated_row(&[], "s", 0, &mut seen).is_none());
         // Garbage bytes that do not form a valid wire-format message.
-        assert!(parse_gen_metadata(&[0xff, 0xff, 0xff, 0xff], "s", 0, &mut seen).is_none());
+        assert!(parse_isolated_row(&[0xff, 0xff, 0xff, 0xff], "s", 0, &mut seen).is_none());
         // A length-delimited #1 whose declared length overruns the buffer:
         // exercises the ProtoReader bounds check (must stop, not index OOB).
         let truncated = [(1u8 << 3) | 2, 0x7f, 0x01, 0x02];
-        assert!(parse_gen_metadata(&truncated, "s", 0, &mut seen).is_none());
+        assert!(parse_isolated_row(&truncated, "s", 0, &mut seen).is_none());
         // Valid outer #1 wrapping a #4 usage whose declared length overruns:
         // the inner reader must bail without panicking.
         let inner = [(4u8 << 3) | 2, 0x40, 0x00];
         let mut outer = vec![(1u8 << 3) | 2, inner.len() as u8];
         outer.extend_from_slice(&inner);
-        assert!(parse_gen_metadata(&outer, "s", 0, &mut seen).is_none());
+        assert!(parse_isolated_row(&outer, "s", 0, &mut seen).is_none());
     }
 
     #[test]
@@ -765,7 +1077,7 @@ mod tests {
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
-        let message = parse_gen_metadata(&blob, "s", session_fallback, &mut seen).unwrap();
+        let message = parse_isolated_row(&blob, "s", session_fallback, &mut seen).unwrap();
         assert_eq!(
             message.timestamp, session_fallback,
             "out-of-range per-generation nanos must fall back to the session timestamp"
