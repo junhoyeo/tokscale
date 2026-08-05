@@ -20,7 +20,7 @@
 //!
 //! - `gen_metadata.#1`            → chatModel message
 //!   - `#19` (string, optional)  → responseModel (e.g. `gemini-3-flash-a`)
-//!   - `#21` (string)            → model display label (`Gemini 3.6 Flash (High)`)
+//!   - `#21` (string, optional)  → model display label (`Gemini 3.6 Flash (High)`)
 //!   - `#9.#4` = `{#1: seconds, #2: nanos}` → per-generation wall-clock time
 //!   - `#4`                      → usage message
 //!     - `#1` (varint, const)    → fixed system-prompt tokens (≈1132)
@@ -34,10 +34,12 @@
 //!
 //! `#19` is optional in practice: some continuation turns omit it while still
 //! writing `#21`. [`SessionModels`] recovers the machine id for those rows from
-//! the rest of the same conversation. `#21` serves only as a join key between
-//! rows of one file and is never used as a pricing key — it is a server-supplied
-//! name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash (High)`) and
-//! could be localized.
+//! the rest of the same conversation. `#21` was present on every row observed so
+//! far, including the ones missing `#19`, but nothing here requires it — a row
+//! carrying neither field is handled too. `#21` serves only as a join key
+//! between rows of one file and is never used as a pricing key: it is a
+//! server-supplied name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash
+//! (High)`) and could be localized.
 
 use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -118,7 +120,8 @@ struct SessionModels {
     /// that appear with more than one id are dropped: an ambiguous label is no
     /// better evidence than no label at all.
     by_display: HashMap<String, String>,
-    /// The file's only `#19` value, when every row carrying one agrees. Serves
+    /// The file's only `#19` value — set only when every row carrying one
+    /// agrees *and* every label in the file was identified by some row. Serves
     /// rows that have neither `#19` nor `#21`.
     sole_model: Option<String>,
 }
@@ -127,16 +130,21 @@ impl SessionModels {
     fn from_blobs(blobs: &[Vec<u8>]) -> Self {
         let mut by_display: HashMap<&str, Option<&str>> = HashMap::new();
         let mut distinct: HashSet<&str> = HashSet::new();
+        let mut unresolved_labels: Vec<&str> = Vec::new();
 
         for blob in blobs {
             let Some(chat_model) = message_field(blob, 1) else {
                 continue;
             };
+            let label = non_empty_string_field(chat_model, 21);
             let Some(model) = non_empty_string_field(chat_model, 19) else {
+                // Kept so `sole_model` below can tell whether this row was
+                // identified by some other row carrying the same label.
+                unresolved_labels.extend(label);
                 continue;
             };
             distinct.insert(model);
-            if let Some(label) = non_empty_string_field(chat_model, 21) {
+            if let Some(label) = label {
                 by_display
                     .entry(label)
                     .and_modify(|resolved| {
@@ -148,16 +156,26 @@ impl SessionModels {
             }
         }
 
-        let sole_model = match distinct.len() {
-            1 => distinct.iter().next().map(|model| (*model).to_string()),
+        let by_display: HashMap<String, String> = by_display
+            .into_iter()
+            .filter_map(|(label, model)| Some((label.to_string(), model?.to_string())))
+            .collect();
+
+        // A label that no row ever identified is proof the conversation ran a
+        // model this file never names — one *identified* model is not one
+        // model. Counting only the ids would let an unlabelled row inherit the
+        // single named id and bill a model switch under the wrong model, so
+        // withhold the fallback entirely and let those rows stay `unknown`.
+        let every_label_identified = unresolved_labels
+            .iter()
+            .all(|label| by_display.contains_key(*label));
+        let sole_model = match (distinct.len(), every_label_identified) {
+            (1, true) => distinct.iter().next().map(|model| (*model).to_string()),
             _ => None,
         };
 
         Self {
-            by_display: by_display
-                .into_iter()
-                .filter_map(|(label, model)| Some((label.to_string(), model?.to_string())))
-                .collect(),
+            by_display,
             sole_model,
         }
     }
@@ -848,6 +866,33 @@ mod tests {
         );
         let messages = parse_antigravity_cli_file(&mixed);
         assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].model_id, "unknown");
+    }
+
+    #[test]
+    fn a_label_no_row_identified_withholds_the_sole_model_fallback() {
+        // Only one model is named here, but the Pro-labelled row proves a second
+        // one ran. A row carrying no fields at all could be either, so counting
+        // named ids alone would bill a model switch under the wrong model.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unnamed-second-model.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(None, Some("Gemini 3.1 Pro"), "resp-1"),
+                build_row(None, None, "resp-2"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].model_id, "gemini-3.6-flash");
+        assert_eq!(messages[1].model_id, "unknown");
         assert_eq!(messages[2].model_id, "unknown");
     }
 
