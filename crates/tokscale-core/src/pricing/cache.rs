@@ -118,14 +118,40 @@ fn legacy_cache_paths(filename: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // The imports the one test here needs live in its body: the test is
+    // `#[cfg(unix)]`, and at module scope they would be unused imports on
+    // Windows.
+    #[allow(unused_imports)]
     use super::*;
-    use crate::paths::test_env::EnvGuard;
-    use serial_test::serial;
-    use tempfile::TempDir;
 
+    /// Unix-only, because the fixture this test needs cannot be placed on
+    /// Windows without leaving the sandbox.
+    ///
+    /// The test has to write a pricing file into `legacy_dirs_cache_dir()`,
+    /// which is `dirs::cache_dir()/tokscale`. `dirs::cache_dir()` reads
+    /// `XDG_CACHE_HOME` on Linux and `$HOME` on macOS, so the redirects below
+    /// move it into the temp dir; on Windows it is a `SHGetKnownFolderPath`
+    /// call that no environment variable reaches, so it stays at the real
+    /// `%LOCALAPPDATA%\tokscale\`. Writing there would drop a pricing file in
+    /// the actual profile of whatever machine ran the suite — the sandbox
+    /// escape #997 was about — and the assertion would be meaningless anyway,
+    /// since that directory may already hold a cache the canonical lookup
+    /// finds first, so the fallback under test would never run.
+    ///
+    /// `#[cfg(unix)]` rather than a runtime `return`: the previous form was an
+    /// early return with no marker, so on Windows this reported as a passing
+    /// test that asserted nothing. The condition is not dynamic — it is the
+    /// platform — so the gate belongs where a reader can see it. The sandbox
+    /// check itself is kept below as an assertion, which fails loudly instead
+    /// of skipping if a Unix host ever resolves the legacy root outside the
+    /// temp dirs.
+    #[cfg(unix)]
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn load_falls_back_to_legacy_dirs_cache_path() {
+        use crate::paths::test_env::EnvGuard;
+        use tempfile::TempDir;
+
         let temp_home = TempDir::new().unwrap();
         let temp_xdg_cache = TempDir::new().unwrap();
         let mut env = EnvGuard::capture(&[
@@ -149,20 +175,18 @@ mod tests {
             .unwrap()
             .join("pricing-litellm.json");
 
-        // `dirs::cache_dir()` reads `XDG_CACHE_HOME` on Linux and `$HOME` on
-        // macOS, but on Windows it is a `SHGetKnownFolderPath` call that no
-        // environment variable reaches, so the redirects above do not move it.
-        // Writing the fixture anyway would put a pricing file in the real
-        // `%LOCALAPPDATA%\tokscale\` of whatever machine ran the suite — the
-        // same escape from the sandbox that #997 found — and the assertion
-        // would still be meaningless, because the canonical path outside the
-        // temp dir may already hold a cache and the fallback would never run.
-        // Skip instead of doing either.
-        if !legacy_path.starts_with(temp_home.path())
-            && !legacy_path.starts_with(temp_xdg_cache.path())
-        {
-            return;
-        }
+        // Never write the fixture outside the sandbox: this file lands in a
+        // real user profile if the redirects above did not take. Assert rather
+        // than skip, so a host where they stop working reports a failure
+        // instead of a silently empty test. See the note on this fn for why
+        // Windows is excluded at compile time rather than caught here.
+        assert!(
+            legacy_path.starts_with(temp_home.path())
+                || legacy_path.starts_with(temp_xdg_cache.path()),
+            "legacy cache root resolved outside the sandbox ({}); writing the \
+             fixture there would touch a real profile",
+            legacy_path.display()
+        );
 
         fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
