@@ -1895,7 +1895,7 @@ mod tests {
     #[test]
     fn keeps_repeated_event_ids_in_distinct_dedup_keys() {
         let (_temp, path) = write_fixture(
-            &format!(
+            format!(
                 "{}\n{}\n",
                 usage_line("turn-1", 1_700_000_001_000, 10, 1),
                 usage_line("turn-1", 1_700_000_002_000, 20, 2),
