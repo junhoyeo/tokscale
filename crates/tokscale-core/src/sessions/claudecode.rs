@@ -1018,10 +1018,18 @@ fn extract_claude_tool_result_message(
         // model-less result after a local synthetic notice rather than emit
         // another unpriceable `provider/unknown` estimate.
         None if context.suppress_unattributed => return None,
-        None => context
-            .last_model
-            .map(str::to_string)
-            .unwrap_or_else(|| "unknown".to_string()),
+        // A tool result inherits the preceding assistant model. That carrier can
+        // still be Claude Code's local `<synthetic>` notice when the placeholder
+        // arrived in a different transcript (a subagent sidechain resets the
+        // per-file suppression flag), so re-check the inherited value instead of
+        // trusting `suppress_unattributed` alone. Without this, the placeholder
+        // becomes a `model_id` carrying a char-based estimate and submission
+        // fails with "pricing is unavailable for submitted token usage".
+        None => match context.last_model {
+            Some(model) if is_claude_synthetic_placeholder_model(model) => return None,
+            Some(model) => model.to_string(),
+            None => "unknown".to_string(),
+        },
     };
     let provider_hint = provider_hint
         .or_else(|| context.last_provider_hint.map(str::to_string))
@@ -2347,6 +2355,41 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
         assert_eq!(messages[0].tokens.input, 4);
+    }
+
+    #[test]
+    fn test_inherited_synthetic_model_does_not_price_a_tool_result() {
+        // A `<synthetic>` notice that is not immediately followed by the tool
+        // result in the same transcript still leaves the placeholder as the
+        // inherited carrier model. The estimate must be dropped rather than
+        // emitted as `unknown/<synthetic>`, which submission rejects as
+        // unpriceable usage.
+        let context = ClaudeToolResultContext {
+            entry: &ClaudeEntry {
+                entry_type: "user".to_string(),
+                timestamp: Some("2026-05-30T01:00:00.000Z".to_string()),
+                message: None,
+                request_id: None,
+                is_sidechain: false,
+                agent_id: None,
+                session_id: None,
+                provider_id: None,
+            },
+            last_model: Some("<synthetic>"),
+            last_provider_hint: None,
+            client_id: "claude",
+            default_provider_hint: None,
+            session_id: "session",
+            fallback_timestamp: 1_782_259_200_000,
+            workspace_key: None,
+            workspace_label: None,
+            sidechain_agent: None,
+            suppress_unattributed: false,
+            allow_char_estimate: true,
+        };
+        let raw = r#"{"type":"user","timestamp":"2026-05-30T01:00:00.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"XXXXXXXXXXXXXXXX"}]}}"#;
+
+        assert!(extract_claude_tool_result_message(raw, context).is_none());
     }
 
     #[test]
