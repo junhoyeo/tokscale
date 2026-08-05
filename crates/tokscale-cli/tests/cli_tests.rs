@@ -3884,18 +3884,31 @@ fn pin_bucket_timezone_field(base: &Path, json_value: &str) {
 ///
 /// # Why the `TZ`-driven tests below are unix-only
 ///
-/// Passing `TZ` to the child moves `chrono::Local` on Unix and does nothing on
-/// Windows, where `Local` reads `GetTimeZoneInformation` — the machine's zone,
-/// which no environment variable overrides. A test whose premise is "run this
-/// from Los Angeles, then from Seoul" therefore runs twice from UTC on a
-/// Windows runner and asserts against buckets the host never produced.
+/// `TZ` is the instrument these tests pose their question with, and it is a
+/// POSIX instrument. `chrono::Local` honors it on Unix; on Windows `Local`
+/// reads `GetTimeZoneInformation` — the machine's own zone, which no
+/// environment variable overrides. A test whose premise is "run this from Los
+/// Angeles, then from Seoul" therefore runs twice from the runner's own zone
+/// on Windows and asserts against buckets the host never produced. Concretely:
+/// this fixture's two messages sit at 2026-03-02T11:30Z and 2026-03-02T18:00Z,
+/// so a UTC runner buckets both into `2026-03-02` while the expectation is
+/// Seoul's `03-02`/`03-03` split.
 ///
-/// The *product* is fine there, and the Windows leg proves it: auto-pinning
-/// records `Etc/UTC` on the runner, and `bucket_tz::detect_local_iana_name`
-/// declining to pin `Asia/Seoul` while `chrono::Local` says UTC is the
-/// agreement guard doing exactly its job — pinning the detected name over a
-/// disagreeing `Local` is the history re-keying that guard exists to prevent.
-/// Only the mechanism these tests use to pose the question is POSIX.
+/// That is a statement about the instrument, and only about the instrument. It
+/// is *not* a claim that the product was fine on Windows. It was not:
+/// `detect_local_iana_name` declining to pin while a foreign `TZ` was set was
+/// a real bug — the device never pinned, on any run, for as long as the
+/// variable stayed set, and so kept the rescan-splits-history behaviour that
+/// pinning exists to remove. It is fixed in `bucket_tz::tz_env_zone`, which no
+/// longer offers `TZ` as the pin candidate on the platform where
+/// `chrono::Local` does not read it.
+///
+/// That fix does not hand these tests their instrument back. `TZ` still cannot
+/// move the zone the child buckets in on Windows, so these tests still cannot
+/// place the child anywhere, and they stay gated. What the fix restored is
+/// covered directly by the unit test
+/// `bucket_tz::tests::a_foreign_tz_does_not_make_a_windows_host_unpinnable`,
+/// which asserts the pinning behaviour itself rather than through `TZ`.
 ///
 /// Tests that pin a zone through settings.json rather than through `TZ` stay
 /// on every platform: the pin outranks the host, which is the whole claim.
@@ -3983,6 +3996,15 @@ fn test_unpinned_first_scan_still_buckets_by_the_host_timezone() {
 /// The first run records the zone, and recording it changes nothing about what
 /// that run reports. If pinning moved the numbers on the machine doing the
 /// pinning, every user would see a one-off jump on upgrade.
+///
+/// This is the integration witness to the Windows bug fixed in
+/// `bucket_tz::tz_env_zone`, and it stays unix-only anyway. Both of its
+/// assertions are addressed to a zone this test cannot put a Windows child in:
+/// the buckets it expects are Seoul's, and the zone it expects on disk is
+/// `Asia/Seoul`, whereas a fixed Windows host pins the Win32 zone it is
+/// actually in (`Etc/UTC` on the runner) and buckets accordingly. Passing there
+/// would require `TZ` to move `chrono::Local`, which is the one thing Windows
+/// does not do. See [`graph_day_buckets`].
 #[test]
 #[cfg(unix)]
 fn test_first_run_pins_the_host_timezone_without_changing_its_own_output() {
