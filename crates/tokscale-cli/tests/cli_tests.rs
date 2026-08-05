@@ -747,6 +747,14 @@ fn settings_json_path(base: &Path) -> std::path::PathBuf {
 /// forward slashes. There was no native-separator contract to preserve, only
 /// two spellings of the same path, so match the one the binary actually
 /// emits.
+///
+/// That does make this helper a pin on the mixed spelling: `clients --json`
+/// prints `C:\Users\me/.codex/sessions` in `sessionsPath` and
+/// `additionalPaths[].path`, and the two assertions below now hold it there.
+/// The pin is deliberate but not an endorsement — whether user-facing path
+/// output should be normalized, and to native or to forward separators, is a
+/// product decision tracked in junhoyeo/tokscale#1048. Changing the emitter
+/// means changing this helper in the same commit.
 fn client_scan_path(home: &Path, relative: &str) -> String {
     format!("{}/{}", home.display(), relative)
 }
