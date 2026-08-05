@@ -948,7 +948,13 @@ mod tests {
                 .expect("test process has a current directory")
                 .join("relative-reasonix"),
         );
-        assert_eq!(client.data().resolve_path("/tmp/home"), expected);
+        // The home argument cannot reach this expectation — the default the
+        // reference falls back to is relative, so the resolver prepends the
+        // working directory and never consults the home. It is still
+        // `reasonix_home()` like every other call in this module: a literal
+        // `/tmp/home` here would read as a claim that this arm is special,
+        // when the only thing special about it is that any home would do.
+        assert_eq!(client.data().resolve_path(reasonix_home()), expected);
     }
 
     #[test]
