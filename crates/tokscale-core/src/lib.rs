@@ -3006,8 +3006,33 @@ fn build_graph_from_messages(
         }
         GraphPricingRequirement::SubmissionLenient => {
             // 宽松提交模式：不因为缺少价格而失败，未定价消息保留在 graph 中，
-            // 仅收集统计信息用于向用户展示警告。
+            // 仅收集统计信息用于向用户展示警告。同时把非权威、未定价的
+            // token 用量成本归 0，避免上传残留估算价格，同时保留供应商直接报告的价格。
             let exclusions = collect_unpriced_submission_exclusions(&filtered, pricing);
+            let mut filtered = filtered;
+            for message in &mut filtered {
+                let tokens = &message.tokens;
+                let token_bearing = tokens.input > 0
+                    || tokens.output > 0
+                    || tokens.cache_read > 0
+                    || tokens.cache_write > 0
+                    || tokens.reasoning > 0;
+                if !token_bearing || message.has_authoritative_cost() {
+                    continue;
+                }
+                let covered = pricing
+                    .map(|p| {
+                        p.covers_usage_with_provider(
+                            &message.model_id,
+                            Some(&message.provider_id),
+                            &message.tokens,
+                        )
+                    })
+                    .unwrap_or(false);
+                if !covered {
+                    message.cost = 0.0;
+                }
+            }
             (filtered, exclusions)
         }
     };
@@ -3193,16 +3218,17 @@ pub async fn generate_submission_graph(
     strict_pricing: bool,
 ) -> Result<GraphResult, String> {
     // 当用户显式设置 TOKSCALE_SKIP_EXTERNAL_PRICING 时，跳过外部价格源的网络请求，
-    // 仅使用本地 custom pricing，并以宽松模式生成报表，让未定价 token 用量
-    // 以 cost=0 的形式被批量上报，而不是直接报错。
+    // 仅使用本地 custom pricing。strict 优先级高于 skip-external：若用户同时要求
+    // strict，则使用仅 custom pricing 的严格校验，缺价时仍然失败；否则使用宽松模式，
+    // 让未定价 token 用量以 cost=0 的形式被批量上报，而不是直接报错。
     let skip_external = std::env::var("TOKSCALE_SKIP_EXTERNAL_PRICING")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
 
-    let requirement = if skip_external || !strict_pricing {
-        GraphPricingRequirement::SubmissionLenient
-    } else {
+    let requirement = if strict_pricing {
         GraphPricingRequirement::Submission
+    } else {
+        GraphPricingRequirement::SubmissionLenient
     };
 
     if skip_external {
@@ -10638,8 +10664,10 @@ mod tests {
     #[test]
     #[serial]
     fn skip_external_pricing_allows_unpriced_submission() {
-        // 设置跳过外部价格源的环境变量。
-        std::env::set_var("TOKSCALE_SKIP_EXTERNAL_PRICING", "true");
+        // 设置跳过外部价格源的环境变量，使用 EnvGuard 保证 panic 时自动恢复，
+        // 避免污染同进程中的其他测试。
+        let mut env = crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_SKIP_EXTERNAL_PRICING"]);
+        env.set("TOKSCALE_SKIP_EXTERNAL_PRICING", "true");
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let sessions_dir = temp_dir
@@ -10669,9 +10697,6 @@ mod tests {
                 false,
             ))
             .expect("未定价 token 用量在跳过模式下应当成功生成报表");
-
-        // 清理环境变量，避免影响同进程中的其他测试。
-        std::env::remove_var("TOKSCALE_SKIP_EXTERNAL_PRICING");
 
         assert!(
             graph.summary.total_cost.abs() < 1e-9,

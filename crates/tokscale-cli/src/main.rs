@@ -5496,12 +5496,14 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
 
 fn report_unpriced_submission_exclusions(
     excluded: &[tokscale_core::UnpricedSubmissionExclusion],
+    is_lenient: bool,
 ) {
     use colored::Colorize;
 
     for row in excluded {
-        println!(
-            "{}",
+        // 宽松模式下消息保留在 graph 中按 0 成本上报；严格模式下消息被排除，
+        // 仅上报剩余已定价用量，因此文案需要区分。
+        let message = if is_lenient {
             format!(
                 "  Warning: no price for {} {}/{} message(s) ({} tokens): {}. These tokens will be reported at zero cost.",
                 row.message_count,
@@ -5510,8 +5512,17 @@ fn report_unpriced_submission_exclusions(
                 format_tokens_with_commas(row.total_tokens),
                 row.reason,
             )
-            .yellow()
-        );
+        } else {
+            format!(
+                "  Warning: excluded {} {}/{} unpriced message(s) ({} tokens): {}. Remaining priced usage will be submitted.",
+                row.message_count,
+                row.provider_id,
+                row.model_id,
+                format_tokens_with_commas(row.total_tokens),
+                row.reason,
+            )
+        };
+        println!("{}", message.yellow());
     }
 }
 
@@ -5680,7 +5691,10 @@ fn run_submit_command(
     // left out, so a single legacy charge can't block the whole submission.
     let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
     report_excluded_tokenless_rows(&excluded_rows);
-    report_unpriced_submission_exclusions(&graph_result.unpriced_submission_exclusions);
+    report_unpriced_submission_exclusions(
+        &graph_result.unpriced_submission_exclusions,
+        !strict_pricing,
+    );
 
     println!("{}", "  Data to submit:".white());
     println!(
