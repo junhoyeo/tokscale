@@ -148,8 +148,8 @@ impl SessionModels {
                 by_display
                     .entry(label)
                     .and_modify(|resolved| {
-                        if let Some(existing) = resolved {
-                            if existing != &model {
+                        if let Some(existing) = *resolved {
+                            if existing != model {
                                 let existing_canon = crate::pricing::aliases::resolve_alias(existing).unwrap_or(existing);
                                 let new_canon = crate::pricing::aliases::resolve_alias(model).unwrap_or(model);
                                 
