@@ -66,7 +66,7 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
 // `fireworks-ai-default` row. That row prices at 0.0/0.0, and
 // `ModelPricing::covers_usage` treats an explicit zero as a real rate, so the
 // label looked *priced* — enough to slip past
-// `exclude_generic_unpriced_submission_messages` and be submitted at
+// `exclude_unpriced_submission_messages` and be submitted at
 // Fireworks AI's rates. A Google routing label is not a Fireworks model.
 // See `fuzzy_match_does_not_resolve_generic_default_token`.
 const FUZZY_BLOCKLIST: &[&str] = &[
@@ -3303,7 +3303,7 @@ mod tests {
     //
     // That row is priced 0.0/0.0, and `covers_usage` counts an explicit zero as
     // a real rate, so before `default` joined the FUZZY_BLOCKLIST the label
-    // looked priced and `exclude_generic_unpriced_submission_messages` let it
+    // looked priced and `exclude_unpriced_submission_messages` let it
     // through — a Google routing label submitted at Fireworks AI's rates.
     // Verified against the live LiteLLM dataset: `fireworks-ai-default` is a
     // real key with input and output cost 0.0.

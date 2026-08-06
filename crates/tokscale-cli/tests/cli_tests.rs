@@ -3619,7 +3619,7 @@ fn test_root_with_group_by() {
 }
 
 #[test]
-fn test_submit_offline_without_pricing_cache_fails() {
+fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_fake_credentials(tmp.path());
     let unpriced_dir = tmp
@@ -3642,23 +3642,34 @@ fn test_submit_offline_without_pricing_cache_fails() {
     .unwrap();
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["submit", "--client", "opencode", "--dry-run"])
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "submit should fail for genuinely unpriced token usage; stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
+        output.status.success(),
+        "one unpriced model should not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    // Verify failure is from pricing fetch, not from auth or argument errors
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stderr.contains("Not logged in"),
-        "submit failed due to auth, not pricing: {stderr}"
+        stdout.contains(
+            "excluded 1 unpriced unknown_provider/genuinely-unpriced-model message(s) (1 tokens)"
+        ),
+        "the excluded model must be named: {stdout}"
     );
     assert!(
-        stderr.contains("error") || stderr.contains("Error"),
-        "stderr should contain a pricing/network error: {stderr}"
+        stdout.contains("Remaining priced usage will be submitted."),
+        "the warning must say covered usage remains: {stdout}"
+    );
+    assert!(
+        stdout.contains("Dry run - not submitting data."),
+        "dry-run must complete without submitting: {stdout}"
     );
 }
 
