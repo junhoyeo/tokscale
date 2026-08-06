@@ -63,7 +63,10 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
 
         let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
 
-        let cost = payload.cost.unwrap_or(0.0).max(0.0);
+        // 先用原始值判断 authority，再用 clamped 值构造消息，避免负数/非有限 cost
+        // 被 max(0.0) 洗白成权威免费请求。
+        let raw_cost = payload.cost;
+        let cost = raw_cost.unwrap_or(0.0).max(0.0);
         let mut message = UnifiedMessage::new_with_agent(
             source,
             model_id.clone(),
@@ -80,10 +83,9 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             cost,
             agent.clone(),
         );
-        // RooCode 日志中 api_req_started 的 cost 是原始数据直接给出的金额；只要存在
-        // 有限且非负的 cost（包括显式 0）就标记为供应商报告成本，避免免费请求被
-        // 外部模型价格覆盖。
-        if payload.cost.is_some() && cost.is_finite() && cost >= 0.0 {
+        // RooCode 日志中 api_req_started 的 cost 是原始数据直接给出的金额；只有原始
+        // 值存在、有限且非负时才标记为供应商报告成本，避免非法值被当成权威免费请求。
+        if raw_cost.is_some_and(|c| c.is_finite() && c >= 0.0) {
             message.mark_provider_reported_cost();
         }
         messages.push(message);

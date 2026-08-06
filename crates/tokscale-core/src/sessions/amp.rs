@@ -158,6 +158,9 @@ fn parse_amp_ledger_records(
             });
 
             let raw_credits = event.credits;
+            // credits 字段必须存在、有限且非负才视为 Amp 报告的权威成本；负值被忽略，
+            // 同时不设置 has_credits，避免被错误标记为 provider-reported 的免费请求。
+            let credits_valid = raw_credits.is_some_and(|c| c.is_finite() && c >= 0.0);
             Some(AmpUsageRecord {
                 model,
                 timestamp,
@@ -171,8 +174,8 @@ fn parse_amp_ledger_records(
                     cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
                     reasoning: 0,
                 },
-                cost: raw_credits.unwrap_or(0.0).max(0.0),
-                has_credits: raw_credits.is_some(),
+                cost: if credits_valid { raw_credits.unwrap() } else { 0.0 },
+                has_credits: credits_valid,
             })
         })
         .collect()
@@ -206,6 +209,9 @@ fn parse_amp_message_records(
             let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
 
             let raw_credits = usage.credits;
+            // credits 字段必须存在、有限且非负才视为 Amp 报告的权威成本；负值被忽略，
+            // 同时不设置 has_credits，避免被错误标记为 provider-reported 的免费请求。
+            let credits_valid = raw_credits.is_some_and(|c| c.is_finite() && c >= 0.0);
             Some(AmpUsageRecord {
                 model,
                 timestamp,
@@ -219,8 +225,8 @@ fn parse_amp_message_records(
                     cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
                     reasoning: 0,
                 },
-                cost: raw_credits.unwrap_or(0.0).max(0.0),
-                has_credits: raw_credits.is_some(),
+                cost: if credits_valid { raw_credits.unwrap() } else { 0.0 },
+                has_credits: credits_valid,
             })
         })
         .collect()
@@ -257,7 +263,12 @@ fn merge_amp_records(
 ) -> AmpUsageRecord {
     if ledger_record.has_explicit_timestamp {
         if ledger_record.cost > 0.0 || message_record.cost <= 0.0 {
-            ledger_record
+            // ledger row 即使没有 credits，也要把消息自身的 has_credits 标志合并进来，
+            // 确保显式 credits: 0 的消息不会被后续重新定价覆盖。
+            AmpUsageRecord {
+                has_credits: ledger_record.has_credits || message_record.has_credits,
+                ..ledger_record
+            }
         } else {
             AmpUsageRecord {
                 cost: message_record.cost,

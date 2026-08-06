@@ -137,7 +137,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let date_str = fields[0].trim().trim_matches('"');
-        let kind = kind_idx
+        let _kind = kind_idx
             .map(|idx| fields[idx].trim().trim_matches('"'))
             .unwrap_or("");
         let model = fields[model_idx].trim().trim_matches('"');
@@ -195,11 +195,11 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             },
             cost.max(0.0),
         );
-        // Cursor 用量导出 CSV 的 Cost 列直接来自 Cursor；只有 On-Demand（或无 Kind
-        // 列的旧格式）且成本为有限正数时才标记为供应商报告成本，Included / - / 0
-        // 等行保持非权威。
-        let is_on_demand = kind.is_empty() || kind.eq_ignore_ascii_case("on-demand");
-        if is_on_demand && cost.is_finite() && cost > 0.0 {
+        // Cursor 用量导出 CSV 的 Cost 列直接来自 Cursor；只有旧格式（CSV 没有 Kind
+        // 列）且成本为有限正数时才标记为供应商报告成本。有 Kind 列但值为空字符串
+        // 时属于新格式，按非权威处理，避免空字段被误判为旧格式权威报告。
+        let is_old_format_without_kind = kind_idx.is_none();
+        if is_old_format_without_kind && cost.is_finite() && cost > 0.0 {
             message.mark_provider_reported_cost();
         }
         messages.push(message);
@@ -384,8 +384,9 @@ mod tests {
         assert_eq!(messages[1].provider_id, "openai"); // gpt -> openai
         assert_eq!(messages[1].tokens.input, 8263);
         assert_eq!(messages[1].tokens.cache_read, 66964);
-        // "On-Demand" 且 cost > 0 的行应标记为权威成本。
-        assert!(messages[1].has_authoritative_cost());
+        // 新格式存在 Kind 列，无论 On-Demand 与否都不再视为供应商报告成本，
+        // 避免空字段或分类变化导致误判。
+        assert!(!messages[1].has_authoritative_cost());
     }
 
     #[test]
@@ -413,7 +414,9 @@ mod tests {
         // Second message: actual cost from "On-Demand"
         assert_eq!(messages[1].model_id, "composer-2");
         assert!((messages[1].cost - 0.11).abs() < 0.001);
-        assert!(messages[1].has_authoritative_cost());
+        // 新格式存在 Kind 列，On-Demand 正 cost 也不再标记为权威成本；只有旧格式
+        // （无 Kind 列）才按 cost > 0 判定权威。
+        assert!(!messages[1].has_authoritative_cost());
 
         // Third message: "-" cost should be 0 (Errored, No Charge)
         assert_eq!(messages[2].model_id, "composer-2");
@@ -440,9 +443,9 @@ mod tests {
         assert_eq!(messages[0].cost, 0.0);
         assert!(!messages[0].has_authoritative_cost());
 
-        // 正数成本的 On-Demand 行应标记为权威。
+        // 新格式存在 Kind 列，正数成本的 On-Demand 行也不应标记为权威。
         assert!((messages[1].cost - 0.11).abs() < 0.001);
-        assert!(messages[1].has_authoritative_cost());
+        assert!(!messages[1].has_authoritative_cost());
 
         // Included 行即使有数值成本也不应标记为权威。
         assert!((messages[2].cost - 0.05).abs() < 0.001);

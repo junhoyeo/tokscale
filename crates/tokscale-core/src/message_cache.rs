@@ -1004,6 +1004,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: RooCode now preserves whether the `cost` field was present,
         // including explicit zero, so free requests are not repriced from cache.
         ClientId::RooCode => 2,
+        // KiloCode 复用 RooCode 的解析器，因此同步升级到 v2，使旧缓存条目失效并
+        // 重新识别 authoritative 标记。
+        ClientId::KiloCode => 2,
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,

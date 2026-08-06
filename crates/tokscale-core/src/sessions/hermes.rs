@@ -99,11 +99,11 @@ const SESSION_TOTALS_QUERY: &str = r#"
             cache_write_tokens,
             reasoning_tokens,
             COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd,
-            -- has_actual_cost 仅当该 session 的 cost 完全来自 actual_cost_usd 时才为 1。
-            -- actual_cost_usd 为 0 或 NULL 且 estimated_cost_usd 产生非零成本时视为估算。
+            -- has_actual_cost 仅当最终选用的 cost 来自 actual_cost_usd 时才为 1。
+            -- 只要 actual_cost_usd 非 NULL 且非零即可判定为供应商实际报告成本，
+            -- 无需关心是否存在 estimate，与 COALESCE 的优先级保持一致。
             CASE
                 WHEN actual_cost_usd IS NOT NULL AND actual_cost_usd != 0
-                 AND (estimated_cost_usd IS NULL OR estimated_cost_usd = 0)
                 THEN 1 ELSE 0
             END AS has_actual_cost
         FROM sessions
