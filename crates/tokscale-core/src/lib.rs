@@ -3080,7 +3080,9 @@ fn exclude_unpriced_submission_messages(
             let entry = exclusions
                 .entry((message.provider_id.clone(), message.model_id.clone()))
                 .or_insert((0, 0, reason));
-            entry.0 += 1;
+            entry.0 = entry
+                .0
+                .saturating_add(message.message_count.max(0) as usize);
             entry.1 = entry.1.saturating_add(message.tokens.total());
         } else {
             submitted.push(message);
@@ -8191,6 +8193,33 @@ mod tests {
     }
 
     #[test]
+    fn submission_without_any_pricing_data_still_fails() {
+        let message = UnifiedMessage::new(
+            "opencode",
+            "gpt-4o",
+            "openai",
+            "priced-if-data-loaded",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let error = build_graph_from_messages(
+            vec![message],
+            None,
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect_err("submission must still fail when no pricing dataset loaded");
+
+        assert_eq!(error, "pricing data is unavailable for submission");
+    }
+
+    #[test]
     fn submission_excludes_unpriced_generic_gemini_default_but_keeps_priceable_usage() {
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -8201,7 +8230,7 @@ mod tests {
             },
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
-        let generic = UnifiedMessage::new(
+        let mut generic = UnifiedMessage::new(
             "antigravity-cli",
             "gemini-default",
             "google",
@@ -8214,6 +8243,7 @@ mod tests {
             },
             0.0,
         );
+        generic.message_count = 7;
         let concrete = UnifiedMessage::new(
             "synthetic",
             "gpt-4o",
@@ -8245,7 +8275,7 @@ mod tests {
             UnpricedSubmissionExclusion {
                 provider_id: "google".to_string(),
                 model_id: "gemini-default".to_string(),
-                message_count: 1,
+                message_count: 7,
                 total_tokens: 18,
                 reason: GEMINI_DEFAULT_UNPRICED_REASON,
             }

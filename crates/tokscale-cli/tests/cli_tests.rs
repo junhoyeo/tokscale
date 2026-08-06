@@ -3620,7 +3620,7 @@ fn test_root_with_group_by() {
 
 #[test]
 fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let tmp = create_temp_fixture_dir();
     write_fake_credentials(tmp.path());
     let unpriced_dir = tmp
         .path()
