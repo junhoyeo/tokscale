@@ -131,6 +131,7 @@ pub fn parse_kilo_sqlite_with_fallback(
             .to_string();
         let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
 
+        let cost = msg.cost.unwrap_or(0.0).max(0.0);
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",
             model_id,
@@ -144,9 +145,14 @@ pub fn parse_kilo_sqlite_with_fallback(
                 cache_write: tokens.cache.write.max(0),
                 reasoning: tokens.reasoning.unwrap_or(0).max(0),
             },
-            msg.cost.unwrap_or(0.0).max(0.0),
+            cost,
             agent,
         );
+        // Kilo 消息数据中携带的 cost 是原始数据直接给出的金额，标记为供应商报告成本，
+        // 避免在 lenient submission 中被误归零。
+        if msg.cost.is_some() {
+            unified.mark_provider_reported_cost();
+        }
         unified.dedup_key = dedup_key;
 
         messages.push(unified);

@@ -101,6 +101,11 @@ pub fn parse_crush_sqlite_in(
                     TokenBreakdown::default(),
                     bucket_cost,
                 );
+                // Crush 数据库中存储的会话级 cost 是 Crush 直接报告的金额，标记为
+                // 供应商报告成本，避免在 lenient submission 中被误归零。
+                if bucket_cost > 0.0 {
+                    message.mark_provider_reported_cost();
+                }
                 message.message_count = bucket.message_count.max(0);
                 messages.push(message);
             }
@@ -118,6 +123,7 @@ pub fn parse_crush_sqlite_in(
             continue;
         };
 
+        let cost = session.cost.max(0.0);
         let mut message = UnifiedMessage::new(
             "crush",
             CRUSH_MODEL_ID,
@@ -125,8 +131,13 @@ pub fn parse_crush_sqlite_in(
             session_key,
             timestamp_ms,
             TokenBreakdown::default(),
-            session.cost.max(0.0),
+            cost,
         );
+        // Crush 数据库中存储的会话级 cost 是 Crush 直接报告的金额，标记为供应商报告成本，
+        // 避免在 lenient submission 中被误归零。
+        if cost > 0.0 {
+            message.mark_provider_reported_cost();
+        }
         message.message_count = 0;
         messages.push(message);
     }

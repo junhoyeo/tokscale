@@ -226,9 +226,14 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
                     let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
-                    let cost = usage.cost.and_then(|c| c.total).unwrap_or(0.0);
+                    let has_reported_cost = usage.cost.is_some();
+                    let cost = usage
+                        .cost
+                        .as_ref()
+                        .and_then(|c| c.total)
+                        .unwrap_or(0.0);
 
-                    messages.push(UnifiedMessage::new(
+                    let mut message = UnifiedMessage::new(
                         "openclaw",
                         model,
                         provider,
@@ -242,7 +247,13 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                             reasoning: 0,
                         },
                         cost.max(0.0),
-                    ));
+                    );
+                    // OpenClaw 会话数据中的 cost.total 是原始数据直接给出的金额，标记为
+                    // 供应商报告成本，避免在 lenient submission 中被误归零。
+                    if has_reported_cost {
+                        message.mark_provider_reported_cost();
+                    }
+                    messages.push(message);
                 }
             }
             _ => {}

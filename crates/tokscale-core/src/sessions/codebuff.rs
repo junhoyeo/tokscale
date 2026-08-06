@@ -74,7 +74,8 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));
 
-        results.push(UnifiedMessage::new_with_dedup(
+        let cost = usage.credits.max(0.0);
+        let mut message = UnifiedMessage::new_with_dedup(
             "codebuff",
             &model,
             provider,
@@ -87,9 +88,15 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
                 cache_write: usage.cache_creation_input_tokens.max(0),
                 reasoning: 0,
             },
-            usage.credits.max(0.0),
+            cost,
             Some(dedup_key),
-        ));
+        );
+        // CodeBuff 用量数据中的 credits 是原始数据直接给出的金额，标记为供应商报告成本，
+        // 避免在 lenient submission 中被误归零。
+        if cost > 0.0 {
+            message.mark_provider_reported_cost();
+        }
+        results.push(message);
     }
 
     results

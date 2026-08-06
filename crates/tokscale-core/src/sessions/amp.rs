@@ -92,7 +92,7 @@ impl AmpUsageRecord {
     }
 
     fn into_unified(self, thread_id: &str) -> UnifiedMessage {
-        UnifiedMessage::new(
+        let mut message = UnifiedMessage::new(
             "amp",
             &self.model,
             get_provider_from_model(&self.model),
@@ -100,7 +100,13 @@ impl AmpUsageRecord {
             self.timestamp,
             self.tokens,
             self.cost,
-        )
+        );
+        // Amp 用量账本中的 credits 是 Amp 直接报告的金额，标记为供应商报告成本，
+        // 避免在 lenient submission 中被误归零。
+        if self.cost > 0.0 {
+            message.mark_provider_reported_cost();
+        }
+        message
     }
 }
 

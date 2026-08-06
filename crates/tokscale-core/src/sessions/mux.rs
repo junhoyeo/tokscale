@@ -112,7 +112,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             };
             let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
 
-            Some(UnifiedMessage::new_with_dedup(
+            let mut message = UnifiedMessage::new_with_dedup(
                 "mux",
                 model_id,
                 provider,
@@ -127,7 +127,13 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                 },
                 source_cost,
                 dedup_key,
-            ))
+            );
+            // Mux 用量数据中的 cost_usd 是原始数据直接给出的金额，标记为供应商报告成本，
+            // 避免在 lenient submission 中被误归零。
+            if source_cost > 0.0 {
+                message.mark_provider_reported_cost();
+            }
+            Some(message)
         })
         .collect()
 }

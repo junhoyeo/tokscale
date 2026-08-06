@@ -63,7 +63,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
 
         let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
 
-        messages.push(UnifiedMessage::new_with_agent(
+        let mut message = UnifiedMessage::new_with_agent(
             source,
             model_id.clone(),
             provider,
@@ -78,7 +78,13 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             },
             payload.cost,
             agent.clone(),
-        ));
+        );
+        // RooCode 日志中 api_req_started 的 cost 是原始数据直接给出的金额，标记为
+        // 供应商报告成本，避免在 lenient submission 中被误归零。
+        if payload.cost > 0.0 {
+            message.mark_provider_reported_cost();
+        }
+        messages.push(message);
     }
 
     messages

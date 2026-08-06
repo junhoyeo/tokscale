@@ -3011,27 +3011,10 @@ fn build_graph_from_messages(
             let exclusions = collect_unpriced_submission_exclusions(&filtered, pricing);
             let mut filtered = filtered;
             for message in &mut filtered {
-                let tokens = &message.tokens;
-                let token_bearing = tokens.input > 0
-                    || tokens.output > 0
-                    || tokens.cache_read > 0
-                    || tokens.cache_write > 0
-                    || tokens.reasoning > 0;
-                if !token_bearing || message.has_authoritative_cost() {
+                if !is_unpriced_token_bearing(message, pricing) {
                     continue;
                 }
-                let covered = pricing
-                    .map(|p| {
-                        p.covers_usage_with_provider(
-                            &message.model_id,
-                            Some(&message.provider_id),
-                            &message.tokens,
-                        )
-                    })
-                    .unwrap_or(false);
-                if !covered {
-                    message.cost = 0.0;
-                }
+                message.cost = 0.0;
             }
             (filtered, exclusions)
         }
@@ -3116,34 +3099,39 @@ fn exclude_generic_unpriced_submission_messages(
     (submitted, exclusions)
 }
 
+/// 统一判断消息是否为未定价的 token-bearing 用量，确保警告集合与实际归零集合一致。
+fn is_unpriced_token_bearing(
+    message: &UnifiedMessage,
+    pricing: Option<&pricing::PricingService>,
+) -> bool {
+    let tokens = &message.tokens;
+    let token_bearing = tokens.input > 0
+        || tokens.output > 0
+        || tokens.cache_read > 0
+        || tokens.cache_write > 0
+        || tokens.reasoning > 0;
+    token_bearing
+        && !message.has_authoritative_cost()
+        && pricing.map_or(true, |p| {
+            !p.covers_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            )
+        })
+}
+
 /// 在宽松提交模式下收集未定价的 token-bearing 消息，用于打印警告。
 /// 这些消息不会被从 graph 中移除，因此 tokens 仍会上报，cost 保持为 0。
 fn collect_unpriced_submission_exclusions(
     messages: &[UnifiedMessage],
     pricing: Option<&pricing::PricingService>,
 ) -> Vec<UnpricedSubmissionExclusion> {
-    let Some(pricing) = pricing else {
-        return Vec::new();
-    };
-
     let mut counts: std::collections::BTreeMap<(String, String), (usize, i64)> =
         std::collections::BTreeMap::new();
 
     for message in messages {
-        let tokens = &message.tokens;
-        let token_bearing = tokens.input > 0
-            || tokens.output > 0
-            || tokens.cache_read > 0
-            || tokens.cache_write > 0
-            || tokens.reasoning > 0;
-        let unpriced = token_bearing
-            && !message.has_authoritative_cost()
-            && !pricing.covers_usage_with_provider(
-                &message.model_id,
-                Some(&message.provider_id),
-                &message.tokens,
-            );
-        if !unpriced {
+        if !is_unpriced_token_bearing(message, pricing) {
             continue;
         }
 
@@ -10761,6 +10749,57 @@ mod tests {
                 total_tokens: 19,
                 reason: MODEL_HAS_NO_KNOWN_PRICE_REASON,
             }
+        );
+    }
+
+    /// Trae 解析出的带精确供应商报告成本的消息，在宽松提交模式下不应被归零。
+    #[test]
+    fn lenient_submission_preserves_trae_provider_reported_cost() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir.path().join("trae-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("test.json"),
+            serde_json::json!([{
+                "model_name": "GPT-5.4",
+                "session_id": "trae-session-1",
+                "usage_time": 1776000000,
+                "dollar_float": 0.42,
+                "extra_info": {
+                    "input_token": 1000,
+                    "output_token": 500,
+                    "cache_read_token": 200,
+                    "cache_write_token": 100
+                }
+            }])
+            .to_string(),
+        )
+        .unwrap();
+
+        let messages =
+            crate::sessions::trae::parse_trae_file("trae", &sessions_dir.join("test.json"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].has_authoritative_cost());
+        assert!((messages[0].cost - 0.42).abs() < 1e-9);
+
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let graph = build_graph_from_messages(
+            messages,
+            Some(&pricing),
+            GraphPricingRequirement::SubmissionLenient,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("Trae 供应商报告成本在宽松提交模式下应保留");
+
+        assert!(
+            (graph.summary.total_cost - 0.42).abs() < 1e-9,
+            "Trae 报告成本应保留，got {}",
+            graph.summary.total_cost
+        );
+        assert!(
+            graph.unpriced_submission_exclusions.is_empty(),
+            "已定价的 Trae 消息不应产生未定价警告"
         );
     }
 }

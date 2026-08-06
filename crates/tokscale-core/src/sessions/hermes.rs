@@ -57,7 +57,8 @@ const PER_MODEL_QUERY: &str = r#"
             SUM(smu.cache_read_tokens)   AS cache_read_tokens,
             SUM(smu.cache_write_tokens)  AS cache_write_tokens,
             SUM(smu.reasoning_tokens)    AS reasoning_tokens,
-            SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) AS cost_usd
+            SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) AS cost_usd,
+            MAX(CASE WHEN smu.actual_cost_usd IS NOT NULL AND smu.actual_cost_usd != 0 THEN 1 ELSE 0 END) AS has_actual_cost
         FROM session_model_usage smu
         JOIN sessions s ON s.id = smu.session_id
         WHERE smu.model IS NOT NULL
@@ -90,7 +91,8 @@ const SESSION_TOTALS_QUERY: &str = r#"
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
-            COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd
+            COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd,
+            CASE WHEN actual_cost_usd IS NOT NULL AND actual_cost_usd != 0 THEN 1 ELSE 0 END AS has_actual_cost
         FROM sessions
         WHERE model IS NOT NULL
           AND TRIM(model) != ''
@@ -117,6 +119,7 @@ struct HermesUsageRow {
     cache_write: i64,
     reasoning: i64,
     cost: f64,
+    has_actual_cost: bool,
 }
 
 fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HermesUsageRow> {
@@ -132,6 +135,10 @@ fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HermesUsageRow>
         cache_write: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
         reasoning: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
         cost: row.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+        has_actual_cost: row
+            .get::<_, Option<i32>>(11)?
+            .unwrap_or(0)
+            != 0,
     })
 }
 
@@ -197,6 +204,11 @@ fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
         row.cost.max(0.0),
         Some(HERMES_AGENT_NAME.to_string()),
     );
+    // Hermes 数据库中存在 actual_cost_usd 时，该金额为 Hermes 直接报告的精确成本；
+    // 仅使用 estimated_cost_usd 时保持默认 Unknown/Estimated。
+    if row.has_actual_cost {
+        msg.mark_provider_reported_cost();
+    }
     msg.message_count = row.message_count.max(0);
     msg.dedup_key = Some(dedup_key);
     msg

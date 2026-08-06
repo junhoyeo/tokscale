@@ -71,6 +71,7 @@ fn usage_to_message(usage: &WarpAggregateUsage, timestamp: i64) -> Option<Unifie
         return None;
     }
 
+    let cost = cents_to_dollars(spend_cents);
     let mut message = UnifiedMessage::new(
         "warp",
         "aggregate-requests",
@@ -78,8 +79,13 @@ fn usage_to_message(usage: &WarpAggregateUsage, timestamp: i64) -> Option<Unifie
         "warp-aggregate-account",
         timestamp,
         TokenBreakdown::default(),
-        cents_to_dollars(spend_cents),
+        cost,
     );
+    // Warp usage cache 中的 spend_cents 是 Warp 直接报告的消费金额，标记为供应商
+    // 报告成本，避免在 lenient submission 中被误归零。
+    if cost > 0.0 {
+        message.mark_provider_reported_cost();
+    }
     message.message_count = requests;
     Some(message)
 }
@@ -97,6 +103,7 @@ fn workspace_to_message(workspace: &WarpWorkspaceUsage, timestamp: i64) -> Optio
         .map(sanitize_id)
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    let cost = cents_to_dollars(spend_cents);
     let mut message = UnifiedMessage::new(
         "warp",
         "aggregate-requests",
@@ -104,8 +111,13 @@ fn workspace_to_message(workspace: &WarpWorkspaceUsage, timestamp: i64) -> Optio
         format!("warp-aggregate-{workspace_id}"),
         timestamp,
         TokenBreakdown::default(),
-        cents_to_dollars(spend_cents),
+        cost,
     );
+    // Warp usage cache 中的 spend_cents 是 Warp 直接报告的消费金额，标记为供应商
+    // 报告成本，避免在 lenient submission 中被误归零。
+    if cost > 0.0 {
+        message.mark_provider_reported_cost();
+    }
     message.message_count = requests;
     message.set_workspace(
         workspace.id.clone().filter(|id| !id.trim().is_empty()),

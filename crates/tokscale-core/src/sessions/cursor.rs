@@ -175,7 +175,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         // Input tokens = input_without_cache_write
         let input = input_without_cache_write;
 
-        messages.push(UnifiedMessage::new(
+        let mut message = UnifiedMessage::new(
             "cursor",
             model,
             infer_provider(model),
@@ -189,7 +189,13 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning: 0,
             },
             cost.max(0.0),
-        ));
+        );
+        // Cursor 用量导出 CSV 的 Cost 列直接来自 Cursor，标记为供应商报告成本，
+        // 避免在 lenient submission 中被误归零。
+        if cost > 0.0 {
+            message.mark_provider_reported_cost();
+        }
+        messages.push(message);
     }
 
     messages

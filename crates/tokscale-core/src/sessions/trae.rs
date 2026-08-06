@@ -77,6 +77,7 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
     // wrap to a negative timestamp in release builds.
     let timestamp_ms = usage_time.checked_mul(1000)?;
     let cost = session["dollar_float"].as_f64().unwrap_or(0.0);
+    let has_reported_cost = session["dollar_float"].as_f64().is_some();
 
     let extra = &session["extra_info"];
     let input = extra["input_token"].as_i64().unwrap_or(0);
@@ -90,7 +91,7 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
 
     let dedup_key = Some(format!("trae:{}:{}", session_id, usage_time));
 
-    Some(UnifiedMessage::new_with_dedup(
+    let mut message = UnifiedMessage::new_with_dedup(
         client,
         model_id,
         provider,
@@ -105,7 +106,13 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         },
         cost,
         dedup_key,
-    ))
+    );
+    // Trae 用量 API 直接返回精确 dollar_float，标记为供应商报告成本，避免在
+    // lenient submission 中被误归零。
+    if has_reported_cost {
+        message.mark_provider_reported_cost();
+    }
+    Some(message)
 }
 
 /// Parse a cache file containing an array of sessions as returned by the API.
