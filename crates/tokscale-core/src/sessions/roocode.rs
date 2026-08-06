@@ -63,6 +63,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
 
         let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
 
+        let cost = payload.cost.unwrap_or(0.0).max(0.0);
         let mut message = UnifiedMessage::new_with_agent(
             source,
             model_id.clone(),
@@ -76,12 +77,13 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
                 cache_write: payload.cache_writes,
                 reasoning: 0,
             },
-            payload.cost,
+            cost,
             agent.clone(),
         );
-        // RooCode 日志中 api_req_started 的 cost 是原始数据直接给出的金额，标记为
-        // 供应商报告成本，避免在 lenient submission 中被误归零。
-        if payload.cost > 0.0 {
+        // RooCode 日志中 api_req_started 的 cost 是原始数据直接给出的金额；只要存在
+        // 有限且非负的 cost（包括显式 0）就标记为供应商报告成本，避免免费请求被
+        // 外部模型价格覆盖。
+        if payload.cost.is_some() && cost.is_finite() && cost >= 0.0 {
             message.mark_provider_reported_cost();
         }
         messages.push(message);
@@ -182,7 +184,9 @@ fn parse_entry_timestamp(ts: Option<&Value>) -> Option<i64> {
 }
 
 struct ApiReqStartedPayload {
-    cost: f64,
+    /// 原始 `cost` 字段是否存在（包括显式 0）。用于区分供应商报告的免费请求与
+    /// 没有成本信息的请求。
+    cost: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
     cache_reads: i64,
@@ -194,7 +198,7 @@ fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
     let mut bytes = text.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
 
-    let cost = extract_f64(value.get("cost")).unwrap_or(0.0).max(0.0);
+    let cost = extract_f64(value.get("cost"));
     let tokens_in = extract_i64(value.get("tokensIn")).unwrap_or(0).max(0);
     let tokens_out = extract_i64(value.get("tokensOut")).unwrap_or(0).max(0);
     let cache_reads = extract_i64(value.get("cacheReads")).unwrap_or(0).max(0);

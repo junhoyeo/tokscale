@@ -226,12 +226,16 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
                     let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
-                    let has_reported_cost = usage.cost.is_some();
-                    let cost = usage
+                    let total_cost = usage
                         .cost
                         .as_ref()
-                        .and_then(|c| c.total)
+                        .and_then(|c| c.total);
+                    // 只有 cost.total 是有限且非负的数值时才视为供应商报告金额；
+                    // 缺少 total 或 total 为 null 时走正常定价/估算路径。
+                    let cost = total_cost
+                        .filter(|v| v.is_finite() && *v >= 0.0)
                         .unwrap_or(0.0);
+                    let has_reported_cost = total_cost.is_some();
 
                     let mut message = UnifiedMessage::new(
                         "openclaw",
@@ -246,10 +250,10 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                             cache_write: usage.cache_write.unwrap_or(0).max(0),
                             reasoning: 0,
                         },
-                        cost.max(0.0),
+                        cost,
                     );
-                    // OpenClaw 会话数据中的 cost.total 是原始数据直接给出的金额，标记为
-                    // 供应商报告成本，避免在 lenient submission 中被误归零。
+                    // OpenClaw 会话数据中的 cost.total 是原始数据直接给出的金额；
+                    // 仅当存在有限且非负的 total 时才标记为供应商报告成本。
                     if has_reported_cost {
                         message.mark_provider_reported_cost();
                     }

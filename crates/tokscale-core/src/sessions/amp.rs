@@ -84,6 +84,9 @@ struct AmpUsageRecord {
     ledger_to_message_id: Option<i64>,
     tokens: TokenBreakdown,
     cost: f64,
+    /// 原始数据中是否存在 `credits` 字段（包括显式的 0）。用于区分“Amp 报告免费”
+    /// 和“没有成本信息”，前者在 lenient submission 中应保持 authoritative。
+    has_credits: bool,
 }
 
 impl AmpUsageRecord {
@@ -101,9 +104,9 @@ impl AmpUsageRecord {
             self.tokens,
             self.cost,
         );
-        // Amp 用量账本中的 credits 是 Amp 直接报告的金额，标记为供应商报告成本，
-        // 避免在 lenient submission 中被误归零。
-        if self.cost > 0.0 {
+        // Amp 用量账本中的 credits 是 Amp 直接报告的金额；只要原始字段存在（包括 0）
+        // 就标记为供应商报告成本，避免显式免费请求被外部价格覆盖。
+        if self.has_credits && self.cost.is_finite() && self.cost >= 0.0 {
             message.mark_provider_reported_cost();
         }
         message
@@ -154,6 +157,7 @@ fn parse_amp_ledger_records(
                 cache_creation_input_tokens: Some(0),
             });
 
+            let raw_credits = event.credits;
             Some(AmpUsageRecord {
                 model,
                 timestamp,
@@ -167,7 +171,8 @@ fn parse_amp_ledger_records(
                     cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
                     reasoning: 0,
                 },
-                cost: event.credits.unwrap_or(0.0).max(0.0),
+                cost: raw_credits.unwrap_or(0.0).max(0.0),
+                has_credits: raw_credits.is_some(),
             })
         })
         .collect()
@@ -200,6 +205,7 @@ fn parse_amp_message_records(
             let message_id = msg.message_id.unwrap_or(0).max(0);
             let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
 
+            let raw_credits = usage.credits;
             Some(AmpUsageRecord {
                 model,
                 timestamp,
@@ -213,7 +219,8 @@ fn parse_amp_message_records(
                     cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
                     reasoning: 0,
                 },
-                cost: usage.credits.unwrap_or(0.0).max(0.0),
+                cost: raw_credits.unwrap_or(0.0).max(0.0),
+                has_credits: raw_credits.is_some(),
             })
         })
         .collect()
@@ -255,6 +262,7 @@ fn merge_amp_records(
             AmpUsageRecord {
                 cost: message_record.cost,
                 message_id: message_record.message_id,
+                has_credits: ledger_record.has_credits || message_record.has_credits,
                 ..ledger_record
             }
         }
@@ -271,6 +279,7 @@ fn merge_amp_records(
             } else {
                 message_record.cost
             },
+            has_credits: ledger_record.has_credits || message_record.has_credits,
         }
     }
 }

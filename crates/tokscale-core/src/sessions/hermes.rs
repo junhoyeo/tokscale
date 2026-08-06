@@ -58,7 +58,14 @@ const PER_MODEL_QUERY: &str = r#"
             SUM(smu.cache_write_tokens)  AS cache_write_tokens,
             SUM(smu.reasoning_tokens)    AS reasoning_tokens,
             SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) AS cost_usd,
-            MAX(CASE WHEN smu.actual_cost_usd IS NOT NULL AND smu.actual_cost_usd != 0 THEN 1 ELSE 0 END) AS has_actual_cost
+            -- has_actual_cost 仅当所有产生非零成本的行都使用 actual_cost_usd 时才为 1。
+            -- 只要存在一行靠 estimated_cost_usd 产生非零成本，就视为估算而非权威。
+            CASE
+                WHEN MAX(CASE WHEN smu.actual_cost_usd IS NOT NULL AND smu.actual_cost_usd != 0 THEN 1 ELSE 0 END) = 1
+                 AND MAX(CASE WHEN (smu.actual_cost_usd IS NULL OR smu.actual_cost_usd = 0)
+                                AND smu.estimated_cost_usd IS NOT NULL AND smu.estimated_cost_usd != 0 THEN 1 ELSE 0 END) = 0
+                THEN 1 ELSE 0
+            END AS has_actual_cost
         FROM session_model_usage smu
         JOIN sessions s ON s.id = smu.session_id
         WHERE smu.model IS NOT NULL
@@ -92,7 +99,13 @@ const SESSION_TOTALS_QUERY: &str = r#"
             cache_write_tokens,
             reasoning_tokens,
             COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd,
-            CASE WHEN actual_cost_usd IS NOT NULL AND actual_cost_usd != 0 THEN 1 ELSE 0 END AS has_actual_cost
+            -- has_actual_cost 仅当该 session 的 cost 完全来自 actual_cost_usd 时才为 1。
+            -- actual_cost_usd 为 0 或 NULL 且 estimated_cost_usd 产生非零成本时视为估算。
+            CASE
+                WHEN actual_cost_usd IS NOT NULL AND actual_cost_usd != 0
+                 AND (estimated_cost_usd IS NULL OR estimated_cost_usd = 0)
+                THEN 1 ELSE 0
+            END AS has_actual_cost
         FROM sessions
         WHERE model IS NOT NULL
           AND TRIM(model) != ''
@@ -204,9 +217,9 @@ fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
         row.cost.max(0.0),
         Some(HERMES_AGENT_NAME.to_string()),
     );
-    // Hermes 数据库中存在 actual_cost_usd 时，该金额为 Hermes 直接报告的精确成本；
-    // 仅使用 estimated_cost_usd 时保持默认 Unknown/Estimated。
-    if row.has_actual_cost {
+    // Hermes 数据库中存在 actual_cost_usd 且所有产生成本的行都使用 actual 时，
+    // 该金额为 Hermes 直接报告的精确成本；仅当成本有限且非负时才标记为权威。
+    if row.has_actual_cost && row.cost.is_finite() && row.cost >= 0.0 {
         msg.mark_provider_reported_cost();
     }
     msg.message_count = row.message_count.max(0);

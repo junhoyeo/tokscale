@@ -76,8 +76,13 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
     // `usage_time` near `i64::MAX` would panic in debug builds and silently
     // wrap to a negative timestamp in release builds.
     let timestamp_ms = usage_time.checked_mul(1000)?;
-    let cost = session["dollar_float"].as_f64().unwrap_or(0.0);
-    let has_reported_cost = session["dollar_float"].as_f64().is_some();
+    let raw_cost = session["dollar_float"].as_f64();
+    // 只接受有限且非负的 dollar_float；负值视为无效，保持 cost=0 且不标记为权威，
+    // 避免扭曲 totals。
+    let (cost, has_reported_cost) = match raw_cost {
+        Some(v) if v.is_finite() && v >= 0.0 => (v, true),
+        _ => (0.0, false),
+    };
 
     let extra = &session["extra_info"];
     let input = extra["input_token"].as_i64().unwrap_or(0);

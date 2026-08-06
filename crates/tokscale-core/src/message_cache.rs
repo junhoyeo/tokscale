@@ -1001,6 +1001,9 @@ fn parser_version(client: ClientId) -> u32 {
         // recognizes user tool-result records as continuations instead of
         // beginning a new turn, so cached turns must be reparsed.
         ClientId::Cline => 3,
+        // v1->v2: RooCode now preserves whether the `cost` field was present,
+        // including explicit zero, so free requests are not repriced from cache.
+        ClientId::RooCode => 2,
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,

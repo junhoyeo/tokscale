@@ -101,6 +101,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
 
     // Column indices based on format
     let (
+        kind_idx,
         model_idx,
         input_cache_write_idx,
         input_no_cache_idx,
@@ -109,13 +110,14 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         cost_idx,
     ) = if has_kind_column && column_count >= 11 {
         // v3 format: Date,Cloud Agent ID,Automation ID,Kind,Model,...
-        (4, 6, 7, 8, 9, 11)
+        (Some(3), 4, 6, 7, 8, 9, 11)
     } else if has_kind_column {
         // v2 format: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
-        (2, 4, 5, 6, 7, 9)
+        (Some(1), 2, 4, 5, 6, 7, 9)
     } else {
         // v1 format: Date,Model,Input (w/ Cache Write),...
-        (1, 2, 3, 4, 5, 7)
+        // 旧格式没有 Kind 列，按成本金额判断（与新增测试兼容）。
+        (None, 1, 2, 3, 4, 5, 7)
     };
 
     let account_id = account_id_from_cursor_cache_path(path);
@@ -135,6 +137,9 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let date_str = fields[0].trim().trim_matches('"');
+        let kind = kind_idx
+            .map(|idx| fields[idx].trim().trim_matches('"'))
+            .unwrap_or("");
         let model = fields[model_idx].trim().trim_matches('"');
         let input_with_cache_write: i64 = fields[input_cache_write_idx]
             .trim()
@@ -190,9 +195,11 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             },
             cost.max(0.0),
         );
-        // Cursor 用量导出 CSV 的 Cost 列直接来自 Cursor，标记为供应商报告成本，
-        // 避免在 lenient submission 中被误归零。
-        if cost > 0.0 {
+        // Cursor 用量导出 CSV 的 Cost 列直接来自 Cursor；只有 On-Demand（或无 Kind
+        // 列的旧格式）且成本为有限正数时才标记为供应商报告成本，Included / - / 0
+        // 等行保持非权威。
+        let is_on_demand = kind.is_empty() || kind.eq_ignore_ascii_case("on-demand");
+        if is_on_demand && cost.is_finite() && cost > 0.0 {
             message.mark_provider_reported_cost();
         }
         messages.push(message);
@@ -339,8 +346,11 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_write, 5); // 10 - 5
         assert!((messages[0].cost - 0.10).abs() < 0.001);
+        // 旧格式无 Kind 列，cost > 0 的行视为 On-Demand，应标记为权威成本。
+        assert!(messages[0].has_authoritative_cost());
 
         assert_eq!(messages[1].model_id, "gpt-4o-mini");
+        assert!(messages[1].has_authoritative_cost());
     }
 
     #[test]
@@ -366,12 +376,16 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 105891);
         assert_eq!(messages[0].tokens.cache_write, 28342 - 775); // 27567
         assert!((messages[0].cost - 0.19).abs() < 0.001);
+        // "Included" 行即使有数值成本也不应视为供应商报告成本。
+        assert!(!messages[0].has_authoritative_cost());
 
         // Second message: gpt-5-codex
         assert_eq!(messages[1].model_id, "gpt-5-codex");
         assert_eq!(messages[1].provider_id, "openai"); // gpt -> openai
         assert_eq!(messages[1].tokens.input, 8263);
         assert_eq!(messages[1].tokens.cache_read, 66964);
+        // "On-Demand" 且 cost > 0 的行应标记为权威成本。
+        assert!(messages[1].has_authoritative_cost());
     }
 
     #[test]
@@ -394,13 +408,44 @@ mod tests {
         assert_eq!(messages[0].model_id, "composer-2");
         assert_eq!(messages[0].cost, 0.0);
         assert_eq!(messages[0].tokens.cache_read, 29045760);
+        assert!(!messages[0].has_authoritative_cost());
 
         // Second message: actual cost from "On-Demand"
         assert_eq!(messages[1].model_id, "composer-2");
         assert!((messages[1].cost - 0.11).abs() < 0.001);
+        assert!(messages[1].has_authoritative_cost());
 
         // Third message: "-" cost should be 0 (Errored, No Charge)
         assert_eq!(messages[2].model_id, "composer-2");
         assert_eq!(messages[2].cost, 0.0);
+        assert!(!messages[2].has_authoritative_cost());
+    }
+
+    #[test]
+    fn test_parse_cursor_csv_only_on_demand_positive_cost_is_authoritative() {
+        // 显式 "0" 的 On-Demand 行以及 Included / - 行都不应标记为权威成本。
+        let csv = r#"Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-04-09T20:01:10.528Z","bc-a380fb49-e1a5-414e-817d-6a85b6cdc51c","cc30782e-26cc-4359-bc22-7567efe282be","On-Demand","composer-2","Yes","0","343446","29045760","915201","30304407","0"
+"2026-04-09T18:02:13.576Z","bc-19a9b74b-2af3-46e2-9f61-3ba1cdac46c8","1a0df38f-1474-4dfe-896b-70b841d4a833","On-Demand","composer-2","Yes","0","43478","420864","7957","472299","0.11"
+"2026-04-09T07:39:09.091Z","bc-49262501-0ee0-49f9-b856-a5b0466deddb","","Included","composer-2","Yes","0","104504","985600","3666","1093770","0.05""#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.csv");
+        std::fs::write(&file_path, csv).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 3);
+
+        // 显式 0 成本的 On-Demand 行不应标记为权威。
+        assert_eq!(messages[0].cost, 0.0);
+        assert!(!messages[0].has_authoritative_cost());
+
+        // 正数成本的 On-Demand 行应标记为权威。
+        assert!((messages[1].cost - 0.11).abs() < 0.001);
+        assert!(messages[1].has_authoritative_cost());
+
+        // Included 行即使有数值成本也不应标记为权威。
+        assert!((messages[2].cost - 0.05).abs() < 0.001);
+        assert!(!messages[2].has_authoritative_cost());
     }
 }
