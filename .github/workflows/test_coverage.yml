@@ -57,16 +57,21 @@ jobs:
   #
   # The windows leg is advisory (`continue-on-error`) and Ubuntu stays a hard
   # gate. That split is deliberate and temporary. Running the suite for the
-  # first time found 33 pre-existing failures that no one has ever seen,
+  # first time found 33 pre-existing failures that no one had ever seen,
   # because cargo used to stop at the first failing binary and nine of the ten
-  # never ran at all. They are not one bug: they span at least six unrelated
-  # root causes, and two of those groups (the crush registry scan returning
-  # nothing, cc-mirror attributing the wrong provider) look like real Windows
-  # defects rather than test artefacts. Blocking every PR on them would mean
-  # either reverting this job or landing a 30-plus-fix change nobody can
-  # review, so the signal goes in first and the failures get fixed against a
-  # visible baseline. See #1014 for the enumerated groups.
+  # never ran at all. They spanned six unrelated root causes, enumerated in
+  # #1014, and all six have since been addressed: the leg is green on main,
+  # 2,679 passed / 0 failed across all 11 binaries.
   #
+  # Two of those groups were first read as real Windows product defects: the
+  # crush registry scan returning nothing, and cc-mirror attributing the wrong
+  # provider. Both turned out to be fixture artefacts. The tests built their
+  # JSON by interpolating a path into a string literal, and on Windows the
+  # backslashes land unescaped, so `serde_json` rejected the fixture and the
+  # parse error was swallowed into an empty result. Crush discovery was
+  # additionally verified working against a real Windows install. See #1014.
+  #
+  # The leg stays advisory until the two un-redirected config roots are swept.
   # This must not become permanent: an advisory job nobody reads is how #997
   # happened. Flip `continue-on-error` off as soon as #1014 closes.
   tests:
