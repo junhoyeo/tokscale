@@ -1608,6 +1608,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // Freebuff shares Codebuff's ~/.config/manicode scan (same layout, same
+    // directory — a separate product built on the same runtime). The two
+    // parsers partition the shared file set under distinct cache identities:
+    // codebuff emits chats with authoritative usage, freebuff emits estimated
+    // rows for the rest.
+    let freebuff_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Codebuff)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Freebuff),
+                path,
+                &source_cache,
+                pricing,
+                sessions::freebuff::parse_freebuff_file,
+            )
+        })
+        .collect();
+    for outcome in freebuff_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let droid_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Droid)
         .par_iter()
@@ -3691,6 +3716,22 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codebuff_count = codebuff_msgs.len() as i32;
     counts.set(ClientId::Codebuff, codebuff_count);
     messages.extend(codebuff_msgs);
+
+    // Freebuff shares the manicode scan; the estimated parser runs over the
+    // same file set (see the main dispatch block above).
+    let freebuff_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Codebuff)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::freebuff::parse_freebuff_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let freebuff_count = freebuff_msgs.len() as i32;
+    counts.set(ClientId::Freebuff, freebuff_count);
+    messages.extend(freebuff_msgs);
 
     let droid_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Droid)

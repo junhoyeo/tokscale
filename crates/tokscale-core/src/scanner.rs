@@ -1326,6 +1326,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::Freebuff
                 | ClientId::Kimi
                 | ClientId::Gjc
                 | ClientId::MiMoCode
@@ -1963,13 +1964,21 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if enabled.contains(&ClientId::Codebuff) {
+    if enabled.contains(&ClientId::Codebuff) || enabled.contains(&ClientId::Freebuff) {
         // Codebuff persists per-channel chat history under
         // ~/.config/<channel>/projects/<project>/chats/<chatId>/chat-messages.json.
-        // When CODEBUFF_DATA_DIR is set to a non-empty value (via
-        // PathRoot::EnvVar), scan only that root; otherwise — including when
-        // the env var is unset *or* set to an empty/whitespace string — walk
-        // the three known channel roots:
+        // Freebuff is built on the same runtime and shares this exact directory
+        // and file layout (a separate product, but not a separate location), so
+        // the two clients are fed from a single scan of the same roots and the
+        // parsers partition the result: Codebuff's parser emits chats carrying
+        // authoritative usage, Freebuff's parser emits estimated rows for the
+        // rest. Running the scan whenever either client is enabled lets a
+        // freebuff-only filter work without a physical codebuff install.
+        //
+        // When CODEBUFF_DATA_DIR|FREEBUFF_DATA_DIR is set to a non-empty value
+        // (via PathRoot::EnvVar), scan only that root; otherwise — including
+        // when the env vars are unset *or* set to an empty/whitespace string —
+        // walk the three known channel roots:
         //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
         //   - ~/.config/manicode-dev
         //   - ~/.config/manicode-staging
@@ -1978,6 +1987,12 @@ fn scan_all_clients_with_env_strategy_inner(
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    std::env::var("FREEBUFF_DATA_DIR")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                })
         } else {
             None
         };
@@ -5469,6 +5484,30 @@ mod tests {
             .contains("custom-codebuff"));
 
         restore_env("CODEBUFF_DATA_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_freebuff_enables_shared_manicode_scan() {
+        let prev_freebuff = std::env::var("FREEBUFF_DATA_DIR").ok();
+        let prev_codebuff = std::env::var("CODEBUFF_DATA_DIR").ok();
+        unsafe {
+            std::env::remove_var("FREEBUFF_DATA_DIR");
+            std::env::remove_var("CODEBUFF_DATA_DIR");
+        }
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+
+        // Freebuff shares Codebuff's manicode layout, so enabling it alone must
+        // still walk the shared root (populating the Codebuff scan vector) for
+        // the estimated Freebuff parser in lib.rs to have files to read.
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["freebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+
+        restore_env("FREEBUFF_DATA_DIR", prev_freebuff);
+        restore_env("CODEBUFF_DATA_DIR", prev_codebuff);
     }
 
     #[test]

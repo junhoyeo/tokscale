@@ -1616,6 +1616,7 @@ mod tests {
         assert_eq!(clients[41], ClientId::Kimchi);
         assert_eq!(clients[42], ClientId::Reasonix);
         assert_eq!(clients[43], ClientId::PrimeAgent);
+        assert_eq!(clients[44], ClientId::Freebuff);
     }
 
     #[test]
@@ -1680,6 +1681,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Codebuff),
             "Codebuff"
+        );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Freebuff),
+            "Freebuff"
         );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Antigravity),
