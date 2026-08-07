@@ -147,11 +147,6 @@ pub fn parse_freebuff_file(path: &Path) -> Vec<UnifiedMessage> {
         let output = estimate_tokens(msg_chars);
         turn_input_chars = 0;
 
-        if input + output == 0 {
-            pending_turn_start = false;
-            continue;
-        }
-
         let chat_id_fallback = if chat_id_ts > 0 {
             Some(chat_id_ts)
         } else {

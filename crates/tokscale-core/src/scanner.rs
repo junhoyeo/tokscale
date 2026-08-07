@@ -1968,48 +1968,56 @@ fn scan_all_clients_with_env_strategy_inner(
         // Codebuff persists per-channel chat history under
         // ~/.config/<channel>/projects/<project>/chats/<chatId>/chat-messages.json.
         // Freebuff is built on the same runtime and shares this exact directory
-        // and file layout (a separate product, but not a separate location), so
-        // the two clients are fed from a single scan of the same roots and the
-        // parsers partition the result: Codebuff's parser emits chats carrying
-        // authoritative usage, Freebuff's parser emits estimated rows for the
-        // rest. Running the scan whenever either client is enabled lets a
-        // freebuff-only filter work without a physical codebuff install.
+        // and file layout, so the two clients are fed from a single scan of the
+        // same roots and the parsers partition the result. Running the scan
+        // whenever either client is enabled lets a freebuff-only filter work
+        // without a physical Codebuff install.
         //
-        // When CODEBUFF_DATA_DIR|FREEBUFF_DATA_DIR is set to a non-empty value
-        // (via PathRoot::EnvVar), scan only that root; otherwise — including
-        // when the env vars are unset *or* set to an empty/whitespace string —
-        // walk the three known channel roots:
+        // When the respective override is set to a non-empty value (via
+        // PathRoot::EnvVar), each client scans only its own root; otherwise —
+        // including when the env var is unset *or* set to an empty/whitespace
+        // string — that client falls back to the three known channel roots:
         //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
         //   - ~/.config/manicode-dev
         //   - ~/.config/manicode-staging
-        let trimmed_override = if use_env_roots {
-            std::env::var("CODEBUFF_DATA_DIR")
+        fn env_override(var: &str, use_env_roots: bool) -> Option<String> {
+            if !use_env_roots {
+                return None;
+            }
+            std::env::var(var)
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .or_else(|| {
-                    std::env::var("FREEBUFF_DATA_DIR")
-                        .ok()
-                        .map(|v| v.trim().to_string())
-                        .filter(|v| !v.is_empty())
-                })
-        } else {
-            None
-        };
-
-        let mut codebuff_roots: Vec<String> = Vec::new();
-        if let Some(root) = trimmed_override {
-            // No `trim_end_matches('/')`: `PathBuf` already collapses a trailing
-            // separator, and trimming empties a root of `/` — after which
-            // `push` produces a cwd-relative `projects` instead of `/projects`.
-            codebuff_roots.push(join_native(&root, "projects"));
-        } else {
-            let config_dir = join_native(home_dir, ".config");
-            for channel in ["manicode", "manicode-dev", "manicode-staging"] {
-                codebuff_roots.push(join_native(&config_dir, &format!("{channel}/projects")));
+        }
+        // No `trim_end_matches('/')`: `PathBuf` already collapses a trailing
+        // separator, and trimming empties a root of `/` — after which `push`
+        // produces a cwd-relative `projects` instead of `/projects`.
+        fn manicode_roots(home_dir: &str, override_root: Option<&str>) -> Vec<String> {
+            match override_root {
+                Some(root) => vec![join_native(root, "projects")],
+                None => {
+                    let config_dir = join_native(home_dir, ".config");
+                    ["manicode", "manicode-dev", "manicode-staging"]
+                        .iter()
+                        .map(|channel| join_native(&config_dir, &format!("{channel}/projects")))
+                        .collect()
+                }
             }
         }
 
+        let codebuff_override = env_override("CODEBUFF_DATA_DIR", use_env_roots);
+        let freebuff_override = env_override("FREEBUFF_DATA_DIR", use_env_roots);
+
+        let mut codebuff_roots: Vec<String> = Vec::new();
+        if enabled.contains(&ClientId::Codebuff) {
+            codebuff_roots.extend(manicode_roots(home_dir, codebuff_override.as_deref()));
+        }
+        if enabled.contains(&ClientId::Freebuff) {
+            codebuff_roots.extend(manicode_roots(home_dir, freebuff_override.as_deref()));
+        }
+
+        // `push_unique_scan_task` already dedups by canonicalized path, which
+        // collapses the overlap between the two clients' root lists.
         for root in codebuff_roots {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Codebuff, root);
         }
@@ -5489,12 +5497,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_freebuff_enables_shared_manicode_scan() {
-        let prev_freebuff = std::env::var("FREEBUFF_DATA_DIR").ok();
-        let prev_codebuff = std::env::var("CODEBUFF_DATA_DIR").ok();
-        unsafe {
-            std::env::remove_var("FREEBUFF_DATA_DIR");
-            std::env::remove_var("CODEBUFF_DATA_DIR");
-        }
+        let mut env = EnvGuard::capture(&["FREEBUFF_DATA_DIR", "CODEBUFF_DATA_DIR"]);
+        env.remove("FREEBUFF_DATA_DIR");
+        env.remove("CODEBUFF_DATA_DIR");
 
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -5505,9 +5510,32 @@ mod tests {
         // the estimated Freebuff parser in lib.rs to have files to read.
         let result = scan_without_extra_dirs(home.to_str().unwrap(), &["freebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+    }
 
-        restore_env("FREEBUFF_DATA_DIR", prev_freebuff);
-        restore_env("CODEBUFF_DATA_DIR", prev_codebuff);
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_ignores_freebuff_override_when_not_enabled() {
+        let mut env = EnvGuard::capture(&["FREEBUFF_DATA_DIR", "CODEBUFF_DATA_DIR"]);
+        env.remove("CODEBUFF_DATA_DIR");
+        let override_dir = TempDir::new().unwrap();
+        // The Freebuff override must NOT redirect a codebuff-only scan: each
+        // client resolves only its own override (see the shared-manicode scan).
+        unsafe {
+            std::env::set_var(
+                "FREEBUFF_DATA_DIR",
+                override_dir.path().to_string_lossy().as_ref(),
+            )
+        };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+        assert!(result.get(ClientId::Codebuff)[0]
+            .to_string_lossy()
+            .contains("manicode/projects"));
     }
 
     #[test]

@@ -1184,6 +1184,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
     let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
+    // Freebuff and Codebuff share the manicode scan bucket in the scanner (the
+    // two parsers partition the same file set). Each product parses and counts
+    // only when it was actually requested, so a codebuff-only filter cannot
+    // pick up estimated Freebuff rows and vice versa.
+    let include_codebuff = include_all || clients.iter().any(|c| c == "codebuff");
+    let include_freebuff = include_all || clients.iter().any(|c| c == "freebuff");
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1588,19 +1594,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Codebuff),
-                path,
-                &source_cache,
-                pricing,
-                sessions::codebuff::parse_codebuff_file,
-            )
-        })
-        .collect();
+    let codebuff_outcomes: Vec<CachedParseOutcome> = if include_codebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::Codebuff),
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::codebuff::parse_codebuff_file,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for outcome in codebuff_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
@@ -1613,19 +1623,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // parsers partition the shared file set under distinct cache identities:
     // codebuff emits chats with authoritative usage, freebuff emits estimated
     // rows for the rest.
-    let freebuff_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Freebuff),
-                path,
-                &source_cache,
-                pricing,
-                sessions::freebuff::parse_freebuff_file,
-            )
-        })
-        .collect();
+    let freebuff_outcomes: Vec<CachedParseOutcome> = if include_freebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::Freebuff),
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::freebuff::parse_freebuff_file,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for outcome in freebuff_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
@@ -3506,6 +3520,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
     let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
+    // Freebuff and Codebuff share the manicode scan bucket in the scanner (the
+    // two parsers partition the same file set). Each product parses and counts
+    // only when it was actually requested, so a codebuff-only filter cannot
+    // pick up estimated Freebuff rows and vice versa.
+    let include_codebuff = include_all || clients.iter().any(|c| c == "codebuff");
+    let include_freebuff = include_all || clients.iter().any(|c| c == "freebuff");
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -3703,32 +3723,40 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Amp, amp_count);
     messages.extend(amp_msgs);
 
-    let codebuff_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::codebuff::parse_codebuff_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let codebuff_msgs: Vec<ParsedMessage> = if include_codebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .flat_map(|path| {
+                sessions::codebuff::parse_codebuff_file(path)
+                    .into_iter()
+                    .map(|msg| unified_to_parsed(&msg))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let codebuff_count = codebuff_msgs.len() as i32;
     counts.set(ClientId::Codebuff, codebuff_count);
     messages.extend(codebuff_msgs);
 
     // Freebuff shares the manicode scan; the estimated parser runs over the
     // same file set (see the main dispatch block above).
-    let freebuff_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::freebuff::parse_freebuff_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let freebuff_msgs: Vec<ParsedMessage> = if include_freebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .flat_map(|path| {
+                sessions::freebuff::parse_freebuff_file(path)
+                    .into_iter()
+                    .map(|msg| unified_to_parsed(&msg))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let freebuff_count = freebuff_msgs.len() as i32;
     counts.set(ClientId::Freebuff, freebuff_count);
     messages.extend(freebuff_msgs);
@@ -6509,6 +6537,93 @@ mod tests {
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("kimchi:kimchi-session:kimchi-message")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_codebuff_freebuff_filters_stay_isolated() {
+        // Freebuff and Codebuff share the manicode scan bucket (parser
+        // partition the same file set). A single-client filter must not pick
+        // up the other product's rows: codebuff-only must produce clean code
+        // rows/zero freebuff count, and vice versa.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let manicode = source_home.path().join(".config").join("manicode");
+        // An authoritative Codebuff chat: assistant message carries usage.
+        let codebuff_chat = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-08-07T05-21-00.000Z");
+        std::fs::create_dir_all(&codebuff_chat).unwrap();
+        std::fs::write(
+            codebuff_chat.join("chat-messages.json"),
+            r#"[
+                { "variant": "user", "content": "hi", "timestamp": "2026-08-07T05:21:00.000Z" },
+                { "variant": "ai", "timestamp": "2026-08-07T05:22:00.000Z",
+                  "metadata": { "model": "claude-sonnet-4-20250514",
+                                "usage": { "inputTokens": 500, "outputTokens": 200 } } }
+            ]"#,
+        )
+        .unwrap();
+        // A Freebuff chat: no authoritative usage, only estimated text.
+        let freebuff_chat = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-08-07T13-00-00.000Z");
+        std::fs::create_dir_all(&freebuff_chat).unwrap();
+        std::fs::write(
+            freebuff_chat.join("chat-messages.json"),
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T13:00:00.000Z" },
+                { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ] }
+            ]"#,
+        )
+        .unwrap();
+
+        let options_for = |clients: Vec<String>| LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        };
+
+        // codebuff-only: authoritative Codebuff row, zero estimated Freebuff rows.
+        let codebuff_only = parse_local_clients(options_for(vec!["codebuff".to_string()])).unwrap();
+        assert_eq!(codebuff_only.counts.get(ClientId::Codebuff), 1);
+        assert_eq!(codebuff_only.counts.get(ClientId::Freebuff), 0);
+        assert!(
+            codebuff_only
+                .messages
+                .iter()
+                .all(|m| m.client == "codebuff"),
+            "all reported rows must be codebuff, got {:?}",
+            codebuff_only
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
+        );
+
+        // freebuff-only → estimated Freebuff rows, zero Codebuff rows.
+        let free_only = parse_local_clients(options_for(vec!["freebuff".to_string()])).unwrap();
+        assert_eq!(free_only.counts.get(ClientId::Freebuff), 1);
+        assert_eq!(free_only.counts.get(ClientId::Codebuff), 0);
+        assert!(
+            free_only.messages.iter().all(|m| m.client == "freebuff"),
+            "all reported rows must be freebuff, got {:?}",
+            free_only
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
         );
     }
 
