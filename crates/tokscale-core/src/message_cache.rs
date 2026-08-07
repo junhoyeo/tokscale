@@ -109,15 +109,16 @@ fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std:
     // subscriber. Surface persistence failures directly once per process so a
     // permanently cold cache can never fail silently again. The TUI owns raw
     // mode and the alternate screen for its whole run, so a raw stdio write
-    // there corrupts the rendered display instead of being visible as a log
-    // line — suppress it in that case and rely on tracing::warn! (or the
-    // TUI's own status/error UI) instead.
+    // there corrupts the rendered display. Defer that fallback until the TUI
+    // restores the terminal instead of consuming the once-only warning while
+    // leaving the user with no visible diagnostic (#941).
     static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().is_ok_and(|mut warned| warned.insert(context))
-        && !crate::tui_signal::is_tui_active()
-    {
-        eprintln!("tokscale: warning: {context} ({}): {error}", path.display());
+    if warned.lock().is_ok_and(|mut warned| warned.insert(context)) {
+        crate::tui_signal::emit_or_defer_stderr(format!(
+            "tokscale: warning: {context} ({}): {error}",
+            path.display()
+        ));
     }
 }
 
@@ -1878,6 +1879,34 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_warning_is_deferred_once_while_the_tui_is_active() {
+        const CONTEXT: &str = "test source cache warning deferral";
+        let previous = crate::tui_signal::is_tui_active();
+        assert!(
+            crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
+            "the test must not inherit deferred diagnostics"
+        );
+
+        crate::tui_signal::set_tui_active(true);
+        let path = Path::new("cache-warning-test");
+        let error = std::io::Error::other("simulated cache failure");
+        warn_cache_failure_once(CONTEXT, path, &error);
+        warn_cache_failure_once(CONTEXT, path, &error);
+        let deferred = crate::tui_signal::take_deferred_stderr_for_test();
+        crate::tui_signal::set_tui_active(previous);
+
+        assert_eq!(
+            deferred,
+            vec![format!(
+                "tokscale: warning: {CONTEXT} ({}): {error}",
+                path.display()
+            )],
+            "a repeated failure should leave one complete warning for terminal restore"
+        );
+    }
 
     #[test]
     fn from_roo_path_invalidates_on_history_only_change() {
