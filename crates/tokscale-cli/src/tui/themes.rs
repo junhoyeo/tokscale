@@ -7,6 +7,11 @@ pub(crate) enum TerminalColorMode {
 }
 
 impl TerminalColorMode {
+    // Terminal 2.15 (build 464, shipped with macOS 26 Tahoe) is the first
+    // Terminal.app that renders 24-bit SGR reliably. Older builds garble RGB
+    // sequences into saturated color blocks (see #559 and #1060).
+    const APPLE_TERMINAL_TRUECOLOR_VERSION: u32 = 464;
+
     pub(crate) fn from_env<I, K, V>(env: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -15,6 +20,8 @@ impl TerminalColorMode {
     {
         let mut term = String::new();
         let mut colorterm = String::new();
+        let mut term_program = String::new();
+        let mut term_program_version = String::new();
         let mut no_color = false;
 
         for (key, value) in env {
@@ -23,17 +30,13 @@ impl TerminalColorMode {
             match key {
                 "TERM" => term = value.to_ascii_lowercase(),
                 "COLORTERM" => colorterm = value.to_ascii_lowercase(),
+                "TERM_PROGRAM" => term_program = value.to_ascii_lowercase(),
+                "TERM_PROGRAM_VERSION" => term_program_version = value.to_string(),
                 "NO_COLOR" => no_color = true,
                 _ => {}
             }
         }
 
-        // `TERM_PROGRAM == "Apple_Terminal"` used to land here too. Terminal.app
-        // does render 24-bit SGR colors (verified: `ESC[38;2;255;80;0m` paints
-        // its own orange, distinct from indexed 208), and it never sets
-        // COLORTERM, so blacklisting it dropped Terminal.app to `Compatible`,
-        // which overwrites every theme with one palette and made theme
-        // switching a no-op there. Re-test before reinstating it.
         if no_color || term == "dumb" {
             return Self::Compatible;
         }
@@ -45,7 +48,22 @@ impl TerminalColorMode {
             return Self::FullColor;
         }
 
-        Self::FullColor
+        // Terminal.app never sets COLORTERM, and only modern builds (macOS 26+)
+        // render 24-bit SGR. Gate on the version so old builds fall back to the
+        // named-color palette instead of garbling every theme into blocks.
+        if term_program == "apple_terminal" {
+            let version = term_program_version
+                .split('.')
+                .next()
+                .and_then(|v| v.parse::<u32>().ok());
+            if version.is_some_and(|v| v >= Self::APPLE_TERMINAL_TRUECOLOR_VERSION) {
+                return Self::FullColor;
+            }
+        }
+
+        // No positive evidence of truecolor support: prefer the named-color
+        // palette over raw RGB, which non-truecolor terminals garble.
+        Self::Compatible
     }
 }
 
@@ -547,6 +565,7 @@ mod tests {
     fn apple_terminal_keeps_full_color_and_per_theme_palettes() {
         let mode = TerminalColorMode::from_env(env(&[
             ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM_PROGRAM_VERSION", "487"),
             ("TERM", "xterm-256color"),
         ]));
 
@@ -558,6 +577,41 @@ mod tests {
         let green = Theme::from_name_with_color_mode(ThemeName::Green, mode);
         let blue = Theme::from_name_with_color_mode(ThemeName::Blue, mode);
         assert_ne!(green.colors, blue.colors);
+    }
+
+    #[test]
+    fn old_apple_terminal_falls_back_to_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM_PROGRAM_VERSION", "455"),
+            ("TERM", "xterm-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn apple_terminal_without_version_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM", "xterm-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn xterm_256_without_truecolor_evidence_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[("TERM", "xterm-256color")]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn screen_without_truecolor_evidence_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[("TERM", "screen-256color")]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
     }
 
     #[test]
