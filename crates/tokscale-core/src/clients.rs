@@ -187,11 +187,18 @@ pub struct ClientDef {
 
 impl ClientDef {
     pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
-        format!(
-            "{}/{}",
-            self.root.resolve_with_env_strategy(home_dir, use_env_roots),
-            self.relative_path
-        )
+        let root = self.root.resolve_with_env_strategy(home_dir, use_env_roots);
+        if self.relative_path.is_empty() {
+            return root;
+        }
+        // Join through `Path` instead of hand-concatenating "{root}/{relative}":
+        // on Windows the root comes back with native separators (`C:\Users\me`)
+        // and a hardcoded `/` produced mixed-separator paths
+        // (`C:\Users\me/.codex/sessions`) that reached user-facing JSON (#1048).
+        std::path::Path::new(&root)
+            .join(self.relative_path)
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub fn resolve_path(&self, home_dir: &str) -> String {
@@ -783,6 +790,38 @@ mod tests {
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_resolve_path_joins_with_native_separators_not_hardcoded_slash() {
+        // #1048: on Windows a `C:\Users\me` root joined with a `/`-separated
+        // relative path used to produce `C:\Users\me/.codex/sessions` (mixed
+        // separators) that reached user-facing `clients --json` output. The
+        // joined result must equal what `Path::join` produces on the host
+        // platform, never a hand-concatenated "{root}/{relative}" string.
+        let client = ClientDef {
+            id: "codex",
+            root: PathRoot::Home,
+            relative_path: ".codex/sessions",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+            submit_default: true,
+        };
+        let windows_style_home = r"C:\Users\me";
+        let joined = client.resolve_path_with_env_strategy(windows_style_home, false);
+        let expected = std::path::Path::new(windows_style_home)
+            .join(client.relative_path)
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(joined, expected);
+        // On Windows the resolved path must use native separators throughout:
+        // no forward slash may remain from the relative half or the joiner.
+        #[cfg(windows)]
+        assert!(
+            !joined.contains('/'),
+            "mixed separators in resolved path: {joined:?}"
+        );
     }
 
     #[test]
