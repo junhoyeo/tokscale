@@ -4463,12 +4463,11 @@ mod tests {
 
     /// A client's scan root under `home`, spelled the way a scan will spell it.
     ///
-    /// `ClientDef::resolve_path` builds the root with `format!("{root}/{rel}")`
-    /// and `WalkDir` appends each component below it with the platform
-    /// separator, so on Windows a discovered file reads
-    /// `C:\home/.claude/projects\demo\session.jsonl`. A fixture that builds the
-    /// same file with `Path::join` gets all backslashes — the same file, a
-    /// different string.
+    /// `ClientDef::resolve_path` pushes each relative component with the
+    /// platform separator (#1048), so on Windows a discovered file reads
+    /// `C:\home\.claude\projects\demo\session.jsonl`. A fixture that builds the
+    /// same file with `Path::join` gets a mixed spelling (`C:\home\.claude/projects\...`)
+    /// — the same file, a different string.
     ///
     /// That difference is invisible until a test seeds the message cache by
     /// hand and expects the next scan to find it, because `CachedPath` keys on

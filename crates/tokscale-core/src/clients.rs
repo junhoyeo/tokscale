@@ -191,14 +191,18 @@ impl ClientDef {
         if self.relative_path.is_empty() {
             return root;
         }
-        // Join through `Path` instead of hand-concatenating "{root}/{relative}":
-        // on Windows the root comes back with native separators (`C:\Users\me`)
-        // and a hardcoded `/` produced mixed-separator paths
-        // (`C:\Users\me/.codex/sessions`) that reached user-facing JSON (#1048).
-        std::path::Path::new(&root)
-            .join(self.relative_path)
-            .to_string_lossy()
-            .into_owned()
+        // Join component-by-component instead of hand-concatenating
+        // "{root}/{relative}": a hardcoded `/` — and even `Path::join`, which
+        // only normalizes the junction — leaves the relative half's own `/`
+        // separators untouched on Windows, producing mixed-separator paths
+        // (`C:\Users\me/.codex/sessions`) that reached user-facing
+        // `clients --json` output (#1048). Pushing each component yields
+        // native separators throughout on every platform.
+        let mut path = std::path::PathBuf::from(&root);
+        for component in std::path::Path::new(self.relative_path).components() {
+            path.push(component.as_os_str());
+        }
+        path.to_string_lossy().into_owned()
     }
 
     pub fn resolve_path(&self, home_dir: &str) -> String {
@@ -766,6 +770,20 @@ mod tests {
     // the same trap.
     use crate::paths::test_env::EnvGuard;
 
+    /// Join `relative` onto `root` with native separators throughout — the
+    /// behavior `ClientDef::resolve_path_with_env_strategy` must produce on
+    /// every platform (#1048). `Path::join` alone is not enough: it only
+    /// normalizes the junction, leaving the relative half's own `/`
+    /// separators untouched on Windows. Pushing each component is the only
+    /// spelling that yields `C:\Users\me\.codex\sessions` there.
+    fn native_join(root: &std::path::Path, relative: &str) -> String {
+        let mut path = root.to_path_buf();
+        for component in std::path::Path::new(relative).components() {
+            path.push(component.as_os_str());
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     // Retained for the env tests below that predate this module's move to one
     // serialization domain. New tests should capture an `EnvGuard` instead;
     // this pairing is only panic-safe when nothing between it and the restore
@@ -797,8 +815,9 @@ mod tests {
         // #1048: on Windows a `C:\Users\me` root joined with a `/`-separated
         // relative path used to produce `C:\Users\me/.codex/sessions` (mixed
         // separators) that reached user-facing `clients --json` output. The
-        // joined result must equal what `Path::join` produces on the host
-        // platform, never a hand-concatenated "{root}/{relative}" string.
+        // joined result must use native separators throughout — component
+        // pushes, not a hand-concatenated "{root}/{relative}" string and not
+        // a single `Path::join` (which only normalizes the junction).
         let client = ClientDef {
             id: "codex",
             root: PathRoot::Home,
@@ -810,10 +829,8 @@ mod tests {
         };
         let windows_style_home = r"C:\Users\me";
         let joined = client.resolve_path_with_env_strategy(windows_style_home, false);
-        let expected = std::path::Path::new(windows_style_home)
-            .join(client.relative_path)
-            .to_string_lossy()
-            .into_owned();
+        let expected =
+            native_join(std::path::Path::new(windows_style_home), client.relative_path);
         assert_eq!(joined, expected);
         // On Windows the resolved path must use native separators throughout:
         // no forward slash may remain from the relative half or the joiner.
@@ -829,7 +846,7 @@ mod tests {
         let client = ClientId::from_str("augment").expect("augment client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.augment/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".augment/sessions")
         );
         assert_eq!(client.data().relative_path, ".augment/sessions");
         assert_eq!(client.data().pattern, "*.json");
@@ -876,10 +893,10 @@ mod tests {
     }
 
     /// `<root>/stats`, spelled the way [`ClientDef::resolve_path`] appends a
-    /// client's relative path: a forward slash, whatever the root's own
-    /// separators are.
+    /// client's relative path: native separators throughout, on every
+    /// platform (#1048).
     fn reasonix_stats_under(root: impl AsRef<std::path::Path>) -> String {
-        format!("{}/stats", root.as_ref().to_string_lossy())
+        native_join(root.as_ref(), "stats")
     }
 
     /// The reasonix root with no environment override.
@@ -942,7 +959,7 @@ mod tests {
         env.set("REASONIX_HOME", absolute_test_path("unused/reasonix-home"));
         assert_eq!(
             client.data().resolve_path(reasonix_home()),
-            reasonix_stats_under(std::path::Path::new(reasonix_home()).join("reasonix-state"))
+            reasonix_stats_under(native_join(std::path::Path::new(reasonix_home()), "reasonix-state"))
         );
 
         env.set("REASONIX_STATE_HOME", " \t ");
@@ -974,7 +991,7 @@ mod tests {
         assert_eq!(
             client.data().resolve_path(reasonix_home()),
             reasonix_stats_under(
-                std::path::Path::new(reasonix_home()).join("reasonix-state/nested")
+                native_join(std::path::Path::new(reasonix_home()), "reasonix-state/nested")
             )
         );
 
@@ -1023,7 +1040,7 @@ mod tests {
         let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.config/kimchi/harness/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".config/kimchi/harness/sessions")
         );
     }
 
@@ -1049,7 +1066,7 @@ mod tests {
         let client = ClientId::from_str("senpi").expect("senpi client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.senpi/agent/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".senpi/agent/sessions")
         );
     }
 
@@ -1072,7 +1089,7 @@ mod tests {
             ClientId::from_str("codebuddy").expect("codebuddy client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.codebuddy/projects"
+            native_join(std::path::Path::new("/tmp/home"), ".codebuddy/projects")
         );
         assert_eq!(client.data().pattern, "*.jsonl");
         assert!(client.data().parse_local);
@@ -1086,7 +1103,7 @@ mod tests {
             ClientId::from_str("workbuddy").expect("workbuddy client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.workbuddy"
+            native_join(std::path::Path::new("/tmp/home"), ".workbuddy")
         );
         assert_eq!(client.data().pattern, "workbuddy.db");
         assert!(client.data().parse_local);
@@ -1125,7 +1142,7 @@ mod tests {
             ClientId::from_str("commandcode").expect("commandcode client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.commandcode/projects"
+            native_join(std::path::Path::new("/tmp/home"), ".commandcode/projects")
         );
         assert_eq!(client.data().pattern, "*.jsonl");
         assert!(client.data().parse_local);
@@ -1138,7 +1155,7 @@ mod tests {
         let client = ClientId::from_str("junie").expect("junie client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/tmp/home/.junie/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".junie/sessions")
         );
         assert_eq!(client.data().pattern, "events.jsonl");
         assert!(client.data().parse_local);
@@ -1379,7 +1396,7 @@ mod tests {
             submit_default: true,
         };
 
-        assert_eq!(client.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
+        assert_eq!(client.resolve_path("/tmp/home"), native_join(std::path::Path::new("/tmp/home"), ".test/sessions"));
     }
 
     #[test]
@@ -1419,7 +1436,7 @@ mod tests {
         unsafe { std::env::remove_var(var) };
         assert_eq!(
             ClientId::Gjc.data().resolve_path("/tmp/home"),
-            "/tmp/home/.gjc/agent/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".gjc/agent/sessions")
         );
         assert_eq!(ClientId::Gjc.data().pattern, "*.jsonl");
         assert!(ClientId::Gjc.data().parse_local);
@@ -1432,7 +1449,7 @@ mod tests {
             ClientId::Gjc
                 .data()
                 .resolve_path_with_env_strategy("/tmp/home", false),
-            "/tmp/home/.gjc/agent/sessions"
+            native_join(std::path::Path::new("/tmp/home"), ".gjc/agent/sessions")
         );
 
         restore_env(var, previous);
@@ -1490,7 +1507,7 @@ mod tests {
 
         assert_eq!(
             ClientId::Zed.data().resolve_path("/tmp/home"),
-            "/tmp/home/.local/share/zed/threads/threads.db"
+            native_join(std::path::Path::new("/tmp/home"), ".local/share/zed/threads/threads.db")
         );
 
         restore_env("XDG_DATA_HOME", previous);
@@ -1505,7 +1522,7 @@ mod tests {
     fn test_kiro_data_dir_path() {
         assert_eq!(
             ClientId::Kiro.data().resolve_path("/tmp/home"),
-            "/tmp/home/.kiro/sessions/cli"
+            native_join(std::path::Path::new("/tmp/home"), ".kiro/sessions/cli")
         );
         assert_eq!(ClientId::Kiro.data().pattern, "*.json");
         assert!(ClientId::Kiro.parse_local());

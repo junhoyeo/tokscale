@@ -785,27 +785,20 @@ fn settings_json_path(base: &Path) -> std::path::PathBuf {
 
 /// A scan path spelled the way the binary spells it.
 ///
-/// `ClientDef::resolve_path` builds every client's root as
-/// `format!("{root}/{relative}")` — one separator, `/`, on every platform,
-/// with the relative half a `/`-joined literal in the client table. Windows
-/// accepts `/` in a path, so the value works; it just is not what
-/// `Path::join` produces. An expectation built with `join` disagreed on the
-/// first separator only (`...\.tmpXXXX\.codex/sessions` against the emitted
-/// `...\.tmpXXXX/.codex/sessions`) — and note that `join` did not give a
-/// natively-spelled path either, because the rest of the literal keeps its
-/// forward slashes. There was no native-separator contract to preserve, only
-/// two spellings of the same path, so match the one the binary actually
-/// emits.
-///
-/// That does make this helper a pin on the mixed spelling: `clients --json`
-/// prints `C:\Users\me/.codex/sessions` in `sessionsPath` and
-/// `additionalPaths[].path`, and the two assertions below now hold it there.
-/// The pin is deliberate but not an endorsement — whether user-facing path
-/// output should be normalized, and to native or to forward separators, is a
-/// product decision tracked in junhoyeo/tokscale#1048. Changing the emitter
-/// means changing this helper in the same commit.
+/// `tokscale clients --json` emits every client's scan root with native
+/// separators throughout: the root half comes from the platform (`C:\Users\me`
+/// on Windows), and the relative half is pushed component-by-component so no
+/// forward slash survives from the `/`-joined client-table literal. An
+/// expectation built with `Path::join` would disagree on the relative half's
+/// separators (`...\.codex/sessions` against the emitted
+/// `...\.codex/sessions`), because `join` only normalizes the junction.
+/// Changing the emitter means changing this helper in the same commit (#1048).
 fn client_scan_path(home: &Path, relative: &str) -> String {
-    format!("{}/{}", home.display(), relative)
+    let mut path = home.to_path_buf();
+    for component in Path::new(relative).components() {
+        path.push(component.as_os_str());
+    }
+    path.to_string_lossy().into_owned()
 }
 
 /// Writes a minimal clawdboard account export to `<dir>/export.json` and
