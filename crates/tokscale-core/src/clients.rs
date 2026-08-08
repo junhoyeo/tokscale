@@ -829,8 +829,10 @@ mod tests {
         };
         let windows_style_home = r"C:\Users\me";
         let joined = client.resolve_path_with_env_strategy(windows_style_home, false);
-        let expected =
-            native_join(std::path::Path::new(windows_style_home), client.relative_path);
+        let expected = native_join(
+            std::path::Path::new(windows_style_home),
+            client.relative_path,
+        );
         assert_eq!(joined, expected);
         // On Windows the resolved path must use native separators throughout:
         // no forward slash may remain from the relative half or the joiner.
@@ -959,7 +961,10 @@ mod tests {
         env.set("REASONIX_HOME", absolute_test_path("unused/reasonix-home"));
         assert_eq!(
             client.data().resolve_path(reasonix_home()),
-            reasonix_stats_under(native_join(std::path::Path::new(reasonix_home()), "reasonix-state"))
+            reasonix_stats_under(native_join(
+                std::path::Path::new(reasonix_home()),
+                "reasonix-state"
+            ))
         );
 
         env.set("REASONIX_STATE_HOME", " \t ");
@@ -990,9 +995,10 @@ mod tests {
         );
         assert_eq!(
             client.data().resolve_path(reasonix_home()),
-            reasonix_stats_under(
-                native_join(std::path::Path::new(reasonix_home()), "reasonix-state/nested")
-            )
+            reasonix_stats_under(native_join(
+                std::path::Path::new(reasonix_home()),
+                "reasonix-state/nested"
+            ))
         );
 
         env.set(
@@ -1040,7 +1046,10 @@ mod tests {
         let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            native_join(std::path::Path::new("/tmp/home"), ".config/kimchi/harness/sessions")
+            native_join(
+                std::path::Path::new("/tmp/home"),
+                ".config/kimchi/harness/sessions"
+            )
         );
     }
 
@@ -1396,7 +1405,10 @@ mod tests {
             submit_default: true,
         };
 
-        assert_eq!(client.resolve_path("/tmp/home"), native_join(std::path::Path::new("/tmp/home"), ".test/sessions"));
+        assert_eq!(
+            client.resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".test/sessions")
+        );
     }
 
     #[test]
@@ -1507,7 +1519,10 @@ mod tests {
 
         assert_eq!(
             ClientId::Zed.data().resolve_path("/tmp/home"),
-            native_join(std::path::Path::new("/tmp/home"), ".local/share/zed/threads/threads.db")
+            native_join(
+                std::path::Path::new("/tmp/home"),
+                ".local/share/zed/threads/threads.db"
+            )
         );
 
         restore_env("XDG_DATA_HOME", previous);
