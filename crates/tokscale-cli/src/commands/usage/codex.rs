@@ -1117,12 +1117,21 @@ fn has_opencode_auth_candidate_at(path: &Path) -> bool {
     }
 }
 
-fn has_opencode_credentials_at(path: &Path) -> bool {
-    matches!(read_opencode_credentials_at(path), Ok(Some(_)))
+fn has_opencode_usage_candidate_at(path: &Path) -> bool {
+    if !has_opencode_auth_candidate_at(path) {
+        return false;
+    }
+
+    // Keep malformed or unreadable files active so the fetch path can report
+    // the owning path instead of silently suppressing Codex usage.
+    match read_opencode_credentials_at(path) {
+        Ok(Some(_)) | Err(_) => true,
+        Ok(None) => false,
+    }
 }
 
 pub fn has_credentials() -> bool {
-    has_native_credentials() || has_opencode_credentials_at(&opencode_auth_path())
+    has_native_credentials() || has_opencode_usage_candidate_at(&opencode_auth_path())
 }
 
 async fn refresh_token(client: &reqwest::Client, token_url: &str, rt: &str) -> Result<Refresh> {
@@ -3270,6 +3279,16 @@ mod tests {
         )?;
 
         assert!(!has_credentials());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_opencode_auth_remains_a_usage_candidate() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(&auth_path, "not json")?;
+
+        assert!(has_opencode_usage_candidate_at(&auth_path));
         Ok(())
     }
 
