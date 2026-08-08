@@ -9116,6 +9116,46 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_pricing_if_available_prices_minimax_m3_bare_id_via_alias() {
+        // #935: Ollama Cloud and other routers report MiniMax M3 with the
+        // bare lowercase id `minimax-m3`. The authoritative litellm key is
+        // `minimax/MiniMax-M3`; the alias in aliases.rs must route the bare
+        // id there instead of leaving it to fuzzy matching (which can land
+        // on the separate `fireworks_ai/minimax-m3` hosted row).
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "minimax/MiniMax-M3".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-7),
+                output_cost_per_token: Some(2e-7),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "ollama",
+            "minimax-m3",
+            "minimax",
+            "session-1",
+            1_776_000_000_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        // 10 * 1e-7 + 5 * 2e-7 = 2e-6
+        assert!((msg.cost - 2e-6).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_apply_pricing_if_available_prices_claude_code_minimax_model() {
         let mut litellm = HashMap::new();
         litellm.insert(

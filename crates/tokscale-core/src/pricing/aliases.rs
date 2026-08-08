@@ -16,6 +16,15 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed");
     m.insert("k3", "kimi-k3");
 
+    // MiniMax M3: Ollama Cloud and other routers report the model with the
+    // lowercase bare id `minimax-m3` (and mixed-case variants), while the
+    // authoritative dataset key is `minimax/MiniMax-M3` (litellm) with a
+    // separate `fireworks_ai/minimax-m3` hosted row. A bare id has no exact
+    // hit and would fall through to fuzzy matching, which can land on the
+    // fireworks_ai hosted rate; pin the canonical first-party key so the id
+    // prices deterministically (#935).
+    m.insert("minimax-m3", "minimax/MiniMax-M3");
+
     m.insert("model_placeholder_m26", "claude-opus-4-6");
     m.insert("model_placeholder_m35", "claude-sonnet-4-6");
     m.insert("model_placeholder_m36", "gemini-3.1-pro");
@@ -257,6 +266,29 @@ mod tests {
     /// the separator. Neither form resolved, so real first-party usage was
     /// excluded from submission as unpriced — 41M tokens of claude-opus-4-0 in
     /// one reported case.
+    #[test]
+    fn resolves_minimax_m3_bare_and_case_variants() {
+        // #935: `minimax-m3` (bare lowercase, as Ollama Cloud and other
+        // routers report it) must resolve to the canonical first-party litellm
+        // key, never fall through to fuzzy matching or the fireworks_ai
+        // hosted row. resolve_alias is case-insensitive.
+        assert_eq!(
+            super::resolve_alias("minimax-m3"),
+            Some("minimax/MiniMax-M3")
+        );
+        assert_eq!(
+            super::resolve_alias("MiniMax-M3"),
+            Some("minimax/MiniMax-M3")
+        );
+        assert_eq!(
+            super::resolve_alias("MINIMAX-M3"),
+            Some("minimax/MiniMax-M3")
+        );
+        // The qualified id already resolves via exact match; aliasing it too
+        // would be harmless, but the bare form is the reported gap.
+        assert_eq!(super::resolve_alias("minimax/minimax-m3"), None);
+    }
+
     #[test]
     fn anthropic_moving_aliases_and_copilot_spelling_resolve() {
         assert_eq!(
