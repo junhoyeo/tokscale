@@ -1895,7 +1895,10 @@ fn scan_all_clients_with_env_strategy_inner(
 
         let mut codebuff_roots: Vec<String> = Vec::new();
         if let Some(root) = trimmed_override {
-            codebuff_roots.push(join_native(root.trim_end_matches('/'), "projects"));
+            // No `trim_end_matches('/')`: `PathBuf` already collapses a trailing
+            // separator, and trimming empties a root of `/` — after which
+            // `push` produces a cwd-relative `projects` instead of `/projects`.
+            codebuff_roots.push(join_native(&root, "projects"));
         } else {
             let config_dir = join_native(home_dir, ".config");
             for channel in ["manicode", "manicode-dev", "manicode-staging"] {
@@ -5168,6 +5171,52 @@ mod tests {
 
         let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 2);
+
+        restore_env("CODEBUFF_DATA_DIR", previous);
+    }
+
+    #[test]
+    fn join_native_preserves_an_absolute_root() {
+        // `PathBuf::push` on an empty buffer emits no leading separator, so a
+        // caller that strips the trailing `/` from a root of `/` turns an
+        // absolute scan root into a cwd-relative one. Nothing about the join
+        // needs that strip: a trailing separator is collapsed either way.
+        #[cfg(unix)]
+        {
+            assert_eq!(join_native("/", "projects"), "/projects");
+            assert_eq!(join_native("/foo/", "projects"), "/foo/projects");
+            assert_eq!(join_native("/foo", "projects"), "/foo/projects");
+        }
+        // An empty root is the shape that produced the relative path.
+        assert_eq!(join_native("", "projects"), "projects");
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_override_root_may_end_in_a_separator() {
+        let previous = std::env::var("CODEBUFF_DATA_DIR").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let override_root = dir.path().join("custom-codebuff");
+        let override_chat_dir = override_root
+            .join("projects")
+            .join("sandbox")
+            .join("chats")
+            .join("2025-12-14T11-00-00.000Z");
+        fs::create_dir_all(&override_chat_dir).unwrap();
+        File::create(override_chat_dir.join("chat-messages.json")).unwrap();
+
+        // Trailing separator: the reason the call site used to trim.
+        unsafe {
+            std::env::set_var(
+                "CODEBUFF_DATA_DIR",
+                format!("{}/", override_root.to_string_lossy()),
+            )
+        };
+
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
 
         restore_env("CODEBUFF_DATA_DIR", previous);
     }
