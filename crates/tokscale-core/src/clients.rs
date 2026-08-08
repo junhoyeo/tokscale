@@ -131,7 +131,7 @@ fn clean_reasonix_env_dir(name: &str, home_dir: &str) -> Option<String> {
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        std::path::Path::new(home_dir).join(relative)
+        std::path::PathBuf::from(join_home(home_dir, relative))
     } else {
         std::path::PathBuf::from(value)
     };
@@ -1073,7 +1073,7 @@ mod tests {
         let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/custom/kimchi-agent/sessions"
+            native_join(std::path::Path::new("/custom/kimchi-agent"), "sessions")
         );
     }
 
@@ -1099,7 +1099,7 @@ mod tests {
         let client = ClientId::from_str("senpi").expect("senpi client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
-            "/custom/senpi-agent/sessions"
+            native_join(std::path::Path::new("/custom/senpi-agent"), "sessions")
         );
     }
 

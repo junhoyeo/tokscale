@@ -474,6 +474,18 @@ pub fn extra_scan_paths_for(
         .collect()
 }
 
+/// Join `root` and a `/`-joined relative literal with native separators
+/// throughout — the same spelling `ClientDef::resolve_path_with_env_strategy`
+/// produces. `Path::join` only normalizes the junction, so the relative half's
+/// own `/` separators would survive untouched on Windows (#1048).
+fn join_native(root: &str, relative: &str) -> String {
+    let mut path = std::path::PathBuf::from(root);
+    for component in std::path::Path::new(relative).components() {
+        path.push(component.as_os_str());
+    }
+    path.to_string_lossy().into_owned()
+}
+
 pub fn built_in_extra_scan_paths_for(
     home_dir: &str,
     enabled: &HashSet<ClientId>,
@@ -483,7 +495,7 @@ pub fn built_in_extra_scan_paths_for(
     if enabled.contains(&ClientId::Claude) {
         paths.push((
             ClientId::Claude,
-            PathBuf::from(format!("{}/.claude/transcripts", home_dir)),
+            PathBuf::from(join_native(home_dir, ".claude/transcripts")),
         ));
         paths.extend(
             crate::cc_mirror::discover_claude_project_roots(Path::new(home_dir))
@@ -1389,9 +1401,9 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::OpenCode) {
         let xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| join_native(home_dir, ".local/share"))
         } else {
-            format!("{}/.local/share", home_dir)
+            join_native(home_dir, ".local/share")
         };
 
         // OpenCode 1.2+: SQLite database(s) at ~/.local/share/opencode/opencode*.db
@@ -1403,7 +1415,7 @@ fn scan_all_clients_with_env_strategy_inner(
         // under the data dir. See `getChannelPath` in
         // opencode/packages/opencode/src/storage/db.ts for the source of
         // the naming rule.
-        let opencode_data_dir = PathBuf::from(format!("{}/opencode", xdg_data));
+        let opencode_data_dir = PathBuf::from(join_native(&xdg_data, "opencode"));
         result.opencode_dbs = discover_opencode_dbs(&opencode_data_dir);
 
         // Merge user-configured `scanner.opencodeDbPaths` here, INSIDE the
@@ -1473,14 +1485,14 @@ fn scan_all_clients_with_env_strategy_inner(
         let kimi_code_home = if use_env_roots {
             let configured = std::env::var("KIMI_CODE_HOME").unwrap_or_default();
             if configured.trim().is_empty() {
-                format!("{}/.kimi-code", home_dir)
+                join_native(home_dir, ".kimi-code")
             } else {
                 configured
             }
         } else {
-            format!("{}/.kimi-code", home_dir)
+            join_native(home_dir, ".kimi-code")
         };
-        let kimi_code_path = format!("{}/sessions", kimi_code_home);
+        let kimi_code_path = join_native(&kimi_code_home, "sessions");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1492,9 +1504,9 @@ fn scan_all_clients_with_env_strategy_inner(
     if enabled.contains(&ClientId::Codex) {
         // Codex: ~/.codex/sessions/**/*.jsonl
         let codex_home = if use_env_roots {
-            std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir))
+            std::env::var("CODEX_HOME").unwrap_or_else(|_| join_native(home_dir, ".codex"))
         } else {
-            format!("{}/.codex", home_dir)
+            join_native(home_dir, ".codex")
         };
         let codex_path = ClientId::Codex
             .data()
@@ -1507,7 +1519,7 @@ fn scan_all_clients_with_env_strategy_inner(
         );
 
         // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
-        let codex_archived_path = format!("{}/archived_sessions", codex_home);
+        let codex_archived_path = join_native(&codex_home, "archived_sessions");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1539,7 +1551,7 @@ fn scan_all_clients_with_env_strategy_inner(
         );
 
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
-        let clawdbot_path = format!("{}/.clawdbot/agents", home_dir);
+        let clawdbot_path = join_native(home_dir, ".clawdbot/agents");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1547,7 +1559,7 @@ fn scan_all_clients_with_env_strategy_inner(
             clawdbot_path,
         );
 
-        let moltbot_path = format!("{}/.moltbot/agents", home_dir);
+        let moltbot_path = join_native(home_dir, ".moltbot/agents");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1555,7 +1567,7 @@ fn scan_all_clients_with_env_strategy_inner(
             moltbot_path,
         );
 
-        let moldbot_path = format!("{}/.moldbot/agents", home_dir);
+        let moldbot_path = join_native(home_dir, ".moldbot/agents");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1566,17 +1578,17 @@ fn scan_all_clients_with_env_strategy_inner(
 
     // Oh My Pi fork (https://github.com/can1357/oh-my-pi) — same JSONL format, different root
     if enabled.contains(&ClientId::Pi) {
-        let omp_path = format!("{}/.omp/agent/sessions", home_dir);
+        let omp_path = join_native(home_dir, ".omp/agent/sessions");
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Pi, omp_path);
     }
 
     if include_synthetic {
         let xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| join_native(home_dir, ".local/share"))
         } else {
-            format!("{}/.local/share", home_dir)
+            join_native(home_dir, ".local/share")
         };
-        let octofriend_db_path = PathBuf::from(format!("{}/octofriend/sqlite.db", xdg_data));
+        let octofriend_db_path = PathBuf::from(join_native(&xdg_data, "octofriend/sqlite.db"));
         if octofriend_db_path.exists() {
             result.synthetic_db = Some(octofriend_db_path);
         }
@@ -1805,7 +1817,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Zcode) {
-        let zcode_db_path = PathBuf::from(format!("{}/.zcode/cli/db/db.sqlite", home_dir));
+        let zcode_db_path = PathBuf::from(join_native(home_dir, ".zcode/cli/db/db.sqlite"));
         if zcode_db_path.is_file() {
             result.zcode_db = Some(zcode_db_path);
         }
@@ -1838,7 +1850,7 @@ fn scan_all_clients_with_env_strategy_inner(
         // NOT the ~/.kiro/sessions/cli/*.json layout the base client path targets.
         // Scan the sessions root and match session.json inside sess_* dirs. This
         // resolves via home_dir on Windows too (Kiro IDE uses ~/.kiro there).
-        let kiro_ide_sessions_root = PathBuf::from(format!("{}/.kiro/sessions", home_dir));
+        let kiro_ide_sessions_root = PathBuf::from(join_native(home_dir, ".kiro/sessions"));
         push_unique_scan_task_with_pattern(
             &mut tasks,
             &mut seen_scan_roots,
@@ -1847,7 +1859,7 @@ fn scan_all_clients_with_env_strategy_inner(
             "kiro-ide-session",
         );
 
-        let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
+        let xdg_path = PathBuf::from(join_native(home_dir, ".local/share/kiro-cli/data.sqlite3"));
         if xdg_path.is_file() {
             result.kiro_db = Some(xdg_path);
         }
@@ -1883,11 +1895,11 @@ fn scan_all_clients_with_env_strategy_inner(
 
         let mut codebuff_roots: Vec<String> = Vec::new();
         if let Some(root) = trimmed_override {
-            codebuff_roots.push(format!("{}/projects", root.trim_end_matches('/')));
+            codebuff_roots.push(join_native(root.trim_end_matches('/'), "projects"));
         } else {
-            let config_dir = format!("{}/.config", home_dir);
+            let config_dir = join_native(home_dir, ".config");
             for channel in ["manicode", "manicode-dev", "manicode-staging"] {
-                codebuff_roots.push(format!("{}/{}/projects", config_dir, channel));
+                codebuff_roots.push(join_native(&config_dir, &format!("{channel}/projects")));
             }
         }
 
@@ -1943,7 +1955,7 @@ fn scan_all_clients_with_env_strategy_inner(
         }
 
         // (4) ~/.gjc/agent/sessions home fallback (always available).
-        gjc_roots.push(PathBuf::from(format!("{}/.gjc/agent/sessions", home_dir)));
+        gjc_roots.push(PathBuf::from(join_native(home_dir, ".gjc/agent/sessions")));
 
         for root in gjc_roots {
             if root.exists() {
@@ -1972,7 +1984,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Copilot) {
-        let desktop_db = PathBuf::from(format!("{}/.copilot/data.db", home_dir));
+        let desktop_db = PathBuf::from(join_native(home_dir, ".copilot/data.db"));
         if desktop_db.is_file() {
             result.copilot_desktop_db = Some(desktop_db);
         }
@@ -2867,7 +2879,7 @@ mod tests {
 
         let home = "/tmp/tokscale-test-home";
         let roots = headless_roots(home);
-        let config_root = PathBuf::from(format!("{}/.config/tokscale/headless", home));
+        let config_root = PathBuf::from(join_native(home, ".config/tokscale/headless"));
         let mac_root = PathBuf::from(format!(
             "{}/Library/Application Support/tokscale/headless",
             home
