@@ -1117,8 +1117,12 @@ fn has_opencode_auth_candidate_at(path: &Path) -> bool {
     }
 }
 
+fn has_opencode_credentials_at(path: &Path) -> bool {
+    matches!(read_opencode_credentials_at(path), Ok(Some(_)))
+}
+
 pub fn has_credentials() -> bool {
-    has_native_credentials() || has_opencode_auth_candidate_at(&opencode_auth_path())
+    has_native_credentials() || has_opencode_credentials_at(&opencode_auth_path())
 }
 
 async fn refresh_token(client: &reqwest::Client, token_url: &str, rt: &str) -> Result<Refresh> {
@@ -3243,6 +3247,29 @@ mod tests {
         )?;
 
         assert!(read_opencode_credentials_at(&auth_path)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(not(target_os = "macos"))]
+    fn opencode_api_key_does_not_activate_codex_usage() -> Result<()> {
+        let home = TempDir::new()?;
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let xdg_data = TempDir::new()?;
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+        let _xdg_data_guard = EnvVarGuard::set_path("XDG_DATA_HOME", xdg_data.path());
+        let auth_path = xdg_data.path().join("opencode").join("auth.json");
+        std::fs::create_dir_all(auth_path.parent().expect("auth parent"))?;
+        std::fs::write(
+            &auth_path,
+            r#"{"openai":{"type":"api","key":"sk-openai-api-key"}}"#,
+        )?;
+
+        assert!(!has_credentials());
         Ok(())
     }
 
