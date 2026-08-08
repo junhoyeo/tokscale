@@ -56,6 +56,7 @@ pub fn fetch() -> Result<UsageOutput> {
     Ok(UsageOutput {
         provider: "Warp/Oz".to_string(),
         account: None,
+        credential_source: None,
         plan: None,
         email: None,
         metrics,

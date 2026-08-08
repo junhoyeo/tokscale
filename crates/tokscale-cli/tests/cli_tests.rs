@@ -1155,10 +1155,8 @@ fn test_invalid_subcommand() {
 #[test]
 fn test_codex_accounts_empty_json() {
     let tmp = TempDir::new().expect("failed to create temp home");
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.env("HOME", tmp.path())
-        .env_remove("CODEX_HOME")
-        .args(["codex", "accounts", "--json"])
+    let mut cmd = cmd_with_home(tmp.path());
+    cmd.args(["codex", "accounts", "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""accounts": []"#));

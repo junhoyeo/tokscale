@@ -22,6 +22,24 @@ struct Auth {
     tokens: Option<Tokens>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenCodeAuthDocument {
+    openai: Option<OpenCodeCredential>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum OpenCodeCredential {
+    #[serde(rename = "oauth")]
+    Oauth {
+        access: String,
+        #[serde(rename = "accountId")]
+        account_id: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Tokens {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,6 +187,7 @@ pub struct CodexAccountInfo {
 #[derive(Debug, Clone)]
 enum CredentialSource {
     File(PathBuf),
+    OpenCodeFile(PathBuf),
     Keychain,
     Store(String),
 }
@@ -178,9 +197,11 @@ impl CredentialSource {
     ///
     /// Only [`Self::Store`] qualifies: that is tokscale's own
     /// `<config>/codex-credentials.json`. [`Self::File`] is the codex CLI's
-    /// `auth.json` and [`Self::Keychain`] is its Keychain item -- writing either
-    /// destroys the codex-owned keys tokscale does not model (see
-    /// [`auth_document`]), which is #1001 made against the codex CLI.
+    /// `auth.json`, [`Self::Keychain`] is its Keychain item, and
+    /// [`Self::OpenCodeFile`] belongs to OpenCode. The OpenCode adapter does not
+    /// even deserialize its refresh token; writing either Codex-owned source
+    /// destroys keys tokscale does not model (see [`auth_document`]), which is
+    /// #1001 made against the codex CLI.
     ///
     /// This is ownership of the *file*, which is not the same as ownership of
     /// the OAuth grant, and the difference is not academic: a store entry can be
@@ -193,17 +214,29 @@ impl CredentialSource {
     fn refreshable_account_id(&self) -> Option<&str> {
         match self {
             Self::Store(account_id) => Some(account_id),
-            Self::File(_) | Self::Keychain => None,
+            Self::File(_) | Self::OpenCodeFile(_) | Self::Keychain => None,
         }
     }
 
-    /// Names the credential in user-facing errors, so "run codex" points at the
-    /// login that actually needs attention rather than at codex in general.
+    /// Names the credential in user-facing errors so recovery points at the
+    /// application that owns the rejected login.
     fn describe(&self) -> String {
         match self {
             Self::File(path) => path.display().to_string(),
+            Self::OpenCodeFile(path) => format!("OpenCode auth at {}", path.display()),
             Self::Keychain => "the Codex Keychain item".to_string(),
             Self::Store(account_id) => format!("tokscale account '{account_id}'"),
+        }
+    }
+
+    fn reauthentication_guidance(&self) -> &'static str {
+        match self {
+            Self::OpenCodeFile(_) => {
+                "Run OpenCode and reconnect OpenAI with '/connect', then retry."
+            }
+            Self::File(_) | Self::Keychain | Self::Store(_) => {
+                "Run 'codex' so the Codex CLI can refresh its own login, then retry."
+            }
         }
     }
 }
@@ -430,6 +463,48 @@ fn current_auth_paths() -> Vec<PathBuf> {
     paths.push(home.join(".config").join("codex").join("auth.json"));
     paths.push(home.join(".codex").join("auth.json"));
     paths
+}
+
+fn opencode_auth_path() -> PathBuf {
+    let data_dir = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::paths::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local")
+                .join("share")
+        });
+    data_dir.join("opencode").join("auth.json")
+}
+
+fn read_opencode_credentials_at(path: &Path) -> Result<Option<(Auth, CredentialSource)>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read OpenCode auth from {}", path.display()))?;
+    let document = serde_json::from_str::<OpenCodeAuthDocument>(&content)
+        .with_context(|| format!("Failed to parse OpenCode auth from {}", path.display()))?;
+    let Some(OpenCodeCredential::Oauth {
+        access, account_id, ..
+    }) = document.openai
+    else {
+        return Ok(None);
+    };
+
+    if access.trim().is_empty() {
+        anyhow::bail!("OpenCode OAuth entry has no access token");
+    }
+
+    Ok(Some((
+        Auth {
+            tokens: Some(Tokens {
+                access_token: Some(access),
+                refresh_token: None,
+                account_id,
+                id_token: None,
+            }),
+        },
+        CredentialSource::OpenCodeFile(path.to_path_buf()),
+    )))
 }
 
 /// Where `switch` writes the codex CLI auth. Derived from
@@ -1024,7 +1099,7 @@ fn auth_from_account(account: &CodexAccount) -> Auth {
     }
 }
 
-pub fn has_credentials() -> bool {
+fn has_native_credentials() -> bool {
     if load_credentials_store()
         .map(|store| !store.accounts.is_empty())
         .unwrap_or(false)
@@ -1033,6 +1108,17 @@ pub fn has_credentials() -> bool {
     }
 
     read_current_credentials().is_ok()
+}
+
+fn has_opencode_auth_candidate_at(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+pub fn has_credentials() -> bool {
+    has_native_credentials() || has_opencode_auth_candidate_at(&opencode_auth_path())
 }
 
 async fn refresh_token(client: &reqwest::Client, token_url: &str, rt: &str) -> Result<Refresh> {
@@ -1313,8 +1399,9 @@ async fn fetch_with_auth_async(
             if source.refreshable_account_id().is_none() {
                 return Err(e.context(format!(
                     "Codex usage unavailable: the access token in {} was rejected. \
-                     Run 'codex' so the Codex CLI can refresh its own login, then retry.",
-                    source.describe()
+                     {}",
+                    source.describe(),
+                    source.reauthentication_guidance()
                 )));
             }
             let rt_str = tokens
@@ -1394,6 +1481,7 @@ async fn fetch_with_auth_async(
     Ok(UsageOutput {
         provider: provider_name,
         account,
+        credential_source: None,
         plan,
         email: resp.email,
         metrics,
@@ -1504,8 +1592,14 @@ fn active_account_id_for_usage(store: &mut CodexCredentialsStore) -> Option<Stri
     active_account_id
 }
 
-fn fetch_current_auth_report(diagnostics: Vec<UsageFetchDiagnostic>) -> UsageFetchReport {
-    match fetch() {
+fn fetch_current_auth_report_at(
+    diagnostics: Vec<UsageFetchDiagnostic>,
+    endpoints: &CodexEndpoints,
+) -> UsageFetchReport {
+    let result = read_current_credentials().and_then(|(auth, source)| {
+        fetch_with_auth_at(endpoints, auth, source, "Codex".into(), None)
+    });
+    match result {
         Ok(output) => UsageFetchReport {
             outputs: vec![output],
             diagnostics,
@@ -1521,6 +1615,42 @@ fn fetch_current_auth_report(diagnostics: Vec<UsageFetchDiagnostic>) -> UsageFet
     }
 }
 
+fn append_opencode_fallback_at(
+    mut report: UsageFetchReport,
+    auth_path: &Path,
+    endpoints: &CodexEndpoints,
+) -> UsageFetchReport {
+    if !report.outputs.is_empty() {
+        return report;
+    }
+
+    let credentials = match read_opencode_credentials_at(auth_path) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            report
+                .diagnostics
+                .push(UsageFetchDiagnostic::new("Codex", None, error.to_string()));
+            return report;
+        }
+    };
+    let Some((auth, source)) = credentials else {
+        return report;
+    };
+
+    match fetch_with_auth_at(endpoints, auth, source, "Codex".into(), None) {
+        Ok(mut output) => {
+            output.credential_source = Some("opencode".to_string());
+            report.outputs.push(output);
+        }
+        Err(error) => {
+            report
+                .diagnostics
+                .push(UsageFetchDiagnostic::new("Codex", None, error.to_string()))
+        }
+    }
+    report
+}
+
 pub fn fetch_all() -> Result<Vec<UsageOutput>> {
     let report = fetch_all_report();
     if report.outputs.is_empty() {
@@ -1532,11 +1662,39 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
 }
 
 pub fn fetch_all_report() -> UsageFetchReport {
-    fetch_all_report_inner(CodexFetchIntent::ReadOnly)
+    let endpoints = CodexEndpoints::production();
+    fetch_all_report_with_opencode_fallback_at(
+        CodexFetchIntent::ReadOnly,
+        &endpoints,
+        &opencode_auth_path(),
+    )
 }
 
 pub fn fetch_all_report_importing_current_auth() -> UsageFetchReport {
-    fetch_all_report_inner(CodexFetchIntent::SaveCurrentLogin)
+    let endpoints = CodexEndpoints::production();
+    fetch_all_report_with_opencode_fallback_at(
+        CodexFetchIntent::SaveCurrentLogin,
+        &endpoints,
+        &opencode_auth_path(),
+    )
+}
+
+fn fetch_all_report_with_opencode_fallback_at(
+    intent: CodexFetchIntent,
+    endpoints: &CodexEndpoints,
+    auth_path: &Path,
+) -> UsageFetchReport {
+    let report = if has_native_credentials() {
+        fetch_all_report_inner_at(intent, endpoints)
+    } else {
+        UsageFetchReport::default()
+    };
+
+    if has_opencode_auth_candidate_at(auth_path) {
+        append_opencode_fallback_at(report, auth_path, endpoints)
+    } else {
+        report
+    }
 }
 
 fn load_credentials_store_for_fetch_intent(
@@ -1551,7 +1709,10 @@ fn load_credentials_store_for_fetch_intent(
     }
 }
 
-fn fetch_all_report_inner(intent: CodexFetchIntent) -> UsageFetchReport {
+fn fetch_all_report_inner_at(
+    intent: CodexFetchIntent,
+    endpoints: &CodexEndpoints,
+) -> UsageFetchReport {
     let mut diagnostics = Vec::new();
     let current_auth_account = if intent == CodexFetchIntent::SaveCurrentLogin {
         match save_current_auth_account() {
@@ -1574,11 +1735,11 @@ fn fetch_all_report_inner(intent: CodexFetchIntent) -> UsageFetchReport {
     };
 
     let Some(mut store) = load_credentials_store_for_fetch_intent(intent) else {
-        return fetch_current_auth_report(diagnostics);
+        return fetch_current_auth_report_at(diagnostics, endpoints);
     };
 
     if store.accounts.is_empty() {
-        return fetch_current_auth_report(diagnostics);
+        return fetch_current_auth_report_at(diagnostics, endpoints);
     }
 
     let active_account_id = current_auth_account
@@ -1614,7 +1775,8 @@ fn fetch_all_report_inner(intent: CodexFetchIntent) -> UsageFetchReport {
         };
         let usage_account =
             usage_account_from_saved(&account_id, account, active_account_id.as_deref());
-        match fetch_with_auth(
+        match fetch_with_auth_at(
+            endpoints,
             auth_from_account(account),
             CredentialSource::Store(account_id.clone()),
             "Codex".into(),
@@ -3035,6 +3197,268 @@ mod tests {
   "bedrock_api_key": { "key": "codex-owned-bedrock-key" },
   "someKeyTokscaleDoesNotModel": { "keep": true }
 }"#;
+
+    const OPENCODE_AUTH_FIXTURE: &str = r#"{
+  "anthropic": {
+    "type": "api",
+    "key": "unrelated-provider-key"
+  },
+  "openai": {
+    "type": "oauth",
+    "refresh": "opencode-owned-refresh-token",
+    "access": "opencode-access-token",
+    "expires": 1786089600000,
+    "accountId": "acct_opencode"
+  }
+}"#;
+
+    #[test]
+    fn opencode_oauth_maps_only_read_only_usage_credentials() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(&auth_path, OPENCODE_AUTH_FIXTURE)?;
+
+        let (auth, source) = read_opencode_credentials_at(&auth_path)?
+            .expect("OpenCode OAuth credentials should be detected");
+        let tokens = auth.tokens.expect("mapped tokens");
+
+        assert_eq!(
+            tokens.access_token.as_deref(),
+            Some("opencode-access-token")
+        );
+        assert_eq!(tokens.account_id.as_deref(), Some("acct_opencode"));
+        assert!(tokens.refresh_token.is_none());
+        assert!(tokens.id_token.is_none());
+        assert!(matches!(source, CredentialSource::OpenCodeFile(path) if path == auth_path));
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_api_key_is_not_a_chatgpt_usage_credential() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"openai":{"type":"api","key":"sk-openai-api-key"}}"#,
+        )?;
+
+        assert!(read_opencode_credentials_at(&auth_path)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_opencode_oauth_is_reported_with_its_path() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"openai":{"type":"oauth","refresh":"refresh","expires":1}}"#,
+        )?;
+
+        let error = read_opencode_credentials_at(&auth_path)
+            .expect_err("OAuth without an access token must not be accepted");
+        assert!(error.to_string().contains("Failed to parse OpenCode auth"));
+        assert!(error.to_string().contains(&auth_path.display().to_string()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn opencode_auth_path_honors_xdg_data_home() -> Result<()> {
+        let xdg_data = TempDir::new()?;
+        let _guard = EnvVarGuard::set_path("XDG_DATA_HOME", xdg_data.path());
+
+        assert_eq!(
+            opencode_auth_path(),
+            xdg_data.path().join("opencode").join("auth.json")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_fallback_keeps_native_diagnostics_when_it_recovers_usage() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(&auth_path, OPENCODE_AUTH_FIXTURE)?;
+        let (endpoints, log) = spawn_codex_server(vec![200]);
+        let native_report = UsageFetchReport {
+            outputs: Vec::new(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Codex",
+                None,
+                "saved account token refresh failed",
+            )],
+        };
+
+        let report = append_opencode_fallback_at(native_report, &auth_path, &endpoints);
+
+        assert_eq!(report.outputs.len(), 1);
+        assert_eq!(report.outputs[0].provider, "Codex");
+        assert_eq!(
+            report.outputs[0].credential_source.as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(
+            report.outputs[0].email.as_deref(),
+            Some("codex@example.com")
+        );
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].message,
+            "saved account token refresh failed"
+        );
+        assert_eq!(
+            *log.lock().expect("request log"),
+            vec![Seen {
+                request: format!("GET {USAGE_PATH}"),
+                bearer: Some("opencode-access-token".to_string()),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successful_native_usage_suppresses_opencode_fallback() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(&auth_path, OPENCODE_AUTH_FIXTURE)?;
+        let (endpoints, log) = spawn_codex_server(vec![200]);
+        let native_output = fetch_with_auth_at(
+            &endpoints,
+            Auth {
+                tokens: Some(tokens("native-codex-access-token", Some("acct_native"))),
+            },
+            CredentialSource::Keychain,
+            "Codex".into(),
+            None,
+        )?;
+
+        let report = append_opencode_fallback_at(
+            UsageFetchReport {
+                outputs: vec![native_output],
+                diagnostics: Vec::new(),
+            },
+            &auth_path,
+            &endpoints,
+        );
+
+        assert_eq!(report.outputs.len(), 1);
+        assert!(report.outputs[0].credential_source.is_none());
+        assert_eq!(
+            *log.lock().expect("request log"),
+            vec![Seen {
+                request: format!("GET {USAGE_PATH}"),
+                bearer: Some("native-codex-access-token".to_string()),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_saved_accounts_fall_back_to_opencode_without_hiding_the_failure() -> Result<()> {
+        let config_dir = TempDir::new()?;
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config_dir.path());
+        let store_path = config_dir.path().join("codex-credentials.json");
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_saved".to_string(),
+            CodexAccount {
+                tokens: Tokens {
+                    access_token: Some("stale-saved-access-token".to_string()),
+                    refresh_token: Some("stale-saved-refresh-token".to_string()),
+                    account_id: Some("acct_saved".to_string()),
+                    id_token: None,
+                },
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("old".to_string()),
+            },
+        );
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "acct_saved".to_string(),
+                accounts,
+            },
+        )?;
+        let store_before = std::fs::read(&store_path)?;
+
+        let opencode_dir = TempDir::new()?;
+        let auth_path = opencode_dir.path().join("auth.json");
+        std::fs::write(&auth_path, OPENCODE_AUTH_FIXTURE)?;
+        let auth_before = std::fs::read(&auth_path)?;
+
+        let (base, log) = spawn_server(|path, request_index| match (path, request_index) {
+            (USAGE_PATH, 0) => (401, "{}".to_string()),
+            (TOKEN_PATH, 1) => (401, "{}".to_string()),
+            (USAGE_PATH, 2) => (200, USAGE_BODY.to_string()),
+            _ => (404, "{}".to_string()),
+        });
+        let endpoints = CodexEndpoints {
+            usage: format!("{base}{USAGE_PATH}"),
+            reset_credits: format!("{base}{RESET_CREDITS_PATH}"),
+            token: format!("{base}{TOKEN_PATH}"),
+        };
+
+        let report = fetch_all_report_with_opencode_fallback_at(
+            CodexFetchIntent::ReadOnly,
+            &endpoints,
+            &auth_path,
+        );
+
+        assert_eq!(report.outputs.len(), 1);
+        assert_eq!(
+            report.outputs[0].credential_source.as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0]
+                .account
+                .as_ref()
+                .map(|account| account.id.as_str()),
+            Some("acct_saved")
+        );
+        assert_eq!(
+            requests(&log),
+            vec![
+                format!("GET {USAGE_PATH}"),
+                format!("POST {TOKEN_PATH}"),
+                format!("GET {USAGE_PATH}"),
+            ]
+        );
+        assert_eq!(std::fs::read(&store_path)?, store_before);
+        assert_eq!(std::fs::read(&auth_path)?, auth_before);
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_opencode_token_is_never_refreshed_or_rewritten() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::write(&auth_path, OPENCODE_AUTH_FIXTURE)?;
+        let before = std::fs::read(&auth_path)?;
+        let (endpoints, log) = spawn_codex_server(vec![401]);
+
+        let report =
+            append_opencode_fallback_at(UsageFetchReport::default(), &auth_path, &endpoints);
+
+        assert!(report.outputs.is_empty());
+        assert_eq!(std::fs::read(&auth_path)?, before);
+        assert_eq!(
+            requests(&log),
+            vec![format!("GET {USAGE_PATH}")],
+            "OpenCode-owned credentials must never reach the token endpoint"
+        );
+        let diagnostic = report
+            .diagnostics
+            .first()
+            .expect("rejected OpenCode token should be diagnosed");
+        assert!(diagnostic.message.contains("OpenCode"));
+        assert!(diagnostic.message.contains("/connect"));
+        Ok(())
+    }
 
     /// Path components mirror production so a recorded request line is the same
     /// string the real endpoints would produce.

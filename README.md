@@ -786,7 +786,7 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 | Provider | Auth Method | Metrics | Setup |
 |----------|-------------|---------|-------|
 | **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, Opus quotas | Run `claude` to log in |
-| **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json`, `~/.codex/auth.json`, or saved Tokscale accounts) | Session, Weekly quotas | Use `[Add Codex]` in the TUI Usage tab, run `codex` to log in, or import an existing auth with `tokscale codex import --name work` |
+| **Codex** (OpenAI) | OAuth (Codex auth, saved Tokscale accounts, or OpenCode's `$XDG_DATA_HOME/opencode/auth.json`) | Session, Weekly quotas | Use `[Add Codex]`, run `codex`, import with `tokscale codex import --name work`, or connect OpenAI with ChatGPT Plus/Pro in OpenCode |
 | **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
 | **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
 | **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
@@ -831,6 +831,8 @@ tokscale codex activity --json
 ```
 
 When saved Codex accounts exist, `tokscale usage --json` includes structured account metadata for each Codex entry and the TUI displays those entries under one Codex group. Without saved accounts, Tokscale falls back to the current Codex auth discovery path (`CODEX_HOME/auth.json`, `~/.config/codex/auth.json`, `~/.codex/auth.json`, then macOS Keychain).
+
+If those native Codex sources produce no successful usage result, Tokscale reads the `openai` OAuth entry from OpenCode's `$XDG_DATA_HOME/opencode/auth.json` (normally `~/.local/share/opencode/auth.json`). OpenAI API-key entries are not ChatGPT subscription credentials and are ignored. OpenCode credentials are read-only: Tokscale never imports, refreshes, or rewrites them. If the access token is rejected, use OpenCode so it can refresh the login, or reconnect OpenAI with `/connect`.
 
 `tokscale codex activity` uses only the installed Codex app-server's active authentication to fetch a timestamped, account-level snapshot. It is supplemental data: it is never included in local totals, reports, exports, submissions, or leaderboards.
 

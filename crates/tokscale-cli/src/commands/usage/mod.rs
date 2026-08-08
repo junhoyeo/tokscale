@@ -76,6 +76,8 @@ pub struct UsageOutput {
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<UsageAccount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
     pub plan: Option<String>,
     pub email: Option<String>,
     pub metrics: Vec<UsageMetric>,
@@ -211,7 +213,6 @@ pub struct UsageFetchReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageFetchIntent {
-    #[allow(dead_code)]
     CliReadOnly,
     TuiSurface,
 }
@@ -343,64 +344,6 @@ impl Fetch {
 
 type UsageProvider = (&'static str, fn() -> bool, Fetch);
 
-/// A provider that is active (has credentials) but whose fetch failed.
-///
-/// `name` is the human-facing provider label and `error` is the formatted
-/// error message (e.g. sakana's "refresh SAKANA_SESSION_COOKIE" guidance).
-#[derive(Debug, Clone)]
-pub struct ProviderError {
-    pub name: &'static str,
-    pub error: String,
-}
-
-/// Backwards-compatible entry point: returns only successful provider outputs.
-///
-/// Per-provider errors are silently discarded here. Callers that need to make
-/// failures visible (e.g. the CLI `run`) should use [`fetch_all_with_errors`].
-///
-/// Used by the TUI dashboard (non-test builds only); the TUI test build stubs
-/// the fetch out, so allow it to be unused there.
-#[allow(dead_code)]
-pub fn fetch_all() -> Vec<UsageOutput> {
-    fetch_all_with_errors().0
-}
-
-/// Fetch usage for every active provider in parallel, returning both the
-/// successful outputs and the per-provider errors.
-///
-/// Previously a provider whose `fetch` returned `Err` (notably a stale/expired
-/// session-cookie auth error) was silently dropped: `has_credentials()` reports
-/// the provider as active, yet it just vanished from the output. This collects
-/// those errors so the caller can surface them to the user instead.
-pub fn fetch_all_with_errors() -> (Vec<UsageOutput>, Vec<ProviderError>) {
-    let active: Vec<_> = usage_providers(Fetch::Multi(codex::fetch_all))
-        .into_iter()
-        .filter(|(_, has, _)| has())
-        .collect();
-
-    if active.is_empty() {
-        return (vec![], vec![]);
-    }
-
-    let results = std::thread::scope(|s| {
-        let handles: Vec<_> = active
-            .into_iter()
-            .map(|(name, _, fetch)| s.spawn(move || (name, fetch.call())))
-            .collect();
-
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                // A panicked provider thread should not take down the whole
-                // command; skip it (a join error has no message to surface).
-                handle.join().ok()
-            })
-            .collect::<Vec<_>>()
-    });
-
-    partition_results(results)
-}
-
 fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
     vec![
         (
@@ -499,27 +442,6 @@ fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFe
     })
 }
 
-/// Split per-provider fetch results into (successful outputs, errors).
-///
-/// An active provider returning `Err` becomes a [`ProviderError`] rather than
-/// being silently dropped.
-fn partition_results(
-    results: Vec<(&'static str, Result<Vec<UsageOutput>>)>,
-) -> (Vec<UsageOutput>, Vec<ProviderError>) {
-    let mut outputs = Vec::new();
-    let mut errors = Vec::new();
-    for (name, result) in results {
-        match result {
-            Ok(mut provider_outputs) => outputs.append(&mut provider_outputs),
-            Err(err) => errors.push(ProviderError {
-                name,
-                error: err.to_string(),
-            }),
-        }
-    }
-    (outputs, errors)
-}
-
 // ── Light-mode rendering ──
 
 const BAR_WIDTH: usize = 12;
@@ -597,20 +519,24 @@ fn render_light(output: &UsageOutput) {
 }
 
 pub fn run(json: bool, _light: bool) -> Result<()> {
-    let (outputs, errors) = fetch_all_with_errors();
+    let report = fetch_all_report_with_intent(UsageFetchIntent::CliReadOnly);
     if json {
         // Keep stdout pure JSON: do NOT emit provider warnings here, since they
         // would corrupt downstream `--json` consumers that read stderr too.
-        println!("{}", serde_json::to_string_pretty(&outputs)?);
+        println!("{}", serde_json::to_string_pretty(&report.outputs)?);
     } else {
-        for o in &outputs {
+        for o in &report.outputs {
             render_light(o);
         }
         // Surface active-but-failed providers (e.g. an expired session cookie)
         // so they don't silently vanish from the output. One concise line per
         // failing provider, on stderr to keep stdout clean.
-        for err in &errors {
-            eprintln!("{}: {} — skipped", err.name, err.error);
+        for diagnostic in &report.diagnostics {
+            eprintln!(
+                "{}: {} — skipped",
+                diagnostic.display_name(),
+                diagnostic.message
+            );
         }
     }
     Ok(())
@@ -629,6 +555,7 @@ mod tests {
                 label: Some("work".to_string()),
                 is_active: true,
             }),
+            credential_source: None,
             plan: None,
             email: None,
             metrics: Vec::new(),
@@ -649,6 +576,7 @@ mod tests {
                 label: Some("  ".to_string()),
                 is_active: false,
             }),
+            credential_source: None,
             plan: None,
             email: Some("user@example.com".to_string()),
             metrics: Vec::new(),
@@ -669,6 +597,7 @@ mod tests {
                 label: None,
                 is_active: false,
             }),
+            credential_source: None,
             plan: None,
             email: None,
             metrics: Vec::new(),
@@ -678,65 +607,6 @@ mod tests {
         };
 
         assert_eq!(output.display_name(), "Codex (Account 123e45...4000)");
-    }
-
-    fn sample_output(provider: &str) -> UsageOutput {
-        UsageOutput {
-            provider: provider.to_string(),
-            account: None,
-            plan: None,
-            email: None,
-            metrics: Vec::new(),
-            reset_credits: None,
-            credit_status: None,
-            spend_control: None,
-        }
-    }
-
-    #[test]
-    fn partition_results_surfaces_provider_errors_instead_of_dropping_them() {
-        let results: Vec<(&'static str, Result<Vec<UsageOutput>>)> = vec![
-            ("Claude", Ok(vec![sample_output("Claude")])),
-            (
-                "Sakana",
-                Err(anyhow::anyhow!(
-                    "Sakana session expired or invalid. Refresh SAKANA_SESSION_COOKIE."
-                )),
-            ),
-            (
-                "Codex",
-                Ok(vec![sample_output("Codex"), sample_output("Codex")]),
-            ),
-        ];
-
-        let (outputs, errors) = partition_results(results);
-
-        // Successful providers are preserved (including a Multi provider's
-        // several outputs), in order.
-        assert_eq!(outputs.len(), 3);
-        assert_eq!(outputs[0].provider, "Claude");
-        assert_eq!(outputs[1].provider, "Codex");
-        assert_eq!(outputs[2].provider, "Codex");
-
-        // The failing provider's error is surfaced, not silently discarded.
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].name, "Sakana");
-        assert!(
-            errors[0].error.contains("SAKANA_SESSION_COOKIE"),
-            "expected the auth-refresh guidance to be preserved, got: {}",
-            errors[0].error
-        );
-    }
-
-    #[test]
-    fn partition_results_reports_no_errors_when_all_succeed() {
-        let results: Vec<(&'static str, Result<Vec<UsageOutput>>)> =
-            vec![("Claude", Ok(vec![sample_output("Claude")]))];
-
-        let (outputs, errors) = partition_results(results);
-
-        assert_eq!(outputs.len(), 1);
-        assert!(errors.is_empty());
     }
 
     #[test]
@@ -751,7 +621,30 @@ mod tests {
         )?;
 
         assert!(output.account.is_none());
+        assert!(output.credential_source.is_none());
         assert_eq!(output.display_name(), "Codex");
+        Ok(())
+    }
+
+    #[test]
+    fn usage_output_round_trips_opencode_credential_source() -> Result<()> {
+        let output: UsageOutput = serde_json::from_str(
+            r#"{
+                "provider": "Codex",
+                "credential_source": "opencode",
+                "plan": "Plus",
+                "email": null,
+                "metrics": []
+            }"#,
+        )?;
+
+        assert_eq!(output.credential_source.as_deref(), Some("opencode"));
+        assert_eq!(
+            serde_json::to_value(output)?
+                .get("credential_source")
+                .and_then(serde_json::Value::as_str),
+            Some("opencode")
+        );
         Ok(())
     }
 }

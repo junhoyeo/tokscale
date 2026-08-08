@@ -247,6 +247,7 @@ pub fn fetch() -> Result<UsageOutput> {
         Ok(UsageOutput {
             provider: "MiniMax".into(),
             account: None,
+            credential_source: None,
             plan,
             email: None,
             metrics,

@@ -623,6 +623,7 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
     Ok(UsageOutput {
         provider: "Grok Build".into(),
         account: None,
+        credential_source: None,
         plan,
         email: credentials.email.clone(),
         metrics,
@@ -640,6 +641,7 @@ fn usage_output(
     UsageOutput {
         provider: "Grok Build".into(),
         account: None,
+        credential_source: None,
         plan,
         email,
         metrics,

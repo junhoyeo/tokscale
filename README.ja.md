@@ -785,7 +785,7 @@ TUI では **Usage** タブに移動するとサブスクリプションデー�
 | プロバイダー | 認証方法 | メトリクス | セットアップ |
 |----------|-------------|---------|-------|
 | **Claude** | OAuth（資格情報ファイルまたは macOS Keychain） | Session（5時間）、Weekly、Opus クォータ | `claude` を実行してログイン |
-| **Codex**（OpenAI） | OAuth（`~/.config/codex/auth.json`、`~/.codex/auth.json`、または保存済み Tokscale アカウント） | Session、Weekly クォータ | TUI の Usage タブで `[Add Codex]` を使用するか、`codex` を実行してログイン、または `tokscale codex import --name work` で既存の認証をインポート |
+| **Codex**（OpenAI） | OAuth（Codex 認証、保存済み Tokscale アカウント、または OpenCode の `$XDG_DATA_HOME/opencode/auth.json`） | Session、Weekly クォータ | `[Add Codex]`、`codex`、`tokscale codex import --name work`、または OpenCode で OpenAI の ChatGPT Plus/Pro に接続 |
 | **Z.ai** | API キー（環境変数） | トークン上限、Web 検索 | `ZAI_API_KEY` または `GLM_API_KEY` を設定 |
 | **Amp** | API キー（`~/.local/share/amp/secrets.json`） | 無料枠残高、クレジット | `amp` を実行してログイン |
 | **GitHub Copilot** | GitHub トークン（keychain または `~/.config/gh/hosts.yml`） | プレミアムインタラクション、チャットクォータ | `gh auth login` を実行 |
@@ -826,6 +826,8 @@ tokscale codex status --name personal --json
 ```
 
 保存済みの Codex アカウントが存在する場合、`tokscale usage --json` は各 Codex エントリの構造化されたアカウントメタデータを含み、TUI はそれらのエントリを 1 つの Codex グループにまとめて表示します。保存済みアカウントがない場合、Tokscale は現在の Codex 認証検出パス（`CODEX_HOME/auth.json`、`~/.config/codex/auth.json`、`~/.codex/auth.json`、その後 macOS Keychain）にフォールバックします。
+
+これらのネイティブ Codex ソースから使用量を 1 件も取得できない場合、Tokscale は OpenCode の `$XDG_DATA_HOME/opencode/auth.json`（通常は `~/.local/share/opencode/auth.json`）にある `openai` OAuth エントリを読み取ります。OpenAI API キーのエントリは ChatGPT サブスクリプション資格情報ではないため無視されます。OpenCode の資格情報は読み取り専用で、Tokscale がインポート、更新、または書き換えることはありません。アクセストークンが拒否された場合は OpenCode を使用してログインを更新させるか、`/connect` で OpenAI に再接続してください。
 
 #### 出力例
 

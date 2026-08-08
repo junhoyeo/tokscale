@@ -784,7 +784,7 @@ tokscale usage --light
 | 提供商 | 认证方式 | 指标 | 设置 |
 |----------|-------------|---------|-------|
 | **Claude** | OAuth（凭据文件或 macOS 钥匙串） | Session（5 小时）、Weekly、Opus 配额 | 运行 `claude` 登录 |
-| **Codex**（OpenAI） | OAuth（`~/.config/codex/auth.json`、`~/.codex/auth.json`，或已保存的 Tokscale 账号） | Session、Weekly 配额 | 在 TUI Usage 标签中使用 `[Add Codex]`，运行 `codex` 登录，或用 `tokscale codex import --name work` 导入现有认证 |
+| **Codex**（OpenAI） | OAuth（Codex 认证、已保存的 Tokscale 账号，或 OpenCode 的 `$XDG_DATA_HOME/opencode/auth.json`） | Session、Weekly 配额 | 使用 `[Add Codex]`、运行 `codex`、通过 `tokscale codex import --name work` 导入，或在 OpenCode 中连接 OpenAI ChatGPT Plus/Pro |
 | **Z.ai** | API key（环境变量） | Token 限额、Web Searches | 设置 `ZAI_API_KEY` 或 `GLM_API_KEY` |
 | **Amp** | API key（`~/.local/share/amp/secrets.json`） | 免费额度余额、Credits | 运行 `amp` 登录 |
 | **GitHub Copilot** | GitHub token（钥匙串或 `~/.config/gh/hosts.yml`） | Premium interactions、Chat 配额 | 运行 `gh auth login` |
@@ -825,6 +825,8 @@ tokscale codex status --name personal --json
 ```
 
 当存在已保存的 Codex 账号时，`tokscale usage --json` 会为每个 Codex 条目包含结构化的账号元数据，TUI 会将这些条目显示在一个 Codex 分组下。若无已保存的账号，Tokscale 会回退到当前的 Codex 认证发现路径（`CODEX_HOME/auth.json`、`~/.config/codex/auth.json`、`~/.codex/auth.json`，然后是 macOS 钥匙串）。
+
+如果这些原生 Codex 来源均未产生成功的使用量结果，Tokscale 会读取 OpenCode 的 `$XDG_DATA_HOME/opencode/auth.json`（通常为 `~/.local/share/opencode/auth.json`）中的 `openai` OAuth 条目。OpenAI API key 条目并非 ChatGPT 订阅凭据，因此会被忽略。OpenCode 凭据仅以只读方式使用：Tokscale 永远不会导入、刷新或重写这些凭据。如果访问令牌被拒绝，请使用 OpenCode 让其刷新登录状态，或通过 `/connect` 重新连接 OpenAI。
 
 #### 示例输出
 

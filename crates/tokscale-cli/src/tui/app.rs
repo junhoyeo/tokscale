@@ -2970,6 +2970,7 @@ mod tests {
         UsageOutput {
             provider: provider.to_string(),
             account,
+            credential_source: None,
             plan: Some("Pro".to_string()),
             email: None,
             metrics: vec![UsageMetric {

@@ -782,7 +782,7 @@ TUI에서는 **Usage** 탭으로 이동해 구독 데이터를 확인하세요. 
 | 프로바이더 | 인증 방식 | 지표 | 설정 |
 |----------|-------------|---------|-------|
 | **Claude** | OAuth (자격 증명 파일 또는 macOS Keychain) | 세션(5시간), 주간, Opus 할당량 | `claude`를 실행해 로그인 |
-| **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json`, `~/.codex/auth.json`, 또는 저장된 Tokscale 계정) | 세션, 주간 할당량 | TUI Usage 탭에서 `[Add Codex]`를 사용하거나, `codex`를 실행해 로그인하거나, `tokscale codex import --name work`로 기존 인증을 가져오기 |
+| **Codex** (OpenAI) | OAuth (Codex 인증, 저장된 Tokscale 계정 또는 OpenCode의 `$XDG_DATA_HOME/opencode/auth.json`) | 세션, 주간 할당량 | `[Add Codex]`, `codex`, `tokscale codex import --name work` 또는 OpenCode에서 OpenAI ChatGPT Plus/Pro 연결 사용 |
 | **Z.ai** | API 키 (환경 변수) | 토큰 한도, 웹 검색 | `ZAI_API_KEY` 또는 `GLM_API_KEY` 설정 |
 | **Amp** | API 키 (`~/.local/share/amp/secrets.json`) | 무료 티어 잔액, 크레딧 | `amp`를 실행해 로그인 |
 | **GitHub Copilot** | GitHub 토큰 (keychain 또는 `~/.config/gh/hosts.yml`) | 프리미엄 상호작용, 채팅 할당량 | `gh auth login` 실행 |
@@ -823,6 +823,8 @@ tokscale codex status --name personal --json
 ```
 
 저장된 Codex 계정이 있으면 `tokscale usage --json`은 각 Codex 항목에 대한 구조화된 계정 메타데이터를 포함하며 TUI는 해당 항목들을 하나의 Codex 그룹 아래에 표시합니다. 저장된 계정이 없으면 Tokscale은 현재 Codex 인증 탐색 경로(`CODEX_HOME/auth.json`, `~/.config/codex/auth.json`, `~/.codex/auth.json`, 그리고 macOS Keychain)로 폴백합니다.
+
+이러한 네이티브 Codex 소스에서 성공한 사용량 결과가 없으면 Tokscale은 OpenCode의 `$XDG_DATA_HOME/opencode/auth.json`(일반적으로 `~/.local/share/opencode/auth.json`)에서 `openai` OAuth 항목을 읽습니다. OpenAI API 키 항목은 ChatGPT 구독 자격 증명이 아니므로 무시됩니다. OpenCode 자격 증명은 읽기 전용이며 Tokscale은 이를 가져오거나 갱신하거나 다시 쓰지 않습니다. 액세스 토큰이 거부되면 OpenCode를 사용해 로그인을 갱신하거나 `/connect`로 OpenAI를 다시 연결하세요.
 
 #### 예시 출력
 

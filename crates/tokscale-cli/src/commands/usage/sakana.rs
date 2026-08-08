@@ -470,6 +470,7 @@ fn build_output(parsed: ParsedBilling) -> UsageOutput {
     UsageOutput {
         provider: "Sakana".into(),
         account: None,
+        credential_source: None,
         plan,
         email: None,
         metrics,

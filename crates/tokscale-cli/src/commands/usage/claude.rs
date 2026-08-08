@@ -162,6 +162,7 @@ fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput
         Ok(UsageOutput {
             provider: "Claude".into(),
             account: None,
+            credential_source: None,
             plan,
             email: None,
             metrics,

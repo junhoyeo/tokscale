@@ -202,6 +202,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
                     label: Some(site.label.to_string()),
                     is_active: true,
                 }),
+                credential_source: None,
                 plan: None,
                 email: None,
                 metrics,
