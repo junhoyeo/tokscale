@@ -10,6 +10,17 @@ pub enum PathRoot {
     },
 }
 
+/// Join `home_dir` and a `/`-joined relative literal with native separators
+/// throughout. `Path::join` only normalizes the junction; the relative half's
+/// own `/` separators would survive untouched on Windows (#1048).
+fn join_home(home_dir: &str, relative: &str) -> String {
+    let mut path = std::path::PathBuf::from(home_dir);
+    for component in std::path::Path::new(relative).components() {
+        path.push(component.as_os_str());
+    }
+    path.to_string_lossy().into_owned()
+}
+
 impl PathRoot {
     pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
         match self {
@@ -41,15 +52,15 @@ impl PathRoot {
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    format!("{home_dir}/.reasonix")
+                    join_home(home_dir, ".reasonix")
                 }
             }
             PathRoot::XdgData => {
                 if use_env_roots {
                     std::env::var("XDG_DATA_HOME")
-                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                        .unwrap_or_else(|_| join_home(home_dir, ".local/share"))
                 } else {
-                    format!("{}/.local/share", home_dir)
+                    join_home(home_dir, ".local/share")
                 }
             }
             PathRoot::Config => {
@@ -81,7 +92,7 @@ impl PathRoot {
                         .into_owned();
                 }
 
-                format!("{home_dir}/.config/tokscale")
+                join_home(home_dir, ".config/tokscale")
             }
             PathRoot::EnvVar {
                 var,
@@ -90,12 +101,12 @@ impl PathRoot {
                 if use_env_roots {
                     let val = std::env::var(var).unwrap_or_default();
                     if val.trim().is_empty() {
-                        format!("{}/{}", home_dir, fallback_relative)
+                        join_home(home_dir, fallback_relative)
                     } else {
                         val
                     }
                 } else {
-                    format!("{}/{}", home_dir, fallback_relative)
+                    join_home(home_dir, fallback_relative)
                 }
             }
         }
@@ -1237,7 +1248,10 @@ mod tests {
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
 
         let resolved = PathRoot::XdgData.resolve("/tmp/home");
-        assert_eq!(resolved, "/tmp/home/.local/share");
+        assert_eq!(
+            resolved,
+            native_join(std::path::Path::new("/tmp/home"), ".local/share")
+        );
 
         restore_env("XDG_DATA_HOME", previous);
     }
@@ -1249,7 +1263,10 @@ mod tests {
         unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
 
         let resolved = PathRoot::XdgData.resolve_with_env_strategy("/tmp/home", false);
-        assert_eq!(resolved, "/tmp/home/.local/share");
+        assert_eq!(
+            resolved,
+            native_join(std::path::Path::new("/tmp/home"), ".local/share")
+        );
 
         restore_env("XDG_DATA_HOME", previous);
     }
@@ -1334,7 +1351,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned()
         } else {
-            "/tmp/home/.config/tokscale".to_string()
+            native_join(std::path::Path::new("/tmp/home"), ".config/tokscale")
         };
         assert_eq!(resolved, expected);
 
@@ -1371,7 +1388,10 @@ mod tests {
             fallback_relative: ".fallback",
         };
         let resolved = root.resolve("/tmp/home");
-        assert_eq!(resolved, "/tmp/home/.fallback");
+        assert_eq!(
+            resolved,
+            native_join(std::path::Path::new("/tmp/home"), ".fallback")
+        );
 
         restore_env(var, previous);
     }
@@ -1388,7 +1408,10 @@ mod tests {
             fallback_relative: ".fallback",
         };
         let resolved = root.resolve_with_env_strategy("/tmp/home", false);
-        assert_eq!(resolved, "/tmp/home/.fallback");
+        assert_eq!(
+            resolved,
+            native_join(std::path::Path::new("/tmp/home"), ".fallback")
+        );
 
         restore_env(var, previous);
     }
