@@ -116,9 +116,12 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 /// localizable labels.
 #[derive(Default)]
 struct SessionModels {
-    /// `#21` display label → the `#19` machine id seen alongside it. Labels
-    /// that appear with more than one id are dropped: an ambiguous label is no
-    /// better evidence than no label at all.
+    /// `#21` display label → the `#19` machine id seen alongside it. A label
+    /// that appears with two ids naming *different* priced models is dropped:
+    /// an ambiguous label is no better evidence than no label at all. Ids that
+    /// differ only in spelling but share an alias target (Antigravity's
+    /// `gemini-pro-default` / `gemini-pro-agent`) are not ambiguous, and the
+    /// first id observed is kept.
     by_display: HashMap<String, String>,
     /// The file's only `#19` value — set only when every row carrying one
     /// agrees *and* every label in the file was identified by some row. Serves
@@ -149,10 +152,20 @@ impl SessionModels {
                     .entry(label)
                     .and_modify(|resolved| {
                         if let Some(existing) = *resolved {
+                            // Antigravity swaps between several `#19` machine ids
+                            // under one display label within a single conversation
+                            // (`gemini-pro-default` and `gemini-pro-agent` both
+                            // appear as "Gemini 3.1 Pro (High)"). Those are the same
+                            // priced model, so comparing the raw strings reports a
+                            // false ambiguity and drops the label — which later
+                            // leaves `#19`-less rows as `unknown` and aborts
+                            // `submit`. Compare canonical alias targets instead, so
+                            // only a genuinely different model clears the mapping.
                             if existing != model {
-                                let existing_canon = crate::pricing::aliases::resolve_alias(existing).unwrap_or(existing);
-                                let new_canon = crate::pricing::aliases::resolve_alias(model).unwrap_or(model);
-                                
+                                let existing_canon =
+                                    pricing::aliases::resolve_alias(existing).unwrap_or(existing);
+                                let new_canon =
+                                    pricing::aliases::resolve_alias(model).unwrap_or(model);
                                 if existing_canon != new_canon {
                                     *resolved = None;
                                 }
@@ -836,6 +849,39 @@ mod tests {
         let messages = parse_antigravity_cli_file(&path);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2].model_id, "unknown");
+    }
+
+    #[test]
+    fn two_spellings_of_one_priced_model_are_not_an_ambiguous_label() {
+        // Antigravity swaps machine ids mid-conversation without changing the
+        // display label: `gemini-pro-default` and `gemini-pro-agent` are both
+        // "Gemini 3.1 Pro (High)" and both price as `gemini-3.1-pro`. Comparing
+        // the raw ids called that ambiguous and discarded the label, so the
+        // continuation row below resolved to `unknown` — which has no pricing
+        // and aborted `tokscale submit` outright (#1058).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aliased.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-pro-default"),
+                    Some("Gemini 3.1 Pro (High)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-pro-agent"),
+                    Some("Gemini 3.1 Pro (High)"),
+                    "resp-1",
+                ),
+                build_row(None, Some("Gemini 3.1 Pro (High)"), "resp-2"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].model_id, "gemini-3.1-pro");
+        assert_ne!(messages[2].model_id, "unknown");
     }
 
     #[test]
