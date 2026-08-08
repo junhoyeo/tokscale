@@ -232,14 +232,14 @@ pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> 
     }
 
     let mut roots = Vec::new();
-    roots.push(PathBuf::from(format!(
-        "{}/.config/tokscale/headless",
-        home_dir
+    roots.push(PathBuf::from(join_native(
+        home_dir,
+        ".config/tokscale/headless",
     )));
 
-    let mac_root = PathBuf::from(format!(
-        "{}/Library/Application Support/tokscale/headless",
-        home_dir
+    let mac_root = PathBuf::from(join_native(
+        home_dir,
+        "Library/Application Support/tokscale/headless",
     ));
     roots.push(mac_root);
 

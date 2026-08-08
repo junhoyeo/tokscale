@@ -3214,13 +3214,18 @@ fn test_clients_command_includes_claude_transcripts_text() {
     let tmp = create_empty_fixture_dir();
     fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
 
+    // The transcripts path is spelled with native separators (#1048): on
+    // Windows the `~` root renders with backslashes throughout.
+    #[cfg(windows)]
+    let expected = "additional: ~\\.claude\\transcripts ✓";
+    #[cfg(not(windows))]
+    let expected = "additional: ~/.claude/transcripts ✓";
+
     cmd_with_home(tmp.path())
         .arg("clients")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "additional: ~/.claude/transcripts ✓",
-        ));
+        .stdout(predicate::str::contains(expected));
 }
 
 #[test]
