@@ -79,14 +79,22 @@ impl ModelPricing {
     /// This is a statement about the row, not about the deal. Rows that quote
     /// `0.0` for the buckets upstream bothered to list and omit the rest reach
     /// us from two different worlds and are indistinguishable in the data:
-    /// `kenari/nemotron-3-ultra-550b-a55b` is a genuinely free model, and
-    /// `kenari/claude-opus-4-7` is a premium model whose zeros mean "included
-    /// in your subscription" — both arrive as
+    /// `opencode/nemotron-3-ultra-free` is a genuinely free row, and
+    /// `kenari/claude-opus-4-7` is a premium model whose zeros mean
+    /// "included in your subscription" — both arrive as
     /// `{input_cost_per_token: 0.0, output_cost_per_token: 0.0}` with null
     /// cache fields, byte for byte. Nothing in the dataset separates them, so
     /// tokscale reports both at $0.00 and cannot do better from this input
     /// alone. If upstream ever publishes a plan/subscription marker, that is
     /// the signal to split these two cases apart.
+    ///
+    /// A zero row must not be read as "the model is free": kenari's entire
+    /// catalog is subscription-priced at zero (all 38 of its rows in models.dev
+    /// are `{0, 0}`, `grok-4-5` and `claude-fable-5` included), and the same
+    /// nemotron has 14 paid siblings — `nvidia/nvidia/...` at $0.50/$2.50,
+    /// `openrouter/...` at $0.60/$3.60 — so a resolution that lands on a
+    /// subscription row prices a paid model at $0.00. That is a lookup-quality
+    /// problem, tracked separately, not something this predicate decides.
     ///
     /// That limitation predates this predicate rather than arriving with it:
     /// `0.0` has always satisfied `valid_rate`, so a plan-priced row already

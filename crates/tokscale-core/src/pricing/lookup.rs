@@ -996,7 +996,22 @@ impl PricingLookup {
     /// model-part equals `model_id`. A provider hint must take precedence over
     /// this (see `lookup_auto`), otherwise a hinted lookup leaks to a different
     /// provider's canonical key.
+    ///
+    /// The model-part index is a cross-provider fallback in the same trust
+    /// class as fuzzy matching: it lands the id on "some other provider's
+    /// model whose model-part equals this id". Generic tokens on the
+    /// `FUZZY_BLOCKLIST` carry no model identity, and #1070's resolver-top
+    /// `is_routing_label` guard already refuses the router labels it knows
+    /// (`auto`, `agent_review`). This blocklist gate is the second layer:
+    /// it covers generic tokens no parser emits today but any provider could
+    /// publish as a model part tomorrow (`default`, `router`, `mini`, ...),
+    /// and it protects any path that reaches the model-part index without
+    /// passing through that guard. Full-key matches, which are the id's own
+    /// canonical key, stay honored.
     fn exact_match_openrouter_model_part(&self, model_id: &str) -> Option<LookupResult> {
+        if FUZZY_BLOCKLIST.contains(&model_id) {
+            return None;
+        }
         let key = self.openrouter_model_part.get(model_id)?;
         let pricing = self.openrouter.get(key)?;
         lookup_result_if_usable(pricing, "OpenRouter", key)
@@ -1012,13 +1027,19 @@ impl PricingLookup {
                 });
             }
         }
-        if let Some(key) = self.models_dev_model_part.get(model_id) {
-            if let Some(pricing) = self.models_dev.get(key) {
-                return Some(LookupResult {
-                    pricing: pricing.clone(),
-                    source: "Models.dev".into(),
-                    matched_key: key.clone(),
-                });
+        // Same cross-provider fallback trust class as the OpenRouter model-part
+        // index: #1070's resolver-top guard plus this blocklist gate keep bare
+        // generic tokens off another provider's model part, while the id's own
+        // full dataset key (`morph/auto`) still resolves.
+        if !FUZZY_BLOCKLIST.contains(&model_id) {
+            if let Some(key) = self.models_dev_model_part.get(model_id) {
+                if let Some(pricing) = self.models_dev.get(key) {
+                    return Some(LookupResult {
+                        pricing: pricing.clone(),
+                        source: "Models.dev".into(),
+                        matched_key: key.clone(),
+                    });
+                }
             }
         }
         None
@@ -3441,6 +3462,58 @@ mod tests {
                 .unwrap()
                 .matched_key,
             "vertex_ai/claude-opus-4-7@default"
+        );
+    }
+
+    // Defense-in-depth beyond #1070: the resolver-top `is_routing_label`
+    // guard refuses the router labels parsers emit today (`auto`,
+    // `agent_review`), but the model-part index is a second, deeper place a
+    // bare id can elect another provider's row. Any provider may publish a
+    // generic `FUZZY_BLOCKLIST` token as a model part (`default`, `router`,
+    // `mini`, ...) — none do today, but a bare id carrying such a token names
+    // no model, so it must not land on whatever unrelated key shares the
+    // spelling. This guard covers shapes the label list does not enumerate;
+    // full dataset keys still resolve.
+    #[test]
+    fn model_part_index_does_not_resolve_bare_generic_tokens() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "someprovider/router".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        );
+        models_dev.insert(
+            "someprovider/default".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        // A bare generic token must not resolve through another provider's
+        // model part.
+        assert!(lookup.lookup("router").is_none());
+        assert!(lookup.lookup("default").is_none());
+
+        // The tokens' own full dataset keys are still exact matches.
+        assert_eq!(
+            lookup.lookup("someprovider/router").unwrap().matched_key,
+            "someprovider/router"
+        );
+        assert_eq!(
+            lookup.lookup("someprovider/default").unwrap().matched_key,
+            "someprovider/default"
         );
     }
 
