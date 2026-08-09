@@ -3903,6 +3903,7 @@ fn capitalize_client(client: &str) -> String {
         "gemini" => "Gemini".to_string(),
         "amp" => "Amp".to_string(),
         "codebuff" => "Codebuff".to_string(),
+        "freebuff" => "Freebuff".to_string(),
         "droid" => "Droid".to_string(),
         "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
