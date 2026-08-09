@@ -11329,6 +11329,66 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_contested_child_is_attributed_to_the_nearest_model() {
+        // Two parent responses on different models each persist an aggregate that
+        // contains one 50-token child, and only the second parent's child
+        // transcript survives. Both attributions are inside the tolerance window,
+        // so a maximum-cardinality match could reduce either aggregate and leave
+        // the global total intact -- but pricing is applied per model after
+        // reconciliation, so the wrong choice moves cost between models.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/parent/sub-child");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let parent_path = sessions.join("parent.jsonl");
+        std::fs::write(
+            &parent_path,
+            r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent-a","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"model-a","responseId":"parent-response-a","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"00000000","parentId":"parent-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent-a","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+{"type":"message","id":"parent-b","parentId":"00000000","timestamp":"2026-08-08T00:00:01.500Z","message":{"role":"assistant","provider":"anthropic","model":"model-b","responseId":"parent-response-b","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"ffffffff","parentId":"parent-b","timestamp":"2026-08-08T00:00:02.002Z","targetId":"parent-b","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.600Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.002Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                paths::json_path_literal(&parent_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // The warm source-cache lane must produce the same per-model rows,
+            // not just the same total.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            let mut per_model: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            for message in &messages {
+                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+            }
+            assert_eq!(per_model.get("model-a").copied(), Some(150));
+            assert_eq!(per_model.get("model-b").copied(), Some(100));
+            assert_eq!(per_model.get("child-model").copied(), Some(50));
+            assert_eq!(per_model.values().sum::<i64>(), 300);
+        }
+    }
+
+    #[test]
     fn test_parse_local_clients_reasonix_counts_reported_requests() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         // Where the scan will actually look, rather than the Unix spelling of
