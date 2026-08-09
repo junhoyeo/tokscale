@@ -1069,7 +1069,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             );
         };
 
-        let fingerprint = match fingerprint_status {
+        let mut fingerprint = match fingerprint_status {
             message_cache::FingerprintStatus::Unchanged => cached
                 .expect("an uncached source always builds a complete fingerprint")
                 .fingerprint
@@ -1079,31 +1079,59 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         if let Some(cached) = cached {
             if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
-                let (accounting, cache_entry) = match cached.prime_accounting.as_ref() {
-                    Some(accounting) => (accounting.clone(), None),
-                    None => {
-                        // Version-4 entries already contain valid messages but
-                        // predate Prime accounting metadata. Decode just the
-                        // accounting view once, then rewrite the same identity
-                        // and fingerprint with the backfill attached.
-                        let accounting = sessions::prime_agent::analyze_prime_agent_accounting(
-                            path,
-                            &cached.messages,
+                if let Some(accounting) = cached.prime_accounting.as_ref() {
+                    return (
+                        CachedParseOutcome {
+                            messages: cached_messages(cached, pricing),
+                            cache_entry: None,
+                            invalidate_cache: false,
+                        },
+                        accounting.clone(),
+                    );
+                }
+
+                // Version-4 entries already contain valid messages but predate
+                // Prime accounting metadata. Decode just the accounting view
+                // once, but never combine it with those messages until the
+                // fingerprint is revalidated: the file can change between the
+                // first check and this second transcript read.
+                #[cfg(test)]
+                sessions::prime_agent::run_accounting_backfill_test_hook(path);
+                let accounting =
+                    sessions::prime_agent::analyze_prime_agent_accounting(path, &cached.messages);
+                match message_cache::SourceFingerprint::check_path_samples_only(
+                    path,
+                    Some(&fingerprint),
+                ) {
+                    Some(message_cache::FingerprintStatus::Unchanged) => {
+                        return (
+                            CachedParseOutcome {
+                                messages: cached_messages(cached, pricing),
+                                cache_entry: Some(
+                                    cached.clone().with_prime_accounting(accounting.clone()),
+                                ),
+                                invalidate_cache: false,
+                            },
+                            accounting,
                         );
-                        (
-                            accounting.clone(),
-                            Some(cached.clone().with_prime_accounting(accounting)),
-                        )
                     }
-                };
-                return (
-                    CachedParseOutcome {
-                        messages: cached_messages(cached, pricing),
-                        cache_entry,
-                        invalidate_cache: false,
-                    },
-                    accounting,
-                );
+                    Some(message_cache::FingerprintStatus::Changed(refreshed)) => {
+                        fingerprint = refreshed;
+                    }
+                    None => {
+                        let (mut messages, accounting) =
+                            sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+                        apply_pricing_to_messages(&mut messages, pricing);
+                        return (
+                            CachedParseOutcome {
+                                messages,
+                                cache_entry: None,
+                                invalidate_cache: false,
+                            },
+                            accounting,
+                        );
+                    }
+                }
             }
         }
 
@@ -11462,6 +11490,59 @@ mod tests {
             .unwrap()
             .prime_accounting
             .is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_legacy_backfill_rebuilds_if_source_changes_during_read() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("legacy-race.jsonl");
+        let old_contents = r#"{"type":"session","version":3,"id":"legacy","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20},"aggregateUsage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130},"origin":"spawn_task"}
+"#;
+        let new_contents = r#"{"type":"session","version":3,"id":"legacy","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":240,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":250}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":40,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":40},"aggregateUsage":{"input":240,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":250},"origin":"spawn_task"}
+"#;
+        std::fs::write(&source_path, old_contents).unwrap();
+
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let messages = sessions::prime_agent::parse_prime_agent_file(&source_path);
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new(
+            identity,
+            &source_path,
+            message_cache::SourceFingerprint::from_path(&source_path).unwrap(),
+            messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        sessions::prime_agent::schedule_accounting_backfill_test_rewrite(
+            &source_path,
+            new_contents.to_string(),
+        );
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let clients = ["prime-agent".to_string()];
+        let rebuilt =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let rebuild_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(rebuild_calls, (1, 1));
+        assert_eq!(rebuilt[0].tokens.input, 240);
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            rebuild_calls
+        );
+        assert_eq!(warm[0].tokens.input, 240);
     }
 
     #[test]
