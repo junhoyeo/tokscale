@@ -1698,11 +1698,12 @@ fn scan_all_clients_with_env_strategy_inner(
         // the effective session directory (`dirname(sessions)/session-artifacts`).
         let [sessions, artifacts] =
             prime_agent_session_roots_with_env_strategy(home_dir, use_env_roots);
-        push_unique_scan_task(
+        push_unique_scan_task_with_pattern(
             &mut tasks,
             &mut seen_scan_roots,
             ClientId::PrimeAgent,
             sessions,
+            "prime-agent-session",
         );
         push_unique_scan_task_with_pattern(
             &mut tasks,
@@ -2167,6 +2168,22 @@ mod tests {
 
     fn restore_current_dir(previous: &Path) {
         std::env::set_current_dir(previous).unwrap();
+    }
+
+    struct CurrentDirGuard(PathBuf);
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self(previous)
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).unwrap();
+        }
     }
 
     fn setup_mock_copilot_dir(home: &Path) {
@@ -4147,6 +4164,12 @@ mod tests {
 ",
         )
         .unwrap();
+        fs::write(
+            project.join("session-artifacts/root/rlm-subagents.jsonl"),
+            "{}
+",
+        )
+        .unwrap();
 
         let mut env = EnvGuard::capture(&[
             "PRIME_AGENT_SESSION_DIR",
@@ -4156,11 +4179,9 @@ mod tests {
         env.remove("PRIME_AGENT_SESSION_DIR");
         env.remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
         env.remove("PRIME_AGENT_CODING_AGENT_DIR");
-        let previous_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project).unwrap();
+        let _current_dir = CurrentDirGuard::set(&project);
         let roots = prime_agent_session_roots_with_env_strategy(home.to_str().unwrap(), true);
         let result = scan_all_clients(home.to_str().unwrap(), &["prime-agent".to_string()]);
-        restore_current_dir(&previous_dir);
 
         let canonical_project = project.canonicalize().unwrap();
         assert_eq!(roots[0].canonicalize().unwrap(), canonical_project);
