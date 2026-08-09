@@ -27,7 +27,7 @@ use std::time::UNIX_EPOCH;
 // payload layout. Old shards must be silently rebuilt rather than decoded.
 // 5: Prime Agent entries cache reconciliation accounting beside their messages.
 // Version-4 shards have an explicit wire migration below, so other clients stay
-// warm and Prime entries need only one accounting-only backfill.
+// warm and Prime entries need only one rebuild/backfill.
 const CACHE_FORMAT_VERSION: u32 = 5;
 const LEGACY_CACHE_FORMAT_VERSION: u32 = 4;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:

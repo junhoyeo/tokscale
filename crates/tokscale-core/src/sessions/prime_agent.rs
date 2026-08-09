@@ -54,7 +54,14 @@ pub(crate) fn run_accounting_backfill_test_hook(path: &Path) {
         .is_some_and(|(scheduled_path, _)| scheduled_path == path)
     {
         let (_, contents) = scheduled.take().unwrap();
+        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
         std::fs::write(path, contents).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
     }
 }
 
