@@ -3074,9 +3074,18 @@ fn exclude_unpriced_submission_messages(
             );
 
         if is_unpriced {
-            let reason = if is_generic_routing_label(&message.provider_id, &message.model_id) {
-                ROUTING_LABEL_UNPRICED_REASON
-            } else if pricing
+            // Resolution is consulted before the routing-label reason, not
+            // after. `custom-pricing.json` is read first by
+            // `lookup_with_source_and_provider`, and stating a rate for `auto`
+            // there is the user asserting the label does name something for
+            // them — the escape hatch `lookup::ROUTING_LABELS` documents.
+            // Checking the label first told that user their label "has no
+            // authoritative model-to-price mapping" while their own file held
+            // one, hiding the fixable gap (a bucket their entry omits).
+            // Nothing regresses for unpriced labels: the resolver refuses
+            // routing labels outright, so with no custom entry this returns
+            // None and the routing-label reason still applies.
+            let reason = if pricing
                 .lookup_with_source_and_provider(
                     &message.model_id,
                     None,
@@ -3085,6 +3094,8 @@ fn exclude_unpriced_submission_messages(
                 .is_some()
             {
                 INCOMPLETE_MODEL_PRICING_REASON
+            } else if is_generic_routing_label(&message.provider_id, &message.model_id) {
+                ROUTING_LABEL_UNPRICED_REASON
             } else {
                 MISSING_MODEL_PRICING_REASON
             };
@@ -8460,6 +8471,67 @@ mod tests {
                 message_count: 7,
                 total_tokens: 18,
                 reason: ROUTING_LABEL_UNPRICED_REASON,
+            }
+        );
+    }
+
+    #[test]
+    fn custom_priced_routing_label_reports_incomplete_pricing_not_missing_mapping() {
+        // A `custom-pricing.json` entry for a routing label is the user
+        // stating what their router actually costs them — the escape hatch
+        // `ROUTING_LABELS` documents. Telling that user the label "has no
+        // authoritative model-to-price mapping" contradicts the mapping they
+        // just wrote. Here the custom entry quotes an input rate but no cache
+        // rate, so the row still fails coverage; the reason must name the gap
+        // that is actually fixable (the missing cache-read rate), not deny the
+        // mapping exists.
+        let mut custom_models = HashMap::new();
+        custom_models.insert(
+            "auto".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(3e-6),
+                output_cost_per_token: Some(1.5e-5),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(custom_models),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let mut auto = UnifiedMessage::new(
+            "kiro",
+            "auto",
+            "amazon-bedrock",
+            "generic",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 7,
+                cache_read: 11,
+                ..Default::default()
+            },
+            0.0,
+        );
+        auto.message_count = 7;
+
+        let graph = build_graph_from_messages(
+            vec![auto],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("routing label must not abort submission");
+
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0],
+            UnpricedSubmissionExclusion {
+                provider_id: "amazon-bedrock".to_string(),
+                model_id: "auto".to_string(),
+                message_count: 7,
+                total_tokens: 18,
+                reason: INCOMPLETE_MODEL_PRICING_REASON,
             }
         );
     }
