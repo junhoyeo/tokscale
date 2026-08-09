@@ -197,9 +197,68 @@ impl ResolutionEvidence {
         }
     }
 
-    pub fn is_submission_safe(&self) -> bool {
-        self.kind != ResolutionKind::Fuzzy || (self.exact_model_identity && self.price_consensus)
+    /// Why this resolution cannot be published, or `None` when it can.
+    ///
+    /// Submission diagnostics report the returned gap verbatim, so this is the
+    /// single place that decides both whether a row is publishable and what to
+    /// say about a row that is not. Deriving the message from the same match
+    /// that decides safety is what keeps a diagnostic from claiming candidates
+    /// disagreed when the lookup only ever saw one.
+    pub fn submission_safety_gap(&self) -> Option<SubmissionSafetyGap> {
+        if self.kind != ResolutionKind::Fuzzy {
+            return None;
+        }
+        if !self.price_consensus {
+            return Some(SubmissionSafetyGap::PriceDisagreement);
+        }
+        if !self.exact_model_identity {
+            return Some(SubmissionSafetyGap::UnverifiedModelIdentity);
+        }
+        None
     }
+
+    pub fn is_submission_safe(&self) -> bool {
+        self.submission_safety_gap().is_none()
+    }
+
+    /// Compose evidence for a row whose missing rates were filled from
+    /// `donor`.
+    ///
+    /// The filled row publishes `donor`'s rate under its own key, so it can be
+    /// no stronger than the resolution that rate came from. Without this, a
+    /// submission-safe hinted row filled from an ambiguous fuzzy canonical row
+    /// launders that ambiguity into a submitted price: the hinted row's own
+    /// evidence says nothing about the borrowed bucket, and the leaderboard
+    /// receives a rate the resolver had already judged too weak to publish.
+    fn borrowing_from(&self, donor: &Self) -> Self {
+        Self {
+            // A donor that could not be published on its own is the composed
+            // row's weakest link, so report its kind rather than the stronger
+            // kind of the row being filled.
+            kind: if donor.is_submission_safe() {
+                self.kind
+            } else {
+                donor.kind
+            },
+            candidate_count: self.candidate_count.max(donor.candidate_count),
+            price_consensus: self.price_consensus && donor.price_consensus,
+            exact_model_identity: self.exact_model_identity && donor.exact_model_identity,
+            alias_applied: self.alias_applied || donor.alias_applied,
+            normalized: self.normalized || donor.normalized,
+            stripped: self.stripped || donor.stripped,
+        }
+    }
+}
+
+/// Why a resolution is not safe to publish to the shared leaderboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionSafetyGap {
+    /// The considered candidates do not publish the same rates, so the
+    /// selected candidate's price is one of several conflicting answers.
+    PriceDisagreement,
+    /// No candidate names the requested model exactly, so the price belongs to
+    /// a model that merely resembles the one that was used.
+    UnverifiedModelIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -1460,9 +1519,15 @@ impl PricingLookup {
 
         // Keep the hinted row's source and matched key: `compute_cost_for_lookup`
         // branches on both for OpenAI's full-request 272k tiering, so borrowing
-        // rates must not change which pricing model applies.
+        // rates must not change which pricing model applies. The evidence is
+        // composed rather than kept, because the filled row now quotes the
+        // canonical row's rates and has to be judged on the weaker of the two
+        // resolutions. The estimate stays visible either way; only its
+        // publishability changes.
+        let evidence = hinted.evidence.borrowing_from(&canonical.evidence);
         Some(LookupResult {
             pricing: filled,
+            evidence,
             ..hinted
         })
     }
@@ -5228,6 +5293,125 @@ mod tests {
         assert!(result.evidence.exact_model_identity);
         assert!(result.evidence.stripped);
         assert!(result.evidence.is_submission_safe());
+    }
+
+    /// A provider-hinted row that resolves deterministically is publishable on
+    /// its own evidence, but the rates it borrows to cover a bucket it does not
+    /// price are only as trustworthy as the row they came from. Filling from an
+    /// ambiguous fuzzy canonical row must not turn that row's price into a
+    /// submitted one.
+    #[test]
+    fn borrowed_rates_from_an_ambiguous_canonical_row_are_not_submission_safe() {
+        let disputed_cache_row = |cache_read: f64| ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            cache_read_input_token_cost: Some(cache_read),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            (
+                "azure_ai/atlas-chat".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-a/atlas-chat-preview".to_string(),
+                disputed_cache_row(5e-7),
+            ),
+            (
+                "vendor-b/atlas-chat-beta".to_string(),
+                disputed_cache_row(9e-7),
+            ),
+        ]);
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 20,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let hinted = lookup
+            .lookup_with_provider("atlas-chat", Some("azure"))
+            .expect("the provider-hinted row resolves deterministically");
+        assert_eq!(hinted.matched_key, "azure_ai/atlas-chat");
+        assert!(hinted.evidence.is_submission_safe());
+
+        let canonical = lookup
+            .lookup_with_provider("atlas-chat", None)
+            .expect("the unhinted lookup falls back to a fuzzy estimate");
+        assert_eq!(canonical.evidence.kind, ResolutionKind::Fuzzy);
+        assert!(!canonical.evidence.is_submission_safe());
+
+        // The cache-read rate is borrowed from a row the resolver already
+        // refused to publish, and the candidates it was chosen from disagree
+        // about it (5e-7 against 9e-7).
+        let resolved = lookup
+            .resolve_for_usage("atlas-chat", Some("azure"), &usage)
+            .expect("the hinted row still resolves");
+        assert_eq!(resolved.matched_key, "azure_ai/atlas-chat");
+        assert_eq!(resolved.pricing.cache_read_input_token_cost, Some(5e-7));
+        assert!(
+            !lookup.covers_usage_with_provider("atlas-chat", Some("azure"), &usage),
+            "a rate borrowed from an ambiguous canonical row must not be publishable \
+             through a submission-safe hinted row"
+        );
+        assert_eq!(
+            resolved.evidence.submission_safety_gap(),
+            Some(SubmissionSafetyGap::PriceDisagreement)
+        );
+        assert!(!resolved.evidence.is_submission_safe());
+
+        // The estimate itself stays visible: this separates estimates from
+        // submissions, it does not stop reporting the cache-read cost.
+        let cost = lookup.calculate_cost_with_provider("atlas-chat", Some("azure"), &usage);
+        assert!((cost - (100.0 * 1e-6 + 50.0 * 2e-6 + 20.0 * 5e-7)).abs() < 1e-12);
+    }
+
+    /// The counterpart to the guard above: when the canonical row is itself
+    /// publishable, borrowing its rate must still produce a submittable price.
+    /// This is the #1013 behaviour the borrow exists for.
+    #[test]
+    fn borrowed_rates_from_a_submission_safe_canonical_row_still_submit() {
+        let litellm = HashMap::from([
+            (
+                "azure_ai/atlas-chat".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "atlas-chat".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    cache_read_input_token_cost: Some(5e-7),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 20,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolved = lookup
+            .resolve_for_usage("atlas-chat", Some("azure"), &usage)
+            .expect("the hinted row resolves");
+        assert_eq!(resolved.matched_key, "azure_ai/atlas-chat");
+        assert_eq!(resolved.pricing.cache_read_input_token_cost, Some(5e-7));
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(lookup.covers_usage_with_provider("atlas-chat", Some("azure"), &usage));
     }
 
     #[test]
