@@ -84,6 +84,12 @@ fn subtract_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
 
 type UsageKey = (i64, i64, i64, i64);
 type LineageUsageKey = (PathBuf, UsageKey);
+/// Attribution ids are only unique within one session: Prime mints them with
+/// `randomUUID().slice(0, 8)` and collision-checks against that session's own id
+/// map alone. Pairing an id with its resolved lineage root keeps fork copies of
+/// one attribution collapsed while keeping a colliding id in an unrelated
+/// lineage independent.
+type AttributionKey = (PathBuf, String);
 
 fn usage_key(usage: &TokenBreakdown) -> UsageKey {
     (
@@ -92,6 +98,37 @@ fn usage_key(usage: &TokenBreakdown) -> UsageKey {
         usage.cache_read,
         usage.cache_write,
     )
+}
+
+/// Resolve every file to the head of its fork chain. Serializing a fork copies
+/// the parent's `child_usage_attributed` records verbatim, so all copies within
+/// one chain describe the same invocation and must share an attribution
+/// identity. Files in different chains never do.
+fn lineage_roots(accounting: &[PrimeFileAccounting]) -> HashMap<PathBuf, PathBuf> {
+    let forked_from: HashMap<&PathBuf, &PathBuf> = accounting
+        .iter()
+        .filter_map(|file| Some((&file.source_path, file.fork_parent_path.as_ref()?)))
+        .collect();
+    let mut roots = HashMap::new();
+    for file in accounting {
+        let mut root = &file.source_path;
+        let mut visited = HashSet::new();
+        while visited.insert(root.clone()) {
+            let Some(parent) = forked_from.get(root) else {
+                break;
+            };
+            root = parent;
+        }
+        roots.insert(file.source_path.clone(), root.clone());
+    }
+    roots
+}
+
+fn lineage_root(roots: &HashMap<PathBuf, PathBuf>, file: &PrimeFileAccounting) -> PathBuf {
+    roots
+        .get(&file.source_path)
+        .cloned()
+        .unwrap_or_else(|| file.source_path.clone())
 }
 
 fn lineage_path(path: &Path) -> PathBuf {
@@ -306,14 +343,19 @@ pub(crate) fn reconcile_prime_agent_messages(
     // parent session and whose completion timestamp is the same event (Prime
     // writes the two records within milliseconds). This disambiguates equal
     // token buckets produced by separate children in one parent.
+    // Attribution ids are unique only inside one session, so they are keyed by
+    // their lineage root as well: fork copies of one attribution still collapse,
+    // while a colliding id minted in an unrelated lineage stays separate.
+    let roots = lineage_roots(accounting);
     let mut unique_attributions: BTreeMap<
-        String,
+        AttributionKey,
         (TokenBreakdown, Option<i64>, BTreeSet<PathBuf>),
     > = BTreeMap::new();
     for file in accounting {
+        let lineage = lineage_root(&roots, file);
         for attribution in &file.attributions {
             let (_, _, owners) = unique_attributions
-                .entry(attribution.id.clone())
+                .entry((lineage.clone(), attribution.id.clone()))
                 .or_insert_with(|| {
                     (
                         attribution.child_usage.clone(),
@@ -322,14 +364,15 @@ pub(crate) fn reconcile_prime_agent_messages(
                     )
                 });
             owners.insert(file.source_path.clone());
+            owners.insert(lineage.clone());
             if let Some(parent) = &file.fork_parent_path {
                 owners.insert(parent.clone());
             }
         }
     }
 
-    let mut represented_attributions = HashSet::new();
-    for (id, (usage, attribution_timestamp, owners)) in unique_attributions {
+    let mut represented_attributions: HashSet<AttributionKey> = HashSet::new();
+    for (attribution_key, (usage, attribution_timestamp, owners)) in unique_attributions {
         let mut timed_candidates = Vec::new();
         let mut untimed_candidates = Vec::new();
         for owner in owners {
@@ -362,24 +405,28 @@ pub(crate) fn reconcile_prime_agent_messages(
         if let Some((key, index)) = selected {
             if let Some(children) = available_children.get_mut(&key) {
                 children.swap_remove(index);
-                represented_attributions.insert(id);
+                represented_attributions.insert(attribution_key);
             }
         }
     }
 
-    let mut adjustment_groups: HashMap<String, Vec<&PrimeUsageAdjustment>> = HashMap::new();
+    let mut adjustment_groups: HashMap<String, Vec<(PathBuf, &PrimeUsageAdjustment)>> =
+        HashMap::new();
     let mut attribution_fallback_bases = HashSet::new();
-    for adjustment in accounting.iter().flat_map(|file| &file.adjustments) {
-        let identity = fallback_key_base(&adjustment.dedup_key)
-            .inspect(|base| {
-                attribution_fallback_bases.insert((*base).to_string());
-            })
-            .unwrap_or(&adjustment.dedup_key)
-            .to_string();
-        adjustment_groups
-            .entry(identity)
-            .or_default()
-            .push(adjustment);
+    for file in accounting {
+        let lineage = lineage_root(&roots, file);
+        for adjustment in &file.adjustments {
+            let identity = fallback_key_base(&adjustment.dedup_key)
+                .inspect(|base| {
+                    attribution_fallback_bases.insert((*base).to_string());
+                })
+                .unwrap_or(&adjustment.dedup_key)
+                .to_string();
+            adjustment_groups
+                .entry(identity)
+                .or_default()
+                .push((lineage.clone(), adjustment));
+        }
     }
 
     let mut grouped: HashMap<String, Vec<UnifiedMessage>> = HashMap::new();
@@ -416,20 +463,20 @@ pub(crate) fn reconcile_prime_agent_messages(
 
         let mut base_usage = TokenBreakdown::default();
         let mut found_base = false;
-        let mut all_attributions: BTreeMap<String, TokenBreakdown> = BTreeMap::new();
-        for adjustment in adjustments {
+        let mut all_attributions: BTreeMap<AttributionKey, TokenBreakdown> = BTreeMap::new();
+        for (lineage, adjustment) in adjustments {
             let mut own_usage = adjustment.persisted_usage.clone();
             for attribution in &adjustment.attributions {
                 subtract_usage(&mut own_usage, &attribution.child_usage);
                 all_attributions
-                    .entry(attribution.id.clone())
+                    .entry((lineage.clone(), attribution.id.clone()))
                     .or_insert_with(|| attribution.child_usage.clone());
             }
             maximize_usage(&mut base_usage, &own_usage);
             found_base = true;
         }
         for message in &group {
-            let is_aggregate_copy = adjustments.iter().any(|adjustment| {
+            let is_aggregate_copy = adjustments.iter().any(|(_, adjustment)| {
                 message.dedup_key.as_deref() == Some(&adjustment.dedup_key)
                     && message.tokens == adjustment.persisted_usage
             });
@@ -443,8 +490,8 @@ pub(crate) fn reconcile_prime_agent_messages(
                 maximize_usage(&mut base_usage, &message.tokens);
             }
         }
-        for (id, usage) in all_attributions {
-            if !represented_attributions.contains(&id) {
+        for (attribution_key, usage) in all_attributions {
+            if !represented_attributions.contains(&attribution_key) {
                 add_usage(&mut base_usage, &usage);
             }
         }
@@ -751,6 +798,131 @@ mod tests {
 
         assert_ne!(original[0].timestamp, fork[0].timestamp);
         assert_eq!(original[0].dedup_key, fork[0].dedup_key);
+    }
+
+    /// Prime allocates attribution ids with `randomUUID().slice(0, 8)` and only
+    /// collision-checks them against the current session's own id map, so the
+    /// same 32-bit id can appear in two unrelated sessions. A collision must not
+    /// let one lineage's parsed child authorize a subtraction in the other.
+    #[test]
+    fn colliding_attribution_ids_in_separate_lineages_stay_independent() {
+        fn totals(reverse: bool) -> (i64, i64) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_a = dir.path().join("parent-a.jsonl");
+            let child_a = dir.path().join("child-a.jsonl");
+            let parent_b = dir.path().join("parent-b.jsonl");
+            std::fs::write(
+                &parent_a,
+                r#"{"type":"session","version":3,"id":"parent-a","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-a-response","usage":{"input":120,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}
+{"type":"child_usage_attributed","id":"deadbeef","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20},"aggregateUsage":{"input":120,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":120},"origin":"spawn_task"}
+"#,
+            )
+            .unwrap();
+            std::fs::write(
+                &child_a,
+                format!(
+                    r#"{{"type":"session","version":3,"id":"child-a","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child","parentId":null,"timestamp":"2026-08-08T00:00:02.001Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-a-response","usage":{{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}}}}
+"#,
+                    serde_json::to_string(&parent_a.to_string_lossy()).unwrap()
+                ),
+            )
+            .unwrap();
+            // Unrelated lineage reusing the same 8-hex attribution id. Its own
+            // child transcript was pruned, so the aggregate parent must stand.
+            std::fs::write(
+                &parent_b,
+                r#"{"type":"session","version":3,"id":"parent-b","timestamp":"2026-08-09T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-09T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-b-response","usage":{"input":130,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":130}}}
+{"type":"child_usage_attributed","id":"deadbeef","parentId":"parent","timestamp":"2026-08-09T00:00:02.000Z","targetId":"parent","childUsage":{"input":30,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":30},"aggregateUsage":{"input":130,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":130},"origin":"spawn_task"}
+"#,
+            )
+            .unwrap();
+
+            let mut paths = vec![parent_a, child_a, parent_b];
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let parent_b_input = messages
+                .iter()
+                .find(|message| {
+                    message.dedup_key.as_deref() == Some("prime-agent:response:parent-b-response")
+                })
+                .map_or(0, |message| message.tokens.input);
+            (
+                messages.iter().map(|message| message.tokens.input).sum(),
+                parent_b_input,
+            )
+        }
+
+        // parent-a reconciles to 100, its parsed child contributes 20, and the
+        // pruned lineage keeps its full aggregate 130.
+        assert_eq!(totals(false), (250, 130));
+        assert_eq!(totals(true), (250, 130));
+    }
+
+    #[test]
+    fn attributed_child_larger_than_the_parent_aggregate_clamps_at_zero() {
+        fn tokens(input: i64, output: i64) -> TokenBreakdown {
+            TokenBreakdown {
+                input,
+                output,
+                ..TokenBreakdown::default()
+            }
+        }
+
+        let mut message = UnifiedMessage::new(
+            "prime-agent",
+            "claude-opus-5",
+            "anthropic",
+            "partial",
+            1,
+            tokens(40, 10),
+            0.0,
+        );
+        message.dedup_key = Some("prime-agent:response:partial".to_string());
+        let attribution = PrimeAttribution {
+            id: "deadbeef".to_string(),
+            timestamp: Some(1),
+            child_usage: tokens(90, 25),
+            aggregate_usage: tokens(40, 10),
+        };
+        let accounting = [PrimeFileAccounting {
+            source_path: PathBuf::from("partial.jsonl"),
+            attributions: vec![attribution.clone()],
+            adjustments: vec![PrimeUsageAdjustment {
+                dedup_key: "prime-agent:response:partial".to_string(),
+                persisted_usage: tokens(40, 10),
+                attributions: vec![attribution],
+            }],
+            ..PrimeFileAccounting::default()
+        }];
+
+        let messages = reconcile_prime_agent_messages(vec![message], &accounting);
+
+        assert_eq!(messages.len(), 1);
+        // 40 - 90 clamps to 0 instead of wrapping, then the unavailable child is
+        // restored, so the row never reports a negative or absurd bucket.
+        assert_eq!(messages[0].tokens.input, 90);
+        assert_eq!(messages[0].tokens.output, 25);
     }
 
     #[test]
