@@ -4163,12 +4163,19 @@ mod tests {
         restore_current_dir(&previous_dir);
 
         let canonical_project = project.canonicalize().unwrap();
-        assert_eq!(roots[0], canonical_project);
-        assert_eq!(roots[1], canonical_project.join("session-artifacts"));
+        assert_eq!(roots[0].canonicalize().unwrap(), canonical_project);
+        assert_eq!(
+            roots[1].canonicalize().unwrap(),
+            project.join("session-artifacts").canonicalize().unwrap()
+        );
         let files = result.get(ClientId::PrimeAgent);
         assert_eq!(files.len(), 2);
-        assert!(files.contains(&root.canonicalize().unwrap()));
-        assert!(files.contains(&child.canonicalize().unwrap()));
+        let canonical_files: Vec<PathBuf> = files
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert!(canonical_files.contains(&root.canonicalize().unwrap()));
+        assert!(canonical_files.contains(&child.canonicalize().unwrap()));
     }
 
     #[test]
