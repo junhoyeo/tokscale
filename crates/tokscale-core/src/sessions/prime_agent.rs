@@ -90,6 +90,10 @@ type LineageUsageKey = (PathBuf, UsageKey);
 /// one attribution collapsed while keeping a colliding id in an unrelated
 /// lineage independent.
 type AttributionKey = (PathBuf, String);
+/// One parsed child response: the pool bucket it landed in plus its position
+/// inside that bucket. Buckets are keyed by parent lineage and usage, so this
+/// identifies a single transcript entry without depending on scan order.
+type ChildResponseRef = (LineageUsageKey, usize);
 
 fn usage_key(usage: &TokenBreakdown) -> UsageKey {
     (
@@ -317,6 +321,32 @@ fn rewrite_fallback_usage(key: &str, usage: &TokenBreakdown) -> String {
     )
 }
 
+/// Claim one eligible child response for `attribution`, re-seating an already
+/// matched attribution along an augmenting path when that frees a response.
+/// Returns whether `attribution` ended up matched. This is Kuhn's algorithm; it
+/// recurses only through attributions that contend for the same equal-usage
+/// child responses inside one lineage, which is a handful even in long threads.
+fn match_child_response(
+    attribution: usize,
+    eligible: &[Vec<ChildResponseRef>],
+    matched_children: &mut HashMap<ChildResponseRef, usize>,
+    visited: &mut HashSet<ChildResponseRef>,
+) -> bool {
+    for candidate in &eligible[attribution] {
+        if !visited.insert(candidate.clone()) {
+            continue;
+        }
+        let holder = matched_children.get(candidate).copied();
+        if holder
+            .is_none_or(|holder| match_child_response(holder, eligible, matched_children, visited))
+        {
+            matched_children.insert(candidate.clone(), attribution);
+            return true;
+        }
+    }
+    false
+}
+
 /// Subtract child usage only when a matching RLM transcript was actually
 /// parsed, then collapse fork copies. Missing/pruned children remain represented
 /// by Prime's aggregate parent usage instead of disappearing from the total.
@@ -371,44 +401,79 @@ pub(crate) fn reconcile_prime_agent_messages(
         }
     }
 
-    let mut represented_attributions: HashSet<AttributionKey> = HashSet::new();
-    for (attribution_key, (usage, attribution_timestamp, owners)) in unique_attributions {
-        let mut timed_candidates = Vec::new();
-        let mut untimed_candidates = Vec::new();
-        for owner in owners {
-            let key = (owner, usage_key(&usage));
-            let Some(children) = available_children.get(&key) else {
-                continue;
-            };
-            for (index, child_timestamp) in children.iter().enumerate() {
-                match (attribution_timestamp, *child_timestamp) {
-                    (Some(attribution), Some(child)) => {
-                        let distance = attribution.abs_diff(child) as i64;
-                        if distance <= ATTRIBUTION_TIMESTAMP_TOLERANCE_MS {
-                            timed_candidates.push((distance, key.clone(), index));
+    // The matching rule, in full. An attribution authorizes subtracting its
+    // `childUsage` from the parent aggregate only when a parsed child response
+    // is matched to it, and a child response is eligible only when all three
+    // hold:
+    //
+    // 1. Lineage and size. The child's `parentSession` header must resolve to a
+    //    file that owns the attribution, and the child's usage must equal the
+    //    recorded `childUsage` bucket exactly.
+    // 2. Provable completion identity. Either both records carry a timestamp
+    //    within ATTRIBUTION_TIMESTAMP_TOLERANCE_MS -- Prime appends the
+    //    attribution milliseconds after the child response it describes -- or
+    //    neither record carries one, which only happens in transcripts written
+    //    before Prime timestamped its entries and where lineage plus size is
+    //    the only identity that exists. A half-timed pairing proves nothing, so
+    //    an unrelated same-sized sibling can never stand in for a pruned child
+    //    and shrink the parent.
+    // 3. Exclusivity. Matching is one-to-one: every child response authorizes
+    //    at most one attribution and every attribution consumes at most one
+    //    child response. N children of equal size completing in the same
+    //    millisecond pair off with their N attributions rather than being
+    //    discarded as ambiguous, which would count both the children and the
+    //    parent aggregate that already contains them.
+    //
+    // Rule 3 uses augmenting paths rather than nearest-first greed so that a
+    // contested child response cannot strand an attribution that had no other
+    // candidate. Every attribution contending for one child response carries
+    // the same `childUsage` (the pool is keyed by usage), so the reconciled
+    // total depends only on how many attributions are matched, never on which
+    // maximum matching is found.
+    let attribution_keys: Vec<AttributionKey> = unique_attributions.keys().cloned().collect();
+    let eligible: Vec<Vec<ChildResponseRef>> = unique_attributions
+        .values()
+        .map(|(usage, attribution_timestamp, owners)| {
+            let mut candidates: Vec<(i64, ChildResponseRef)> = Vec::new();
+            for owner in owners {
+                let key = (owner.clone(), usage_key(usage));
+                let Some(children) = available_children.get(&key) else {
+                    continue;
+                };
+                for (index, child_timestamp) in children.iter().enumerate() {
+                    match (attribution_timestamp, *child_timestamp) {
+                        (Some(attribution), Some(child)) => {
+                            let distance = attribution.abs_diff(child) as i64;
+                            if distance <= ATTRIBUTION_TIMESTAMP_TOLERANCE_MS {
+                                candidates.push((distance, (key.clone(), index)));
+                            }
                         }
+                        // Untimed on both sides: legacy transcripts, matched on
+                        // lineage and size alone and ranked after every timed
+                        // pairing.
+                        (None, None) => candidates
+                            .push((ATTRIBUTION_TIMESTAMP_TOLERANCE_MS + 1, (key.clone(), index))),
+                        _ => {}
                     }
-                    _ => untimed_candidates.push((key.clone(), index)),
                 }
             }
-        }
+            candidates.sort();
+            candidates
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .collect()
+        })
+        .collect();
 
-        timed_candidates.sort_by_key(|candidate| candidate.0);
-        let selected = timed_candidates.first().and_then(|best| {
-            let tied = timed_candidates.get(1).is_some_and(|next| next.0 == best.0);
-            (!tied).then(|| (best.1.clone(), best.2))
-        });
-        let selected = selected.or_else(|| {
-            (timed_candidates.is_empty() && untimed_candidates.len() == 1)
-                .then(|| untimed_candidates.remove(0))
-        });
-        if let Some((key, index)) = selected {
-            if let Some(children) = available_children.get_mut(&key) {
-                children.swap_remove(index);
-                represented_attributions.insert(attribution_key);
-            }
-        }
+    let mut matched_children: HashMap<ChildResponseRef, usize> = HashMap::new();
+    for attribution in 0..attribution_keys.len() {
+        let mut visited = HashSet::new();
+        match_child_response(attribution, &eligible, &mut matched_children, &mut visited);
     }
+    let represented_attributions: HashSet<AttributionKey> = matched_children
+        .into_values()
+        .map(|attribution| attribution_keys[attribution].clone())
+        .collect();
 
     let mut adjustment_groups: HashMap<String, Vec<(PathBuf, &PrimeUsageAdjustment)>> =
         HashMap::new();
@@ -923,6 +988,221 @@ mod tests {
         // restored, so the row never reports a negative or absurd bucket.
         assert_eq!(messages[0].tokens.input, 90);
         assert_eq!(messages[0].tokens.output, 25);
+    }
+
+    /// Two child responses of the same size completing inside one timestamp
+    /// millisecond used to produce two tied candidates for each attribution.
+    /// Rejecting both ties left the parent aggregate holding both children while
+    /// the two child transcripts were also counted, double counting them.
+    #[test]
+    fn concurrent_equal_sized_children_pair_off_with_their_attributions() {
+        fn totals(reverse: bool) -> (i64, i64) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_path = dir.path().join("parent.jsonl");
+            let child_a = dir.path().join("child-a.jsonl");
+            let child_b = dir.path().join("child-b.jsonl");
+            std::fs::write(
+                &parent_path,
+                r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":200,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":200},"origin":"spawn_task"}
+{"type":"child_usage_attributed","id":"usage-b","parentId":"usage-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300},"origin":"spawn_task"}
+"#,
+            )
+            .unwrap();
+            // Both children answered the same parent in the same millisecond, so
+            // neither timestamp distinguishes them from the other's attribution.
+            for (path, response) in [
+                (&child_a, "child-a-response"),
+                (&child_b, "child-b-response"),
+            ] {
+                std::fs::write(
+                    path,
+                    format!(
+                        r#"{{"type":"session","version":3,"id":"{response}","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"{response}","usage":{{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100}}}}}}
+"#,
+                        serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+                    ),
+                )
+                .unwrap();
+            }
+
+            let mut paths = vec![parent_path, child_a, child_b];
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let parent_input = messages
+                .iter()
+                .find(|message| {
+                    message.dedup_key.as_deref() == Some("prime-agent:response:parent-response")
+                })
+                .map_or(0, |message| message.tokens.input);
+            (
+                messages.iter().map(|message| message.tokens.input).sum(),
+                parent_input,
+            )
+        }
+
+        // The parent keeps only its own 100; each of the two 100-token children
+        // is counted once from its own transcript.
+        assert_eq!(totals(false), (300, 100));
+        assert_eq!(totals(true), (300, 100));
+    }
+
+    /// A surviving child response with no completion timestamp cannot prove it
+    /// is the child a timed attribution describes. Accepting it because it was
+    /// the only same-sized bucket let an unrelated sibling authorize the
+    /// subtraction of a pruned child, undercounting billable usage.
+    #[test]
+    fn an_untimed_sibling_child_does_not_authorize_a_pruned_child_subtraction() {
+        fn totals(reverse: bool) -> (i64, i64) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_path = dir.path().join("parent.jsonl");
+            let sibling_path = dir.path().join("sibling.jsonl");
+            // The attributed child transcript is gone; only the attribution
+            // records that it spent 50 input tokens inside the 150 aggregate.
+            std::fs::write(
+                &parent_path,
+                r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+"#,
+            )
+            .unwrap();
+            // An unrelated child of the same parent that happens to have spent
+            // the same 50 input tokens, and whose entry carries no timestamp.
+            std::fs::write(
+                &sibling_path,
+                format!(
+                    r#"{{"type":"session","version":3,"id":"sibling","timestamp":"2026-08-08T00:00:20.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"sibling-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                    serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let mut paths = vec![parent_path, sibling_path];
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let parent_input = messages
+                .iter()
+                .find(|message| {
+                    message.dedup_key.as_deref() == Some("prime-agent:response:parent-response")
+                })
+                .map_or(0, |message| message.tokens.input);
+            (
+                messages.iter().map(|message| message.tokens.input).sum(),
+                parent_input,
+            )
+        }
+
+        // The aggregate parent keeps its full 150 because the child it names was
+        // never parsed, and the untimed sibling adds its own 50 on top.
+        assert_eq!(totals(false), (200, 150));
+        assert_eq!(totals(true), (200, 150));
+    }
+
+    /// Transcripts written before Prime timestamped its entries carry no timing
+    /// on either side of the pair. Lineage plus usage is then the only identity
+    /// that exists, so it must still authorize the subtraction rather than
+    /// double counting every legacy child.
+    #[test]
+    fn timestampless_transcripts_still_match_on_lineage_and_usage() {
+        fn totals(reverse: bool) -> (i64, i64) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_path = dir.path().join("parent.jsonl");
+            let child_path = dir.path().join("child.jsonl");
+            std::fs::write(
+                &parent_path,
+                r#"{"type":"session","version":3,"id":"parent","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent","targetId":"parent","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+"#,
+            )
+            .unwrap();
+            std::fs::write(
+                &child_path,
+                format!(
+                    r#"{{"type":"session","version":3,"id":"child","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                    serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let mut paths = vec![parent_path, child_path];
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let parent_input = messages
+                .iter()
+                .find(|message| {
+                    message.dedup_key.as_deref() == Some("prime-agent:response:parent-response")
+                })
+                .map_or(0, |message| message.tokens.input);
+            (
+                messages.iter().map(|message| message.tokens.input).sum(),
+                parent_input,
+            )
+        }
+
+        assert_eq!(totals(false), (150, 100));
+        assert_eq!(totals(true), (150, 100));
     }
 
     #[test]

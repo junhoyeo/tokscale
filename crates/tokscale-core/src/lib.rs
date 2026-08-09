@@ -11164,6 +11164,87 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_prime_agent_concurrent_equal_children_are_counted_once() {
+        // Two children of the same parent spent identical tokens and finished in
+        // the same millisecond, so no timestamp separates one child's response
+        // from the other's attribution. Both must still be paired off: keeping
+        // the aggregate parent while also counting both transcripts would report
+        // their usage twice.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let root_path = sessions.join("a-root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":200,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":200},"origin":"spawn_task"}
+{"type":"child_usage_attributed","id":"usage-b","parentId":"usage-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        for child in ["sub-a", "sub-b"] {
+            let child_dir = source_home
+                .path()
+                .join(".prime/agent/session-artifacts/a-root")
+                .join(child);
+            std::fs::create_dir_all(&child_dir).unwrap();
+            std::fs::write(
+                child_dir.join("child.jsonl"),
+                format!(
+                    r#"{{"type":"session","version":3,"id":"{child}","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"{child}-response","usage":{{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100}}}}}}
+"#,
+                    paths::json_path_literal(&root_path)
+                ),
+            )
+            .unwrap();
+        }
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // Warm source-cache lane must agree with the cold parse exactly.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            assert_eq!(messages.len(), 3);
+            // 100 own parent usage plus the two 100-token children, each counted
+            // once from its own transcript.
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                300
+            );
+        }
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            300
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_prime_agent_colliding_attribution_ids_do_not_cross_lineages() {
         // Prime mints attribution ids as `randomUUID().slice(0, 8)` and only
         // checks them against the session it is writing, so two unrelated
