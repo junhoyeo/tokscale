@@ -1074,6 +1074,21 @@ struct CacheShardKey {
     index: usize,
 }
 
+/// Marks a Claude entry as carrying retention provenance.
+///
+/// A Claude entry's `fallback_timestamp_indices` lists the messages the live
+/// transcript no longer contains. An entry with nothing retained and an entry
+/// written before provenance existed both leave that vector empty, so the
+/// vector alone cannot answer "is this legacy?" — and answering it wrong
+/// either strands stale rows (see
+/// [`CachedSourceEntry::needs_retention_provenance_migration`]) or re-parses
+/// every Claude transcript on every scan forever.
+///
+/// `usize::MAX` is never a real message index, so appending it records
+/// "provenance is present, retained set may be empty" without changing the
+/// serialized layout.
+const CLAUDE_RETENTION_PROVENANCE_MARKER: usize = usize::MAX;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedSourceEntry {
     parser_namespace: String,
@@ -1090,9 +1105,10 @@ pub(crate) struct CachedSourceEntry {
     ///
     /// For Codex these identify fallback-timestamp messages. For Claude they
     /// identify messages retained after the live transcript stopped containing
-    /// them. Claude never used this vector before retention provenance, so the
-    /// second interpretation preserves the existing bincode layout and avoids
-    /// a cache-format bump that would discard unrecoverable compacted history.
+    /// them, plus a trailing [`CLAUDE_RETENTION_PROVENANCE_MARKER`]. Claude
+    /// never used this vector before retention provenance, so the second
+    /// interpretation preserves the existing bincode layout and avoids a
+    /// cache-format bump that would discard unrecoverable compacted history.
     pub fallback_timestamp_indices: Vec<usize>,
     pub codex_incremental: Option<CodexIncrementalCache>,
 }
@@ -1122,26 +1138,48 @@ impl CachedSourceEntry {
             .is_some_and(|identity| identity.parser_version == self.parser_version)
     }
 
+    pub(crate) fn is_claude_namespace(&self) -> bool {
+        self.parser_namespace == ClientId::Claude.as_str()
+    }
+
+    /// Whether this Claude entry predates retention provenance.
+    ///
+    /// Entries written before the provenance marker existed carry retained
+    /// turns mixed in with live ones and no way to tell them apart, so reading
+    /// one as-is presents a stale copy of a response as if the live transcript
+    /// still contained it. The reader rebuilds those entries once (see
+    /// `lib.rs`), which re-derives the retained set from the live bytes and
+    /// writes the marker, and this then reports `false` forever after.
+    ///
+    /// The distinction has to survive on disk, and it cannot be a new struct
+    /// field: `CachedSourceEntry` is bincode-encoded without field names, so
+    /// adding one needs a `CACHE_FORMAT_VERSION` bump, and that discards every
+    /// Claude entry — including the compacted assistant turns only the cache
+    /// still holds. The marker rides inside the existing index vector instead.
+    pub(crate) fn needs_retention_provenance_migration(&self) -> bool {
+        self.is_claude_namespace()
+            && !self
+                .fallback_timestamp_indices
+                .contains(&CLAUDE_RETENTION_PROVENANCE_MARKER)
+    }
+
     pub(crate) fn retained_message_keys(&self) -> HashSet<String> {
-        if self.parser_namespace != ClientId::Claude.as_str() {
+        if !self.is_claude_namespace() {
             return HashSet::new();
         }
         self.fallback_timestamp_indices
             .iter()
+            .filter(|index| **index != CLAUDE_RETENTION_PROVENANCE_MARKER)
             .filter_map(|index| self.messages.get(*index))
             .filter_map(|message| message.dedup_key.clone())
             .collect()
     }
 
-    pub(crate) fn new_with_retained_message_keys(
-        identity: CacheIdentity,
-        path: &Path,
-        fingerprint: SourceFingerprint,
-        messages: Vec<UnifiedMessage>,
+    fn claude_retained_indices(
+        messages: &[UnifiedMessage],
         retained_message_keys: &HashSet<String>,
-    ) -> Self {
-        debug_assert_eq!(identity.namespace, ClientId::Claude.as_str());
-        let retained_indices = messages
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = messages
             .iter()
             .enumerate()
             .filter_map(|(index, message)| {
@@ -1152,6 +1190,19 @@ impl CachedSourceEntry {
                     .then_some(index)
             })
             .collect();
+        indices.push(CLAUDE_RETENTION_PROVENANCE_MARKER);
+        indices
+    }
+
+    pub(crate) fn new_with_retained_message_keys(
+        identity: CacheIdentity,
+        path: &Path,
+        fingerprint: SourceFingerprint,
+        messages: Vec<UnifiedMessage>,
+        retained_message_keys: &HashSet<String>,
+    ) -> Self {
+        debug_assert_eq!(identity.namespace, ClientId::Claude.as_str());
+        let retained_indices = Self::claude_retained_indices(&messages, retained_message_keys);
         Self::new(
             identity,
             path,
@@ -1163,25 +1214,23 @@ impl CachedSourceEntry {
     }
 
     fn remove_claude_synthetic_placeholders(&mut self) -> bool {
-        if self.parser_namespace != ClientId::Claude.as_str() {
+        if !self.is_claude_namespace() {
             return false;
         }
         let retained_keys = self.retained_message_keys();
+        // Repairing placeholder rows tells us nothing about which turns are
+        // retained, so an entry that arrived without provenance still needs
+        // the rebuild afterwards.
+        let had_provenance = !self.needs_retention_provenance_migration();
         let changed =
             crate::sessions::claudecode::remove_synthetic_placeholder_messages(&mut self.messages);
         if changed {
-            self.fallback_timestamp_indices = self
-                .messages
-                .iter()
-                .enumerate()
-                .filter_map(|(index, message)| {
-                    message
-                        .dedup_key
-                        .as_ref()
-                        .is_some_and(|key| retained_keys.contains(key))
-                        .then_some(index)
-                })
-                .collect();
+            self.fallback_timestamp_indices =
+                Self::claude_retained_indices(&self.messages, &retained_keys);
+            if !had_provenance {
+                self.fallback_timestamp_indices
+                    .retain(|index| *index != CLAUDE_RETENTION_PROVENANCE_MARKER);
+            }
         }
         changed
     }
@@ -3708,6 +3757,63 @@ mod tests {
         message.model_id = " <SYNTHETIC> ".to_string();
         message.provider_id = "unknown".to_string();
         message
+    }
+
+    /// "Nothing was retained" and "this entry predates retention provenance"
+    /// both leave the index vector without any real index, and they need
+    /// opposite handling: the first is a warm hit, the second has to be
+    /// rebuilt from the live transcript. Only the marker separates them.
+    #[test]
+    fn test_claude_entry_reports_retention_provenance_only_once_recorded() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let live = keyed_message(ClientId::Claude.as_str(), "session", "msg_live:req_live");
+        let retained = keyed_message(ClientId::Claude.as_str(), "session", "msg_old:req_old");
+
+        let legacy = entry_with_messages(identity, &path, vec![live.clone(), retained.clone()]);
+        assert!(
+            legacy.needs_retention_provenance_migration(),
+            "an entry written before the marker existed has to be rebuilt"
+        );
+        assert!(legacy.retained_message_keys().is_empty());
+
+        let nothing_retained = CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            &path,
+            SourceFingerprint::from_path(&path).unwrap(),
+            vec![live.clone()],
+            &HashSet::new(),
+        );
+        assert!(
+            !nothing_retained.needs_retention_provenance_migration(),
+            "an entry that retained nothing is current, not legacy — rebuilding \
+             it on every scan would make the upgrade cost permanent"
+        );
+        assert!(nothing_retained.retained_message_keys().is_empty());
+
+        let with_retained = CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            &path,
+            SourceFingerprint::from_path(&path).unwrap(),
+            vec![live, retained],
+            &HashSet::from(["msg_old:req_old".to_string()]),
+        );
+        assert!(!with_retained.needs_retention_provenance_migration());
+        assert_eq!(
+            with_retained.retained_message_keys(),
+            HashSet::from(["msg_old:req_old".to_string()])
+        );
+
+        // A Codex entry uses the same vector for real fallback-timestamp
+        // indices and must never be mistaken for a Claude rebuild candidate.
+        let codex = entry_with_messages(
+            CacheIdentity::for_client(ClientId::Codex),
+            &path,
+            vec![keyed_message(ClientId::Codex.as_str(), "session", "key")],
+        );
+        assert!(!codex.needs_retention_provenance_migration());
     }
 
     #[test]
