@@ -77,10 +77,14 @@ pub(crate) fn take_deferred_stderr_for_test() -> Vec<String> {
 /// failure with nothing to do with what it asserts. This mirrors
 /// `paths::test_env::EnvGuard`, which exists for the same reason.
 ///
-/// `Drop` also drains whatever the test deferred. Restoring through
-/// `set_tui_active` would instead `eprintln!` the test's synthetic
-/// diagnostics onto the real stderr, and leaving them queued would surface in
-/// the next test's `take_deferred_stderr_for_test`.
+/// `Drop` restores through `transition_tui_active`, which makes the queue
+/// follow the state being restored. Restoring to inactive drains whatever the
+/// test deferred: restoring through `set_tui_active` would instead `eprintln!`
+/// the test's synthetic diagnostics onto the real stderr, and leaving them
+/// queued would surface in the next test's `take_deferred_stderr_for_test`.
+/// Restoring to *active* leaves the queue alone, because an enclosing active
+/// scope still owns the terminal and its deferred diagnostics are owed to the
+/// eventual restore, not to this guard.
 #[cfg(test)]
 pub(crate) struct TuiActiveGuard {
     previous: bool,
@@ -105,7 +109,11 @@ impl TuiActiveGuard {
 #[cfg(test)]
 impl Drop for TuiActiveGuard {
     fn drop(&mut self) {
-        let _discarded = transition_tui_active(false);
+        // One transition, so the queue's fate matches the state actually being
+        // restored. Draining unconditionally first would discard diagnostics an
+        // enclosing active scope had deferred and still owes its user, turning
+        // "restore the previous value" into a silent teardown of state this
+        // guard never owned.
         let _discarded = transition_tui_active(self.previous);
     }
 }
@@ -170,6 +178,45 @@ mod tests {
             take_deferred_stderr_for_test().is_empty(),
             "TuiActiveGuard must drain what the probe deferred instead of \
              leaving it for the next test"
+        );
+    }
+
+    /// Restoring is not the same as tearing down. When the captured previous
+    /// value is active, an enclosing scope still owns the terminal, and the
+    /// diagnostics queued for its eventual restore must outlive this guard.
+    #[test]
+    #[serial]
+    fn tui_active_guard_restoring_an_active_scope_keeps_the_deferred_queue() {
+        // The outermost guard is what cleans up: its own previous value is
+        // inactive, so its drop drains the queue and clears TUI_ACTIVE however
+        // this test exits.
+        let mut outer = TuiActiveGuard::capture();
+        assert!(
+            take_deferred_stderr_for_test().is_empty(),
+            "the test must not inherit deferred diagnostics"
+        );
+        outer.set(true);
+
+        let marker = "deferred inside a nested capture".to_string();
+        {
+            let mut nested = TuiActiveGuard::capture();
+            assert!(
+                nested.previous,
+                "the nested guard must capture the enclosing active state"
+            );
+            nested.set(true);
+            assert!(route_stderr(marker.clone()).is_none());
+        }
+
+        assert!(
+            is_tui_active(),
+            "restoring an active previous value must leave the TUI active"
+        );
+        assert_eq!(
+            take_deferred_stderr_for_test(),
+            vec![marker],
+            "restoring an active scope must not discard the diagnostics that \
+             scope still owes its eventual terminal restore"
         );
     }
 }
