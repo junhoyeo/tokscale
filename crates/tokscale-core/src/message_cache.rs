@@ -109,6 +109,21 @@ fn warned_contexts() -> &'static Mutex<HashSet<&'static str>> {
 }
 
 fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std::fmt::Display) {
+    warn_cache_failure_once_in(warned_contexts(), context, path, error);
+}
+
+/// The once-only set is a parameter purely so the poisoned-set regression test
+/// can supply its own. Mutex poisoning is irreversible, so a test that poisoned
+/// the process-global set would leave every later test in the binary depending
+/// on the very recovery it is checking. Production has exactly one caller and
+/// it always passes `warned_contexts()`, so the once-per-process,
+/// once-per-context semantics are unchanged.
+fn warn_cache_failure_once_in(
+    warned: &Mutex<HashSet<&'static str>>,
+    context: &'static str,
+    path: &Path,
+    error: &impl std::fmt::Display,
+) {
     tracing::warn!(path = %path.display(), %error, %context, "source message cache failure");
 
     // Most non-TUI commands (including `submit`) do not install a tracing
@@ -122,7 +137,7 @@ fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std:
     // elsewhere must not be what silences the diagnostic this block exists to
     // guarantee. The set only tracks which contexts were already reported, so
     // its contents stay meaningful across an unwind.
-    if warned_contexts()
+    if warned
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(context)
@@ -1896,22 +1911,23 @@ mod tests {
     #[serial_test::serial]
     fn cache_warning_is_deferred_once_while_the_tui_is_active() {
         const CONTEXT: &str = "test source cache warning deferral";
-        let previous = crate::tui_signal::is_tui_active();
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
         assert!(
             crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
             "the test must not inherit deferred diagnostics"
         );
 
-        crate::tui_signal::set_tui_active(true);
+        // Deliberately the real process-global set, so the production entry
+        // point and its once-per-context bookkeeping stay covered. The
+        // poisoning test below is the one that needs an isolated set.
+        tui.set(true);
         let path = Path::new("cache-warning-test");
         let error = std::io::Error::other("simulated cache failure");
         warn_cache_failure_once(CONTEXT, path, &error);
         warn_cache_failure_once(CONTEXT, path, &error);
-        let deferred = crate::tui_signal::take_deferred_stderr_for_test();
-        crate::tui_signal::set_tui_active(previous);
 
         assert_eq!(
-            deferred,
+            crate::tui_signal::take_deferred_stderr_for_test(),
             vec![format!(
                 "tokscale: warning: {CONTEXT} ({}): {error}",
                 path.display()
@@ -1924,38 +1940,44 @@ mod tests {
     #[serial_test::serial]
     fn cache_warning_survives_a_poisoned_once_only_set() {
         const CONTEXT: &str = "test source cache warning after poisoning";
-        let previous = crate::tui_signal::is_tui_active();
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
         assert!(
             crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
             "the test must not inherit deferred diagnostics"
         );
 
+        // Poison a set scoped to this test rather than the process-global one:
+        // poisoning cannot be undone, so poisoning the real set would make
+        // every later test in this binary depend on the recovery under test.
+        let warned: Mutex<HashSet<&'static str>> = Mutex::new(HashSet::new());
+
         // An unrelated panic while the once-only set is locked poisons the
-        // mutex for the rest of the process. The warning must still reach the
-        // user instead of being silently swallowed by the poison.
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        // mutex. The warning must still reach the user instead of being
+        // silently swallowed by the poison.
+        //
+        // No panic hook is installed here. The hook is process-global, so
+        // swapping it would suppress the diagnostics of whatever else runs in
+        // parallel; this unwind happens on the test's own thread, which
+        // libtest already captures, so the expected panic message is only
+        // printed if this test fails.
         let poisoned = std::panic::catch_unwind(|| {
-            let _guard = warned_contexts().lock().expect("set is not yet poisoned");
+            let _guard = warned.lock().expect("set is not yet poisoned");
             panic!("unrelated panic while holding the once-only set");
         });
-        std::panic::set_hook(hook);
         assert!(poisoned.is_err(), "the helper panic must have unwound");
         assert!(
-            warned_contexts().is_poisoned(),
+            warned.is_poisoned(),
             "the once-only set must be poisoned for this test to mean anything"
         );
 
-        crate::tui_signal::set_tui_active(true);
+        tui.set(true);
         let path = Path::new("cache-warning-poison-test");
         let error = std::io::Error::other("simulated cache failure");
-        warn_cache_failure_once(CONTEXT, path, &error);
-        warn_cache_failure_once(CONTEXT, path, &error);
-        let deferred = crate::tui_signal::take_deferred_stderr_for_test();
-        crate::tui_signal::set_tui_active(previous);
+        warn_cache_failure_once_in(&warned, CONTEXT, path, &error);
+        warn_cache_failure_once_in(&warned, CONTEXT, path, &error);
 
         assert_eq!(
-            deferred,
+            crate::tui_signal::take_deferred_stderr_for_test(),
             vec![format!(
                 "tokscale: warning: {CONTEXT} ({}): {error}",
                 path.display()

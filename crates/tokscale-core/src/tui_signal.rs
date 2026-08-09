@@ -67,6 +67,49 @@ pub(crate) fn take_deferred_stderr_for_test() -> Vec<String> {
     std::mem::take(&mut *deferred)
 }
 
+/// Sets `TUI_ACTIVE` for the duration of a test and restores the previous
+/// value on `Drop`, so an unwind restores it too.
+///
+/// `TUI_ACTIVE` and the deferred queue behind it are process-global. Restoring
+/// them by hand just before a test's final assertion leaks the mutation into
+/// every later test in the binary if anything in between panics, and the next
+/// test to run then defers diagnostics it expected to see on stderr — a
+/// failure with nothing to do with what it asserts. This mirrors
+/// `paths::test_env::EnvGuard`, which exists for the same reason.
+///
+/// `Drop` also drains whatever the test deferred. Restoring through
+/// `set_tui_active` would instead `eprintln!` the test's synthetic
+/// diagnostics onto the real stderr, and leaving them queued would surface in
+/// the next test's `take_deferred_stderr_for_test`.
+#[cfg(test)]
+pub(crate) struct TuiActiveGuard {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl TuiActiveGuard {
+    pub(crate) fn capture() -> Self {
+        Self {
+            previous: is_tui_active(),
+        }
+    }
+
+    /// Takes `&mut self` for the same reason `EnvGuard::set` does: it reads
+    /// correctly for a method whose whole purpose is to mutate process-global
+    /// state, and it keeps the guard's owner from being aliased away.
+    pub(crate) fn set(&mut self, active: bool) {
+        let _discarded = transition_tui_active(active);
+    }
+}
+
+#[cfg(test)]
+impl Drop for TuiActiveGuard {
+    fn drop(&mut self) {
+        let _discarded = transition_tui_active(false);
+        let _discarded = transition_tui_active(self.previous);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +118,7 @@ mod tests {
     #[test]
     #[serial]
     fn defers_stderr_until_the_tui_is_inactive() {
-        let previous = is_tui_active();
+        let _restore = TuiActiveGuard::capture();
 
         assert!(
             transition_tui_active(false).is_empty(),
@@ -94,7 +137,39 @@ mod tests {
             route_stderr("immediate diagnostic".to_string()),
             Some("immediate diagnostic".to_string())
         );
+    }
 
-        let _ = transition_tui_active(previous);
+    /// The guard's whole reason to exist, mirroring
+    /// `paths::test_env::EnvGuard`'s equivalent proof: a panic between
+    /// mutating `TUI_ACTIVE` and restoring it must not leak the mutation into
+    /// the next test scheduled in this binary.
+    #[test]
+    #[serial]
+    fn tui_active_guard_restores_even_when_the_probe_panics() {
+        // Practise what the test preaches: restore on the way out however
+        // this test exits.
+        let _restore = TuiActiveGuard::capture();
+        let _discarded = transition_tui_active(false);
+
+        // The panic below is deliberate. It unwinds on this test's own thread,
+        // which libtest already captures, so no process-global panic hook is
+        // swapped to keep it out of the output.
+        let outcome = std::panic::catch_unwind(|| {
+            let mut tui = TuiActiveGuard::capture();
+            tui.set(true);
+            assert!(route_stderr("deferred by the probe".to_string()).is_none());
+            panic!("simulated assertion failure");
+        });
+
+        assert!(outcome.is_err(), "the probe closure must have panicked");
+        assert!(
+            !is_tui_active(),
+            "TuiActiveGuard must restore the previous value while unwinding"
+        );
+        assert!(
+            take_deferred_stderr_for_test().is_empty(),
+            "TuiActiveGuard must drain what the probe deferred instead of \
+             leaving it for the next test"
+        );
     }
 }
