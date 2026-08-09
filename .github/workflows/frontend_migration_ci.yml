@@ -12,6 +12,8 @@ on:
       - "packages/frontend/drizzle.config.ts"
       - "packages/frontend/scripts/check-migrations.ts"
       - "packages/frontend/src/lib/db/**"
+      - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
+      - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
       - ".github/workflows/frontend_migration_ci.yml"
   pull_request:
     branches: [main]
@@ -62,3 +64,8 @@ jobs:
 
       - name: Replay frontend database migrations
         run: bun run --cwd packages/frontend test:migrations
+
+      - name: Execute reconciliation census against PostgreSQL
+        env:
+          RATCHET_CENSUS_DB_INTEGRATION: "1"
+        run: bun run --cwd packages/frontend test:reconciliation:db
