@@ -1,26 +1,37 @@
 //! Freebuff session parser
 //!
-//! Freebuff (https://github.com/CodebuffAI/freebuff) is a sibling product to
-//! Codebuff and is built on the same underlying runtime, so it persists chat
-//! history under the same `~/.config/manicode/projects/<project>/chats/<chatId>/`
-//! layout and file schema as Codebuff (`chat-messages.json` etc.).
+//! Freebuff (https://github.com/CodebuffAI/freebuff) is not a separate program
+//! from Codebuff: it is the same CLI compiled with `FREEBUFF_MODE=true`, a
+//! free-only build that strips paid features. It therefore resolves the same
+//! config dir (`~/.config/manicode[-dev|-staging]`) and writes the same
+//! `projects/<project>/chats/<chatId>/chat-messages.json` layout as Codebuff.
+//! The two products can share one tree on one machine, so location cannot
+//! attribute a chat and neither can "this chat records no usage" — plenty of
+//! ordinary Codebuff turns record none either (interrupted runs, errors).
 //!
-//! Unlike Codebuff, Freebuff does NOT persist token usage locally: usage is
-//! computed in memory and shipped to its backend (Freebuff is a free,
-//! ad-supported product whose web Usage dashboard is server-side). The on-disk
-//! transcript only contains message text, so token counts are ESTIMATED from
-//! message text at ~4 characters per token, consistent with tokscale's other
-//! estimated sources (see CommandCode, Kiro, ZCode).
+//! The discriminator used here is the **root agent id** the run actually used.
+//! Freebuff hardcodes FREE mode and maps every model its picker offers onto a
+//! `base2-free*` root agent (`base2-free`, `base2-free-deepseek-flash`,
+//! `base2-free-minimax-m3`, `base2-free-luna`, ...), while Codebuff's modes map
+//! to `base2`, `base2-lite`, `base2-max` and `base2-plan`. On turn completion
+//! the CLI persists the run state onto the assistant message, so that id is
+//! readable per chat at
+//! `metadata.runState.sessionState.mainAgentState.agentType`.
 //!
-//! Because Freebuff and Codebuff share the same directory and file schema, the
-//! two parsers partition the shared scan in `lib.rs`: `parse_codebuff_file`
-//! emits only chats carrying authoritative usage metadata (real Codebuff
-//! sessions), while `parse_freebuff_file` skips those and emits estimated rows
-//! for the rest (Freebuff sessions). This keeps the two products attributed
-//! separately without double counting.
+//! A chat is treated as Freebuff only when it carries that positive marker.
+//! An unmarked chat (no completed turn, or a CLI old enough not to persist run
+//! state) is left alone rather than guessed at, because the client id flows
+//! into the TUI, report grouping and the submitted payload — a wrong guess is
+//! misattributed submitted data, not just a display quirk.
+//!
+//! Freebuff does not persist token usage locally (`ChatMessageMetadata` has no
+//! usage field; only `credits`, which is 0 in free mode), so token counts are
+//! ESTIMATED from message text at ~4 characters per token, consistent with
+//! tokscale's other estimated sources (see CommandCode, Kiro, ZCode).
 //!
 //! The model is not stored per message, so it is read from the channel root's
-//! `settings.json` (`freebuffModel`), falling back to "freebuff-unknown".
+//! `settings.json` (`freebuffModel`, written by Freebuff's model picker),
+//! falling back to "freebuff-unknown".
 
 use super::codebuff::{
     derive_context_from_path, extract_assistant_usage, is_assistant_role, message_timestamp,
@@ -34,6 +45,33 @@ use std::path::Path;
 
 const CLIENT_ID: &str = "freebuff";
 const DEFAULT_MODEL: &str = "freebuff-unknown";
+
+/// Root agent ids Freebuff runs are prefixed with. Codebuff's own roots
+/// (`base2`, `base2-lite`, `base2-max`, `base2-plan`) never match, so this is a
+/// positive marker rather than an absence test.
+const FREEBUFF_ROOT_AGENT_PREFIX: &str = "base2-free";
+
+/// Read the root agent id a message's persisted run state recorded, if any.
+/// The CLI attaches the whole `RunState` to the assistant message when a turn
+/// completes, and the runtime stamps the resolved root agent id onto
+/// `sessionState.mainAgentState.agentType`.
+fn root_agent_id(msg: &Value) -> Option<&str> {
+    msg.get("metadata")?
+        .get("runState")?
+        .get("sessionState")?
+        .get("mainAgentState")?
+        .get("agentType")?
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Whether any message in the chat proves the chat was produced by Freebuff.
+fn is_freebuff_chat(messages: &[Value]) -> bool {
+    messages
+        .iter()
+        .filter_map(root_agent_id)
+        .any(|agent| agent.starts_with(FREEBUFF_ROOT_AGENT_PREFIX))
+}
 
 /// Estimate tokens from character length at ~4 chars/token, matching the other
 /// estimated sources (CommandCode, Kiro, ZCode).
@@ -81,9 +119,8 @@ fn model_from_settings(path: &Path) -> Option<String> {
 
 /// Parse a single `chat-messages.json` into estimated Freebuff UnifiedMessages.
 ///
-/// Returns an empty vec when the file carries authoritative usage (a real
-/// Codebuff session sharing this directory), so the two parsers never double
-/// count the shared scan.
+/// Returns an empty vec unless the chat carries a `base2-free*` root agent id,
+/// so Codebuff chats sharing this directory are never claimed as Freebuff.
 pub fn parse_freebuff_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(bytes) = read_file_or_none(path) else {
         return Vec::new();
@@ -98,9 +135,16 @@ pub fn parse_freebuff_file(path: &Path) -> Vec<UnifiedMessage> {
         None => return Vec::new(),
     };
 
-    // Real Codebuff chats carry authoritative usage in this same directory;
-    // those belong to the codebuff parser. Defer entirely when any assistant
-    // message exposes usage so the two products never double count.
+    // Attribute only on a positive Freebuff marker. Codebuff shares this
+    // directory, so an unmarked chat is left to the codebuff parser rather
+    // than estimated here on the strength of what it lacks.
+    if !is_freebuff_chat(messages) {
+        return Vec::new();
+    }
+
+    // Belt and braces: should a Freebuff-marked chat ever carry authoritative
+    // usage, it is the codebuff parser's to emit, so the two never double
+    // count the shared scan.
     if messages
         .iter()
         .any(|m| is_assistant_role(m) && extract_assistant_usage(m).has_signal())

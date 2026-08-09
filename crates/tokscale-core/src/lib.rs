@@ -6569,7 +6569,8 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        // A Freebuff chat: no authoritative usage, only estimated text.
+        // A Freebuff chat: marked by its `base2-free*` root agent id, with no
+        // authoritative usage — only estimated text.
         let freebuff_chat = manicode
             .join("projects")
             .join("proj")
@@ -6580,7 +6581,9 @@ mod tests {
             freebuff_chat.join("chat-messages.json"),
             r#"[
                 { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T13:00:00.000Z" },
-                { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ] }
+                { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ],
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base2-free-deepseek-flash" } } } } }
             ]"#,
         )
         .unwrap();
