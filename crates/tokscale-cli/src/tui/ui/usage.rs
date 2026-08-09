@@ -1130,7 +1130,7 @@ fn provider_summary_line(
         Span::styled(
             format!("  {}", truncate_string(group.provider, 18)),
             Style::default()
-                .fg(get_provider_shade(group.provider, 0))
+                .fg(app.theme.color(get_provider_shade(group.provider, 0)))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {summary}"), app.theme.subtle_text_style()),
@@ -2013,7 +2013,7 @@ fn account_table_row(app: &App, output: &UsageOutput, index: usize) -> Row<'stat
         table_text_cell(
             output.provider.clone(),
             Style::default()
-                .fg(get_provider_shade(&output.provider, 0))
+                .fg(app.theme.color(get_provider_shade(&output.provider, 0)))
                 .add_modifier(Modifier::BOLD),
         ),
         table_text_cell(row.account, app.theme.secondary_text_style()),
@@ -2501,6 +2501,7 @@ mod tests {
     };
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::UsageData;
+    use crate::tui::themes::{TerminalColorMode, Theme, ThemeName};
     use chrono::{Duration, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
@@ -2625,6 +2626,30 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Renders the usage view and returns every distinct `Color::Rgb` present
+    /// in the frame's cell foregrounds/backgrounds.
+    fn render_rgb_colors(app: &mut App, width: u16, height: u16) -> Vec<Color> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        let mut rgb: Vec<Color> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .flat_map(|cell| [cell.fg, cell.bg])
+            .filter(|color| matches!(color, Color::Rgb(..)))
+            .collect();
+        rgb.sort_by_key(|color| match color {
+            Color::Rgb(r, g, b) => (*r, *g, *b),
+            _ => (0, 0, 0),
+        });
+        rgb.dedup();
+        rgb
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -2817,6 +2842,50 @@ mod tests {
         assert_eq!(groups[0].outputs[1].0, 2);
         assert_eq!(groups[1].provider, "Claude");
         assert_eq!(groups[1].outputs.len(), 1);
+    }
+
+    /// In `Compatible` mode the theme palette is collapsed to named colors so
+    /// terminals without truecolor support never receive 24-bit SGR. The
+    /// provider summary and the account table color provider labels from the
+    /// vendor shade ramps, which are RGB regardless of theme, so they have to
+    /// be routed through `Theme::color` too — otherwise those cells still emit
+    /// raw RGB and render as garbled blocks (#559, #1060).
+    #[test]
+    fn compatible_color_mode_emits_no_rgb_in_usage_view() {
+        let mut app = make_app();
+        app.theme =
+            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
+        app.selected_index = 0;
+        app.subscription_usage = vec![
+            output(
+                "Anthropic",
+                Some(UsageAccount {
+                    id: "acct_work".to_string(),
+                    label: Some("work".to_string()),
+                    is_active: true,
+                }),
+            ),
+            output(
+                "OpenAI",
+                Some(UsageAccount {
+                    id: "acct_personal".to_string(),
+                    label: Some("personal".to_string()),
+                    is_active: false,
+                }),
+            ),
+        ];
+
+        // Sanity: the provider summary and account table actually rendered.
+        let body = render_body(&mut app, 150, 32);
+        assert!(body.contains("Anthropic"), "{body}");
+        assert!(body.contains("OpenAI"), "{body}");
+        assert!(body.contains("Accounts"), "{body}");
+
+        let rgb = render_rgb_colors(&mut app, 150, 32);
+        assert!(
+            rgb.is_empty(),
+            "Compatible mode must not emit any Color::Rgb, found: {rgb:?}"
+        );
     }
 
     #[test]
