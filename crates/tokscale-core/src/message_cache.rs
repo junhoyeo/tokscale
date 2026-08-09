@@ -102,6 +102,12 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+
+fn warned_contexts() -> &'static Mutex<HashSet<&'static str>> {
+    WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std::fmt::Display) {
     tracing::warn!(path = %path.display(), %error, %context, "source message cache failure");
 
@@ -112,9 +118,15 @@ fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std:
     // there corrupts the rendered display. Defer that fallback until the TUI
     // restores the terminal instead of consuming the once-only warning while
     // leaving the user with no visible diagnostic (#941).
-    static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().is_ok_and(|mut warned| warned.insert(context)) {
+    // Recover from a poisoned set the way tui_signal does: an unrelated panic
+    // elsewhere must not be what silences the diagnostic this block exists to
+    // guarantee. The set only tracks which contexts were already reported, so
+    // its contents stay meaningful across an unwind.
+    if warned_contexts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(context)
+    {
         crate::tui_signal::emit_or_defer_stderr(format!(
             "tokscale: warning: {context} ({}): {error}",
             path.display()
@@ -1905,6 +1917,50 @@ mod tests {
                 path.display()
             )],
             "a repeated failure should leave one complete warning for terminal restore"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_warning_survives_a_poisoned_once_only_set() {
+        const CONTEXT: &str = "test source cache warning after poisoning";
+        let previous = crate::tui_signal::is_tui_active();
+        assert!(
+            crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
+            "the test must not inherit deferred diagnostics"
+        );
+
+        // An unrelated panic while the once-only set is locked poisons the
+        // mutex for the rest of the process. The warning must still reach the
+        // user instead of being silently swallowed by the poison.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = warned_contexts().lock().expect("set is not yet poisoned");
+            panic!("unrelated panic while holding the once-only set");
+        });
+        std::panic::set_hook(hook);
+        assert!(poisoned.is_err(), "the helper panic must have unwound");
+        assert!(
+            warned_contexts().is_poisoned(),
+            "the once-only set must be poisoned for this test to mean anything"
+        );
+
+        crate::tui_signal::set_tui_active(true);
+        let path = Path::new("cache-warning-poison-test");
+        let error = std::io::Error::other("simulated cache failure");
+        warn_cache_failure_once(CONTEXT, path, &error);
+        warn_cache_failure_once(CONTEXT, path, &error);
+        let deferred = crate::tui_signal::take_deferred_stderr_for_test();
+        crate::tui_signal::set_tui_active(previous);
+
+        assert_eq!(
+            deferred,
+            vec![format!(
+                "tokscale: warning: {CONTEXT} ({}): {error}",
+                path.display()
+            )],
+            "a poisoned once-only set must still defer exactly one warning"
         );
     }
 
