@@ -440,8 +440,11 @@ fn matching_components(eligible: &[Vec<(MatchCost, ChildResponseRef)>]) -> Vec<M
 /// tolerance window from consuming a child response another attribution explains
 /// exactly.
 ///
-/// `blocked` removes one attribution from the component, which is how the caller
-/// asks whether that attribution is dispensable at no extra cost.
+/// `blocked` removes one attribution from the component, which answers whether
+/// that attribution is dispensable at no extra cost by brute force. Production
+/// code derives that from a single matching via `indispensable_attributions`;
+/// the parameter is kept so the tests can check the fast derivation against the
+/// definition it implements.
 ///
 /// Returns the cardinality, the total cost, and each local attribution's child.
 fn min_cost_max_matching(
@@ -538,6 +541,124 @@ fn min_cost_max_matching(
         }
     }
     (cardinality, cost, matched_attribution)
+}
+
+/// Which attributions appear in EVERY minimum-cost maximum matching of the
+/// component, derived from a single matching instead of re-solving the whole
+/// component once per matched attribution.
+///
+/// Read the matching as a unit-capacity min-cost flow of value `cardinality`:
+/// `source -> attribution -> child -> sink`. Any other matching of the same
+/// cardinality and the same cost is that flow plus a zero-cost circulation in
+/// the residual graph, and every such circulation splits into simple residual
+/// cycles that individually cost zero. Node potentials that make all residual
+/// arcs non-negative exist because the matching is already cost-optimal, and
+/// potentials cancel around a cycle, so a residual cycle costs zero exactly
+/// when every arc on it has zero reduced cost.
+///
+/// A matched attribution drops out of the matching precisely when such a cycle
+/// cancels its `source -> attribution` arc, i.e. when the residual arc
+/// `attribution -> source` has zero reduced cost and lies on a zero-reduced-cost
+/// cycle. Because that arc leads to `source`, the cycle exists exactly when
+/// `source` reaches the attribution over zero-reduced-cost residual arcs. So one
+/// Bellman-Ford pass for the potentials plus one traversal answers the question
+/// for every attribution at once.
+fn indispensable_attributions(
+    component: &MatchingComponent,
+    matched_attribution: &[Option<usize>],
+) -> Vec<bool> {
+    let attributions = component.edges.len();
+    let children = component.children;
+    let source = attributions + children;
+    let sink = source + 1;
+    let nodes = sink + 1;
+
+    let mut matched_child: Vec<Option<usize>> = vec![None; children];
+    for (attribution, matched) in matched_attribution.iter().enumerate() {
+        if let Some(child) = matched {
+            matched_child[*child] = Some(attribution);
+        }
+    }
+
+    // The complete residual graph, unlike the augmenting-path search, which can
+    // skip the arcs back to the source and out of the sink because a shortest
+    // path never takes them. A cycle that re-seats which child feeds the sink
+    // does take them, and that cycle can free an attribution, so they matter
+    // here.
+    let mut residual: Vec<(usize, usize, MatchCost)> = Vec::new();
+    for (attribution, matched) in matched_attribution.iter().enumerate() {
+        match matched {
+            None => residual.push((source, attribution, 0)),
+            Some(_) => residual.push((attribution, source, 0)),
+        }
+        for &(child, cost) in &component.edges[attribution] {
+            if *matched == Some(child) {
+                residual.push((attributions + child, attribution, -cost));
+            } else {
+                residual.push((attribution, attributions + child, cost));
+            }
+        }
+    }
+    for (child, matched) in matched_child.iter().enumerate() {
+        match matched {
+            None => residual.push((attributions + child, sink, 0)),
+            Some(_) => residual.push((sink, attributions + child, 0)),
+        }
+    }
+
+    // Potentials, as Bellman-Ford from a virtual node joined to every node at
+    // zero cost: `potential[v] <= potential[u] + cost(u, v)` on every residual
+    // arc is exactly the non-negative reduced cost the argument above needs.
+    // The relaxation converges because a cost-optimal flow leaves no negative
+    // residual cycle.
+    let mut potential: Vec<MatchCost> = vec![0; nodes];
+    for _ in 0..nodes {
+        let mut improved = false;
+        for &(from, to, cost) in &residual {
+            let candidate = potential[from] + cost;
+            if candidate < potential[to] {
+                potential[to] = candidate;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    // `<= 0` rather than `== 0`: with converged potentials the two agree, and if
+    // they ever disagreed the extra arcs would only widen the set of
+    // attributions treated as dispensable, which is the conservative direction
+    // -- an unmatched attribution keeps its parent aggregate rather than
+    // authorizing a subtraction.
+    let reduced_cost =
+        |from: usize, to: usize, cost: MatchCost| cost + potential[from] - potential[to];
+
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); nodes];
+    for &(from, to, cost) in &residual {
+        if reduced_cost(from, to, cost) <= 0 {
+            adjacency[from].push(to);
+        }
+    }
+    let mut reached = vec![false; nodes];
+    reached[source] = true;
+    let mut stack = vec![source];
+    while let Some(node) = stack.pop() {
+        for &next in &adjacency[node] {
+            if !reached[next] {
+                reached[next] = true;
+                stack.push(next);
+            }
+        }
+    }
+
+    matched_attribution
+        .iter()
+        .enumerate()
+        .map(|(attribution, matched)| {
+            matched.is_some()
+                && !(reached[attribution] && reduced_cost(attribution, source, 0) <= 0)
+        })
+        .collect()
 }
 
 /// Subtract child usage only when a matching RLM transcript was actually
@@ -674,24 +795,15 @@ pub(crate) fn reconcile_prime_agent_messages(
 
     let mut represented_attributions: HashSet<AttributionKey> = HashSet::new();
     for component in matching_components(&eligible) {
-        let (cardinality, cost, assignment) = min_cost_max_matching(&component, None);
-        // When the matching already covers every attribution in the component,
-        // dropping any one of them shrinks it, so none of them is dispensable
-        // and there is nothing left to disambiguate.
-        let saturated = cardinality == component.edges.len();
-        for (local, matched) in assignment.iter().enumerate() {
-            if matched.is_none() {
-                continue;
+        let (_, _, assignment) = min_cost_max_matching(&component, None);
+        for (local, indispensable) in indispensable_attributions(&component, &assignment)
+            .into_iter()
+            .enumerate()
+        {
+            if indispensable {
+                represented_attributions
+                    .insert(attribution_keys[component.attributions[local]].clone());
             }
-            if !saturated {
-                let (alternate_cardinality, alternate_cost, _) =
-                    min_cost_max_matching(&component, Some(local));
-                if alternate_cardinality == cardinality && alternate_cost == cost {
-                    continue;
-                }
-            }
-            represented_attributions
-                .insert(attribution_keys[component.attributions[local]].clone());
         }
     }
 
@@ -1704,6 +1816,131 @@ mod tests {
                 assert_eq!(per_model.values().sum::<i64>(), 450);
             }
         }
+    }
+
+    /// The definition the fast derivation implements: re-solve the component
+    /// with one attribution removed and see whether an equally cheap maximum
+    /// matching survives without it.
+    fn indispensable_by_reprobe(component: &MatchingComponent) -> Vec<bool> {
+        let (cardinality, cost, assignment) = min_cost_max_matching(component, None);
+        let saturated = cardinality == component.edges.len();
+        assignment
+            .iter()
+            .enumerate()
+            .map(|(local, matched)| {
+                if matched.is_none() {
+                    return false;
+                }
+                if saturated {
+                    return true;
+                }
+                let (alternate_cardinality, alternate_cost, _) =
+                    min_cost_max_matching(component, Some(local));
+                !(alternate_cardinality == cardinality && alternate_cost == cost)
+            })
+            .collect()
+    }
+
+    /// Deterministic xorshift, so a failing case is reproducible from its seed
+    /// without pulling a random-number crate into the dependency tree.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    fn random_component(rng: &mut Rng, attributions: usize, children: usize) -> MatchingComponent {
+        // Three cost shapes, because ties are what make the tie rule bite: all
+        // pairings equally close, a mix of exact and merely-in-window hits, and
+        // fully spread timestamp distances.
+        let shape = rng.below(3);
+        let edges = (0..attributions)
+            .map(|_| {
+                let mut candidates: Vec<(usize, MatchCost)> = Vec::new();
+                for child in 0..children {
+                    // Partially pruned children: not every attribution reaches
+                    // every child response.
+                    if rng.below(3) == 0 {
+                        continue;
+                    }
+                    let cost = match shape {
+                        0 => [0, 0, 1001][rng.below(3)],
+                        1 => [0, 1, 2, 1001][rng.below(4)],
+                        _ => rng.below(1001) as MatchCost,
+                    };
+                    candidates.push((child, cost));
+                }
+                candidates.sort();
+                candidates
+            })
+            .collect();
+        MatchingComponent {
+            attributions: (0..attributions).collect(),
+            edges,
+            children,
+        }
+    }
+
+    #[test]
+    fn one_matching_decides_indispensability_the_same_way_as_re_solving() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut checked = 0usize;
+        for _ in 0..4_000 {
+            let attributions = 1 + rng.below(8);
+            let children = 1 + rng.below(8);
+            let component = random_component(&mut rng, attributions, children);
+            if component.edges.iter().all(|edges| edges.is_empty()) {
+                continue;
+            }
+            let (_, _, assignment) = min_cost_max_matching(&component, None);
+            assert_eq!(
+                indispensable_attributions(&component, &assignment),
+                indispensable_by_reprobe(&component),
+                "component {:?} with {children} children",
+                component.edges
+            );
+            checked += 1;
+        }
+        assert!(checked > 3_000, "only {checked} components were generated");
+    }
+
+    #[test]
+    fn a_large_equal_usage_component_with_pruned_children_resolves_quickly() {
+        // 60 attributions in one equal-usage bucket, all landing on the same
+        // completion timestamp, with only half the child responses still on
+        // disk: the legacy shape where the per-attribution re-probe used to run
+        // a full matching 30 times over.
+        let attributions = 60usize;
+        let children = attributions / 2;
+        let component = MatchingComponent {
+            attributions: (0..attributions).collect(),
+            edges: (0..attributions)
+                .map(|_| (0..children).map(|child| (child, 0)).collect())
+                .collect(),
+            children,
+        };
+        let start = std::time::Instant::now();
+        let (cardinality, _, assignment) = min_cost_max_matching(&component, None);
+        let indispensable = indispensable_attributions(&component, &assignment);
+        let elapsed = start.elapsed();
+
+        assert_eq!(cardinality, children);
+        // Every attribution is interchangeable, so no matching is forced and
+        // each parent aggregate is kept.
+        assert!(indispensable.iter().all(|forced| !forced));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "matching a 60-attribution component took {elapsed:?}"
+        );
     }
 
     #[test]
