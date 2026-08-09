@@ -651,6 +651,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
+        retained_message_keys: HashSet<String>,
         cache_entry: Option<message_cache::CachedSourceEntry>,
         invalidate_cache: bool,
     }
@@ -695,6 +696,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if !parsed.parse_succeeded {
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -703,6 +705,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if parsed.unresolved_model_events {
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -718,6 +721,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         CachedParseOutcome {
             messages,
+            retained_message_keys: HashSet::new(),
             cache_entry,
             invalidate_cache: false,
         }
@@ -799,9 +803,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     /// still contains: a key present on both sides keeps the freshly parsed
     /// message, so a corrected re-parse still wins and nothing is frozen at a
     /// stale value. Only keys the file no longer carries are carried forward.
-    /// (Across entries the Claude lane is first-wins on lexical path order, so
-    /// a retained copy in an earlier-sorting file still beats a live copy of
-    /// the same key in a later one.)
+    /// Across entries the Claude lane separately carries the returned key set,
+    /// so cross-file dedup can merge a retained partial with a completed live
+    /// replay instead of depending on lexical path order.
     ///
     /// Messages without a dedup key are never retained. The key is what lets a
     /// later scan recognise the message as already-seen; re-emitting an
@@ -812,12 +816,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parsed: &mut Vec<UnifiedMessage>,
         cached: &[UnifiedMessage],
         key_is_globally_stable: fn(&str) -> bool,
-    ) {
+    ) -> HashSet<String> {
         let mut seen: HashSet<String> = parsed
             .iter()
             .filter_map(|message| message.dedup_key.clone())
             .collect();
 
+        let mut retained = HashSet::new();
         for message in cached {
             let Some(key) = message.dedup_key.as_ref() else {
                 continue;
@@ -827,8 +832,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             }
             if seen.insert(key.clone()) {
                 parsed.push(message.clone());
+                retained.insert(key.clone());
             }
         }
+        retained
     }
 
     fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
@@ -855,6 +862,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -868,6 +876,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 if !cached.messages.is_empty() {
                     return CachedParseOutcome {
                         messages: cached_messages(cached, pricing),
+                        retained_message_keys: cached.retained_message_keys(),
                         cache_entry: None,
                         invalidate_cache: false,
                     };
@@ -881,6 +890,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
                 return CachedParseOutcome {
                     messages: cached_messages(cached, pricing),
+                    retained_message_keys: cached.retained_message_keys(),
                     cache_entry: None,
                     invalidate_cache: false,
                 };
@@ -895,13 +905,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         // would retire them from history (#994). Only merge when the parse is
         // cacheable: an untrustworthy parse must not be used to synthesise an
         // entry, and the caller invalidates on that path anyway.
+        let mut retained_message_keys = HashSet::new();
         if let HistoryRetention::RetainObserved {
             key_is_globally_stable,
         } = history
         {
             if cacheable {
                 if let Some(cached) = cached {
-                    retain_observed_messages(
+                    retained_message_keys = retain_observed_messages(
                         &mut messages,
                         &cached.messages,
                         key_is_globally_stable,
@@ -912,19 +923,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let cache_entry = if messages.is_empty() || !cacheable {
             None
         } else {
-            Some(message_cache::CachedSourceEntry::new(
-                identity,
-                path,
-                fingerprint,
-                messages.clone(),
-                Vec::new(),
-                None,
-            ))
+            Some(match history {
+                HistoryRetention::LiveFileOnly => message_cache::CachedSourceEntry::new(
+                    identity,
+                    path,
+                    fingerprint,
+                    messages.clone(),
+                    Vec::new(),
+                    None,
+                ),
+                HistoryRetention::RetainObserved { .. } => {
+                    message_cache::CachedSourceEntry::new_with_retained_message_keys(
+                        identity,
+                        path,
+                        fingerprint,
+                        messages.clone(),
+                        &retained_message_keys,
+                    )
+                }
+            })
         };
         apply_pricing_to_messages(&mut messages, pricing);
 
         CachedParseOutcome {
             messages,
+            retained_message_keys,
             cache_entry,
             invalidate_cache: !cacheable,
         }
@@ -1109,6 +1132,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             &cached.fallback_timestamp_indices,
                             fallback_timestamp,
                         ),
+                        retained_message_keys: HashSet::new(),
                         cache_entry: None,
                         invalidate_cache: false,
                     };
@@ -1156,6 +1180,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
                             return CachedParseOutcome {
                                 messages,
+                                retained_message_keys: HashSet::new(),
                                 cache_entry: Some(cache_entry),
                                 invalidate_cache: false,
                             };
@@ -1325,24 +1350,42 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut claude_messages_raw: Vec<(String, UnifiedMessage)> = Vec::new();
+    let mut claude_messages: Vec<(bool, UnifiedMessage)> = Vec::new();
+    let mut claude_keyed_indices: HashMap<String, usize> = HashMap::new();
     for outcome in claude_outcomes {
-        claude_messages_raw.extend(outcome.messages.into_iter().map(|msg| {
-            let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-            (dedup_key, msg)
-        }));
+        for message in outcome.messages {
+            let Some(key) = message.dedup_key.clone().filter(|key| !key.is_empty()) else {
+                claude_messages.push((false, message));
+                continue;
+            };
+            let is_retained = outcome.retained_message_keys.contains(&key);
+            let Some(index) = claude_keyed_indices.get(&key).copied() else {
+                claude_keyed_indices.insert(key, claude_messages.len());
+                claude_messages.push((is_retained, message));
+                continue;
+            };
+
+            let (existing_is_retained, existing) = &mut claude_messages[index];
+            if *existing_is_retained && !is_retained {
+                // Keep live metadata authoritative while still taking token and
+                // duration maxima from the retained observation.
+                let mut live = message;
+                sessions::claudecode::merge_message_completeness(&mut live, existing);
+                *existing = live;
+            } else {
+                sessions::claudecode::merge_message_completeness(existing, &message);
+            }
+            *existing_is_retained &= is_retained;
+            // Both inputs were priced before reaching this merge. Token maxima
+            // can change the estimate, so refresh it after combining.
+            existing.refresh_derived_fields();
+            apply_pricing_if_available(existing, pricing);
+        }
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
-
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_messages: Vec<UnifiedMessage> = claude_messages_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
-    all_messages.extend(claude_messages);
+    all_messages.extend(claude_messages.into_iter().map(|(_, message)| message));
 
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
@@ -5929,14 +5972,14 @@ mod tests {
     /// session into a new transcript that replays earlier turns, so the same
     /// `messageId:requestId` legitimately appears in two files at once.
     ///
-    /// The transcripts are named so the retaining file sorts first: the lane
-    /// walks paths in lexical order and keeps the first copy of a key, so this
-    /// is the ordering where a retained copy wins over the live one. Both
-    /// copies come from the same API response, so either winner reports the
-    /// same tokens — what must not happen is both being counted.
+    /// The transcripts are named so the retaining file sorts first. A scan may
+    /// have cached that copy while the response was still streaming, while the
+    /// fork contains the completed replay. Cross-file dedup must keep one turn,
+    /// merge per-field maxima, and preserve the live copy's provenance across
+    /// the next warm-cache scan.
     #[test]
     #[serial_test::serial]
-    fn test_claude_retained_message_collapses_against_a_forked_transcript() {
+    fn test_claude_retained_partial_merges_completed_fork_replay() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
@@ -5947,10 +5990,15 @@ mod tests {
             let original = claude_dir.join("aaa-original.jsonl");
 
             let turn_one = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
-            let turn_two = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":60}}}"#;
+            let turn_two_partial = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":60}}}"#;
+            let turn_two_complete = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":2000,"output_tokens":999}}}"#;
             let turn_three = r#"{"type":"assistant","timestamp":"2024-12-01T10:10:00.000Z","requestId":"req_003","message":{"id":"msg_003","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":70}}}"#;
 
-            std::fs::write(&original, format!("{turn_one}\n{turn_two}\n{turn_three}\n")).unwrap();
+            std::fs::write(
+                &original,
+                format!("{turn_one}\n{turn_two_partial}\n{turn_three}\n"),
+            )
+            .unwrap();
             let before = parse_all_messages_with_pricing_with_env_strategy(
                 source_home.path().to_str().unwrap(),
                 &["claude".to_string()],
@@ -5965,7 +6013,11 @@ mod tests {
             // only as a retained copy — it is what makes the count here
             // differ from a run with no retention at all.
             std::fs::write(&original, format!("{turn_one}\n")).unwrap();
-            std::fs::write(claude_dir.join("zzz-fork.jsonl"), format!("{turn_two}\n")).unwrap();
+            std::fs::write(
+                claude_dir.join("zzz-fork.jsonl"),
+                format!("{turn_two_complete}\n"),
+            )
+            .unwrap();
 
             let after = parse_all_messages_with_pricing_with_env_strategy(
                 source_home.path().to_str().unwrap(),
@@ -5977,7 +6029,7 @@ mod tests {
             assert_eq!(
                 after.len(),
                 3,
-                "retention must keep turn three and must not double count turn two"
+                "retention must keep turn three and count the replayed turn once"
             );
             let keys: HashSet<String> = after
                 .iter()
@@ -5986,10 +6038,31 @@ mod tests {
             assert_eq!(keys.len(), 3, "every surviving message must be distinct");
             assert_eq!(
                 after.iter().map(|m| m.tokens.output).sum::<i64>(),
-                180,
-                "turn two contributes its 60 once, not twice"
+                50 + 999 + 70,
+                "the completed replay must outrank the retained streaming partial"
             );
-            assert_eq!(after.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
+            assert_eq!(
+                after.iter().map(|m| m.tokens.input).sum::<i64>(),
+                100 + 2000 + 300
+            );
+
+            let warm = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(warm.len(), 3);
+            assert_eq!(
+                warm.iter().map(|m| m.tokens.output).sum::<i64>(),
+                50 + 999 + 70,
+                "retained/live provenance must survive the cache round trip"
+            );
+            assert_eq!(
+                warm.iter().map(|m| m.tokens.input).sum::<i64>(),
+                100 + 2000 + 300
+            );
         }
     }
 

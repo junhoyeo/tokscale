@@ -1086,6 +1086,13 @@ pub(crate) struct CachedSourceEntry {
     /// cache is the only copy. That is what makes a parser_version bump for
     /// those namespaces lossy rather than merely cold.
     pub messages: Vec<UnifiedMessage>,
+    /// Namespace-specific indices that have to survive with the message vector.
+    ///
+    /// For Codex these identify fallback-timestamp messages. For Claude they
+    /// identify messages retained after the live transcript stopped containing
+    /// them. Claude never used this vector before retention provenance, so the
+    /// second interpretation preserves the existing bincode layout and avoids
+    /// a cache-format bump that would discard unrecoverable compacted history.
     pub fallback_timestamp_indices: Vec<usize>,
     pub codex_incremental: Option<CodexIncrementalCache>,
 }
@@ -1115,6 +1122,70 @@ impl CachedSourceEntry {
             .is_some_and(|identity| identity.parser_version == self.parser_version)
     }
 
+    pub(crate) fn retained_message_keys(&self) -> HashSet<String> {
+        if self.parser_namespace != ClientId::Claude.as_str() {
+            return HashSet::new();
+        }
+        self.fallback_timestamp_indices
+            .iter()
+            .filter_map(|index| self.messages.get(*index))
+            .filter_map(|message| message.dedup_key.clone())
+            .collect()
+    }
+
+    pub(crate) fn new_with_retained_message_keys(
+        identity: CacheIdentity,
+        path: &Path,
+        fingerprint: SourceFingerprint,
+        messages: Vec<UnifiedMessage>,
+        retained_message_keys: &HashSet<String>,
+    ) -> Self {
+        debug_assert_eq!(identity.namespace, ClientId::Claude.as_str());
+        let retained_indices = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                message
+                    .dedup_key
+                    .as_ref()
+                    .is_some_and(|key| retained_message_keys.contains(key))
+                    .then_some(index)
+            })
+            .collect();
+        Self::new(
+            identity,
+            path,
+            fingerprint,
+            messages,
+            retained_indices,
+            None,
+        )
+    }
+
+    fn remove_claude_synthetic_placeholders(&mut self) -> bool {
+        if self.parser_namespace != ClientId::Claude.as_str() {
+            return false;
+        }
+        let retained_keys = self.retained_message_keys();
+        let changed =
+            crate::sessions::claudecode::remove_synthetic_placeholder_messages(&mut self.messages);
+        if changed {
+            self.fallback_timestamp_indices = self
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    message
+                        .dedup_key
+                        .as_ref()
+                        .is_some_and(|key| retained_keys.contains(key))
+                        .then_some(index)
+                })
+                .collect();
+        }
+        changed
+    }
+
     /// Carry forward keyed messages an entry already on disk holds for this
     /// same path and this one does not.
     ///
@@ -1141,10 +1212,11 @@ impl CachedSourceEntry {
             return;
         }
 
-        let mut seen: HashSet<String> = self
+        let mut keyed_indices: HashMap<String, usize> = self
             .messages
             .iter()
-            .filter_map(|message| message.dedup_key.clone())
+            .enumerate()
+            .filter_map(|(index, message)| message.dedup_key.clone().map(|key| (key, index)))
             .collect();
         for message in &stored.messages {
             let Some(key) = message.dedup_key.as_ref() else {
@@ -1153,9 +1225,20 @@ impl CachedSourceEntry {
             if !key_is_globally_stable(key) {
                 continue;
             }
-            if seen.insert(key.clone()) {
-                self.messages.push(message.clone());
+            if let Some(index) = keyed_indices.get(key).copied() {
+                crate::sessions::claudecode::merge_message_completeness(
+                    &mut self.messages[index],
+                    message,
+                );
+                continue;
             }
+            let index = self.messages.len();
+            self.messages.push(message.clone());
+            // Relative to this writer's current source fingerprint, a row only
+            // the stored entry knew about is retained history even if it was
+            // live when the concurrent writer observed it.
+            self.fallback_timestamp_indices.push(index);
+            keyed_indices.insert(key.clone(), index);
         }
     }
 }
@@ -1267,11 +1350,7 @@ impl SourceMessageCache {
                         for mut entry in entries {
                             let key = CacheKey::from_entry(&entry);
                             if key.shard() == shard_key && entry.identity_is_current() {
-                                if entry.parser_namespace == ClientId::Claude.as_str()
-                                    && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                        &mut entry.messages,
-                                    )
-                                {
+                                if entry.remove_claude_synthetic_placeholders() {
                                     // Do not bump Claude's parser version here: compacted
                                     // transcripts rely on cached assistant history that a
                                     // full invalidation cannot recover. Repair only the bad
@@ -1476,11 +1555,7 @@ impl SourceMessageCache {
                         if let Some(stored) = merged_entries.remove(key) {
                             entry.absorb_retained_history(&stored);
                         }
-                        if entry.parser_namespace == ClientId::Claude.as_str() {
-                            crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                &mut entry.messages,
-                            );
-                        }
+                        entry.remove_claude_synthetic_placeholders();
                         merged_entries.insert(key.clone(), entry);
                     }
                 }
@@ -3760,7 +3835,12 @@ mod tests {
 
             // Both processes carry the turn the file still has. Only the first
             // ever observed the one a compaction later removed.
-            let shared = keyed_message(namespace, "session", "msg_shared:req_shared");
+            let mut shared_complete = keyed_message(namespace, "session", "msg_shared:req_shared");
+            shared_complete.tokens.input = 2_000;
+            shared_complete.tokens.output = 999;
+            let mut shared_partial = shared_complete.clone();
+            shared_partial.tokens.input = 200;
+            shared_partial.tokens.output = 60;
             let observed_only_by_first =
                 keyed_message(namespace, "session", "msg_dropped:req_dropped");
 
@@ -3768,12 +3848,12 @@ mod tests {
             observer.insert(entry_with_messages(
                 identity,
                 &path,
-                vec![shared.clone(), observed_only_by_first],
+                vec![shared_complete, observed_only_by_first],
             ));
             observer.save_if_dirty();
 
             let mut latecomer = SourceMessageCache::load();
-            latecomer.insert(entry_with_messages(identity, &path, vec![shared]));
+            latecomer.insert(entry_with_messages(identity, &path, vec![shared_partial]));
             latecomer.save_if_dirty();
 
             let loaded = SourceMessageCache::load();
@@ -3791,6 +3871,18 @@ mod tests {
                 entry.messages.len(),
                 2,
                 "and must not duplicate the shared turn"
+            );
+            let shared = entry
+                .messages
+                .iter()
+                .find(|message| message.dedup_key.as_deref() == Some("msg_shared:req_shared"))
+                .expect("the shared turn should survive");
+            assert_eq!(shared.tokens.input, 2_000);
+            assert_eq!(shared.tokens.output, 999);
+            assert_eq!(
+                entry.retained_message_keys(),
+                HashSet::from(["msg_dropped:req_dropped".to_string()]),
+                "only the row absent from the current source is retained"
             );
         }
     }
