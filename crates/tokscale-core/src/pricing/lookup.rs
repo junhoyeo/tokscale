@@ -2304,7 +2304,7 @@ fn prefers_model_part_key(candidate: &str, existing: &str) -> bool {
 /// knows their router's effective rate can still state it.
 const ROUTING_LABELS: &[&str] = &["auto", "agent_review"];
 
-fn is_routing_label(model_id: &str) -> bool {
+pub(crate) fn is_routing_label(model_id: &str) -> bool {
     let lower = model_id.trim().to_lowercase();
     ROUTING_LABELS.contains(&lower.as_str())
 }

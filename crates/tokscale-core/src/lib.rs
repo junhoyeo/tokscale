@@ -3034,14 +3034,17 @@ const INCOMPLETE_MODEL_PRICING_REASON: &str = "pricing does not cover every popu
 
 /// Routing labels name the router that served the request, never the model
 /// that answered it, so they have no authoritative model-to-price mapping.
-/// They are the same labels `lookup::is_routing_label` (lookup.rs) refuses at
-/// the resolver top — `auto` (the unknown-model label Kiro emits and the
-/// default-model label Cursor/Copilot record) and Cursor's `agent_review` —
-/// plus the historical `gemini-default` pair.
+/// This defers to `lookup::is_routing_label` (lookup.rs) rather than restating
+/// its `ROUTING_LABELS` list: the reason a row is excluded has to name the same
+/// labels the resolver refuses at its top, and a second copy of the list would
+/// drift the moment a label is added to one side. Trimming matches for the same
+/// reason — the resolver trims, so ` auto ` must not read as a routing label
+/// here while being refused there. The historical `gemini-default` pair is
+/// provider-scoped and lives only in this reason, not in the resolver gate.
 fn is_generic_routing_label(provider_id: &str, model_id: &str) -> bool {
-    (provider_id.eq_ignore_ascii_case("google") && model_id.eq_ignore_ascii_case("gemini-default"))
-        || model_id.eq_ignore_ascii_case("auto")
-        || model_id.eq_ignore_ascii_case("agent_review")
+    (provider_id.eq_ignore_ascii_case("google")
+        && model_id.trim().eq_ignore_ascii_case("gemini-default"))
+        || pricing::lookup::is_routing_label(model_id)
 }
 
 fn has_positive_token_usage(tokens: &TokenBreakdown) -> bool {
@@ -4404,13 +4407,14 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, build_graph_from_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
-        generate_graph_with_loaded_pricing, get_home_dir_string, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, paths, pricing, retain_for_requested_clients,
-        scanner, select_local_parse_pricing, unified_to_parsed, validate_priced_messages, ClientId,
-        GraphPricingRequirement, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UnpricedSubmissionExclusion, INCOMPLETE_MODEL_PRICING_REASON,
-        MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
+        message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
+        unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement, GroupBy,
+        LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UnpricedSubmissionExclusion, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
+        ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
@@ -8472,6 +8476,71 @@ mod tests {
                 total_tokens: 18,
                 reason: ROUTING_LABEL_UNPRICED_REASON,
             }
+        );
+    }
+
+    #[test]
+    fn whitespace_padded_routing_label_is_classified_the_same_by_resolver_and_reason() {
+        // `lookup::is_routing_label` trims before comparing, so the resolver
+        // refuses to price ` auto `. The exclusion reason has to agree, or the
+        // row is reported as having no model-to-price mapping while the reason
+        // it is unpriced is that it names a router. Both paths now read the
+        // same list, so a label added to `lookup::ROUTING_LABELS` cannot drift
+        // out of the reason.
+        assert_eq!(
+            crate::pricing::lookup::is_routing_label(" auto "),
+            is_generic_routing_label("amazon-bedrock", " auto "),
+            "resolver and exclusion reason must classify a padded routing label alike"
+        );
+
+        // The models.dev `morph/auto` row is fully priced, so if the resolver
+        // did not refuse the padded label the row would submit at Morph rates
+        // (#1062) instead of reaching the exclusion path at all.
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "morph/auto".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(8.5e-7),
+                output_cost_per_token: Some(1.55e-6),
+                cache_read_input_token_cost: Some(1.6e-7),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new_with_custom_and_models_dev(
+            pricing::custom::CustomPricing::default(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+        let mut padded = UnifiedMessage::new(
+            "kiro",
+            " auto ",
+            "amazon-bedrock",
+            "generic",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 7,
+                cache_read: 11,
+                ..Default::default()
+            },
+            0.0,
+        );
+        padded.message_count = 7;
+
+        let graph = build_graph_from_messages(
+            vec![padded],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("routing label must not abort submission");
+
+        assert_eq!(graph.summary.total_tokens, 0);
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason, ROUTING_LABEL_UNPRICED_REASON,
+            "padded routing label must report the routing-label reason"
         );
     }
 
