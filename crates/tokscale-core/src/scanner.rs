@@ -5594,9 +5594,16 @@ mod tests {
 
         let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 1);
-        assert!(result.get(ClientId::Codebuff)[0]
+        // Compare against a natively joined suffix: scan roots are built with
+        // `join_native`, so this path is `manicode\projects` on Windows and a
+        // hardcoded `manicode/projects` never matches there.
+        let found = result.get(ClientId::Codebuff)[0]
             .to_string_lossy()
-            .contains("manicode/projects"));
+            .into_owned();
+        assert!(
+            found.contains(&join_native("manicode", "projects")),
+            "expected the default manicode root, got {found}"
+        );
     }
 
     #[test]
