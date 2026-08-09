@@ -18,11 +18,14 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 
     // MiniMax M3: Ollama Cloud and other routers report the model with the
     // lowercase bare id `minimax-m3` (and mixed-case variants), while the
-    // authoritative dataset key is `minimax/MiniMax-M3` (litellm) with a
-    // separate `fireworks_ai/minimax-m3` hosted row. A bare id has no exact
-    // hit and would fall through to fuzzy matching, which can land on the
-    // fireworks_ai hosted rate; pin the canonical first-party key so the id
-    // prices deterministically (#935).
+    // authoritative dataset key is `minimax/MiniMax-M3` (litellm). The bare id
+    // has no exact hit in any dataset, so with no usable provider hint it falls
+    // through to model-part matching across every row whose model part is
+    // `minimax-m3` — and models.dev publishes that model part under dozens of
+    // third parties, several at 0.0/0.0 (`kenari/minimax-m3`,
+    // `nvidia/minimaxai/minimax-m3`). Electing one of those prices real usage
+    // at exactly $0, which is the "pricing missing" symptom in #935. Pin the
+    // canonical first-party key so the id prices deterministically.
     m.insert("minimax-m3", "minimax/MiniMax-M3");
 
     m.insert("model_placeholder_m26", "claude-opus-4-6");
@@ -261,17 +264,15 @@ mod tests {
         assert_eq!(m20_result.matched_key, "google/gemini-3.5-flash");
     }
 
-    /// Regression: Anthropic's "-0" suffix is a documented moving alias for the
-    /// latest snapshot of a model line, and GitHub Copilot reports 4.1 without
-    /// the separator. Neither form resolved, so real first-party usage was
-    /// excluded from submission as unpriced — 41M tokens of claude-opus-4-0 in
-    /// one reported case.
+    /// Regression: Ollama Cloud and other routers report MiniMax M3 as the
+    /// bare lowercase id `minimax-m3`, which matches no dataset key exactly.
+    /// Unhinted, it fell through to the model-part fallback and could elect any
+    /// third-party row publishing that model part — including the 0.0/0.0 rows
+    /// models.dev carries — instead of the first-party `minimax/MiniMax-M3`
+    /// key (#935).
     #[test]
     fn resolves_minimax_m3_bare_and_case_variants() {
-        // #935: `minimax-m3` (bare lowercase, as Ollama Cloud and other
-        // routers report it) must resolve to the canonical first-party litellm
-        // key, never fall through to fuzzy matching or the fireworks_ai
-        // hosted row. resolve_alias is case-insensitive.
+        // resolve_alias is case-insensitive, since clients report mixed casing.
         assert_eq!(
             super::resolve_alias("minimax-m3"),
             Some("minimax/MiniMax-M3")
@@ -289,6 +290,11 @@ mod tests {
         assert_eq!(super::resolve_alias("minimax/minimax-m3"), None);
     }
 
+    /// Regression: Anthropic's "-0" suffix is a documented moving alias for the
+    /// latest snapshot of a model line, and GitHub Copilot reports 4.1 without
+    /// the separator. Neither form resolved, so real first-party usage was
+    /// excluded from submission as unpriced — 41M tokens of claude-opus-4-0 in
+    /// one reported case.
     #[test]
     fn anthropic_moving_aliases_and_copilot_spelling_resolve() {
         assert_eq!(
