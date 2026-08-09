@@ -1669,31 +1669,40 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let prime_agent_outcomes: Vec<CachedParseOutcome> = scan_result
+    let prime_agent_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::PrimeAgent),
-                path,
-                &source_cache,
-                pricing,
-                sessions::prime_agent::parse_prime_agent_file,
+            (
+                path.clone(),
+                load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::PrimeAgent),
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::prime_agent::parse_prime_agent_file,
+                ),
             )
         })
         .collect();
-    let mut prime_agent_seen: HashSet<String> = HashSet::new();
-    for outcome in prime_agent_outcomes {
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut prime_agent_seen, message)),
-        );
+    let mut prime_agent_messages = Vec::new();
+    let mut prime_agent_accounting = Vec::new();
+    for (path, outcome) in prime_agent_outcomes {
+        prime_agent_accounting.push(sessions::prime_agent::analyze_prime_agent_accounting(
+            &path,
+            &outcome.messages,
+        ));
+        prime_agent_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    let mut prime_agent_messages = sessions::prime_agent::reconcile_prime_agent_messages(
+        prime_agent_messages,
+        &prime_agent_accounting,
+    );
+    apply_pricing_to_messages(&mut prime_agent_messages, pricing);
+    all_messages.extend(prime_agent_messages);
 
     let kimchi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimchi)
@@ -3734,15 +3743,30 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
-    let prime_agent_msgs_raw: Vec<UnifiedMessage> = scan_result
+    let prime_agent_files: Vec<(
+        Vec<UnifiedMessage>,
+        sessions::prime_agent::PrimeFileAccounting,
+    )> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
-        .flat_map(|path| sessions::prime_agent::parse_prime_agent_file(path))
+        .map(|path| {
+            let messages = sessions::prime_agent::parse_prime_agent_file(path);
+            let accounting = sessions::prime_agent::analyze_prime_agent_accounting(path, &messages);
+            (messages, accounting)
+        })
         .collect();
-    let mut prime_agent_seen: HashSet<String> = HashSet::new();
-    let prime_agent_msgs: Vec<ParsedMessage> = prime_agent_msgs_raw
+    let mut prime_agent_msgs_raw = Vec::new();
+    let mut prime_agent_accounting = Vec::new();
+    for (file_messages, file_accounting) in prime_agent_files {
+        prime_agent_msgs_raw.extend(file_messages);
+        prime_agent_accounting.push(file_accounting);
+    }
+    let prime_agent_msgs: Vec<ParsedMessage> =
+        sessions::prime_agent::reconcile_prime_agent_messages(
+            prime_agent_msgs_raw,
+            &prime_agent_accounting,
+        )
         .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut prime_agent_seen, message))
         .map(|message| unified_to_parsed(&message))
         .collect();
     let prime_agent_count = prime_agent_msgs.len() as i32;
@@ -11036,6 +11060,106 @@ mod tests {
         };
         assert!(dates.contains(&local_date(thread_created + 2000)));
         assert!(dates.contains(&local_date(ledger_timestamp)));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_forked_parent_and_rlm_child_are_counted_once() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/z-original/sub-child");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let original_path = sessions.join("z-original.jsonl");
+        std::fs::write(
+            sessions.join("a-fork.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"fork","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":0}}
+{{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250}}}}}}
+{{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}},"aggregateUsage":{{"input":130,"output":60,"cacheRead":20,"cacheWrite":10,"totalTokens":220}},"origin":"spawn_task"}}
+{{"type":"child_usage_attributed","id":"usage-2","parentId":"usage-1","timestamp":"2026-08-08T00:00:03.000Z","targetId":"parent","childUsage":{{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}},"aggregateUsage":{{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250}},"origin":"spawn_task"}}
+"#,
+                paths::json_path_literal(&original_path)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &original_path,
+            r#"{"type":"session","version":3,"id":"original","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":10,"totalTokens":180}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40},"aggregateUsage":{"input":130,"output":60,"cacheRead":20,"cacheWrite":10,"totalTokens":220},"origin":"spawn_task"}
+{"type":"child_usage_attributed","id":"usage-2","parentId":"usage-1","timestamp":"2026-08-08T00:00:03.000Z","targetId":"parent","childUsage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30},"aggregateUsage":{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message-1","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response-1","usage":{{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}}}}
+{{"type":"message","id":"child-message-2","parentId":"child-message-1","timestamp":"2026-08-08T00:00:03.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response-2","usage":{{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}}}}
+"#,
+                paths::json_path_literal(&original_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // Exercise the warm source-cache lane as well as the initial parse.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            assert_eq!(messages.len(), 3);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                150
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.output)
+                    .sum::<i64>(),
+                70
+            );
+        }
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.counts.get(ClientId::PrimeAgent), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            150
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.output)
+                .sum::<i64>(),
+            70
+        );
     }
 
     #[test]

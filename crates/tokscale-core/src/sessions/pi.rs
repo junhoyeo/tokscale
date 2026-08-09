@@ -26,6 +26,8 @@ pub struct PiSessionHeader {
     pub timestamp: Option<String>,
     #[allow(dead_code)]
     pub cwd: Option<String>,
+    #[serde(rename = "parentSession")]
+    pub parent_session: Option<String>,
     #[serde(rename = "rlmDepth")]
     pub rlm_depth: Option<u32>,
 }
@@ -57,6 +59,12 @@ pub struct PiSessionEntry {
     pub timestamp: Option<String>,
     pub message: Option<PiMessage>,
     pub name: Option<String>,
+    #[serde(rename = "targetId")]
+    pub target_id: Option<String>,
+    #[serde(rename = "childUsage")]
+    pub child_usage: Option<PiUsage>,
+    #[serde(rename = "aggregateUsage")]
+    pub aggregate_usage: Option<PiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +77,7 @@ pub struct PiMessage {
     pub response_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiUsage {
     pub input: Option<i64>,
