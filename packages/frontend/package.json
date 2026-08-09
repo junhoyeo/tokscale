@@ -9,7 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:reconciliation:db": "vitest run __tests__/integration/ratchetCensusPostgres.test.ts",
+    "test:reconciliation:db": "RATCHET_CENSUS_DB_INTEGRATION=1 vitest run __tests__/integration/ratchetCensusPostgres.test.ts",
     "test:migrations": "drizzle-kit migrate && bun scripts/check-migrations.ts",
     "gallery": "bun scripts/gallery/build-gallery.ts",
     "db:generate": "drizzle-kit generate",
