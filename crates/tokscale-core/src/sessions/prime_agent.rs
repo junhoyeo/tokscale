@@ -108,22 +108,50 @@ fn usage_key(usage: &TokenBreakdown) -> UsageKey {
 /// the parent's `child_usage_attributed` records verbatim, so all copies within
 /// one chain describe the same invocation and must share an attribution
 /// identity. Files in different chains never do.
+///
+/// A chain can loop: two files can name each other as fork parent, and a rewritten
+/// or relocated session can close a longer loop. Stopping the walk on a repeat is
+/// not enough, because each member would then stop at itself and the copies would
+/// be accounted for as unrelated attributions, restoring the same child delta once
+/// per member. Every member of a loop therefore resolves to a single deterministic
+/// representative instead.
 fn lineage_roots(accounting: &[PrimeFileAccounting]) -> HashMap<PathBuf, PathBuf> {
     let forked_from: HashMap<&PathBuf, &PathBuf> = accounting
         .iter()
         .filter_map(|file| Some((&file.source_path, file.fork_parent_path.as_ref()?)))
         .collect();
-    let mut roots = HashMap::new();
+    let mut roots: HashMap<PathBuf, PathBuf> = HashMap::new();
     for file in accounting {
-        let mut root = &file.source_path;
-        let mut visited = HashSet::new();
-        while visited.insert(root.clone()) {
-            let Some(parent) = forked_from.get(root) else {
-                break;
-            };
-            root = parent;
+        // Walk the fork chain, remembering the order the files were seen so a
+        // cycle can be recognized by where it closes rather than merely stopped.
+        let mut chain: Vec<PathBuf> = Vec::new();
+        let mut position: HashMap<PathBuf, usize> = HashMap::new();
+        let mut node = file.source_path.clone();
+        let root = loop {
+            if let Some(resolved) = roots.get(&node) {
+                break resolved.clone();
+            }
+            if let Some(entered) = position.get(&node).copied() {
+                // A fork chain that loops back on itself: every file in the loop
+                // is a copy of the same fork history, so they must collapse onto
+                // one representative instead of each becoming its own root. Take
+                // the smallest path in the loop, which no scan order can change.
+                break chain[entered..].iter().min().cloned().unwrap_or(node);
+            }
+            position.insert(node.clone(), chain.len());
+            chain.push(node.clone());
+            match forked_from.get(&node) {
+                Some(parent) => node = (*parent).clone(),
+                // The head of an acyclic chain is its own root.
+                None => break node,
+            }
+        };
+        // Memoized for the whole walk: every file on a chain shares its root, and
+        // a chain that runs into a loop adopts the loop's representative.
+        for member in chain {
+            roots.insert(member, root.clone());
         }
-        roots.insert(file.source_path.clone(), root.clone());
+        roots.entry(file.source_path.clone()).or_insert(root);
     }
     roots
 }
@@ -321,30 +349,195 @@ fn rewrite_fallback_usage(key: &str, usage: &TokenBreakdown) -> String {
     )
 }
 
-/// Claim one eligible child response for `attribution`, re-seating an already
-/// matched attribution along an augmenting path when that frees a response.
-/// Returns whether `attribution` ended up matched. This is Kuhn's algorithm; it
-/// recurses only through attributions that contend for the same equal-usage
-/// child responses inside one lineage, which is a handful even in long threads.
-fn match_child_response(
-    attribution: usize,
-    eligible: &[Vec<ChildResponseRef>],
-    matched_children: &mut HashMap<ChildResponseRef, usize>,
-    visited: &mut HashSet<ChildResponseRef>,
-) -> bool {
-    for candidate in &eligible[attribution] {
-        if !visited.insert(candidate.clone()) {
-            continue;
-        }
-        let holder = matched_children.get(candidate).copied();
-        if holder
-            .is_none_or(|holder| match_child_response(holder, eligible, matched_children, visited))
-        {
-            matched_children.insert(candidate.clone(), attribution);
-            return true;
+/// Timestamp distance in milliseconds between an attribution and a parsed child
+/// response. A lower cost is a better explanation of one completion event.
+type MatchCost = i64;
+
+/// One independent contention group, in dense local indices: the attributions
+/// that reach a shared set of child responses, directly or transitively.
+/// Separate components never influence each other, so each is matched alone.
+struct MatchingComponent {
+    /// Local attribution index -> index into the global attribution key list.
+    attributions: Vec<usize>,
+    /// Local attribution index -> its eligible (local child index, cost) pairs.
+    edges: Vec<Vec<(usize, MatchCost)>>,
+    children: usize,
+}
+
+fn disjoint_set_root(parents: &mut [usize], node: usize) -> usize {
+    let mut root = node;
+    while parents[root] != root {
+        root = parents[root];
+    }
+    let mut walk = node;
+    while parents[walk] != root {
+        let next = parents[walk];
+        parents[walk] = root;
+        walk = next;
+    }
+    root
+}
+
+/// Split the attribution/child graph into connected components, so the
+/// attributions that genuinely contend for the same child responses are matched
+/// together while unrelated sessions stay out of each other's cost accounting.
+fn matching_components(eligible: &[Vec<(MatchCost, ChildResponseRef)>]) -> Vec<MatchingComponent> {
+    let mut child_indices: BTreeMap<ChildResponseRef, usize> = BTreeMap::new();
+    for candidates in eligible {
+        for (_, candidate) in candidates {
+            let next = child_indices.len();
+            child_indices.entry(candidate.clone()).or_insert(next);
         }
     }
-    false
+    let mut parents: Vec<usize> = (0..eligible.len() + child_indices.len()).collect();
+    for (attribution, candidates) in eligible.iter().enumerate() {
+        for (_, candidate) in candidates {
+            let child = eligible.len() + child_indices[candidate];
+            let left = disjoint_set_root(&mut parents, attribution);
+            let right = disjoint_set_root(&mut parents, child);
+            if left != right {
+                parents[left] = right;
+            }
+        }
+    }
+    let mut grouped: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (attribution, candidates) in eligible.iter().enumerate() {
+        if candidates.is_empty() {
+            continue;
+        }
+        let root = disjoint_set_root(&mut parents, attribution);
+        grouped.entry(root).or_default().push(attribution);
+    }
+    grouped
+        .into_values()
+        .map(|attributions| {
+            let mut local_children: BTreeMap<ChildResponseRef, usize> = BTreeMap::new();
+            let mut edges = Vec::with_capacity(attributions.len());
+            for attribution in &attributions {
+                let mut candidates = Vec::new();
+                for (cost, candidate) in &eligible[*attribution] {
+                    let next = local_children.len();
+                    let child = *local_children.entry(candidate.clone()).or_insert(next);
+                    candidates.push((child, *cost));
+                }
+                edges.push(candidates);
+            }
+            MatchingComponent {
+                attributions,
+                edges,
+                children: local_children.len(),
+            }
+        })
+        .collect()
+}
+
+/// Minimum-cost maximum matching over one component, by successive shortest
+/// augmenting paths: every augmentation takes the cheapest path that adds one
+/// pair, so the result is a maximum matching whose total timestamp distance is
+/// the smallest of any maximum matching. Plain maximum-cardinality matching is
+/// not enough here -- it fixes how many attributions are matched but not which
+/// ones -- so this is what stops an attribution that merely lands inside the
+/// tolerance window from consuming a child response another attribution explains
+/// exactly.
+///
+/// `blocked` removes one attribution from the component, which is how the caller
+/// asks whether that attribution is dispensable at no extra cost.
+///
+/// Returns the cardinality, the total cost, and each local attribution's child.
+fn min_cost_max_matching(
+    component: &MatchingComponent,
+    blocked: Option<usize>,
+) -> (usize, MatchCost, Vec<Option<usize>>) {
+    let attributions = component.edges.len();
+    let children = component.children;
+    let source = attributions + children;
+    let sink = source + 1;
+    let mut matched_attribution: Vec<Option<usize>> = vec![None; attributions];
+    let mut matched_child: Vec<Option<usize>> = vec![None; children];
+    let mut cardinality = 0usize;
+
+    loop {
+        // Residual arcs: an unused pairing costs its distance and a used one
+        // refunds it, so the cheapest source-to-sink walk is the cheapest way
+        // to gain one pair. Refunds are negative, hence Bellman-Ford rather
+        // than Dijkstra; a component is the handful of attributions sharing one
+        // equal-usage bucket inside one lineage.
+        let mut residual: Vec<(usize, usize, MatchCost)> = Vec::new();
+        for (attribution, matched) in matched_attribution.iter().enumerate() {
+            if blocked == Some(attribution) {
+                continue;
+            }
+            if matched.is_none() {
+                residual.push((source, attribution, 0));
+            }
+            for &(child, cost) in &component.edges[attribution] {
+                if *matched == Some(child) {
+                    residual.push((attributions + child, attribution, -cost));
+                } else {
+                    residual.push((attribution, attributions + child, cost));
+                }
+            }
+        }
+        for (child, matched) in matched_child.iter().enumerate() {
+            if matched.is_none() {
+                residual.push((attributions + child, sink, 0));
+            }
+        }
+
+        let mut distance: Vec<Option<MatchCost>> = vec![None; sink + 1];
+        let mut previous: Vec<Option<usize>> = vec![None; sink + 1];
+        distance[source] = Some(0);
+        for _ in 0..=sink {
+            let mut improved = false;
+            for &(from, to, cost) in &residual {
+                let Some(reached) = distance[from] else {
+                    continue;
+                };
+                let candidate = reached + cost;
+                if distance[to].is_none_or(|current| candidate < current) {
+                    distance[to] = Some(candidate);
+                    previous[to] = Some(from);
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        if distance[sink].is_none() {
+            break;
+        }
+
+        // Re-seat every pairing the augmenting path crosses. A shortest path is
+        // simple, so each attribution and each child response appears at most
+        // once and the rewrites are independent of the order applied.
+        let mut node = sink;
+        let mut steps = 0;
+        while let Some(from) = previous[node] {
+            if from < attributions && (attributions..source).contains(&node) {
+                let child = node - attributions;
+                matched_attribution[from] = Some(child);
+                matched_child[child] = Some(from);
+            }
+            node = from;
+            steps += 1;
+            if steps > sink {
+                break;
+            }
+        }
+        cardinality += 1;
+    }
+
+    let mut cost = 0;
+    for (attribution, matched) in matched_attribution.iter().enumerate() {
+        if let Some(child) = matched {
+            cost += component.edges[attribution]
+                .iter()
+                .find(|(candidate, _)| candidate == child)
+                .map_or(0, |(_, cost)| *cost);
+        }
+    }
+    (cardinality, cost, matched_attribution)
 }
 
 /// Subtract child usage only when a matching RLM transcript was actually
@@ -424,14 +617,31 @@ pub(crate) fn reconcile_prime_agent_messages(
     //    discarded as ambiguous, which would count both the children and the
     //    parent aggregate that already contains them.
     //
-    // Rule 3 uses augmenting paths rather than nearest-first greed so that a
-    // contested child response cannot strand an attribution that had no other
-    // candidate. Every attribution contending for one child response carries
-    // the same `childUsage` (the pool is keyed by usage), so the reconciled
-    // total depends only on how many attributions are matched, never on which
-    // maximum matching is found.
+    // Rule 3 is settled by a minimum-cost maximum matching, the cost of a
+    // pairing being its timestamp distance. Maximum cardinality alone fixes how
+    // MANY attributions are matched but not WHICH ones, and that choice decides
+    // which parent response gets its aggregate reduced. Every attribution
+    // contending for one child response carries the same `childUsage`, so the
+    // global token total is the same for every maximum matching -- but the
+    // per-model rows are not, and pricing is applied per model after
+    // reconciliation, so an arbitrary choice silently moves cost between models.
+    // Minimum cost keeps an attribution that merely lands inside the tolerance
+    // window from consuming a child response another attribution explains
+    // exactly.
+    //
+    // Remaining ties are resolved conservatively rather than arbitrarily. An
+    // attribution is represented only when EVERY minimum-cost maximum matching
+    // contains it; if an equally cheap matching exists that leaves it out, the
+    // transcripts do not say which aggregate spent that child, so the aggregate
+    // is retained -- the same fallback used for a child that was never parsed.
+    // That rule is deterministic and independent of attribution id ordering. It
+    // cannot decide the residual case where two attributions belonging to
+    // different parent responses describe equally sized children that completed
+    // in the very same millisecond: nothing in the records distinguishes them,
+    // and proving identity there would need an upstream child or response id on
+    // the attribution record.
     let attribution_keys: Vec<AttributionKey> = unique_attributions.keys().cloned().collect();
-    let eligible: Vec<Vec<ChildResponseRef>> = unique_attributions
+    let eligible: Vec<Vec<(MatchCost, ChildResponseRef)>> = unique_attributions
         .values()
         .map(|(usage, attribution_timestamp, owners)| {
             let mut candidates: Vec<(i64, ChildResponseRef)> = Vec::new();
@@ -459,21 +669,31 @@ pub(crate) fn reconcile_prime_agent_messages(
             }
             candidates.sort();
             candidates
-                .into_iter()
-                .map(|(_, candidate)| candidate)
-                .collect()
         })
         .collect();
 
-    let mut matched_children: HashMap<ChildResponseRef, usize> = HashMap::new();
-    for attribution in 0..attribution_keys.len() {
-        let mut visited = HashSet::new();
-        match_child_response(attribution, &eligible, &mut matched_children, &mut visited);
+    let mut represented_attributions: HashSet<AttributionKey> = HashSet::new();
+    for component in matching_components(&eligible) {
+        let (cardinality, cost, assignment) = min_cost_max_matching(&component, None);
+        // When the matching already covers every attribution in the component,
+        // dropping any one of them shrinks it, so none of them is dispensable
+        // and there is nothing left to disambiguate.
+        let saturated = cardinality == component.edges.len();
+        for (local, matched) in assignment.iter().enumerate() {
+            if matched.is_none() {
+                continue;
+            }
+            if !saturated {
+                let (alternate_cardinality, alternate_cost, _) =
+                    min_cost_max_matching(&component, Some(local));
+                if alternate_cardinality == cardinality && alternate_cost == cost {
+                    continue;
+                }
+            }
+            represented_attributions
+                .insert(attribution_keys[component.attributions[local]].clone());
+        }
     }
-    let represented_attributions: HashSet<AttributionKey> = matched_children
-        .into_values()
-        .map(|attribution| attribution_keys[attribution].clone())
-        .collect();
 
     let mut adjustment_groups: HashMap<String, Vec<(PathBuf, &PrimeUsageAdjustment)>> =
         HashMap::new();
@@ -1203,6 +1423,287 @@ mod tests {
 
         assert_eq!(totals(false), (150, 100));
         assert_eq!(totals(true), (150, 100));
+    }
+
+    /// Maximum-cardinality matching alone leaves which attribution wins a
+    /// contested child response up to the order attributions happen to be
+    /// visited in, which is their random 8-hex id order. The global token total
+    /// survives that, but the per-model rows do not, and pricing is applied per
+    /// model after reconciliation -- so the cost of a pruned child lands on the
+    /// wrong model. The nearer pairing must win regardless of id order.
+    #[test]
+    fn the_nearest_attribution_wins_a_contested_child_response() {
+        fn per_model_input(reverse: bool, swap_ids: bool) -> HashMap<String, i64> {
+            let (id_a, id_b) = if swap_ids {
+                ("ffffffff", "00000000")
+            } else {
+                ("00000000", "ffffffff")
+            };
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_path = dir.path().join("parent.jsonl");
+            let child_path = dir.path().join("child.jsonl");
+            // Two parent responses, each persisting a 150 aggregate that is 100
+            // of its own plus one 50-token child. Only the second parent's child
+            // transcript survives; the first parent's child was pruned.
+            std::fs::write(
+                &parent_path,
+                format!(
+                    r#"{{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}}
+{{"type":"message","id":"parent-a","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{{"role":"assistant","provider":"anthropic","model":"model-a","responseId":"parent-response-a","usage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}}}}
+{{"type":"child_usage_attributed","id":"{id_a}","parentId":"parent-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent-a","childUsage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}},"aggregateUsage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}},"origin":"spawn_task"}}
+{{"type":"message","id":"parent-b","parentId":"{id_a}","timestamp":"2026-08-08T00:00:01.500Z","message":{{"role":"assistant","provider":"anthropic","model":"model-b","responseId":"parent-response-b","usage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}}}}
+{{"type":"child_usage_attributed","id":"{id_b}","parentId":"parent-b","timestamp":"2026-08-08T00:00:02.002Z","targetId":"parent-b","childUsage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}},"aggregateUsage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}},"origin":"spawn_task"}}
+"#
+                ),
+            )
+            .unwrap();
+            // The surviving child completed in the same millisecond as the
+            // second parent's attribution, and two milliseconds from the first
+            // parent's -- inside the tolerance window for both.
+            std::fs::write(
+                &child_path,
+                format!(
+                    r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.600Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.002Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                    serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let mut paths = vec![parent_path, child_path];
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let mut per_model: HashMap<String, i64> = HashMap::new();
+            for message in &messages {
+                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+            }
+            per_model
+        }
+
+        for reverse in [false, true] {
+            for swap_ids in [false, true] {
+                let per_model = per_model_input(reverse, swap_ids);
+                assert_eq!(
+                    per_model.get("model-a").copied(),
+                    Some(150),
+                    "the parent whose child was pruned keeps its aggregate \
+                     (reverse={reverse}, swap_ids={swap_ids})"
+                );
+                assert_eq!(
+                    per_model.get("model-b").copied(),
+                    Some(100),
+                    "the parent whose child survived keeps only its own usage \
+                     (reverse={reverse}, swap_ids={swap_ids})"
+                );
+                assert_eq!(per_model.get("child-model").copied(), Some(50));
+                assert_eq!(per_model.values().sum::<i64>(), 300);
+            }
+        }
+    }
+
+    /// Two fork copies that name each other as fork parent describe one fork
+    /// history, so their copies of one attribution must collapse. Resolving each
+    /// copy to itself instead makes the pair look like two independent
+    /// attributions, and the unavailable child's delta is restored once per copy.
+    #[test]
+    fn a_fork_parent_loop_collapses_onto_one_lineage() {
+        fn totals(reverse: bool, with_child: bool) -> (i64, i64) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let first_path = dir.path().join("fork-a.jsonl");
+            let second_path = dir.path().join("fork-b.jsonl");
+            let child_path = dir.path().join("child.jsonl");
+            // Each copy names the other as its fork parent, and both carry the
+            // same response, the same attribution id, and the same 150 aggregate
+            // that is 100 of their own plus one 50-token child.
+            for (path, fork_parent) in [(&first_path, &second_path), (&second_path, &first_path)] {
+                std::fs::write(
+                    path,
+                    format!(
+                        r#"{{"type":"session","version":3,"id":"fork","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":0}}
+{{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"shared-parent","usage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}}}}
+{{"type":"child_usage_attributed","id":"aaaa1111","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}},"aggregateUsage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}},"origin":"spawn_task"}}
+"#,
+                        serde_json::to_string(&fork_parent.to_string_lossy()).unwrap()
+                    ),
+                )
+                .unwrap();
+            }
+            if with_child {
+                std::fs::write(
+                    &child_path,
+                    format!(
+                        r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                        serde_json::to_string(&first_path.to_string_lossy()).unwrap()
+                    ),
+                )
+                .unwrap();
+            }
+
+            let mut paths = vec![first_path, second_path];
+            if with_child {
+                paths.push(child_path);
+            }
+            if reverse {
+                paths.reverse();
+            }
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let parent_input = messages
+                .iter()
+                .find(|message| {
+                    message.dedup_key.as_deref() == Some("prime-agent:response:shared-parent")
+                })
+                .map_or(0, |message| message.tokens.input);
+            (
+                messages.iter().map(|message| message.tokens.input).sum(),
+                parent_input,
+            )
+        }
+
+        for reverse in [false, true] {
+            // The child was never parsed, so the one aggregate is kept whole and
+            // counted once rather than once per fork copy.
+            assert_eq!(totals(reverse, false), (150, 150), "reverse={reverse}");
+            // The child transcript is available, so the collapsed parent keeps
+            // only its own 100 and the child is counted once from its own file.
+            assert_eq!(totals(reverse, true), (150, 100), "reverse={reverse}");
+        }
+    }
+
+    /// The partial case: three parent responses each claim a 50-token child
+    /// inside one timestamp window, but only two of those child transcripts
+    /// survive. Maximum cardinality fixes that two attributions are matched
+    /// without saying which two, so the surviving transcripts must go to the
+    /// attributions they are nearest to, not to whichever the scan reaches first.
+    #[test]
+    fn partial_equal_usage_matches_keep_each_attributions_identity() {
+        fn per_model_input(reverse: bool, descending_ids: bool) -> HashMap<String, i64> {
+            let mut ids = ["00000000", "88888888", "ffffffff"];
+            if descending_ids {
+                ids.reverse();
+            }
+            let dir = tempfile::TempDir::new().unwrap();
+            let parent_path = dir.path().join("parent.jsonl");
+            let mut parent = r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+"#
+            .to_string();
+            // model-a's child was pruned; model-b's and model-c's survived, each
+            // completing in the same millisecond as its own attribution.
+            for (model, id, millis) in [
+                ("model-a", ids[0], "000"),
+                ("model-b", ids[1], "003"),
+                ("model-c", ids[2], "006"),
+            ] {
+                parent.push_str(&format!(
+                    r#"{{"type":"message","id":"parent-{model}","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{{"role":"assistant","provider":"anthropic","model":"{model}","responseId":"response-{model}","usage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}}}}
+{{"type":"child_usage_attributed","id":"{id}","parentId":"parent-{model}","timestamp":"2026-08-08T00:00:02.{millis}Z","targetId":"parent-{model}","childUsage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}},"aggregateUsage":{{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}},"origin":"spawn_task"}}
+"#
+                ));
+            }
+            std::fs::write(&parent_path, parent).unwrap();
+
+            let mut paths = vec![parent_path.clone()];
+            for (name, millis) in [("child-b", "003"), ("child-c", "006")] {
+                let child_path = dir.path().join(format!("{name}.jsonl"));
+                std::fs::write(
+                    &child_path,
+                    format!(
+                        r#"{{"type":"session","version":3,"id":"{name}","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.{millis}Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"{name}-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                        serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+                    ),
+                )
+                .unwrap();
+                paths.push(child_path);
+            }
+            if reverse {
+                paths.reverse();
+            }
+
+            let parsed: Vec<(PathBuf, Vec<UnifiedMessage>)> = paths
+                .into_iter()
+                .map(|path| {
+                    let messages = parse_prime_agent_file(&path);
+                    (path, messages)
+                })
+                .collect();
+            let accounting: Vec<PrimeFileAccounting> = parsed
+                .iter()
+                .map(|(path, messages)| analyze_prime_agent_accounting(path, messages))
+                .collect();
+            let messages: Vec<UnifiedMessage> = parsed
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect();
+            let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+            let mut per_model: HashMap<String, i64> = HashMap::new();
+            for message in &messages {
+                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+            }
+            per_model
+        }
+
+        for reverse in [false, true] {
+            for descending_ids in [false, true] {
+                let per_model = per_model_input(reverse, descending_ids);
+                let context = format!("reverse={reverse}, descending_ids={descending_ids}");
+                assert_eq!(
+                    per_model.get("model-a").copied(),
+                    Some(150),
+                    "the pruned child's aggregate is retained ({context})"
+                );
+                assert_eq!(
+                    per_model.get("model-b").copied(),
+                    Some(100),
+                    "model-b's own child authorizes its subtraction ({context})"
+                );
+                assert_eq!(
+                    per_model.get("model-c").copied(),
+                    Some(100),
+                    "model-c's own child authorizes its subtraction ({context})"
+                );
+                assert_eq!(per_model.get("child-model").copied(), Some(100));
+                assert_eq!(per_model.values().sum::<i64>(), 450);
+            }
+        }
     }
 
     #[test]
