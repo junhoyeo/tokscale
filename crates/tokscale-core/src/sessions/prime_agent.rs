@@ -9,6 +9,7 @@
 //! serializing a fork, before the copied parent is deduplicated across files.
 
 use super::pi::{parse_pi_format_rlm_file, PiSessionEntry, PiSessionHeader, PiUsage};
+use super::utils::parse_timestamp_str;
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -22,8 +23,15 @@ pub fn parse_prime_agent_file(path: &Path) -> Vec<UnifiedMessage> {
 #[derive(Debug, Clone)]
 struct PrimeAttribution {
     id: String,
+    timestamp: Option<i64>,
     child_usage: TokenBreakdown,
     aggregate_usage: TokenBreakdown,
+}
+
+#[derive(Debug, Clone)]
+struct ChildMessageUsage {
+    timestamp: Option<i64>,
+    usage: TokenBreakdown,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +46,7 @@ pub(crate) struct PrimeFileAccounting {
     source_path: PathBuf,
     attributions: Vec<PrimeAttribution>,
     adjustments: Vec<PrimeUsageAdjustment>,
-    child_message_usages: Vec<TokenBreakdown>,
+    child_message_usages: Vec<ChildMessageUsage>,
     child_parent_path: Option<PathBuf>,
     fork_parent_path: Option<PathBuf>,
 }
@@ -58,6 +66,13 @@ fn add_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
     total.output = total.output.saturating_add(usage.output);
     total.cache_read = total.cache_read.saturating_add(usage.cache_read);
     total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+}
+
+fn maximize_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
+    total.input = total.input.max(usage.input);
+    total.output = total.output.max(usage.output);
+    total.cache_read = total.cache_read.max(usage.cache_read);
+    total.cache_write = total.cache_write.max(usage.cache_write);
 }
 
 fn subtract_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
@@ -115,6 +130,7 @@ pub(crate) fn analyze_prime_agent_accounting(
     let mut message_index = 0usize;
     let mut targets: HashMap<String, (String, TokenBreakdown)> = HashMap::new();
     let mut attributions: HashMap<String, Vec<PrimeAttribution>> = HashMap::new();
+    let mut child_message_usages = Vec::new();
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let trimmed = line.trim();
@@ -157,6 +173,7 @@ pub(crate) fn analyze_prime_agent_accounting(
         let Ok(entry) = serde_json::from_str::<PiSessionEntry>(trimmed) else {
             continue;
         };
+        let entry_timestamp = entry.timestamp.as_deref().and_then(parse_timestamp_str);
         if entry.entry_type == "child_usage_attributed" {
             if let (Some(id), Some(target_id), Some(child_usage), Some(aggregate_usage)) = (
                 entry.id,
@@ -169,6 +186,7 @@ pub(crate) fn analyze_prime_agent_accounting(
                     .or_default()
                     .push(PrimeAttribution {
                         id,
+                        timestamp: entry_timestamp,
                         child_usage: usage_breakdown(&child_usage),
                         aggregate_usage: usage_breakdown(&aggregate_usage),
                     });
@@ -181,18 +199,24 @@ pub(crate) fn analyze_prime_agent_accounting(
         let Some(message) = entry.message else {
             continue;
         };
-        if message.role.as_deref() != Some("assistant") || message.usage.is_none() {
+        if message.role.as_deref() != Some("assistant")
+            || message.usage.is_none()
+            || message.model.is_none()
+        {
             continue;
         }
-        let Some(model) = message.model.filter(|model| !model.is_empty()) else {
+
+        let parsed = messages.get(message_index);
+        message_index += 1;
+        let Some(parsed) = parsed else {
             continue;
         };
-        drop(model);
-
-        let Some(parsed) = messages.get(message_index) else {
-            break;
-        };
-        message_index += 1;
+        if is_rlm_child {
+            child_message_usages.push(ChildMessageUsage {
+                timestamp: entry_timestamp,
+                usage: parsed.tokens.clone(),
+            });
+        }
         if let (Some(id), Some(dedup_key)) = (entry.id, parsed.dedup_key.clone()) {
             targets.insert(id, (dedup_key, parsed.tokens.clone()));
         }
@@ -221,15 +245,6 @@ pub(crate) fn analyze_prime_agent_accounting(
             });
         }
     }
-
-    let child_message_usages = if is_rlm_child {
-        messages
-            .iter()
-            .map(|message| message.tokens.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     PrimeFileAccounting {
         source_path,
@@ -269,100 +284,177 @@ fn rewrite_fallback_usage(key: &str, usage: &TokenBreakdown) -> String {
 /// parsed, then collapse fork copies. Missing/pruned children remain represented
 /// by Prime's aggregate parent usage instead of disappearing from the total.
 pub(crate) fn reconcile_prime_agent_messages(
-    mut messages: Vec<UnifiedMessage>,
+    messages: Vec<UnifiedMessage>,
     accounting: &[PrimeFileAccounting],
 ) -> Vec<UnifiedMessage> {
-    let mut available_children: HashMap<LineageUsageKey, usize> = HashMap::new();
+    const ATTRIBUTION_TIMESTAMP_TOLERANCE_MS: i64 = 1_000;
+
+    let mut available_children: HashMap<LineageUsageKey, Vec<Option<i64>>> = HashMap::new();
     for file in accounting {
         if let Some(parent_path) = &file.child_parent_path {
-            for usage in &file.child_message_usages {
-                *available_children
-                    .entry((parent_path.clone(), usage_key(usage)))
-                    .or_default() += 1;
+            for child in &file.child_message_usages {
+                available_children
+                    .entry((parent_path.clone(), usage_key(&child.usage)))
+                    .or_default()
+                    .push(child.timestamp);
             }
         }
     }
 
     // Attribution ids survive fork serialization. Record every file that owns
-    // a copy, but only match against children whose header points back to that
-    // exact parent session file. A same-sized child from another lineage must
-    // never authorize subtraction.
-    let mut unique_attributions: BTreeMap<String, (TokenBreakdown, BTreeSet<PathBuf>)> =
-        BTreeMap::new();
+    // a copy, but match only a child response whose header points back to that
+    // parent session and whose completion timestamp is the same event (Prime
+    // writes the two records within milliseconds). This disambiguates equal
+    // token buckets produced by separate children in one parent.
+    let mut unique_attributions: BTreeMap<
+        String,
+        (TokenBreakdown, Option<i64>, BTreeSet<PathBuf>),
+    > = BTreeMap::new();
     for file in accounting {
         for attribution in &file.attributions {
-            let (_, owners) = unique_attributions
+            let (_, _, owners) = unique_attributions
                 .entry(attribution.id.clone())
-                .or_insert_with(|| (attribution.child_usage.clone(), BTreeSet::new()));
+                .or_insert_with(|| {
+                    (
+                        attribution.child_usage.clone(),
+                        attribution.timestamp,
+                        BTreeSet::new(),
+                    )
+                });
             owners.insert(file.source_path.clone());
             if let Some(parent) = &file.fork_parent_path {
                 owners.insert(parent.clone());
             }
         }
     }
+
     let mut represented_attributions = HashSet::new();
-    for (id, (usage, owners)) in unique_attributions {
+    for (id, (usage, attribution_timestamp, owners)) in unique_attributions {
+        let mut timed_candidates = Vec::new();
+        let mut untimed_candidates = Vec::new();
         for owner in owners {
             let key = (owner, usage_key(&usage));
-            let Some(count) = available_children.get_mut(&key) else {
+            let Some(children) = available_children.get(&key) else {
                 continue;
             };
-            if *count > 0 {
-                *count -= 1;
-                represented_attributions.insert(id);
-                break;
-            }
-        }
-    }
-
-    let mut attribution_fallback_bases = HashSet::new();
-    for adjustment in accounting.iter().flat_map(|file| &file.adjustments) {
-        if let Some(base) = fallback_key_base(&adjustment.dedup_key) {
-            attribution_fallback_bases.insert(base.to_string());
-        }
-        let mut represented_usage = TokenBreakdown::default();
-        for attribution in &adjustment.attributions {
-            if represented_attributions.contains(&attribution.id) {
-                add_usage(&mut represented_usage, &attribution.child_usage);
-            }
-        }
-        if represented_usage == TokenBreakdown::default() {
-            continue;
-        }
-        for message in &mut messages {
-            if message.dedup_key.as_deref() == Some(&adjustment.dedup_key)
-                && message.tokens == adjustment.persisted_usage
-            {
-                subtract_usage(&mut message.tokens, &represented_usage);
-                if let Some(key) = message.dedup_key.as_deref() {
-                    message.dedup_key = Some(rewrite_fallback_usage(key, &message.tokens));
+            for (index, child_timestamp) in children.iter().enumerate() {
+                match (attribution_timestamp, *child_timestamp) {
+                    (Some(attribution), Some(child)) => {
+                        let distance = attribution.abs_diff(child) as i64;
+                        if distance <= ATTRIBUTION_TIMESTAMP_TOLERANCE_MS {
+                            timed_candidates.push((distance, key.clone(), index));
+                        }
+                    }
+                    _ => untimed_candidates.push((key.clone(), index)),
                 }
             }
         }
+
+        timed_candidates.sort_by_key(|candidate| candidate.0);
+        let selected = timed_candidates.first().and_then(|best| {
+            let tied = timed_candidates.get(1).is_some_and(|next| next.0 == best.0);
+            (!tied).then(|| (best.1.clone(), best.2))
+        });
+        let selected = selected.or_else(|| {
+            (timed_candidates.is_empty() && untimed_candidates.len() == 1)
+                .then(|| untimed_candidates.remove(0))
+        });
+        if let Some((key, index)) = selected {
+            if let Some(children) = available_children.get_mut(&key) {
+                children.swap_remove(index);
+                represented_attributions.insert(id);
+            }
+        }
     }
 
-    let mut deduped = Vec::<UnifiedMessage>::new();
-    let mut seen = HashMap::<String, usize>::new();
-    for message in messages {
-        let Some(key) = message.dedup_key.as_deref() else {
-            deduped.push(message);
+    let mut adjustment_groups: HashMap<String, Vec<&PrimeUsageAdjustment>> = HashMap::new();
+    let mut attribution_fallback_bases = HashSet::new();
+    for adjustment in accounting.iter().flat_map(|file| &file.adjustments) {
+        let identity = fallback_key_base(&adjustment.dedup_key)
+            .inspect(|base| {
+                attribution_fallback_bases.insert((*base).to_string());
+            })
+            .unwrap_or(&adjustment.dedup_key)
+            .to_string();
+        adjustment_groups
+            .entry(identity)
+            .or_default()
+            .push(adjustment);
+    }
+
+    let mut grouped: HashMap<String, Vec<UnifiedMessage>> = HashMap::new();
+    let mut group_order = Vec::new();
+    for (ordinal, message) in messages.into_iter().enumerate() {
+        let identity = message.dedup_key.as_deref().map_or_else(
+            || format!("prime-agent:unkeyed:{ordinal}"),
+            |key| {
+                fallback_key_base(key)
+                    .filter(|base| attribution_fallback_bases.contains(*base))
+                    .unwrap_or(key)
+                    .to_string()
+            },
+        );
+        if !grouped.contains_key(&identity) {
+            group_order.push(identity.clone());
+        }
+        grouped.entry(identity).or_default().push(message);
+    }
+
+    let mut deduped = Vec::with_capacity(group_order.len());
+    for identity in group_order {
+        let mut group = grouped.remove(&identity).unwrap_or_default();
+        let Some(mut representative) = group.first().cloned() else {
             continue;
         };
-        let identity = fallback_key_base(key)
-            .filter(|base| attribution_fallback_bases.contains(*base))
-            .unwrap_or(key)
-            .to_string();
-        if let Some(index) = seen.get(&identity).copied() {
-            let existing = &mut deduped[index];
-            existing.tokens.input = existing.tokens.input.max(message.tokens.input);
-            existing.tokens.output = existing.tokens.output.max(message.tokens.output);
-            existing.tokens.cache_read = existing.tokens.cache_read.max(message.tokens.cache_read);
-            existing.tokens.cache_write =
-                existing.tokens.cache_write.max(message.tokens.cache_write);
-        } else {
-            seen.insert(identity, deduped.len());
-            deduped.push(message);
+        let Some(adjustments) = adjustment_groups.get(&identity) else {
+            for duplicate in group.iter().skip(1) {
+                maximize_usage(&mut representative.tokens, &duplicate.tokens);
+            }
+            deduped.push(representative);
+            continue;
+        };
+
+        let mut base_usage = TokenBreakdown::default();
+        let mut found_base = false;
+        let mut all_attributions: BTreeMap<String, TokenBreakdown> = BTreeMap::new();
+        for adjustment in adjustments {
+            let mut own_usage = adjustment.persisted_usage.clone();
+            for attribution in &adjustment.attributions {
+                subtract_usage(&mut own_usage, &attribution.child_usage);
+                all_attributions
+                    .entry(attribution.id.clone())
+                    .or_insert_with(|| attribution.child_usage.clone());
+            }
+            maximize_usage(&mut base_usage, &own_usage);
+            found_base = true;
         }
+        for message in &group {
+            let is_aggregate_copy = adjustments.iter().any(|adjustment| {
+                message.dedup_key.as_deref() == Some(&adjustment.dedup_key)
+                    && message.tokens == adjustment.persisted_usage
+            });
+            if !is_aggregate_copy {
+                maximize_usage(&mut base_usage, &message.tokens);
+                found_base = true;
+            }
+        }
+        if !found_base {
+            for message in &group {
+                maximize_usage(&mut base_usage, &message.tokens);
+            }
+        }
+        for (id, usage) in all_attributions {
+            if !represented_attributions.contains(&id) {
+                add_usage(&mut base_usage, &usage);
+            }
+        }
+
+        representative.tokens = base_usage;
+        if let Some(key) = representative.dedup_key.as_deref() {
+            representative.dedup_key = Some(rewrite_fallback_usage(key, &representative.tokens));
+        }
+        group.clear();
+        deduped.push(representative);
     }
     deduped
 }
@@ -440,6 +532,134 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 10);
+    }
+
+    #[test]
+    fn blank_model_message_does_not_shift_accounting_alignment() {
+        let file = session_file(
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"blank","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"","responseId":"blank-response","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}
+{"type":"message","id":"parent","parentId":"blank","timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:03.000Z","targetId":"parent","childUsage":{"input":50,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":70},"aggregateUsage":{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250},"origin":"spawn_task"}"#,
+        );
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(accounting.adjustments.len(), 1);
+        assert_eq!(
+            accounting.adjustments[0].dedup_key,
+            "prime-agent:response:parent-response"
+        );
+    }
+
+    #[test]
+    fn sibling_forks_preserve_each_distinct_unavailable_child_delta() {
+        fn tokens(input: i64) -> TokenBreakdown {
+            TokenBreakdown {
+                input,
+                ..TokenBreakdown::default()
+            }
+        }
+        fn parent_message(input: i64, session: &str) -> UnifiedMessage {
+            let mut message = UnifiedMessage::new(
+                "prime-agent",
+                "claude-opus-5",
+                "anthropic",
+                session,
+                1,
+                tokens(input),
+                0.0,
+            );
+            message.dedup_key = Some("prime-agent:response:shared-parent".to_string());
+            message
+        }
+        fn fork_accounting(
+            source: &str,
+            attribution_id: &str,
+            child_input: i64,
+        ) -> PrimeFileAccounting {
+            let attribution = PrimeAttribution {
+                id: attribution_id.to_string(),
+                timestamp: Some(1),
+                child_usage: tokens(child_input),
+                aggregate_usage: tokens(100 + child_input),
+            };
+            PrimeFileAccounting {
+                source_path: PathBuf::from(source),
+                attributions: vec![attribution.clone()],
+                adjustments: vec![PrimeUsageAdjustment {
+                    dedup_key: "prime-agent:response:shared-parent".to_string(),
+                    persisted_usage: tokens(100 + child_input),
+                    attributions: vec![attribution],
+                }],
+                ..PrimeFileAccounting::default()
+            }
+        }
+
+        let messages = vec![parent_message(150, "fork-a"), parent_message(130, "fork-b")];
+        let accounting = [
+            fork_accounting("fork-a.jsonl", "child-a", 50),
+            fork_accounting("fork-b.jsonl", "child-b", 30),
+        ];
+        let messages = reconcile_prime_agent_messages(messages, &accounting);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 180);
+    }
+
+    #[test]
+    fn equal_child_usage_is_matched_by_parent_lineage_and_completion_time() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let parent_path = dir.path().join("parent.jsonl");
+        let child_path = dir.path().join("child.jsonl");
+        std::fs::write(
+            &parent_path,
+            r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent-a","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"model-a","responseId":"parent-response-a","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent-a","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+{"type":"message","id":"parent-b","parentId":"usage-a","timestamp":"2026-08-08T00:00:10.000Z","message":{"role":"assistant","provider":"anthropic","model":"model-b","responseId":"parent-response-b","usage":{"input":250,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":250}}}
+{"type":"child_usage_attributed","id":"usage-b","parentId":"parent-b","timestamp":"2026-08-08T00:00:11.000Z","targetId":"parent-b","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":250,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":250},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &child_path,
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:10.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:11.001Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                serde_json::to_string(&parent_path.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let parent_messages = parse_prime_agent_file(&parent_path);
+        let child_messages = parse_prime_agent_file(&child_path);
+        let accounting = [
+            analyze_prime_agent_accounting(&parent_path, &parent_messages),
+            analyze_prime_agent_accounting(&child_path, &child_messages),
+        ];
+        let messages = reconcile_prime_agent_messages(
+            parent_messages.into_iter().chain(child_messages).collect(),
+            &accounting,
+        );
+
+        let parent_a = messages
+            .iter()
+            .find(|message| {
+                message.dedup_key.as_deref() == Some("prime-agent:response:parent-response-a")
+            })
+            .unwrap();
+        let parent_b = messages
+            .iter()
+            .find(|message| {
+                message.dedup_key.as_deref() == Some("prime-agent:response:parent-response-b")
+            })
+            .unwrap();
+        assert_eq!(parent_a.tokens.input, 150);
+        assert_eq!(parent_b.tokens.input, 200);
     }
 
     #[test]
