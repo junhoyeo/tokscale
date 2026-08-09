@@ -452,7 +452,10 @@ impl PricingService {
                     price_consensus: true,
                     exact_model_identity: true,
                     alias_applied: false,
-                    normalized: false,
+                    // A custom entry can be reached through synthetic-model
+                    // normalization, which is exactly the case provenance has
+                    // to disclose: the matched key is not the requested id.
+                    normalized: result.normalized,
                     stripped: false,
                 },
             })
@@ -1703,6 +1706,36 @@ mod tests {
 
         let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    /// A custom entry keyed by the normalized model name still prices a raw
+    /// synthetic id, and provenance has to say the match came from that
+    /// normalized key rather than from the id as written.
+    #[test]
+    fn custom_match_through_synthetic_normalization_reports_normalized_provenance() {
+        let service = custom_service(
+            HashMap::from([("glm-4.7".to_string(), model_pricing(0.000001, 0.000002))]),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let normalized = service
+            .lookup_with_source("hf:zai-org/GLM-4.7", None)
+            .expect("the normalized custom key prices the synthetic id");
+        assert_eq!(normalized.source, "Custom");
+        assert_eq!(normalized.matched_key, "glm-4.7");
+        assert!(
+            normalized.evidence.normalized,
+            "a match reached through synthetic-model normalization is normalized"
+        );
+        assert!(normalized.evidence.is_submission_safe());
+
+        // The raw key is untouched: only the fallback path is normalized.
+        let raw = service
+            .lookup_with_source("glm-4.7", None)
+            .expect("the custom key still matches as written");
+        assert_eq!(raw.matched_key, "glm-4.7");
+        assert!(!raw.evidence.normalized);
     }
 
     #[test]
