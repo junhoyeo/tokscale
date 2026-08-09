@@ -228,33 +228,60 @@ fn expand_tilde_path_with_home(value: &str, home_dir: &str) -> PathBuf {
     if value == "~" {
         return PathBuf::from(home_dir);
     }
-    if let Some(relative) = value
-        .strip_prefix("~/")
-        .or_else(|| value.strip_prefix("~\\"))
-    {
+    if let Some(relative) = value.strip_prefix("~/") {
         return PathBuf::from(home_dir).join(relative);
     }
     PathBuf::from(value)
 }
 
-fn prime_agent_session_dir_from_settings(agent_dir: &Path, home_dir: &str) -> Option<PathBuf> {
-    fn read_session_dir(path: &Path) -> Option<String> {
+#[derive(Debug, PartialEq, Eq)]
+enum PrimeSessionDirSetting {
+    Default,
+    Path(PathBuf),
+    CurrentDirectory(PathBuf),
+}
+
+fn prime_agent_session_dir_from_settings_files(
+    global_settings: &Path,
+    project_settings: Option<&Path>,
+    home_dir: &str,
+    current_dir: Option<&Path>,
+) -> Option<PrimeSessionDirSetting> {
+    fn read_session_dir(path: &Path) -> Option<Option<String>> {
         let content = std::fs::read_to_string(path).ok()?;
         let settings: Value = serde_json::from_str(&content).ok()?;
-        settings
-            .as_object()?
-            .get("sessionDir")?
-            .as_str()
-            .map(str::to_owned)
+        match settings.as_object()?.get("sessionDir")? {
+            Value::Null => Some(None),
+            Value::String(path) => Some(Some(path.clone())),
+            _ => None,
+        }
     }
 
-    let global = read_session_dir(&agent_dir.join("settings.json"));
-    let project = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| read_session_dir(&cwd.join(".prime/agent/settings.json")));
-    project
-        .or(global)
-        .map(|path| expand_tilde_path_with_home(&path, home_dir))
+    let global = read_session_dir(global_settings);
+    let project = project_settings.and_then(read_session_dir);
+    project.or(global).map(|setting| match setting {
+        None => PrimeSessionDirSetting::Default,
+        Some(path) if path.is_empty() => PrimeSessionDirSetting::CurrentDirectory(
+            current_dir.unwrap_or_else(|| Path::new("")).to_path_buf(),
+        ),
+        Some(path) => PrimeSessionDirSetting::Path(expand_tilde_path_with_home(&path, home_dir)),
+    })
+}
+
+fn prime_agent_session_dir_from_settings(
+    agent_dir: &Path,
+    home_dir: &str,
+) -> Option<PrimeSessionDirSetting> {
+    let current_dir = std::env::current_dir().ok();
+    let project_settings = current_dir
+        .as_ref()
+        .map(|cwd| cwd.join(".prime/agent/settings.json"));
+    prime_agent_session_dir_from_settings_files(
+        &agent_dir.join("settings.json"),
+        project_settings.as_deref(),
+        home_dir,
+        current_dir.as_deref(),
+    )
 }
 
 /// Resolve Prime Agent's root-session and RLM-artifact scan roots using the
@@ -263,29 +290,44 @@ pub fn prime_agent_session_roots_with_env_strategy(
     home_dir: &str,
     use_env_roots: bool,
 ) -> [PathBuf; 2] {
-    let sessions = if use_env_roots {
-        let session_override = std::env::var("PRIME_AGENT_SESSION_DIR")
-            .ok()
-            .or_else(|| std::env::var("PRIME_AGENT_CODING_AGENT_SESSION_DIR").ok());
-        if let Some(path) = session_override.filter(|value| !value.is_empty()) {
-            expand_tilde_path_with_home(&path, home_dir)
-        } else {
-            let agent_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|path| expand_tilde_path_with_home(&path, home_dir))
-                .unwrap_or_else(|| PathBuf::from(home_dir).join(".prime/agent"));
-            prime_agent_session_dir_from_settings(&agent_dir, home_dir)
-                .unwrap_or_else(|| agent_dir.join("sessions"))
+    fn sessions_with_sibling_artifacts(sessions: PathBuf) -> [PathBuf; 2] {
+        let artifacts = sessions
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("session-artifacts");
+        [sessions, artifacts]
+    }
+
+    if !use_env_roots {
+        let agent_dir = PathBuf::from(home_dir).join(".prime/agent");
+        return [
+            agent_dir.join("sessions"),
+            agent_dir.join("session-artifacts"),
+        ];
+    }
+
+    let session_override = std::env::var("PRIME_AGENT_SESSION_DIR")
+        .ok()
+        .or_else(|| std::env::var("PRIME_AGENT_CODING_AGENT_SESSION_DIR").ok());
+    if let Some(path) = session_override.filter(|value| !value.is_empty()) {
+        return sessions_with_sibling_artifacts(expand_tilde_path_with_home(&path, home_dir));
+    }
+
+    let agent_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|path| expand_tilde_path_with_home(&path, home_dir))
+        .unwrap_or_else(|| PathBuf::from(home_dir).join(".prime/agent"));
+    match prime_agent_session_dir_from_settings(&agent_dir, home_dir) {
+        Some(PrimeSessionDirSetting::Path(sessions)) => sessions_with_sibling_artifacts(sessions),
+        Some(PrimeSessionDirSetting::CurrentDirectory(current_dir)) => {
+            [current_dir.clone(), current_dir.join("session-artifacts")]
         }
-    } else {
-        PathBuf::from(home_dir).join(".prime/agent/sessions")
-    };
-    let artifacts = sessions
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("session-artifacts");
-    [sessions, artifacts]
+        Some(PrimeSessionDirSetting::Default) | None => [
+            agent_dir.join("sessions"),
+            agent_dir.join("session-artifacts"),
+        ],
+    }
 }
 
 pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -4015,6 +4057,118 @@ mod tests {
         let roots = prime_agent_session_roots_with_env_strategy(home.to_str().unwrap(), true);
         assert_eq!(roots[0], home.join("custom-agent/sessions"));
         assert_eq!(roots[1], home.join("custom-agent/session-artifacts"));
+    }
+
+    #[test]
+    fn test_prime_agent_tilde_expansion_matches_upstream_forward_slash_only() {
+        let home = if cfg!(windows) {
+            r"C:\Users\test"
+        } else {
+            "/tmp/home"
+        };
+        assert_eq!(
+            expand_tilde_path_with_home("~/sessions", home),
+            PathBuf::from(home).join("sessions")
+        );
+        assert_eq!(
+            expand_tilde_path_with_home(r"~\sessions", home),
+            PathBuf::from(r"~\sessions")
+        );
+    }
+
+    #[test]
+    fn test_prime_agent_project_null_session_dir_resets_global_setting() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let global = home.join("global-settings.json");
+        let project = home.join("project-settings.json");
+        fs::write(&global, r#"{"sessionDir":"~/global-sessions"}"#).unwrap();
+        fs::write(&project, r#"{"sessionDir":null}"#).unwrap();
+
+        let setting = prime_agent_session_dir_from_settings_files(
+            &global,
+            Some(&project),
+            home.to_str().unwrap(),
+            Some(home),
+        );
+        assert_eq!(setting, Some(PrimeSessionDirSetting::Default));
+        let sessions = match setting {
+            Some(PrimeSessionDirSetting::Path(path))
+            | Some(PrimeSessionDirSetting::CurrentDirectory(path)) => path,
+            Some(PrimeSessionDirSetting::Default) | None => home.join("custom-agent/sessions"),
+        };
+        assert_eq!(sessions, home.join("custom-agent/sessions"));
+    }
+
+    #[test]
+    fn test_prime_agent_empty_project_session_dir_resolves_to_current_directory() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let current_dir = home.join("project");
+        let global = home.join("global-settings.json");
+        let project = home.join("project-settings.json");
+        fs::write(&global, r#"{"sessionDir":"~/global-sessions"}"#).unwrap();
+        fs::write(&project, r#"{"sessionDir":""}"#).unwrap();
+
+        let setting = prime_agent_session_dir_from_settings_files(
+            &global,
+            Some(&project),
+            home.to_str().unwrap(),
+            Some(&current_dir),
+        );
+        assert_eq!(
+            setting,
+            Some(PrimeSessionDirSetting::CurrentDirectory(current_dir))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_prime_agent_empty_session_dir_scans_cwd_root_and_artifacts() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let project = home.join("work/project");
+        fs::create_dir_all(project.join(".prime/agent")).unwrap();
+        fs::write(
+            project.join(".prime/agent/settings.json"),
+            r#"{"sessionDir":""}"#,
+        )
+        .unwrap();
+        let root = project.join("root.jsonl");
+        let child = project.join("session-artifacts/root/sub-child/child.jsonl");
+        fs::create_dir_all(child.parent().unwrap()).unwrap();
+        fs::write(
+            &root, "{}
+",
+        )
+        .unwrap();
+        fs::write(
+            &child, "{}
+",
+        )
+        .unwrap();
+
+        let mut env = EnvGuard::capture(&[
+            "PRIME_AGENT_SESSION_DIR",
+            "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+            "PRIME_AGENT_CODING_AGENT_DIR",
+        ]);
+        env.remove("PRIME_AGENT_SESSION_DIR");
+        env.remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
+        env.remove("PRIME_AGENT_CODING_AGENT_DIR");
+        let previous_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project).unwrap();
+        let roots = prime_agent_session_roots_with_env_strategy(home.to_str().unwrap(), true);
+        let result = scan_all_clients(home.to_str().unwrap(), &["prime-agent".to_string()]);
+        restore_current_dir(&previous_dir);
+
+        let canonical_project = project.canonicalize().unwrap();
+        assert_eq!(roots[0], canonical_project);
+        assert_eq!(roots[1], canonical_project.join("session-artifacts"));
+        let files = result.get(ClientId::PrimeAgent);
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&root.canonicalize().unwrap()));
+        assert!(files.contains(&child.canonicalize().unwrap()));
     }
 
     #[test]
