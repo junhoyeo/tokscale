@@ -8,19 +8,53 @@
 //! used only to reverse aggregate parent usage that Prime may persist while
 //! serializing a fork, before the copied parent is deduplicated across files.
 
-use super::pi::{parse_pi_format_rlm_file, PiSessionEntry, PiSessionHeader, PiUsage};
+use super::pi::{
+    parse_pi_format_rlm_file_with_observer, PiFormatObserver, PiSessionEntry, PiSessionHeader,
+    PiUsage,
+};
 use super::utils::parse_timestamp_str;
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-pub fn parse_prime_agent_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_pi_format_rlm_file(path, "prime-agent", "prime-agent")
+#[cfg(test)]
+#[derive(Default)]
+struct PrimeDecodeCounter {
+    root: Option<PathBuf>,
+    messages: usize,
+    accounting: usize,
 }
 
-#[derive(Debug, Clone)]
+#[cfg(test)]
+static PRIME_DECODE_COUNTER: std::sync::LazyLock<std::sync::Mutex<PrimeDecodeCounter>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PrimeDecodeCounter::default()));
+
+#[cfg(test)]
+fn record_transcript_decode(path: &Path, accounting: bool) {
+    let mut counter = PRIME_DECODE_COUNTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if counter
+        .root
+        .as_deref()
+        .is_some_and(|root| path.starts_with(root))
+    {
+        if accounting {
+            counter.accounting += 1;
+        } else {
+            counter.messages += 1;
+        }
+    }
+}
+
+pub fn parse_prime_agent_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_prime_agent_file_with_accounting(path).0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrimeAttribution {
     id: String,
     timestamp: Option<i64>,
@@ -28,20 +62,20 @@ struct PrimeAttribution {
     aggregate_usage: TokenBreakdown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChildMessageUsage {
     timestamp: Option<i64>,
     usage: TokenBreakdown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrimeUsageAdjustment {
     dedup_key: String,
     persisted_usage: TokenBreakdown,
     attributions: Vec<PrimeAttribution>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct PrimeFileAccounting {
     source_path: PathBuf,
     attributions: Vec<PrimeAttribution>,
@@ -49,6 +83,157 @@ pub(crate) struct PrimeFileAccounting {
     child_message_usages: Vec<ChildMessageUsage>,
     child_parent_path: Option<PathBuf>,
     fork_parent_path: Option<PathBuf>,
+}
+
+struct PrimeAccountingBuilder<'a> {
+    path: &'a Path,
+    found_header: bool,
+    is_rlm_child: bool,
+    child_parent_path: Option<PathBuf>,
+    fork_parent_path: Option<PathBuf>,
+    targets: HashMap<String, (String, TokenBreakdown)>,
+    attributions: HashMap<String, Vec<PrimeAttribution>>,
+    child_message_usages: Vec<ChildMessageUsage>,
+}
+
+impl<'a> PrimeAccountingBuilder<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            found_header: false,
+            is_rlm_child: false,
+            child_parent_path: None,
+            fork_parent_path: None,
+            targets: HashMap::new(),
+            attributions: HashMap::new(),
+            child_message_usages: Vec::new(),
+        }
+    }
+
+    fn finish(self) -> PrimeFileAccounting {
+        if !self.found_header {
+            return PrimeFileAccounting::default();
+        }
+
+        let all_attributions = self
+            .attributions
+            .values()
+            .flat_map(|entries| entries.iter().cloned())
+            .collect();
+        let mut adjustments = Vec::new();
+        for (target_id, entries) in self.attributions {
+            let Some((dedup_key, persisted_usage)) = self.targets.get(&target_id) else {
+                continue;
+            };
+            let mut matching_prefix = None;
+            for (index, entry) in entries.iter().enumerate() {
+                if entry.aggregate_usage == *persisted_usage {
+                    matching_prefix = Some(entries[..=index].to_vec());
+                }
+            }
+            if let Some(prefix) = matching_prefix {
+                adjustments.push(PrimeUsageAdjustment {
+                    dedup_key: dedup_key.clone(),
+                    persisted_usage: persisted_usage.clone(),
+                    attributions: prefix,
+                });
+            }
+        }
+
+        PrimeFileAccounting {
+            source_path: lineage_path(self.path),
+            attributions: all_attributions,
+            adjustments,
+            child_message_usages: self.child_message_usages,
+            child_parent_path: self.child_parent_path,
+            fork_parent_path: self.fork_parent_path,
+        }
+    }
+}
+
+impl PiFormatObserver for PrimeAccountingBuilder<'_> {
+    fn observe_header(&mut self, header: &PiSessionHeader) {
+        self.found_header = true;
+        self.is_rlm_child = header.rlm_depth.unwrap_or(0) > 0;
+        let parent_path = header
+            .parent_session
+            .as_deref()
+            .map(Path::new)
+            .map(|parent| referenced_lineage_path(self.path, parent));
+        if self.is_rlm_child {
+            self.child_parent_path = parent_path;
+        } else {
+            self.fork_parent_path = parent_path;
+        }
+    }
+
+    fn observe_entry(&mut self, entry: &PiSessionEntry, emitted: Option<&UnifiedMessage>) {
+        let entry_timestamp = entry.timestamp.as_deref().and_then(parse_timestamp_str);
+        if entry.entry_type == "child_usage_attributed" {
+            if let (Some(id), Some(target_id), Some(child_usage), Some(aggregate_usage)) = (
+                entry.id.as_ref(),
+                entry.target_id.as_ref(),
+                entry.child_usage.as_ref(),
+                entry.aggregate_usage.as_ref(),
+            ) {
+                self.attributions
+                    .entry(target_id.clone())
+                    .or_default()
+                    .push(PrimeAttribution {
+                        id: id.clone(),
+                        timestamp: entry_timestamp,
+                        child_usage: usage_breakdown(child_usage),
+                        aggregate_usage: usage_breakdown(aggregate_usage),
+                    });
+            }
+            return;
+        }
+
+        let Some(parsed) = emitted else {
+            return;
+        };
+        if self.is_rlm_child {
+            self.child_message_usages.push(ChildMessageUsage {
+                timestamp: entry_timestamp,
+                usage: parsed.tokens.clone(),
+            });
+        }
+        if let (Some(id), Some(dedup_key)) = (entry.id.as_ref(), parsed.dedup_key.as_ref()) {
+            self.targets
+                .insert(id.clone(), (dedup_key.clone(), parsed.tokens.clone()));
+        }
+    }
+}
+
+pub(crate) fn parse_prime_agent_file_with_accounting(
+    path: &Path,
+) -> (Vec<UnifiedMessage>, PrimeFileAccounting) {
+    #[cfg(test)]
+    record_transcript_decode(path, false);
+
+    let mut accounting = PrimeAccountingBuilder::new(path);
+    let messages =
+        parse_pi_format_rlm_file_with_observer(path, "prime-agent", "prime-agent", &mut accounting);
+    (messages, accounting.finish())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_transcript_decode_call_counts(root: &Path) {
+    *PRIME_DECODE_COUNTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = PrimeDecodeCounter {
+        root: Some(root.to_path_buf()),
+        messages: 0,
+        accounting: 0,
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn transcript_decode_call_counts() -> (usize, usize) {
+    let counter = PRIME_DECODE_COUNTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (counter.messages, counter.accounting)
 }
 
 fn usage_breakdown(usage: &PiUsage) -> TokenBreakdown {
@@ -187,20 +372,16 @@ pub(crate) fn analyze_prime_agent_accounting(
     path: &Path,
     messages: &[UnifiedMessage],
 ) -> PrimeFileAccounting {
+    #[cfg(test)]
+    record_transcript_decode(path, true);
+
     let Ok(file) = std::fs::File::open(path) else {
         return PrimeFileAccounting::default();
     };
 
-    let source_path = lineage_path(path);
+    let mut accounting = PrimeAccountingBuilder::new(path);
     let mut found_header = false;
-    let mut is_rlm_child = false;
-    let mut child_parent_path = None;
-    let mut fork_parent_path = None;
     let mut message_index = 0usize;
-    let mut targets: HashMap<String, (String, TokenBreakdown)> = HashMap::new();
-    let mut attributions: HashMap<String, Vec<PrimeAttribution>> = HashMap::new();
-    let mut child_message_usages = Vec::new();
-
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -210,17 +391,7 @@ pub(crate) fn analyze_prime_agent_accounting(
             if let Ok(header) = serde_json::from_str::<PiSessionHeader>(trimmed) {
                 if header.entry_type == "session" {
                     found_header = true;
-                    is_rlm_child = header.rlm_depth.unwrap_or(0) > 0;
-                    let parent_path = header
-                        .parent_session
-                        .as_deref()
-                        .map(Path::new)
-                        .map(|parent| referenced_lineage_path(path, parent));
-                    if is_rlm_child {
-                        child_parent_path = parent_path;
-                    } else {
-                        fork_parent_path = parent_path;
-                    }
+                    accounting.observe_header(&header);
                     continue;
                 }
             }
@@ -242,87 +413,24 @@ pub(crate) fn analyze_prime_agent_accounting(
         let Ok(entry) = serde_json::from_str::<PiSessionEntry>(trimmed) else {
             continue;
         };
-        let entry_timestamp = entry.timestamp.as_deref().and_then(parse_timestamp_str);
-        if entry.entry_type == "child_usage_attributed" {
-            if let (Some(id), Some(target_id), Some(child_usage), Some(aggregate_usage)) = (
-                entry.id,
-                entry.target_id,
-                entry.child_usage,
-                entry.aggregate_usage,
-            ) {
-                attributions
-                    .entry(target_id)
-                    .or_default()
-                    .push(PrimeAttribution {
-                        id,
-                        timestamp: entry_timestamp,
-                        child_usage: usage_breakdown(&child_usage),
-                        aggregate_usage: usage_breakdown(&aggregate_usage),
-                    });
-            }
-            continue;
-        }
-        if entry.entry_type != "message" {
-            continue;
-        }
-        let Some(message) = entry.message else {
-            continue;
-        };
-        if message.role.as_deref() != Some("assistant")
-            || message.usage.is_none()
-            || message.model.is_none()
-        {
-            continue;
-        }
-
-        let parsed = messages.get(message_index);
-        message_index += 1;
-        let Some(parsed) = parsed else {
-            continue;
-        };
-        if is_rlm_child {
-            child_message_usages.push(ChildMessageUsage {
-                timestamp: entry_timestamp,
-                usage: parsed.tokens.clone(),
+        let emitted = entry
+            .message
+            .as_ref()
+            .filter(|message| {
+                entry.entry_type == "message"
+                    && message.role.as_deref() == Some("assistant")
+                    && message.usage.is_some()
+                    && message.model.is_some()
+            })
+            .and_then(|_| {
+                let parsed = messages.get(message_index);
+                message_index += 1;
+                parsed
             });
-        }
-        if let (Some(id), Some(dedup_key)) = (entry.id, parsed.dedup_key.clone()) {
-            targets.insert(id, (dedup_key, parsed.tokens.clone()));
-        }
+        accounting.observe_entry(&entry, emitted);
     }
 
-    let all_attributions = attributions
-        .values()
-        .flat_map(|entries| entries.iter().cloned())
-        .collect();
-    let mut adjustments = Vec::new();
-    for (target_id, entries) in attributions {
-        let Some((dedup_key, persisted_usage)) = targets.get(&target_id) else {
-            continue;
-        };
-        let mut matching_prefix = None;
-        for (index, entry) in entries.iter().enumerate() {
-            if entry.aggregate_usage == *persisted_usage {
-                matching_prefix = Some(entries[..=index].to_vec());
-            }
-        }
-        if let Some(prefix) = matching_prefix {
-            adjustments.push(PrimeUsageAdjustment {
-                dedup_key: dedup_key.clone(),
-                persisted_usage: persisted_usage.clone(),
-                attributions: prefix,
-            });
-        }
-    }
-
-    PrimeFileAccounting {
-        source_path,
-        attributions: all_attributions,
-        adjustments,
-        child_message_usages,
-        child_parent_path,
-        fork_parent_path,
-    }
+    accounting.finish()
 }
 
 fn fallback_key_base(key: &str) -> Option<&str> {

@@ -145,7 +145,16 @@ pub(crate) fn parse_pi_format_file(
     client: &str,
     fallback_provider: &'static str,
 ) -> Vec<UnifiedMessage> {
-    parse_pi_format_file_inner(path, client, fallback_provider, None, false, false)
+    let mut observer = NoopPiFormatObserver;
+    parse_pi_format_file_inner(
+        path,
+        client,
+        fallback_provider,
+        None,
+        false,
+        false,
+        &mut observer,
+    )
 }
 
 /// Parse a Pi-format session and retain message ids in namespaced dedup keys.
@@ -156,8 +165,32 @@ pub(crate) fn parse_pi_format_file_with_dedup(
     client: &str,
     fallback_provider: &'static str,
 ) -> Vec<UnifiedMessage> {
-    parse_pi_format_file_inner(path, client, fallback_provider, Some(client), false, false)
+    let mut observer = NoopPiFormatObserver;
+    parse_pi_format_file_inner(
+        path,
+        client,
+        fallback_provider,
+        Some(client),
+        false,
+        false,
+        &mut observer,
+    )
 }
+
+/// Receives already-decoded Pi records while the shared parser walks a file.
+///
+/// Prime Agent uses this hook to derive its fork/child accounting metadata in
+/// the same pass that emits messages. The emitted message is supplied only for
+/// an assistant record that passed the shared parser's validation.
+pub(crate) trait PiFormatObserver {
+    fn observe_header(&mut self, _header: &PiSessionHeader) {}
+
+    fn observe_entry(&mut self, _entry: &PiSessionEntry, _emitted: Option<&UnifiedMessage>) {}
+}
+
+struct NoopPiFormatObserver;
+
+impl PiFormatObserver for NoopPiFormatObserver {}
 
 /// Parse a Pi-format session whose `session_info.name` identifies an RLM
 /// subagent when the session header has `rlmDepth > 0`.
@@ -165,12 +198,21 @@ pub(crate) fn parse_pi_format_file_with_dedup(
 /// Deduplication is intentionally cross-session: Prime Agent forks copy prior
 /// message entries into a file with a new session id. Provider response ids are
 /// preferred; the message id plus immutable event fields is the fallback.
-pub(crate) fn parse_pi_format_rlm_file(
+pub(crate) fn parse_pi_format_rlm_file_with_observer(
     path: &Path,
     client: &str,
     fallback_provider: &'static str,
+    observer: &mut impl PiFormatObserver,
 ) -> Vec<UnifiedMessage> {
-    parse_pi_format_file_inner(path, client, fallback_provider, Some(client), true, true)
+    parse_pi_format_file_inner(
+        path,
+        client,
+        fallback_provider,
+        Some(client),
+        true,
+        true,
+        observer,
+    )
 }
 
 fn parse_pi_format_file_inner(
@@ -180,6 +222,7 @@ fn parse_pi_format_file_inner(
     dedup_namespace: Option<&str>,
     rlm_session_name_as_agent: bool,
     cross_session_dedup: bool,
+    observer: &mut impl PiFormatObserver,
 ) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -230,7 +273,8 @@ fn parse_pi_format_file_inner(
                 Err(_) => return Vec::new(),
             };
 
-            session_id = Some(header.id);
+            observer.observe_header(&header);
+            session_id = Some(header.id.clone());
             workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
             workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
             is_rlm_subagent = header.rlm_depth.unwrap_or(0) > 0;
@@ -246,36 +290,41 @@ fn parse_pi_format_file_inner(
 
         if entry.entry_type == "session_info" {
             agent = if rlm_session_name_as_agent && is_rlm_subagent {
-                entry.name.filter(|name| !name.trim().is_empty())
+                entry
+                    .name
+                    .as_ref()
+                    .filter(|name| !name.trim().is_empty())
+                    .cloned()
             } else {
                 entry.name.as_deref().and_then(pi_subagent_name)
             };
+            observer.observe_entry(&entry, None);
             continue;
         }
 
         if entry.entry_type != "message" {
+            observer.observe_entry(&entry, None);
             continue;
         }
 
-        let message_id = entry.id;
-        let message = match entry.message {
-            Some(m) => m,
-            None => continue,
+        let Some(message) = entry.message.as_ref() else {
+            observer.observe_entry(&entry, None);
+            continue;
         };
 
         if message.role.as_deref() != Some("assistant") {
+            observer.observe_entry(&entry, None);
             continue;
         }
 
-        let response_id = message.response_id;
-        let usage = match message.usage {
-            Some(u) => u,
-            None => continue,
+        let Some(usage) = message.usage.as_ref() else {
+            observer.observe_entry(&entry, None);
+            continue;
         };
 
-        let model = match message.model {
-            Some(m) => m,
-            None => continue,
+        let Some(model) = message.model.as_deref() else {
+            observer.observe_entry(&entry, None);
+            continue;
         };
 
         // A missing/blank provider field is recoverable: infer it from the
@@ -283,17 +332,18 @@ fn parse_pi_format_file_inner(
         // "openai"), falling back to "pi" only when inference can't
         // identify the model, rather than dropping a message that carries
         // valid tokens.
-        let provider = match message.provider {
-            Some(p) if !p.is_empty() => p,
-            _ => inferred_provider_from_model(&model)
+        let provider = match message.provider.as_deref() {
+            Some(provider) if !provider.is_empty() => provider.to_string(),
+            _ => inferred_provider_from_model(model)
                 .unwrap_or(fallback_provider)
                 .to_string(),
         };
 
         let recorded_timestamp = entry
             .timestamp
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-            .map(|dt| dt.timestamp_millis());
+            .as_deref()
+            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+            .map(|timestamp| timestamp.timestamp_millis());
         let timestamp = recorded_timestamp.unwrap_or(fallback_timestamp);
 
         // `usage.reasoning` is read but deliberately not mapped onto
@@ -303,7 +353,7 @@ fn parse_pi_format_file_inner(
         // through would double count.
         let mut unified = UnifiedMessage::new_with_agent(
             client,
-            model.as_str(),
+            model,
             provider.as_str(),
             session_id.clone().unwrap_or_else(|| "unknown".to_string()),
             timestamp,
@@ -319,12 +369,14 @@ fn parse_pi_format_file_inner(
         );
         if let Some(namespace) = dedup_namespace {
             if cross_session_dedup {
-                unified.dedup_key = response_id
+                unified.dedup_key = message
+                    .response_id
                     .as_deref()
                     .filter(|id| !id.trim().is_empty())
                     .map(|id| format!("{namespace}:response:{id}"))
                     .or_else(|| {
-                        message_id
+                        entry
+                            .id
                             .as_deref()
                             .filter(|id| !id.trim().is_empty())
                             .map(|id| {
@@ -340,14 +392,14 @@ fn parse_pi_format_file_inner(
                                 )
                             })
                     });
-            } else if let Some(message_id) =
-                message_id.as_deref().filter(|id| !id.trim().is_empty())
+            } else if let Some(message_id) = entry.id.as_deref().filter(|id| !id.trim().is_empty())
             {
                 let session_id = session_id.as_deref().unwrap_or("unknown");
                 unified.dedup_key = Some(format!("{namespace}:{session_id}:{message_id}"));
             }
         }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+        observer.observe_entry(&entry, Some(&unified));
         messages.push(unified);
     }
 

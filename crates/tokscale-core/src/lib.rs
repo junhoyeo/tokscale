@@ -1042,6 +1042,98 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         )
     }
 
+    fn load_or_parse_prime_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    ) {
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let cached = source_cache.get(identity, path);
+        let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path_samples_only(
+            path,
+            cached.map(|entry| &entry.fingerprint),
+        ) else {
+            let (mut messages, accounting) =
+                sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+            apply_pricing_to_messages(&mut messages, pricing);
+            return (
+                CachedParseOutcome {
+                    messages,
+                    cache_entry: None,
+                    invalidate_cache: false,
+                },
+                accounting,
+            );
+        };
+
+        let fingerprint = match fingerprint_status {
+            message_cache::FingerprintStatus::Unchanged => cached
+                .expect("an uncached source always builds a complete fingerprint")
+                .fingerprint
+                .clone(),
+            message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+        };
+
+        if let Some(cached) = cached {
+            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
+                let (accounting, cache_entry) = match cached.prime_accounting.as_ref() {
+                    Some(accounting) => (accounting.clone(), None),
+                    None => {
+                        // Version-4 entries already contain valid messages but
+                        // predate Prime accounting metadata. Decode just the
+                        // accounting view once, then rewrite the same identity
+                        // and fingerprint with the backfill attached.
+                        let accounting = sessions::prime_agent::analyze_prime_agent_accounting(
+                            path,
+                            &cached.messages,
+                        );
+                        (
+                            accounting.clone(),
+                            Some(cached.clone().with_prime_accounting(accounting)),
+                        )
+                    }
+                };
+                return (
+                    CachedParseOutcome {
+                        messages: cached_messages(cached, pricing),
+                        cache_entry,
+                        invalidate_cache: false,
+                    },
+                    accounting,
+                );
+            }
+        }
+
+        // A cold or changed Prime transcript produces both views from the one
+        // decoded Pi record stream. The accounting payload is persisted beside
+        // the raw messages under this exact fingerprint.
+        let (mut messages, accounting) =
+            sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+        let cache_entry = (!messages.is_empty()).then(|| {
+            message_cache::CachedSourceEntry::new(
+                identity,
+                path,
+                fingerprint,
+                messages.clone(),
+                Vec::new(),
+                None,
+            )
+            .with_prime_accounting(accounting.clone())
+        });
+        apply_pricing_to_messages(&mut messages, pricing);
+        (
+            CachedParseOutcome {
+                messages,
+                cache_entry,
+                invalidate_cache: false,
+            },
+            accounting,
+        )
+    }
+
     fn load_or_parse_sqlite_source<F>(
         identity: message_cache::CacheIdentity,
         path: &Path,
@@ -1708,29 +1800,18 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let prime_agent_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
+    let prime_agent_outcomes: Vec<(
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    )> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
-        .map(|path| {
-            (
-                path.clone(),
-                load_or_parse_source(
-                    message_cache::CacheIdentity::for_client(ClientId::PrimeAgent),
-                    path,
-                    &source_cache,
-                    pricing,
-                    sessions::prime_agent::parse_prime_agent_file,
-                ),
-            )
-        })
+        .map(|path| load_or_parse_prime_source(path, &source_cache, pricing))
         .collect();
     let mut prime_agent_messages = Vec::new();
     let mut prime_agent_accounting = Vec::new();
-    for (path, outcome) in prime_agent_outcomes {
-        prime_agent_accounting.push(sessions::prime_agent::analyze_prime_agent_accounting(
-            &path,
-            &outcome.messages,
-        ));
+    for (outcome, accounting) in prime_agent_outcomes {
+        prime_agent_accounting.push(accounting);
         prime_agent_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -3818,11 +3899,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     )> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
-        .map(|path| {
-            let messages = sessions::prime_agent::parse_prime_agent_file(path);
-            let accounting = sessions::prime_agent::analyze_prime_agent_accounting(path, &messages);
-            (messages, accounting)
-        })
+        .map(|path| sessions::prime_agent::parse_prime_agent_file_with_accounting(path))
         .collect();
     let mut prime_agent_msgs_raw = Vec::new();
     let mut prime_agent_accounting = Vec::new();
@@ -4545,8 +4622,8 @@ mod tests {
         message_cache, normalize_model_for_grouping,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
         paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement, GroupBy,
-        LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        sessions, unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement,
+        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
         UnpricedSubmissionExclusion, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
         ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
     };
@@ -11269,11 +11346,21 @@ mod tests {
         .unwrap();
 
         let clients = ["prime-agent".to_string()];
-        for messages in [
-            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
-            // Exercise the warm source-cache lane as well as the initial parse.
-            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
-        ] {
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_decode_calls, (3, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_decode_calls,
+            "an unchanged warm scan must decode neither messages nor accounting"
+        );
+
+        for messages in [cold, warm] {
             assert_eq!(messages.len(), 3);
             assert_eq!(
                 messages
@@ -11319,6 +11406,62 @@ mod tests {
                 .sum::<i64>(),
             70
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_legacy_cache_backfills_accounting_once() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("legacy.jsonl");
+        std::fs::write(
+            &source_path,
+            r#"{"type":"session","version":3,"id":"legacy","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20},"aggregateUsage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+
+        // Reproduce a successfully migrated v4 entry: messages and the exact
+        // fingerprint survive, while the newly-added Prime accounting payload
+        // is absent until the next scan backfills it.
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let messages = sessions::prime_agent::parse_prime_agent_file(&source_path);
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new(
+            identity,
+            &source_path,
+            message_cache::SourceFingerprint::from_path(&source_path).unwrap(),
+            messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let first =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let first_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(first_calls, (0, 1));
+        assert_eq!(first[0].tokens.input, 120);
+
+        let second =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            first_calls
+        );
+        assert_eq!(second[0].tokens.input, 120);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(identity, &source_path)
+            .unwrap()
+            .prime_accounting
+            .is_some());
     }
 
     #[test]

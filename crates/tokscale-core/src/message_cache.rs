@@ -25,7 +25,11 @@ use std::time::UNIX_EPOCH;
 // warning), so the format version moves with the struct.
 // 4: UnifiedMessage gained model_attribution_conflicted, changing the bincode
 // payload layout. Old shards must be silently rebuilt rather than decoded.
-const CACHE_FORMAT_VERSION: u32 = 4;
+// 5: Prime Agent entries cache reconciliation accounting beside their messages.
+// Version-4 shards have an explicit wire migration below, so other clients stay
+// warm and Prime entries need only one accounting-only backfill.
+const CACHE_FORMAT_VERSION: u32 = 5;
+const LEGACY_CACHE_FORMAT_VERSION: u32 = 4;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -1116,6 +1120,40 @@ pub(crate) struct CachedSourceEntry {
     pub messages: Vec<UnifiedMessage>,
     pub fallback_timestamp_indices: Vec<usize>,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    /// Prime-only metadata used to reconcile fork aggregates with child
+    /// transcripts. It shares this entry's parser identity and fingerprint, so
+    /// a message cache hit can never pair with accounting from different bytes.
+    pub prime_accounting: Option<crate::sessions::prime_agent::PrimeFileAccounting>,
+}
+
+/// Exact version-4 entry layout. Keeping this wire type lets existing shards
+/// migrate without discarding cached messages for unrelated clients. Prime
+/// entries convert with no accounting and are backfilled once on their next
+/// unchanged scan.
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyCachedSourceEntryV4 {
+    parser_namespace: String,
+    parser_version: u32,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    messages: Vec<UnifiedMessage>,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+}
+
+impl From<LegacyCachedSourceEntryV4> for CachedSourceEntry {
+    fn from(entry: LegacyCachedSourceEntryV4) -> Self {
+        Self {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages,
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: None,
+        }
+    }
 }
 
 impl CachedSourceEntry {
@@ -1135,7 +1173,16 @@ impl CachedSourceEntry {
             messages,
             fallback_timestamp_indices,
             codex_incremental,
+            prime_accounting: None,
         }
+    }
+
+    pub(crate) fn with_prime_accounting(
+        mut self,
+        accounting: crate::sessions::prime_agent::PrimeFileAccounting,
+    ) -> Self {
+        self.prime_accounting = Some(accounting);
+        self
     }
 
     fn identity_is_current(&self) -> bool {
@@ -1290,31 +1337,13 @@ impl SourceMessageCache {
                     index,
                 };
                 let path = dir_entry.path();
-                match read_shard(&path, identity) {
-                    ShardReadStatus::Loaded(entries) => {
-                        for mut entry in entries {
-                            let key = CacheKey::from_entry(&entry);
-                            if key.shard() == shard_key && entry.identity_is_current() {
-                                if entry.parser_namespace == ClientId::Claude.as_str()
-                                    && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                        &mut entry.messages,
-                                    )
-                                {
-                                    // Do not bump Claude's parser version here: compacted
-                                    // transcripts rely on cached assistant history that a
-                                    // full invalidation cannot recover. Repair only the bad
-                                    // `<synthetic>` rows and persist that narrow migration.
-                                    cache.dirty_keys.insert(key.clone());
-                                }
-                                cache.entries.insert(key, entry);
-                            } else {
-                                cache.rewrite_shards.insert(shard_key.clone());
-                            }
-                        }
-                    }
-                    ShardReadStatus::Missing => {}
+                let (entries, migrated) = match read_shard(&path, identity) {
+                    ShardReadStatus::Loaded(entries) => (entries, false),
+                    ShardReadStatus::Migrated(entries) => (entries, true),
+                    ShardReadStatus::Missing => continue,
                     ShardReadStatus::Stale => {
                         cache.rewrite_shards.insert(shard_key);
+                        continue;
                     }
                     ShardReadStatus::Invalid(error) => {
                         warn_cache_failure_once(
@@ -1323,6 +1352,29 @@ impl SourceMessageCache {
                             &error,
                         );
                         cache.rewrite_shards.insert(shard_key);
+                        continue;
+                    }
+                };
+                if migrated {
+                    cache.rewrite_shards.insert(shard_key.clone());
+                }
+                for mut entry in entries {
+                    let key = CacheKey::from_entry(&entry);
+                    if key.shard() == shard_key && entry.identity_is_current() {
+                        if entry.parser_namespace == ClientId::Claude.as_str()
+                            && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
+                                &mut entry.messages,
+                            )
+                        {
+                            // Do not bump Claude's parser version here: compacted
+                            // transcripts rely on cached assistant history that a
+                            // full invalidation cannot recover. Repair only the bad
+                            // `<synthetic>` rows and persist that narrow migration.
+                            cache.dirty_keys.insert(key.clone());
+                        }
+                        cache.entries.insert(key, entry);
+                    } else {
+                        cache.rewrite_shards.insert(shard_key.clone());
                     }
                 }
             }
@@ -1463,12 +1515,14 @@ impl SourceMessageCache {
 
             let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
                 match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
-                    ShardReadStatus::Loaded(entries) => entries
-                        .into_iter()
-                        .filter(|entry| entry.identity_is_current())
-                        .map(|entry| (CacheKey::from_entry(&entry), entry))
-                        .filter(|(key, _)| key.shard() == shard_key)
-                        .collect(),
+                    ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
+                        entries
+                            .into_iter()
+                            .filter(|entry| entry.identity_is_current())
+                            .map(|entry| (CacheKey::from_entry(&entry), entry))
+                            .filter(|(key, _)| key.shard() == shard_key)
+                            .collect()
+                    }
                     ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
                     ShardReadStatus::Invalid(error) => {
                         warn_cache_failure_once(
@@ -1562,6 +1616,7 @@ enum ShardReadStatus {
     Stale,
     Invalid(String),
     Loaded(Vec<CachedSourceEntry>),
+    Migrated(Vec<CachedSourceEntry>),
 }
 
 fn read_shard(path: &Path, identity: CacheIdentity) -> ShardReadStatus {
@@ -1599,12 +1654,24 @@ fn read_shard_with_limit(
         Ok(envelope) => envelope,
         Err(error) => return ShardReadStatus::Invalid(error.to_string()),
     };
-    if envelope.format_version != CACHE_FORMAT_VERSION {
-        return ShardReadStatus::Stale;
-    }
     if envelope.parser_namespace != identity.namespace
         || envelope.parser_version != identity.parser_version
     {
+        return ShardReadStatus::Stale;
+    }
+
+    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION {
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyCachedSourceEntryV4>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries.into_iter().map(CachedSourceEntry::from).collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+    if envelope.format_version != CACHE_FORMAT_VERSION {
         return ShardReadStatus::Stale;
     }
 
@@ -3375,7 +3442,7 @@ mod tests {
         let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
         ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
         let stale_envelope = CachedShardEnvelope {
-            format_version: CACHE_FORMAT_VERSION - 1,
+            format_version: LEGACY_CACHE_FORMAT_VERSION - 1,
             parser_namespace: codex.namespace.to_string(),
             parser_version: codex.parser_version,
             payload: b"prior UnifiedMessage layout".to_vec(),
@@ -3389,6 +3456,62 @@ mod tests {
         assert!(matches!(
             read_shard(&stale_path, codex),
             ShardReadStatus::Stale
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_v4_shard_migrates_messages_and_rewrites_once() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::PrimeAgent);
+        let entry = test_entry(identity, source.path(), "legacy-prime");
+        let key = CacheKey::from_entry(&entry);
+        let shard_key = key.shard();
+        let legacy_path = shard_path(&cache_shard_dir().unwrap(), &shard_key);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let legacy_entry = LegacyCachedSourceEntryV4 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages,
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CACHE_FORMAT_VERSION,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![legacy_entry]).unwrap(),
+        };
+        let mut writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &envelope)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Migrated(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].session_id == "legacy-prime"
+                    && entries[0].prime_accounting.is_none()
+        ));
+
+        let mut cache = SourceMessageCache::load();
+        assert_eq!(
+            cache.get(identity, source.path()).unwrap().messages[0].session_id,
+            "legacy-prime"
+        );
+        assert!(cache.rewrite_shards.contains(&shard_key));
+        cache.save_if_dirty();
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].prime_accounting.is_none()
         ));
     }
 
