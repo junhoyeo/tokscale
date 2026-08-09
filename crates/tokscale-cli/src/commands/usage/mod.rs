@@ -647,4 +647,72 @@ mod tests {
         );
         Ok(())
     }
+
+    fn sample_output(provider: &str) -> UsageOutput {
+        UsageOutput {
+            provider: provider.to_string(),
+            account: None,
+            credential_source: None,
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
+        }
+    }
+
+    /// A provider that has credentials but whose fetch fails must stay visible.
+    ///
+    /// `has_credentials()` reports such a provider as active, so dropping its
+    /// error would make the provider silently vanish from the output instead of
+    /// telling the user their session needs refreshing.
+    #[test]
+    fn fetch_provider_report_surfaces_provider_errors_instead_of_dropping_them() {
+        let report = fetch_provider_report(
+            "Sakana",
+            Err(anyhow::anyhow!(
+                "Sakana session expired or invalid. Refresh SAKANA_SESSION_COOKIE."
+            )),
+        );
+
+        assert!(
+            report.outputs.is_empty(),
+            "a failed fetch must not produce usage outputs, got: {:?}",
+            report.outputs
+        );
+        assert_eq!(
+            report.diagnostics.len(),
+            1,
+            "expected exactly one diagnostic for the failing provider, got: {:?}",
+            report.diagnostics
+        );
+
+        let diagnostic = &report.diagnostics[0];
+        assert_eq!(diagnostic.provider, "Sakana");
+        assert_eq!(diagnostic.kind, UsageFetchDiagnosticKind::FetchFailed);
+        assert_eq!(diagnostic.severity, UsageFetchDiagnosticSeverity::Error);
+        assert!(
+            diagnostic.message.contains("SAKANA_SESSION_COOKIE"),
+            "expected the auth-refresh guidance to be preserved, got: {}",
+            diagnostic.message
+        );
+        assert_eq!(diagnostic.display_name(), "Sakana");
+    }
+
+    #[test]
+    fn fetch_provider_report_reports_no_diagnostics_when_fetch_succeeds() {
+        let report = fetch_provider_report(
+            "Codex",
+            Ok(vec![sample_output("Codex"), sample_output("Codex")]),
+        );
+
+        assert_eq!(report.outputs.len(), 2);
+        assert!(report.outputs.iter().all(|o| o.provider == "Codex"));
+        assert!(
+            report.diagnostics.is_empty(),
+            "a successful fetch must not emit diagnostics, got: {:?}",
+            report.diagnostics
+        );
+    }
 }
