@@ -107,6 +107,7 @@ struct CachedResult {
     pricing: ModelPricing,
     source: String,
     matched_key: String,
+    evidence: ResolutionEvidence,
 }
 
 struct KeyModelPart {
@@ -140,10 +141,95 @@ pub struct PricingLookup {
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionKind {
+    Exact,
+    ModelPart,
+    ProviderPrefix,
+    ProviderScoped,
+    BuiltIn,
+    Fuzzy,
+    Custom,
+}
+
+impl ResolutionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::ModelPart => "model_part",
+            Self::ProviderPrefix => "provider_prefix",
+            Self::ProviderScoped => "provider_scoped",
+            Self::BuiltIn => "built_in",
+            Self::Fuzzy => "fuzzy",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionEvidence {
+    pub kind: ResolutionKind,
+    /// Number of usable candidates considered by a fuzzy lookup. Deterministic
+    /// paths report one.
+    pub candidate_count: usize,
+    /// Whether every considered candidate publishes the same complete rate
+    /// vector. This is deliberately stricter than comparing only input/output.
+    pub price_consensus: bool,
+    /// Whether resolution established exact model identity. Deterministic
+    /// paths establish this by construction; fuzzy paths require the selected
+    /// key's terminal model segment to exactly name the requested model.
+    pub exact_model_identity: bool,
+    pub alias_applied: bool,
+    pub normalized: bool,
+    pub stripped: bool,
+}
+
+impl ResolutionEvidence {
+    fn deterministic(kind: ResolutionKind) -> Self {
+        Self {
+            kind,
+            candidate_count: 1,
+            price_consensus: true,
+            exact_model_identity: true,
+            alias_applied: false,
+            normalized: false,
+            stripped: false,
+        }
+    }
+
+    pub fn is_submission_safe(&self) -> bool {
+        self.kind != ResolutionKind::Fuzzy || (self.exact_model_identity && self.price_consensus)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LookupResult {
     pub pricing: ModelPricing,
     pub source: String,
     pub matched_key: String,
+    pub evidence: ResolutionEvidence,
+}
+
+impl LookupResult {
+    fn with_kind(mut self, kind: ResolutionKind) -> Self {
+        self.evidence.kind = kind;
+        self
+    }
+
+    fn with_alias(mut self) -> Self {
+        self.evidence.alias_applied = true;
+        self
+    }
+
+    fn with_normalization(mut self) -> Self {
+        self.evidence.normalized = true;
+        self
+    }
+
+    fn with_stripping(mut self) -> Self {
+        self.evidence.stripped = true;
+        self
+    }
 }
 
 impl PricingLookup {
@@ -305,6 +391,7 @@ impl PricingLookup {
                 pricing: c.pricing,
                 source: c.source,
                 matched_key: c.matched_key,
+                evidence: c.evidence,
             });
         }
 
@@ -327,6 +414,7 @@ impl PricingLookup {
                     pricing: r.pricing.clone(),
                     source: r.source.clone(),
                     matched_key: r.matched_key.clone(),
+                    evidence: r.evidence.clone(),
                 }),
             );
         }
@@ -356,7 +444,9 @@ impl PricingLookup {
         }
 
         let provider_id = normalize_provider_hint(provider_id);
-        let canonical = aliases::resolve_alias(model_id).unwrap_or(model_id);
+        let resolved_alias = aliases::resolve_alias(model_id);
+        let canonical = resolved_alias.unwrap_or(model_id);
+        let alias_applied = resolved_alias.is_some();
         let lower = canonical.to_lowercase();
 
         // CLIProxyAPI strips `(level)` reasoning-effort suffixes before routing,
@@ -412,8 +502,18 @@ impl PricingLookup {
             )
         };
 
+        let annotate_direct = |mut result: LookupResult| {
+            if alias_applied {
+                result = result.with_alias();
+            }
+            if normalized_owned.is_some() {
+                result = result.with_normalization();
+            }
+            result
+        };
+
         // 1. Try direct lookup
-        if let Some(result) = do_lookup(lower_ref) {
+        if let Some(result) = do_lookup(lower_ref).map(&annotate_direct) {
             if unsafe_claude_resolution(&result) {
                 return None;
             }
@@ -425,7 +525,10 @@ impl PricingLookup {
         }
 
         let guarded_lookup = |candidate: &str| {
-            do_lookup(candidate).filter(|result| !unsafe_claude_resolution(result))
+            do_lookup(candidate)
+                .map(&annotate_direct)
+                .map(LookupResult::with_stripping)
+                .filter(|result| !unsafe_claude_resolution(result))
         };
 
         // 1.5. Generic provider-routing prefix fallback: ids coming from a
@@ -478,7 +581,7 @@ impl PricingLookup {
 
     fn lookup_auto(&self, model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
         if let Some(result) = self.lookup_provider_scoped_path(model_id, provider_id) {
-            return Some(result);
+            return Some(result.with_kind(ResolutionKind::ProviderScoped));
         }
         if parse_provider_scoped_model_path(model_id).is_some() {
             return None;
@@ -494,7 +597,9 @@ impl PricingLookup {
                 }
 
                 let exact_openrouter = self.exact_match_openrouter(model_id);
-                let stripped_litellm = self.exact_or_normalized_litellm(stripped, provider_id);
+                let stripped_litellm = self
+                    .exact_or_normalized_litellm(stripped, provider_id)
+                    .map(LookupResult::with_stripping);
 
                 if let (Some(litellm), Some(openrouter)) = (&stripped_litellm, &exact_openrouter) {
                     if has_meaningful_tier_support(&litellm.pricing)
@@ -516,7 +621,7 @@ impl PricingLookup {
                 if let Some(result) =
                     self.exact_match_models_dev_with_provider(stripped, provider_id)
                 {
-                    return Some(result);
+                    return Some(result.with_stripping());
                 }
             } else {
                 if let Some(result) = choose_best_source_result(
@@ -524,15 +629,15 @@ impl PricingLookup {
                     self.exact_match_openrouter_for_provider(stripped, provider_id),
                     provider_id,
                 ) {
-                    return Some(result);
+                    return Some(result.with_stripping());
                 }
                 if let Some(result) = self.exact_or_normalized_litellm(stripped, provider_id) {
-                    return Some(result);
+                    return Some(result.with_stripping());
                 }
                 if let Some(result) =
                     self.exact_match_models_dev_with_provider(stripped, provider_id)
                 {
-                    return Some(result);
+                    return Some(result.with_stripping());
                 }
             }
         }
@@ -592,20 +697,20 @@ impl PricingLookup {
                 self.exact_match_openrouter_for_provider(&version_normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if provider_id.is_some() {
                 if let Some(result) =
                     self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
                 {
-                    return Some(result);
+                    return Some(result.with_normalization());
                 }
             }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&version_normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -616,7 +721,7 @@ impl PricingLookup {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -626,18 +731,18 @@ impl PricingLookup {
                 self.exact_match_openrouter_for_provider(&normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_litellm(&normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -653,13 +758,13 @@ impl PricingLookup {
 
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_litellm(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.prefix_match_openrouter(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.prefix_match_models_dev(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -668,7 +773,7 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.exact_match_cursor(&version_normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -681,7 +786,7 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.exact_match_sakana(&version_normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
 
@@ -691,8 +796,34 @@ impl PricingLookup {
 
         let litellm_result = self.fuzzy_match_litellm(model_id, provider_id);
         let openrouter_result = self.fuzzy_match_openrouter(model_id, provider_id);
+        let fuzzy_results = [litellm_result.as_ref(), openrouter_result.as_ref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let candidate_count = fuzzy_results
+            .iter()
+            .map(|result| result.evidence.candidate_count)
+            .sum();
+        let price_consensus = fuzzy_results.first().is_some_and(|first| {
+            first.evidence.price_consensus
+                && fuzzy_results.iter().skip(1).all(|result| {
+                    result.evidence.price_consensus
+                        && pricing_rows_equal(&first.pricing, &result.pricing)
+                })
+        });
+        let exact_model_identity = !fuzzy_results.is_empty()
+            && fuzzy_results
+                .iter()
+                .all(|result| result.evidence.exact_model_identity);
 
-        choose_best_source_result(litellm_result, openrouter_result, provider_id)
+        choose_best_source_result(litellm_result, openrouter_result, provider_id).map(
+            |mut result| {
+                result.evidence.candidate_count = candidate_count;
+                result.evidence.price_consensus = price_consensus;
+                result.evidence.exact_model_identity = exact_model_identity;
+                result
+            },
+        )
     }
 
     fn exact_or_normalized_litellm(
@@ -710,18 +841,18 @@ impl PricingLookup {
             if let Some(result) =
                 self.exact_match_litellm_for_provider(&version_normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if let Some(normalized) = normalize_model_name(model_id) {
             if let Some(result) = self.exact_match_litellm_for_provider(&normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_litellm(&normalized) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         None
@@ -743,14 +874,14 @@ impl PricingLookup {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if let Some(normalized) = normalize_model_name(model_id) {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if let Some(result) = self.prefix_match_models_dev(model_id, provider_id) {
@@ -758,7 +889,7 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_models_dev(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         None
@@ -770,7 +901,7 @@ impl PricingLookup {
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
         if let Some(result) = self.lookup_provider_scoped_path_litellm(model_id, provider_id) {
-            return Some(result);
+            return Some(result.with_kind(ResolutionKind::ProviderScoped));
         }
         if parse_provider_scoped_model_path(model_id).is_some() {
             return None;
@@ -781,7 +912,7 @@ impl PricingLookup {
         }
         if let Some(stripped) = strip_known_provider_prefix(model_id) {
             if let Some(result) = self.exact_or_normalized_litellm(stripped, provider_id) {
-                return Some(result);
+                return Some(result.with_stripping());
             }
         }
         if let Some(result) = self.prefix_match_litellm(model_id, provider_id) {
@@ -789,7 +920,7 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_litellm(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if is_fuzzy_eligible(model_id) {
@@ -806,7 +937,7 @@ impl PricingLookup {
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
         if let Some(result) = self.lookup_provider_scoped_path_openrouter(model_id, provider_id) {
-            return Some(result);
+            return Some(result.with_kind(ResolutionKind::ProviderScoped));
         }
         if parse_provider_scoped_model_path(model_id).is_some() {
             return None;
@@ -819,14 +950,14 @@ impl PricingLookup {
             if let Some(result) =
                 self.exact_match_openrouter_with_provider(&version_normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if let Some(normalized) = normalize_model_name(model_id) {
             if let Some(result) =
                 self.exact_match_openrouter_with_provider(&normalized, provider_id)
             {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if let Some(result) = self.prefix_match_openrouter(model_id, provider_id) {
@@ -834,7 +965,7 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_openrouter(&version_normalized, provider_id) {
-                return Some(result);
+                return Some(result.with_normalization());
             }
         }
         if is_fuzzy_eligible(model_id) {
@@ -1015,6 +1146,7 @@ impl PricingLookup {
         let key = self.openrouter_model_part.get(model_id)?;
         let pricing = self.openrouter.get(key)?;
         lookup_result_if_usable(pricing, "OpenRouter", key)
+            .map(|result| result.with_kind(ResolutionKind::ModelPart))
     }
 
     fn exact_match_models_dev(&self, model_id: &str) -> Option<LookupResult> {
@@ -1024,6 +1156,7 @@ impl PricingLookup {
                     pricing: pricing.clone(),
                     source: "Models.dev".into(),
                     matched_key: key.clone(),
+                    evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
                 });
             }
         }
@@ -1038,6 +1171,7 @@ impl PricingLookup {
                         pricing: pricing.clone(),
                         source: "Models.dev".into(),
                         matched_key: key.clone(),
+                        evidence: ResolutionEvidence::deterministic(ResolutionKind::ModelPart),
                     });
                 }
             }
@@ -1047,12 +1181,14 @@ impl PricingLookup {
 
     fn exact_match_cursor(&self, model_id: &str) -> Option<LookupResult> {
         if let Some(key) = self.cursor_lower.get(model_id) {
-            return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key);
+            return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key)
+                .map(|result| result.with_kind(ResolutionKind::BuiltIn));
         }
         if let Some(model_part) = model_id.split('/').next_back() {
             if model_part != model_id {
                 if let Some(key) = self.cursor_lower.get(model_part) {
-                    return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key);
+                    return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key)
+                        .map(|result| result.with_kind(ResolutionKind::BuiltIn));
                 }
             }
         }
@@ -1061,12 +1197,14 @@ impl PricingLookup {
 
     fn exact_match_sakana(&self, model_id: &str) -> Option<LookupResult> {
         if let Some(key) = self.sakana_lower.get(model_id) {
-            return lookup_result_if_usable(self.sakana.get(key).unwrap(), "Sakana", key);
+            return lookup_result_if_usable(self.sakana.get(key).unwrap(), "Sakana", key)
+                .map(|result| result.with_kind(ResolutionKind::BuiltIn));
         }
         if let Some(model_part) = model_id.split('/').next_back() {
             if model_part != model_id {
                 if let Some(key) = self.sakana_lower.get(model_part) {
-                    return lookup_result_if_usable(self.sakana.get(key).unwrap(), "Sakana", key);
+                    return lookup_result_if_usable(self.sakana.get(key).unwrap(), "Sakana", key)
+                        .map(|result| result.with_kind(ResolutionKind::BuiltIn));
                 }
             }
         }
@@ -1087,7 +1225,7 @@ impl PricingLookup {
             if let Some(litellm_key) = self.litellm_lower.get(&key) {
                 if let Some(pricing) = self.litellm.get(litellm_key) {
                     if let Some(result) = lookup_result_if_usable(pricing, "LiteLLM", litellm_key) {
-                        return Some(result);
+                        return Some(result.with_kind(ResolutionKind::ProviderPrefix));
                     }
                 }
             }
@@ -1109,7 +1247,7 @@ impl PricingLookup {
             if let Some(or_key) = self.openrouter_lower.get(&key) {
                 if let Some(pricing) = self.openrouter.get(or_key) {
                     if let Some(result) = lookup_result_if_usable(pricing, "OpenRouter", or_key) {
-                        return Some(result);
+                        return Some(result.with_kind(ResolutionKind::ProviderPrefix));
                     }
                 }
             }
@@ -1134,6 +1272,7 @@ impl PricingLookup {
                         pricing: pricing.clone(),
                         source: "Models.dev".into(),
                         matched_key: models_dev_key.clone(),
+                        evidence: ResolutionEvidence::deterministic(ResolutionKind::ProviderPrefix),
                     });
                 }
             }
@@ -1156,9 +1295,14 @@ impl PricingLookup {
             }
         }
 
-        if let Some(result) =
-            select_best_match(&family_matches_list, &self.litellm, "LiteLLM", provider_id)
-        {
+        if let Some(result) = select_best_match(
+            &family_matches_list,
+            &self.litellm,
+            "LiteLLM",
+            provider_id,
+            ResolutionKind::Fuzzy,
+            model_id,
+        ) {
             return Some(result);
         }
 
@@ -1170,7 +1314,14 @@ impl PricingLookup {
             }
         }
 
-        select_best_match(&all_matches, &self.litellm, "LiteLLM", provider_id)
+        select_best_match(
+            &all_matches,
+            &self.litellm,
+            "LiteLLM",
+            provider_id,
+            ResolutionKind::Fuzzy,
+            model_id,
+        )
     }
 
     fn fuzzy_match_openrouter(
@@ -1194,6 +1345,8 @@ impl PricingLookup {
             &self.openrouter,
             "OpenRouter",
             provider_id,
+            ResolutionKind::Fuzzy,
+            model_id,
         ) {
             return Some(result);
         }
@@ -1207,7 +1360,14 @@ impl PricingLookup {
             }
         }
 
-        select_best_match(&all_matches, &self.openrouter, "OpenRouter", provider_id)
+        select_best_match(
+            &all_matches,
+            &self.openrouter,
+            "OpenRouter",
+            provider_id,
+            ResolutionKind::Fuzzy,
+            model_id,
+        )
     }
 
     pub fn calculate_cost(
@@ -1251,7 +1411,9 @@ impl PricingLookup {
         usage: &TokenBreakdown,
     ) -> bool {
         self.resolve_for_usage(model_id, provider_id, usage)
-            .is_some_and(|result| result.pricing.covers_usage(usage))
+            .is_some_and(|result| {
+                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
+            })
     }
 
     /// Resolve `model_id` for pricing `usage`, borrowing the rates the
@@ -2012,6 +2174,7 @@ fn lookup_result_if_usable(
         pricing: pricing.clone(),
         source: source.into(),
         matched_key: matched_key.into(),
+        evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
     })
 }
 
@@ -2323,15 +2486,59 @@ fn is_reseller_provider(key: &str) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
+fn pricing_rows_equal(left: &ModelPricing, right: &ModelPricing) -> bool {
+    left.all_rates()
+        .into_iter()
+        .zip(right.all_rates())
+        .all(|(left, right)| match (left, right) {
+            (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+            (None, None) => true,
+            _ => false,
+        })
+}
+
+fn terminal_model_identity(model_id: &str) -> String {
+    model_id
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_lowercase()
+}
+
 fn select_best_match(
     matches: &[&String],
     dataset: &HashMap<String, ModelPricing>,
     source: &str,
     provider_id: Option<&str>,
+    kind: ResolutionKind,
+    requested_model_id: &str,
 ) -> Option<LookupResult> {
     if matches.is_empty() {
         return None;
     }
+
+    let all_usable_matches: Vec<&String> = matches
+        .iter()
+        .copied()
+        .filter(|key| {
+            dataset
+                .get(key.as_str())
+                .is_some_and(has_any_usable_pricing)
+        })
+        .collect();
+    if all_usable_matches.is_empty() {
+        return None;
+    }
+
+    let candidate_count = all_usable_matches.len();
+    let first_pricing = dataset.get(all_usable_matches[0].as_str())?;
+    let price_consensus = all_usable_matches.iter().skip(1).all(|key| {
+        dataset
+            .get(key.as_str())
+            .is_some_and(|pricing| pricing_rows_equal(first_pricing, pricing))
+    });
 
     let hint_tags: Vec<String> = provider_id
         .map(provider_identity::provider_tags)
@@ -2393,6 +2600,16 @@ fn select_best_match(
                 pricing: pricing.clone(),
                 source: source.into(),
                 matched_key: (*k).clone(),
+                evidence: ResolutionEvidence {
+                    kind,
+                    candidate_count,
+                    price_consensus,
+                    exact_model_identity: terminal_model_identity(requested_model_id)
+                        == terminal_model_identity(k),
+                    alias_applied: false,
+                    normalized: false,
+                    stripped: false,
+                },
             })
         })
     };
@@ -2555,7 +2772,14 @@ fn exact_match_with_provider_prefixes(
         return None;
     }
 
-    select_best_match(&matches, dataset, source, Some(provider_id))
+    select_best_match(
+        &matches,
+        dataset,
+        source,
+        Some(provider_id),
+        ResolutionKind::ModelPart,
+        model_id,
+    )
 }
 
 #[cfg(test)]
@@ -4952,6 +5176,61 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_resolution_records_conflicting_candidates_as_submission_unsafe() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "vendor-a/atlas-chat-preview".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000001),
+                output_cost_per_token: Some(0.000002),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "vendor-b/atlas-chat-beta".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000003),
+                output_cost_per_token: Some(0.000006),
+                ..Default::default()
+            },
+        );
+
+        let result = PricingLookup::new(litellm, HashMap::new(), HashMap::new())
+            .lookup("atlas-chat")
+            .expect("reporting lookup should still expose its estimate");
+
+        assert_eq!(result.evidence.kind, ResolutionKind::Fuzzy);
+        assert_eq!(result.evidence.candidate_count, 2);
+        assert!(!result.evidence.price_consensus);
+        assert!(!result.evidence.exact_model_identity);
+        assert!(!result.evidence.is_submission_safe());
+    }
+
+    #[test]
+    fn fuzzy_resolution_accepts_exact_terminal_identity_with_price_consensus() {
+        let same_price = ModelPricing {
+            input_cost_per_token: Some(0.000001),
+            output_cost_per_token: Some(0.000002),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            ("gateway-a/atlas-chat".into(), same_price.clone()),
+            ("gateway-b/atlas-chat".into(), same_price),
+        ]);
+
+        let result = PricingLookup::new(litellm, HashMap::new(), HashMap::new())
+            .lookup("unknown-router/atlas-chat")
+            .expect("the stripped terminal identity should resolve");
+
+        assert_eq!(result.evidence.kind, ResolutionKind::Fuzzy);
+        assert_eq!(result.evidence.candidate_count, 2);
+        assert!(result.evidence.price_consensus);
+        assert!(result.evidence.exact_model_identity);
+        assert!(result.evidence.stripped);
+        assert!(result.evidence.is_submission_safe());
+    }
+
+    #[test]
     fn test_fallback_suffix_prefers_exact_match() {
         // If the exact model exists, it should be used (no fallback)
         let mut litellm = HashMap::new();
@@ -5254,6 +5533,7 @@ mod tests {
         LookupResult {
             matched_key: key.into(),
             source: source.into(),
+            evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
             pricing: ModelPricing {
                 input_cost_per_token: Some(0.000005),
                 input_cost_per_token_above_272k_tokens: Some(0.000010),

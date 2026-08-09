@@ -3561,13 +3561,37 @@ fn run_pricing_lookup(
                     model_id: String,
                     matched_key: String,
                     source: String,
+                    resolution: ResolutionOutput,
                     pricing: PricingValues,
+                }
+
+                #[derive(serde::Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ResolutionOutput {
+                    kind: &'static str,
+                    candidate_count: usize,
+                    price_consensus: bool,
+                    exact_model_identity: bool,
+                    alias_applied: bool,
+                    normalized: bool,
+                    stripped: bool,
+                    submission_safe: bool,
                 }
 
                 let output = PricingOutput {
                     model_id: model_id.to_string(),
                     matched_key: pricing.matched_key,
                     source: pricing.source,
+                    resolution: ResolutionOutput {
+                        kind: pricing.evidence.kind.as_str(),
+                        candidate_count: pricing.evidence.candidate_count,
+                        price_consensus: pricing.evidence.price_consensus,
+                        exact_model_identity: pricing.evidence.exact_model_identity,
+                        alias_applied: pricing.evidence.alias_applied,
+                        normalized: pricing.evidence.normalized,
+                        stripped: pricing.evidence.stripped,
+                        submission_safe: pricing.evidence.is_submission_safe(),
+                    },
                     pricing: PricingValues {
                         input_cost_per_token: pricing.pricing.input_cost_per_token.unwrap_or(0.0),
                         output_cost_per_token: pricing.pricing.output_cost_per_token.unwrap_or(0.0),
@@ -3610,6 +3634,22 @@ fn run_pricing_lookup(
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
+                let safety = if pricing.evidence.is_submission_safe() {
+                    "submission-safe"
+                } else {
+                    "estimate only"
+                };
+                println!(
+                    "  Resolution: {} ({}, {} candidate{})",
+                    pricing.evidence.kind.as_str(),
+                    safety,
+                    pricing.evidence.candidate_count,
+                    if pricing.evidence.candidate_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                );
                 println!();
                 let input = pricing.pricing.input_cost_per_token.unwrap_or(0.0);
                 let output = pricing.pricing.output_cost_per_token.unwrap_or(0.0);

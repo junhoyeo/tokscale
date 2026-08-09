@@ -8,7 +8,7 @@ pub mod models_dev;
 pub mod openrouter;
 
 use custom::CustomPricing;
-use lookup::{compute_cost, LookupResult, PricingLookup};
+use lookup::{compute_cost, LookupResult, PricingLookup, ResolutionEvidence, ResolutionKind};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -446,6 +446,15 @@ impl PricingService {
                 pricing: result.pricing.clone(),
                 source: "Custom".into(),
                 matched_key: result.matched_key.to_string(),
+                evidence: ResolutionEvidence {
+                    kind: ResolutionKind::Custom,
+                    candidate_count: 1,
+                    price_consensus: true,
+                    exact_model_identity: true,
+                    alias_applied: false,
+                    normalized: false,
+                    stripped: false,
+                },
             })
     }
 }
@@ -1694,5 +1703,34 @@ mod tests {
 
         let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ambiguous_fuzzy_price_remains_visible_but_does_not_cover_submission() {
+        let litellm = HashMap::from([
+            (
+                "vendor-a/atlas-chat-preview".into(),
+                model_pricing(0.000001, 0.000002),
+            ),
+            (
+                "vendor-b/atlas-chat-beta".into(),
+                model_pricing(0.000003, 0.000006),
+            ),
+        ]);
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolution = service
+            .lookup_with_source("atlas-chat", None)
+            .expect("lenient reporting keeps the estimated price visible");
+        assert!(!resolution.evidence.is_submission_safe());
+        assert!(service.calculate_cost_with_provider("atlas-chat", None, &usage) > 0.0);
+        assert!(!service.covers_usage_with_provider("atlas-chat", None, &usage));
     }
 }

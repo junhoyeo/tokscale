@@ -3314,6 +3314,8 @@ fn test_pricing_command_success() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Pricing for"))
+        .stdout(predicate::str::contains("Resolution:"))
+        .stdout(predicate::str::contains("submission-safe"))
         .stdout(predicate::str::contains("Input"))
         .stdout(predicate::str::contains("Output"));
 }
@@ -3334,7 +3336,13 @@ fn test_pricing_command_json() {
     assert!(json.get("modelId").is_some(), "Missing modelId");
     assert!(json.get("matchedKey").is_some(), "Missing matchedKey");
     assert!(json.get("source").is_some(), "Missing source");
+    assert!(json.get("resolution").is_some(), "Missing resolution");
     assert!(json.get("pricing").is_some(), "Missing pricing");
+
+    let resolution = &json["resolution"];
+    assert!(resolution.get("kind").is_some());
+    assert!(resolution.get("candidateCount").is_some());
+    assert_eq!(resolution["submissionSafe"].as_bool(), Some(true));
 
     let pricing = &json["pricing"];
     assert!(pricing.get("inputCostPerToken").is_some());

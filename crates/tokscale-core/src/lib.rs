@@ -3057,6 +3057,8 @@ const ROUTING_LABEL_UNPRICED_REASON: &str =
     "generic routing label has no authoritative model-to-price mapping";
 const MISSING_MODEL_PRICING_REASON: &str = "no authoritative model-to-price mapping";
 const INCOMPLETE_MODEL_PRICING_REASON: &str = "pricing does not cover every populated token bucket";
+const AMBIGUOUS_MODEL_PRICING_REASON: &str =
+    "model price lookup is ambiguous across non-equivalent candidates";
 
 /// Routing labels name the router that served the request, never the model
 /// that answered it, so they have no authoritative model-to-price mapping.
@@ -3114,14 +3116,17 @@ fn exclude_unpriced_submission_messages(
             // Nothing regresses for unpriced labels: the resolver refuses
             // routing labels outright, so with no custom entry this returns
             // None and the routing-label reason still applies.
-            let reason = if pricing
-                .lookup_with_source_and_provider(
-                    &message.model_id,
-                    None,
-                    Some(&message.provider_id),
-                )
-                .is_some()
+            let resolution = pricing.lookup_with_source_and_provider(
+                &message.model_id,
+                None,
+                Some(&message.provider_id),
+            );
+            let reason = if resolution
+                .as_ref()
+                .is_some_and(|result| !result.evidence.is_submission_safe())
             {
+                AMBIGUOUS_MODEL_PRICING_REASON
+            } else if resolution.is_some() {
                 INCOMPLETE_MODEL_PRICING_REASON
             } else if is_generic_routing_label(&message.provider_id, &message.model_id) {
                 ROUTING_LABEL_UNPRICED_REASON
@@ -4454,7 +4459,8 @@ mod tests {
         paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
         unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement, GroupBy,
         LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
-        UnpricedSubmissionExclusion, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
+        UnpricedSubmissionExclusion, AMBIGUOUS_MODEL_PRICING_REASON,
+        INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
         ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
     };
     use serial_test::serial;
@@ -8682,6 +8688,58 @@ mod tests {
                 total_tokens: 1,
                 reason: MISSING_MODEL_PRICING_REASON,
             }]
+        );
+    }
+
+    #[test]
+    fn submission_excludes_ambiguous_fuzzy_price_with_specific_reason() {
+        let litellm = HashMap::from([
+            (
+                "vendor-a/atlas-chat-preview".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-b/atlas-chat-beta".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(6e-6),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "unknown",
+            "ambiguous",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("an ambiguous estimate must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            AMBIGUOUS_MODEL_PRICING_REASON
         );
     }
 
