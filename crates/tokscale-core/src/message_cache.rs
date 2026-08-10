@@ -1068,7 +1068,11 @@ fn parser_version(client: ClientId) -> u32 {
         // token it ever spent against the day it was started. A session that
         // has since ended never changes its bytes again, so its fingerprint
         // stays valid forever and only this bump discards the v1 anchor.
-        ClientId::Droid => 2,
+        // v2->v3: a session's cumulative total is no longer one record at one
+        // instant. It is now apportioned across the assistant replies in the
+        // sibling transcript, weighted by the context each reply read, so a
+        // multi-day session reports against the days it actually ran.
+        ClientId::Droid => 3,
         _ => 1,
     }
 }
@@ -2601,7 +2605,7 @@ mod tests {
         // A finished Droid session's settings.json is never rewritten again, so
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
-        assert_eq!(parser_version(ClientId::Droid), 2);
+        assert_eq!(parser_version(ClientId::Droid), 3);
     }
 
     #[test]

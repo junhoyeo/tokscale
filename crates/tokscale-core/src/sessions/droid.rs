@@ -2,10 +2,13 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
-use super::utils::{file_modified_timestamp_ms_opt, read_file_or_none};
+use super::utils::{
+    file_modified_timestamp_ms_opt, lossy_lines, parse_timestamp_value, read_file_or_none,
+};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
+use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -142,29 +145,6 @@ pub(crate) fn droid_jsonl_path(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{stem}.jsonl")))
 }
 
-/// Pick the instant a Droid session's cumulative `tokenUsage` is attributed to.
-///
-/// A Droid `*.settings.json` holds one running total for the whole session and
-/// is rewritten every time the agent spends tokens, so the parser emits a
-/// single record and has to anchor it somewhere.
-///
-/// `providerLockTimestamp` is the wrong anchor: it records when the provider
-/// was *selected*, not when the tokens were spent. Droid rewrites the totals
-/// in place without touching that field, so a session left running across days
-/// (a `/loop`, a long autonomous run) keeps reporting its very first instant
-/// while the totals climb. Every token it has ever spent lands in the bucket
-/// for the day it started, and the session reads as silent in `--today` and
-/// `--yesterday` even while it is actively burning tokens.
-///
-/// The file's mtime is when the totals being read were written, which is the
-/// closest available marker for when they were last accrued, so it wins. The
-/// lock timestamp becomes a floor rather than the answer: usage cannot predate
-/// provider selection, so a stale mtime (a restore or copy that rewound it)
-/// cannot drag the record earlier than the session could possibly have run.
-///
-/// When the filesystem reports no mtime at all, fall back to the lock
-/// timestamp, then to now() — a record with real token usage is never dropped
-/// just because its timestamp could not be resolved.
 /// Parse `providerLockTimestamp` into epoch milliseconds, rejecting values that
 /// cannot describe a real provider lock.
 ///
@@ -181,6 +161,25 @@ fn parse_lock_timestamp(raw: Option<&str>) -> Option<i64> {
         .filter(|&ts| ts > 0)
 }
 
+/// Pick the single instant a session's cumulative `tokenUsage` is attributed
+/// to, for the sessions whose transcript cannot spread it across the calls that
+/// spent it.
+///
+/// `providerLockTimestamp` is the wrong anchor: it records when the provider
+/// was *selected*, not when the tokens were spent. Droid rewrites the totals in
+/// place without touching that field, so a session left running across days
+/// keeps reporting its very first instant while the totals climb, and reads as
+/// silent in `--today` even while it is actively burning tokens.
+///
+/// The file's mtime is when the totals being read were written, which is the
+/// closest available marker for when they were last accrued, so it wins. The
+/// lock timestamp becomes a floor rather than the answer: usage cannot predate
+/// provider selection, so a stale mtime (a restore or copy that rewound it)
+/// cannot drag the record earlier than the session could possibly have run.
+///
+/// When the filesystem reports no mtime at all, fall back to the lock
+/// timestamp, then to now() — a record with real token usage is never dropped
+/// just because its timestamp could not be resolved.
 fn resolve_usage_timestamp(lock_timestamp: Option<i64>, modified: Option<i64>) -> i64 {
     match (modified, lock_timestamp) {
         (Some(modified), Some(lock)) => modified.max(lock),
@@ -188,6 +187,103 @@ fn resolve_usage_timestamp(lock_timestamp: Option<i64>, modified: Option<i64>) -
         (None, Some(lock)) => lock,
         (None, None) => chrono::Utc::now().timestamp_millis(),
     }
+}
+
+/// One assistant reply in a Droid transcript: when it was written, and how
+/// expensive it plausibly was relative to the session's other replies.
+struct TranscriptTurn {
+    timestamp: i64,
+    weight: u128,
+}
+
+/// Recover the shape of a session's spend from its transcript.
+///
+/// Droid records no token counts anywhere in the `*.jsonl` — only the
+/// cumulative total in `*.settings.json` — so the transcript cannot say what a
+/// reply cost. It can say *when* each reply happened and how much context was
+/// live at the time, and cost per call tracks context length closely: nearly
+/// every token in these sessions is a cache read of the conversation so far.
+/// Weighting each assistant reply by the bytes accumulated since the last
+/// compaction therefore recovers the relative cost of one reply against
+/// another, which is all the apportioning below needs.
+///
+/// Only assistant replies are counted, since one reply corresponds to one API
+/// call; user and tool records ride along inside the call that reads them.
+/// Compaction resets the running context because it discards the transcript
+/// the following calls would otherwise re-read.
+fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
+    let Ok(file) = std::fs::File::open(jsonl) else {
+        return Vec::new();
+    };
+
+    let mut turns = Vec::new();
+    let mut context_bytes: u128 = 0;
+
+    for line in lossy_lines(BufReader::new(file)) {
+        let line_bytes = line.len() as u128;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            // A malformed line still occupied context in the real conversation.
+            context_bytes = context_bytes.saturating_add(line_bytes);
+            continue;
+        };
+
+        let record_type = record.get("type").and_then(|v| v.as_str());
+        if record_type == Some("compaction_state") {
+            context_bytes = line_bytes;
+            continue;
+        }
+        context_bytes = context_bytes.saturating_add(line_bytes);
+
+        if record_type != Some("message") {
+            continue;
+        }
+        if record
+            .get("message")
+            .and_then(|message| message.get("role"))
+            .and_then(|role| role.as_str())
+            != Some("assistant")
+        {
+            continue;
+        }
+
+        let Some(timestamp) = record.get("timestamp").and_then(parse_timestamp_value) else {
+            continue;
+        };
+
+        turns.push(TranscriptTurn {
+            timestamp,
+            weight: context_bytes.max(1),
+        });
+    }
+
+    turns
+}
+
+/// Split `total` across `weights` so the parts sum back to exactly `total`.
+///
+/// Allocates on the running total rather than rounding each share on its own:
+/// each part is the difference between two cumulative shares, so truncation
+/// error is carried forward instead of accumulating, and the final cumulative
+/// share is `total` by construction. That exactness is what lets a session be
+/// split across days without the daily figures drifting from the cumulative
+/// number Droid actually recorded.
+fn apportion(total: i64, weights: &[u128], total_weight: u128) -> Vec<i64> {
+    if total_weight == 0 {
+        return vec![0; weights.len()];
+    }
+
+    let mut parts = Vec::with_capacity(weights.len());
+    let mut consumed_weight: u128 = 0;
+    let mut allocated: i64 = 0;
+
+    for weight in weights {
+        consumed_weight += weight;
+        let up_to = ((total as i128 * consumed_weight as i128) / total_weight as i128) as i64;
+        parts.push(up_to - allocated);
+        allocated = up_to;
+    }
+
+    parts
 }
 
 /// Parse a Droid settings.json file
@@ -246,24 +342,59 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    let lock_timestamp = parse_lock_timestamp(settings.provider_lock_timestamp.as_deref());
+    let totals = TokenBreakdown {
+        input: usage.input_tokens.unwrap_or(0).max(0),
+        output: usage.output_tokens.unwrap_or(0).max(0),
+        cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
+        cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
+        reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
+    };
 
+    let turns = droid_jsonl_path(path)
+        .map(|jsonl| transcript_turns(&jsonl))
+        .unwrap_or_default();
+    let total_weight: u128 = turns.iter().map(|turn| turn.weight).sum();
+
+    if !turns.is_empty() && total_weight > 0 {
+        let weights: Vec<u128> = turns.iter().map(|turn| turn.weight).collect();
+        let input = apportion(totals.input, &weights, total_weight);
+        let output = apportion(totals.output, &weights, total_weight);
+        let cache_read = apportion(totals.cache_read, &weights, total_weight);
+        let cache_write = apportion(totals.cache_write, &weights, total_weight);
+        let reasoning = apportion(totals.reasoning, &weights, total_weight);
+
+        return turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                UnifiedMessage::new(
+                    "droid",
+                    model.clone(),
+                    provider.clone(),
+                    session_id.clone(),
+                    turn.timestamp,
+                    TokenBreakdown {
+                        input: input[index],
+                        output: output[index],
+                        cache_read: cache_read[index],
+                        cache_write: cache_write[index],
+                        reasoning: reasoning[index],
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+    }
+
+    // No usable transcript (missing, unreadable, or no assistant replies yet).
+    // Fall back to one record for the whole session, anchored at the last write
+    // so an active session still lands in the present rather than at the
+    // instant its provider was locked.
+    let lock_timestamp = parse_lock_timestamp(settings.provider_lock_timestamp.as_deref());
     let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
     vec![UnifiedMessage::new(
-        "droid",
-        model,
-        provider,
-        session_id,
-        timestamp,
-        TokenBreakdown {
-            input: usage.input_tokens.unwrap_or(0).max(0),
-            output: usage.output_tokens.unwrap_or(0).max(0),
-            cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
-            cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
-            reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
-        },
-        0.0,
+        "droid", model, provider, session_id, timestamp, totals, 0.0,
     )]
 }
 
@@ -319,6 +450,134 @@ mod tests {
         assert_eq!(get_default_model_from_provider("google"), "gemini-unknown");
         assert_eq!(get_default_model_from_provider("xai"), "grok-unknown");
         assert_eq!(get_default_model_from_provider("custom"), "custom-unknown");
+    }
+
+    fn write_session(dir: &Path, id: &str, usage: &str, transcript: &[&str]) -> PathBuf {
+        let settings = dir.join(format!("{id}.settings.json"));
+        std::fs::write(
+            &settings,
+            format!(r#"{{"model":"custom:Kimi-K3-0","tokenUsage":{usage}}}"#),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{id}.jsonl")), transcript.join("\n")).unwrap();
+        settings
+    }
+
+    fn assistant(timestamp: &str, filler: usize) -> String {
+        format!(
+            r#"{{"type":"message","timestamp":"{timestamp}","message":{{"role":"assistant","content":"{}"}}}}"#,
+            "x".repeat(filler)
+        )
+    }
+
+    #[test]
+    fn test_apportion_parts_sum_to_the_original_total() {
+        // Truncation must never lose or invent tokens: the daily figures have to
+        // add back up to the cumulative number Droid recorded.
+        let weights = vec![3u128, 1, 1, 1, 1];
+        let parts = apportion(1_000_003, &weights, weights.iter().sum());
+
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts.iter().sum::<i64>(), 1_000_003);
+        assert!(parts.iter().all(|&p| p >= 0));
+        // The heaviest turn gets the largest share.
+        assert!(parts[0] > parts[1]);
+    }
+
+    #[test]
+    fn test_apportion_without_weight_yields_no_tokens() {
+        assert_eq!(apportion(500, &[0, 0], 0), vec![0, 0]);
+    }
+
+    #[test]
+    fn test_usage_spreads_across_the_days_the_session_ran() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Two assistant replies a day apart, the second on a larger context.
+        let settings = write_session(
+            temp_dir.path(),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"inputTokens":900,"outputTokens":100}"#,
+            &[
+                r#"{"type":"session_start","id":"s"}"#,
+                &assistant("2026-08-07T12:00:00Z", 10),
+                &assistant("2026-08-09T12:00:00Z", 400),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+
+        assert_eq!(messages.len(), 2, "one record per assistant reply");
+        // Nothing is lost or invented by the split.
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 900);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 100);
+        // Each record lands on the reply that earned it, not on one anchor.
+        assert!(messages[0].timestamp < messages[1].timestamp);
+        assert_ne!(messages[0].date, messages[1].date);
+        // The later reply read a longer conversation, so it carries more.
+        assert!(messages[1].tokens.input > messages[0].tokens.input);
+    }
+
+    #[test]
+    fn test_compaction_resets_the_context_weighting() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // A big conversation, compacted, then one short reply afterwards. The
+        // post-compaction reply must not inherit the discarded context's weight.
+        let settings = write_session(
+            temp_dir.path(),
+            "11111111-1111-1111-1111-111111111111",
+            r#"{"inputTokens":1000}"#,
+            &[
+                &assistant("2026-08-07T12:00:00Z", 2000),
+                r#"{"type":"compaction_state","timestamp":"2026-08-08T12:00:00Z"}"#,
+                &assistant("2026-08-09T12:00:00Z", 10),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
+        assert!(
+            messages[0].tokens.input > messages[1].tokens.input,
+            "the compacted-away context should not keep charging later replies"
+        );
+    }
+
+    #[test]
+    fn test_session_without_assistant_replies_falls_back_to_one_record() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Usage recorded but the transcript has no assistant reply to hang it
+        // on — the record must still be emitted rather than silently dropped.
+        let settings = write_session(
+            temp_dir.path(),
+            "22222222-2222-2222-2222-222222222222",
+            r#"{"inputTokens":700,"outputTokens":7}"#,
+            &[r#"{"type":"session_start","id":"s"}"#],
+        );
+
+        let messages = parse_droid_file(&settings);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 700);
+        assert_eq!(messages[0].tokens.output, 7);
+    }
+
+    #[test]
+    fn test_missing_transcript_falls_back_to_one_record() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = temp_dir
+            .path()
+            .join("33333333-3333-3333-3333-333333333333.settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"model":"custom:Kimi-K3-0","tokenUsage":{"inputTokens":42}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&settings);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 42);
     }
 
     #[test]
