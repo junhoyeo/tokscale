@@ -133,7 +133,7 @@ fn derive_dedup_key(
 /// portion retains its normal `-` separators. A naive global
 /// `chat_id.replace('-', ":")` corrupts the date to `2025:12:14T...` and
 /// makes RFC3339 parsing fail silently.
-fn parse_chat_id_to_millis(chat_id: &str) -> Option<i64> {
+pub(crate) fn parse_chat_id_to_millis(chat_id: &str) -> Option<i64> {
     let t_index = chat_id.find('T')?;
     let (date, time_with_separator) = chat_id.split_at(t_index);
     // `time_with_separator` starts with 'T'; rebuild "<date>T<HH:MM:SS...>".
@@ -149,7 +149,7 @@ fn parse_chat_id_to_millis(chat_id: &str) -> Option<i64> {
 /// ancestor directory names. Missing ancestors fall back to empty strings so
 /// that malformed layouts still produce a deterministic (but lossy) session
 /// identifier instead of panicking.
-fn derive_context_from_path(path: &Path) -> (String, String, String) {
+pub(crate) fn derive_context_from_path(path: &Path) -> (String, String, String) {
     let chat_id = path
         .parent()
         .and_then(|p| p.file_name())
@@ -179,7 +179,7 @@ fn derive_context_from_path(path: &Path) -> (String, String, String) {
     (channel, project_basename, chat_id)
 }
 
-fn is_assistant_role(msg: &Value) -> bool {
+pub(crate) fn is_assistant_role(msg: &Value) -> bool {
     let variant = msg
         .get("variant")
         .and_then(|v| v.as_str())
@@ -188,7 +188,7 @@ fn is_assistant_role(msg: &Value) -> bool {
     matches!(variant, "ai" | "agent" | "assistant")
 }
 
-fn message_timestamp(msg: &Value) -> Option<i64> {
+pub(crate) fn message_timestamp(msg: &Value) -> Option<i64> {
     for key in ["timestamp", "createdAt"] {
         if let Some(v) = msg.get(key) {
             if let Some(ts) = parse_timestamp_value(v) {
@@ -203,7 +203,7 @@ fn message_timestamp(msg: &Value) -> Option<i64> {
 }
 
 #[derive(Default, Debug, Clone)]
-struct AssistantUsage {
+pub(crate) struct AssistantUsage {
     model: Option<String>,
     credits: f64,
     input_tokens: i64,
@@ -213,7 +213,7 @@ struct AssistantUsage {
 }
 
 impl AssistantUsage {
-    fn has_signal(&self) -> bool {
+    pub(crate) fn has_signal(&self) -> bool {
         self.input_tokens > 0
             || self.output_tokens > 0
             || self.cache_read_input_tokens > 0
@@ -246,7 +246,7 @@ impl AssistantUsage {
 /// Extract assistant usage trying, in order: `metadata.usage`,
 /// `metadata.codebuff.usage`, and the stashed RunState message history (which
 /// is where OpenRouter-routed calls land their final token counts).
-fn extract_assistant_usage(msg: &Value) -> AssistantUsage {
+pub(crate) fn extract_assistant_usage(msg: &Value) -> AssistantUsage {
     let metadata = msg.get("metadata");
 
     let mut usage = AssistantUsage::default();

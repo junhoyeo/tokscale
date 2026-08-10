@@ -302,6 +302,25 @@ export const submittedDevices = pgTable(
     longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
     maxConcurrentSessions: integer("max_concurrent_sessions"),
     sessionCount: integer("session_count"),
+
+    /**
+     * Highest allowlisted parser generation accepted per client. Mirrored
+     * inside `parserStates` and advanced atomically with the high-water.
+     */
+    parserVersions: jsonb("parser_versions")
+      .$type<Record<string, number>>()
+      .notNull()
+      .default({}),
+
+    /**
+     * Accepted version and non-destructive cumulative high-water state for
+     * allowlisted parser rollouts, keyed by client. Updated atomically with
+     * the daily rows that consume a bounded increment.
+     */
+    parserStates: jsonb("parser_states")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
   },
   (table) => [
     index("idx_submitted_devices_user_id").on(table.userId),

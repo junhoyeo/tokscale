@@ -2,6 +2,8 @@
  * Client-level merge helpers for submission API
  */
 
+import { createSafeRecord, ownValue } from "../safeRecord";
+
 export interface ModelBreakdownData {
   tokens: number;
   cost: number;
@@ -11,6 +13,8 @@ export interface ModelBreakdownData {
   cacheWrite: number;
   reasoning: number;
   messages: number;
+  /** Internal parser-state high-water for input before cache-read normalization. */
+  inputIncludingCacheRead?: number;
 }
 
 export interface ClientBreakdownProvenanceData {
@@ -317,12 +321,12 @@ function applyCostCompleteness(
   // cost, and one the incomplete payload dropped entirely is preserved rather
   // than allowed to vanish (its usage did not stop existing because this
   // submission could not price it).
-  const models: Record<string, ModelBreakdownData> = {};
+  const models = createSafeRecord<ModelBreakdownData>();
   for (const [modelId, model] of Object.entries(existing?.models ?? {})) {
     models[modelId] = { ...model };
   }
   for (const [modelId, model] of Object.entries(next.models ?? {})) {
-    const priorCost = models[modelId]?.cost ?? 0;
+    const priorCost = ownValue(models, modelId)?.cost ?? 0;
     models[modelId] = { ...model, cost: Math.max(priorCost, model.cost) };
   }
 

@@ -224,6 +224,13 @@ const SubmissionProvenanceSchema = z.object({
 const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   meta: ExportMetaSchema,
   device: SubmitDeviceSchema.optional(),
+  // Parser identity and snapshot completeness are separate: date-filtered
+  // scans still identify their parser but cannot establish/advance a
+  // cumulative rollout high-water.
+  scanScope: z.object({
+    parserVersions: z.record(SourceSchema, NonNegativeIntegerSchema.min(1)),
+    fullHistory: z.boolean(),
+  }).optional(),
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
   // Each date must appear at most once. The submit route builds its insert

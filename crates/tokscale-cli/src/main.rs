@@ -1079,6 +1079,7 @@ pub enum ClientFilter {
     Reasonix,
     #[value(name = "prime-agent")]
     PrimeAgent,
+    Freebuff,
     Synthetic,
 }
 
@@ -1133,6 +1134,7 @@ impl ClientFilter {
             Self::Kimchi => "kimchi",
             Self::Reasonix => "reasonix",
             Self::PrimeAgent => "prime-agent",
+            Self::Freebuff => "freebuff",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1190,6 +1192,7 @@ impl ClientFilter {
             Self::Kimchi => Some(ClientId::Kimchi),
             Self::Reasonix => Some(ClientId::Reasonix),
             Self::PrimeAgent => Some(ClientId::PrimeAgent),
+            Self::Freebuff => Some(ClientId::Freebuff),
             Self::Synthetic => None,
         }
     }
@@ -1243,6 +1246,7 @@ impl ClientFilter {
             ClientId::Kimchi => Self::Kimchi,
             ClientId::Reasonix => Self::Reasonix,
             ClientId::PrimeAgent => Self::PrimeAgent,
+            ClientId::Freebuff => Self::Freebuff,
         }
     }
 
@@ -3899,6 +3903,7 @@ fn capitalize_client(client: &str) -> String {
         "gemini" => "Gemini".to_string(),
         "amp" => "Amp".to_string(),
         "codebuff" => "Codebuff".to_string(),
+        "freebuff" => "Freebuff".to_string(),
         "droid" => "Droid".to_string(),
         "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
@@ -4469,12 +4474,24 @@ struct TsTimeMetrics {
     session_count: u32,
 }
 
+const SUBMISSION_PARSER_VERSION: u32 = 1;
+const COPILOT_SUBMISSION_PARSER_VERSION: u32 = 2;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TsScanScope {
+    parser_versions: std::collections::BTreeMap<String, u32>,
+    full_history: bool,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TsTokenContributionData {
     meta: TsExportMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     device: Option<TsSubmitDevice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan_scope: Option<TsScanScope>,
     summary: TsDataSummary,
     years: Vec<TsYearSummary>,
     contributions: Vec<TsDailyContribution>,
@@ -4487,6 +4504,7 @@ struct TsTokenContributionData {
 fn to_ts_token_contribution_data(
     graph: &tokscale_core::GraphResult,
     device: Option<&device::SubmitDevice>,
+    scan_scope: Option<TsScanScope>,
 ) -> TsTokenContributionData {
     TsTokenContributionData {
         meta: TsExportMeta {
@@ -4501,6 +4519,7 @@ fn to_ts_token_contribution_data(
             id: d.id.clone(),
             name: d.name.clone(),
         }),
+        scan_scope,
         summary: TsDataSummary {
             total_tokens: graph.summary.total_tokens,
             total_cost: graph.summary.total_cost,
@@ -4582,6 +4601,27 @@ fn to_ts_token_contribution_data(
             }
         },
     }
+}
+
+/// Parser identity is declared for every scanned client, even for a partial
+/// date range. `full_history` is a separate capability bit: only an unbounded
+/// scan can establish or advance a cumulative rollout high-water.
+fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<TsScanScope> {
+    let parser_versions = clients?
+        .iter()
+        .map(|client| {
+            let version = if client == "copilot" {
+                COPILOT_SUBMISSION_PARSER_VERSION
+            } else {
+                SUBMISSION_PARSER_VERSION
+            };
+            (client.clone(), version)
+        })
+        .collect();
+    Some(TsScanScope {
+        parser_versions,
+        full_history,
+    })
 }
 
 fn run_login_command(token: Option<String>) -> Result<()> {
@@ -5072,7 +5112,7 @@ fn run_graph_command(
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let output_data = to_ts_token_contribution_data(&graph_result, None);
+    let output_data = to_ts_token_contribution_data(&graph_result, None, None);
     let json_output = serde_json::to_string_pretty(&output_data)?;
 
     if let Some(output_path) = output {
@@ -5302,7 +5342,7 @@ fn run_import_command(
         return Ok(());
     }
 
-    let mut payload = to_ts_token_contribution_data(graph, None);
+    let mut payload = to_ts_token_contribution_data(graph, None, None);
     // The imported data has no MCP provenance of its own — it's derived
     // purely from a third-party clawdboard export. Reusing the graph/submit
     // converter would otherwise embed the *local* machine's configured MCP
@@ -5640,6 +5680,10 @@ fn run_submit_command(
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let explicit_warp_filter = client_filter_explicitly_requests_warp(&clients);
     let clients = clients.or_else(|| Some(default_submit_clients()));
+    let scan_scope = submit_scan_scope(
+        clients.as_deref(),
+        since.is_none() && until.is_none() && year.is_none(),
+    );
 
     let include_cursor = clients
         .as_ref()
@@ -5755,7 +5799,8 @@ fn run_submit_command(
     let api_url = auth::get_api_base_url();
 
     let submit_device = device::resolve_submit_device()?;
-    let submit_payload = to_ts_token_contribution_data(&graph_result, Some(&submit_device));
+    let submit_payload =
+        to_ts_token_contribution_data(&graph_result, Some(&submit_device), scan_scope);
 
     let response = rt.block_on(async {
         reqwest::Client::new()
@@ -7995,12 +8040,40 @@ mod tests {
             name: Some("Test device".to_string()),
         };
 
-        let payload = to_ts_token_contribution_data(&graph, Some(&device));
+        let payload = to_ts_token_contribution_data(&graph, Some(&device), None);
 
         assert_eq!(payload.device.as_ref().unwrap().id, "dev_test");
         assert_eq!(
             payload.device.as_ref().unwrap().name.as_deref(),
             Some("Test device")
+        );
+    }
+
+    #[test]
+    fn submit_scan_scope_separates_parser_identity_from_full_history() {
+        let clients = vec!["codex".to_string(), "copilot".to_string()];
+        let full = submit_scan_scope(Some(&clients), true).expect("full scope");
+        let partial = submit_scan_scope(Some(&clients), false).expect("partial scope");
+
+        assert!(full.full_history);
+        assert!(!partial.full_history);
+        assert_eq!(full.parser_versions, partial.parser_versions);
+        assert_eq!(full.parser_versions.len(), 2);
+        assert_eq!(
+            full.parser_versions.get("copilot"),
+            Some(&COPILOT_SUBMISSION_PARSER_VERSION)
+        );
+        assert!(!full.parser_versions.contains_key("claude"));
+    }
+
+    #[test]
+    fn submit_scan_scope_keeps_a_partial_client_filter_narrow() {
+        let clients = vec!["codex".to_string()];
+        let scope = submit_scan_scope(Some(&clients), true).expect("codex scope");
+
+        assert_eq!(
+            scope.parser_versions,
+            std::collections::BTreeMap::from([("codex".to_string(), SUBMISSION_PARSER_VERSION)])
         );
     }
 

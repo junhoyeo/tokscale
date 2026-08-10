@@ -228,33 +228,60 @@ fn expand_tilde_path_with_home(value: &str, home_dir: &str) -> PathBuf {
     if value == "~" {
         return PathBuf::from(home_dir);
     }
-    if let Some(relative) = value
-        .strip_prefix("~/")
-        .or_else(|| value.strip_prefix("~\\"))
-    {
+    if let Some(relative) = value.strip_prefix("~/") {
         return PathBuf::from(home_dir).join(relative);
     }
     PathBuf::from(value)
 }
 
-fn prime_agent_session_dir_from_settings(agent_dir: &Path, home_dir: &str) -> Option<PathBuf> {
-    fn read_session_dir(path: &Path) -> Option<String> {
+#[derive(Debug, PartialEq, Eq)]
+enum PrimeSessionDirSetting {
+    Default,
+    Path(PathBuf),
+    CurrentDirectory(PathBuf),
+}
+
+fn prime_agent_session_dir_from_settings_files(
+    global_settings: &Path,
+    project_settings: Option<&Path>,
+    home_dir: &str,
+    current_dir: Option<&Path>,
+) -> Option<PrimeSessionDirSetting> {
+    fn read_session_dir(path: &Path) -> Option<Option<String>> {
         let content = std::fs::read_to_string(path).ok()?;
         let settings: Value = serde_json::from_str(&content).ok()?;
-        settings
-            .as_object()?
-            .get("sessionDir")?
-            .as_str()
-            .map(str::to_owned)
+        match settings.as_object()?.get("sessionDir")? {
+            Value::Null => Some(None),
+            Value::String(path) => Some(Some(path.clone())),
+            _ => None,
+        }
     }
 
-    let global = read_session_dir(&agent_dir.join("settings.json"));
-    let project = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| read_session_dir(&cwd.join(".prime/agent/settings.json")));
-    project
-        .or(global)
-        .map(|path| expand_tilde_path_with_home(&path, home_dir))
+    let global = read_session_dir(global_settings);
+    let project = project_settings.and_then(read_session_dir);
+    project.or(global).map(|setting| match setting {
+        None => PrimeSessionDirSetting::Default,
+        Some(path) if path.is_empty() => PrimeSessionDirSetting::CurrentDirectory(
+            current_dir.unwrap_or_else(|| Path::new("")).to_path_buf(),
+        ),
+        Some(path) => PrimeSessionDirSetting::Path(expand_tilde_path_with_home(&path, home_dir)),
+    })
+}
+
+fn prime_agent_session_dir_from_settings(
+    agent_dir: &Path,
+    home_dir: &str,
+) -> Option<PrimeSessionDirSetting> {
+    let current_dir = std::env::current_dir().ok();
+    let project_settings = current_dir
+        .as_ref()
+        .map(|cwd| cwd.join(".prime/agent/settings.json"));
+    prime_agent_session_dir_from_settings_files(
+        &agent_dir.join("settings.json"),
+        project_settings.as_deref(),
+        home_dir,
+        current_dir.as_deref(),
+    )
 }
 
 /// Resolve Prime Agent's root-session and RLM-artifact scan roots using the
@@ -263,29 +290,44 @@ pub fn prime_agent_session_roots_with_env_strategy(
     home_dir: &str,
     use_env_roots: bool,
 ) -> [PathBuf; 2] {
-    let sessions = if use_env_roots {
-        let session_override = std::env::var("PRIME_AGENT_SESSION_DIR")
-            .ok()
-            .or_else(|| std::env::var("PRIME_AGENT_CODING_AGENT_SESSION_DIR").ok());
-        if let Some(path) = session_override.filter(|value| !value.is_empty()) {
-            expand_tilde_path_with_home(&path, home_dir)
-        } else {
-            let agent_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|path| expand_tilde_path_with_home(&path, home_dir))
-                .unwrap_or_else(|| PathBuf::from(home_dir).join(".prime/agent"));
-            prime_agent_session_dir_from_settings(&agent_dir, home_dir)
-                .unwrap_or_else(|| agent_dir.join("sessions"))
+    fn sessions_with_sibling_artifacts(sessions: PathBuf) -> [PathBuf; 2] {
+        let artifacts = sessions
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("session-artifacts");
+        [sessions, artifacts]
+    }
+
+    if !use_env_roots {
+        let agent_dir = PathBuf::from(home_dir).join(".prime/agent");
+        return [
+            agent_dir.join("sessions"),
+            agent_dir.join("session-artifacts"),
+        ];
+    }
+
+    let session_override = std::env::var("PRIME_AGENT_SESSION_DIR")
+        .ok()
+        .or_else(|| std::env::var("PRIME_AGENT_CODING_AGENT_SESSION_DIR").ok());
+    if let Some(path) = session_override.filter(|value| !value.is_empty()) {
+        return sessions_with_sibling_artifacts(expand_tilde_path_with_home(&path, home_dir));
+    }
+
+    let agent_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|path| expand_tilde_path_with_home(&path, home_dir))
+        .unwrap_or_else(|| PathBuf::from(home_dir).join(".prime/agent"));
+    match prime_agent_session_dir_from_settings(&agent_dir, home_dir) {
+        Some(PrimeSessionDirSetting::Path(sessions)) => sessions_with_sibling_artifacts(sessions),
+        Some(PrimeSessionDirSetting::CurrentDirectory(current_dir)) => {
+            [current_dir.clone(), current_dir.join("session-artifacts")]
         }
-    } else {
-        PathBuf::from(home_dir).join(".prime/agent/sessions")
-    };
-    let artifacts = sessions
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("session-artifacts");
-    [sessions, artifacts]
+        Some(PrimeSessionDirSetting::Default) | None => [
+            agent_dir.join("sessions"),
+            agent_dir.join("session-artifacts"),
+        ],
+    }
 }
 
 pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -1326,6 +1368,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::Freebuff
                 | ClientId::Kimi
                 | ClientId::Gjc
                 | ClientId::MiMoCode
@@ -1656,11 +1699,12 @@ fn scan_all_clients_with_env_strategy_inner(
         // the effective session directory (`dirname(sessions)/session-artifacts`).
         let [sessions, artifacts] =
             prime_agent_session_roots_with_env_strategy(home_dir, use_env_roots);
-        push_unique_scan_task(
+        push_unique_scan_task_with_pattern(
             &mut tasks,
             &mut seen_scan_roots,
             ClientId::PrimeAgent,
             sessions,
+            "prime-agent-session",
         );
         push_unique_scan_task_with_pattern(
             &mut tasks,
@@ -1963,38 +2007,67 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if enabled.contains(&ClientId::Codebuff) {
+    if enabled.contains(&ClientId::Codebuff) || enabled.contains(&ClientId::Freebuff) {
         // Codebuff persists per-channel chat history under
         // ~/.config/<channel>/projects/<project>/chats/<chatId>/chat-messages.json.
-        // When CODEBUFF_DATA_DIR is set to a non-empty value (via
-        // PathRoot::EnvVar), scan only that root; otherwise — including when
-        // the env var is unset *or* set to an empty/whitespace string — walk
-        // the three known channel roots:
+        // Freebuff is built on the same runtime and shares this exact directory
+        // and file layout, so the two clients are fed from a single scan of the
+        // same roots and the parsers partition the result. Running the scan
+        // whenever either client is enabled lets a freebuff-only filter work
+        // without a physical Codebuff install.
+        //
+        // Root resolution: an override set to a non-empty value (via
+        // PathRoot::EnvVar) wins for the client that owns it; otherwise —
+        // including when the env var is unset *or* set to an empty/whitespace
+        // string — the three known channel roots are walked:
         //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
         //   - ~/.config/manicode-dev
         //   - ~/.config/manicode-staging
-        let trimmed_override = if use_env_roots {
-            std::env::var("CODEBUFF_DATA_DIR")
+        fn env_override(var: &str, use_env_roots: bool) -> Option<String> {
+            if !use_env_roots {
+                return None;
+            }
+            std::env::var(var)
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-        } else {
-            None
-        };
-
-        let mut codebuff_roots: Vec<String> = Vec::new();
-        if let Some(root) = trimmed_override {
-            // No `trim_end_matches('/')`: `PathBuf` already collapses a trailing
-            // separator, and trimming empties a root of `/` — after which
-            // `push` produces a cwd-relative `projects` instead of `/projects`.
-            codebuff_roots.push(join_native(&root, "projects"));
-        } else {
-            let config_dir = join_native(home_dir, ".config");
-            for channel in ["manicode", "manicode-dev", "manicode-staging"] {
-                codebuff_roots.push(join_native(&config_dir, &format!("{channel}/projects")));
+        }
+        // No `trim_end_matches('/')`: `PathBuf` already collapses a trailing
+        // separator, and trimming empties a root of `/` — after which `push`
+        // produces a cwd-relative `projects` instead of `/projects`.
+        fn manicode_roots(home_dir: &str, override_root: Option<&str>) -> Vec<String> {
+            match override_root {
+                Some(root) => vec![join_native(root, "projects")],
+                None => {
+                    let config_dir = join_native(home_dir, ".config");
+                    ["manicode", "manicode-dev", "manicode-staging"]
+                        .iter()
+                        .map(|channel| join_native(&config_dir, &format!("{channel}/projects")))
+                        .collect()
+                }
             }
         }
 
+        let codebuff_override = env_override("CODEBUFF_DATA_DIR", use_env_roots);
+        // Freebuff falls back to the location Codebuff resolves to, not to the
+        // default channel roots. The two products share one tree, so
+        // CODEBUFF_DATA_DIR redirects it for both; re-deriving the defaults
+        // here would re-scan ~/.config/manicode behind a user who deliberately
+        // pointed CODEBUFF_DATA_DIR elsewhere, defeating its exclusivity in any
+        // run that has both clients enabled.
+        let freebuff_override =
+            env_override("FREEBUFF_DATA_DIR", use_env_roots).or_else(|| codebuff_override.clone());
+
+        let mut codebuff_roots: Vec<String> = Vec::new();
+        if enabled.contains(&ClientId::Codebuff) {
+            codebuff_roots.extend(manicode_roots(home_dir, codebuff_override.as_deref()));
+        }
+        if enabled.contains(&ClientId::Freebuff) {
+            codebuff_roots.extend(manicode_roots(home_dir, freebuff_override.as_deref()));
+        }
+
+        // `push_unique_scan_task` already dedups by canonicalized path, which
+        // collapses the overlap between the two clients' root lists.
         for root in codebuff_roots {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Codebuff, root);
         }
@@ -2125,6 +2198,22 @@ mod tests {
 
     fn restore_current_dir(previous: &Path) {
         std::env::set_current_dir(previous).unwrap();
+    }
+
+    struct CurrentDirGuard(PathBuf);
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self(previous)
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).unwrap();
+        }
     }
 
     fn setup_mock_copilot_dir(home: &Path) {
@@ -4018,6 +4107,129 @@ mod tests {
     }
 
     #[test]
+    fn test_prime_agent_tilde_expansion_matches_upstream_forward_slash_only() {
+        let home = if cfg!(windows) {
+            r"C:\Users\test"
+        } else {
+            "/tmp/home"
+        };
+        assert_eq!(
+            expand_tilde_path_with_home("~/sessions", home),
+            PathBuf::from(home).join("sessions")
+        );
+        assert_eq!(
+            expand_tilde_path_with_home(r"~\sessions", home),
+            PathBuf::from(r"~\sessions")
+        );
+    }
+
+    #[test]
+    fn test_prime_agent_project_null_session_dir_resets_global_setting() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let global = home.join("global-settings.json");
+        let project = home.join("project-settings.json");
+        fs::write(&global, r#"{"sessionDir":"~/global-sessions"}"#).unwrap();
+        fs::write(&project, r#"{"sessionDir":null}"#).unwrap();
+
+        let setting = prime_agent_session_dir_from_settings_files(
+            &global,
+            Some(&project),
+            home.to_str().unwrap(),
+            Some(home),
+        );
+        assert_eq!(setting, Some(PrimeSessionDirSetting::Default));
+        let sessions = match setting {
+            Some(PrimeSessionDirSetting::Path(path))
+            | Some(PrimeSessionDirSetting::CurrentDirectory(path)) => path,
+            Some(PrimeSessionDirSetting::Default) | None => home.join("custom-agent/sessions"),
+        };
+        assert_eq!(sessions, home.join("custom-agent/sessions"));
+    }
+
+    #[test]
+    fn test_prime_agent_empty_project_session_dir_resolves_to_current_directory() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let current_dir = home.join("project");
+        let global = home.join("global-settings.json");
+        let project = home.join("project-settings.json");
+        fs::write(&global, r#"{"sessionDir":"~/global-sessions"}"#).unwrap();
+        fs::write(&project, r#"{"sessionDir":""}"#).unwrap();
+
+        let setting = prime_agent_session_dir_from_settings_files(
+            &global,
+            Some(&project),
+            home.to_str().unwrap(),
+            Some(&current_dir),
+        );
+        assert_eq!(
+            setting,
+            Some(PrimeSessionDirSetting::CurrentDirectory(current_dir))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_prime_agent_empty_session_dir_scans_cwd_root_and_artifacts() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let project = home.join("work/project");
+        fs::create_dir_all(project.join(".prime/agent")).unwrap();
+        fs::write(
+            project.join(".prime/agent/settings.json"),
+            r#"{"sessionDir":""}"#,
+        )
+        .unwrap();
+        let root = project.join("root.jsonl");
+        let child = project.join("session-artifacts/root/sub-child/child.jsonl");
+        fs::create_dir_all(child.parent().unwrap()).unwrap();
+        fs::write(
+            &root, "{}
+",
+        )
+        .unwrap();
+        fs::write(
+            &child, "{}
+",
+        )
+        .unwrap();
+        fs::write(
+            project.join("session-artifacts/root/rlm-subagents.jsonl"),
+            "{}
+",
+        )
+        .unwrap();
+
+        let mut env = EnvGuard::capture(&[
+            "PRIME_AGENT_SESSION_DIR",
+            "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+            "PRIME_AGENT_CODING_AGENT_DIR",
+        ]);
+        env.remove("PRIME_AGENT_SESSION_DIR");
+        env.remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
+        env.remove("PRIME_AGENT_CODING_AGENT_DIR");
+        let _current_dir = CurrentDirGuard::set(&project);
+        let roots = prime_agent_session_roots_with_env_strategy(home.to_str().unwrap(), true);
+        let result = scan_all_clients(home.to_str().unwrap(), &["prime-agent".to_string()]);
+
+        let canonical_project = project.canonicalize().unwrap();
+        assert_eq!(roots[0].canonicalize().unwrap(), canonical_project);
+        assert_eq!(
+            roots[1].canonicalize().unwrap(),
+            project.join("session-artifacts").canonicalize().unwrap()
+        );
+        let files = result.get(ClientId::PrimeAgent);
+        assert_eq!(files.len(), 2);
+        let canonical_files: Vec<PathBuf> = files
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert!(canonical_files.contains(&root.canonicalize().unwrap()));
+        assert!(canonical_files.contains(&child.canonicalize().unwrap()));
+    }
+
+    #[test]
     #[serial]
     fn test_prime_agent_roots_honor_settings_session_dir() {
         let dir = TempDir::new().unwrap();
@@ -5469,6 +5681,111 @@ mod tests {
             .contains("custom-codebuff"));
 
         restore_env("CODEBUFF_DATA_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_freebuff_enables_shared_manicode_scan() {
+        let mut env = EnvGuard::capture(&["FREEBUFF_DATA_DIR", "CODEBUFF_DATA_DIR"]);
+        env.remove("FREEBUFF_DATA_DIR");
+        env.remove("CODEBUFF_DATA_DIR");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+
+        // Freebuff shares Codebuff's manicode layout, so enabling it alone must
+        // still walk the shared root (populating the Codebuff scan vector) for
+        // the estimated Freebuff parser in lib.rs to have files to read.
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["freebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn test_freebuff_fallback_does_not_defeat_codebuff_data_dir_exclusivity() {
+        // CODEBUFF_DATA_DIR is documented as exclusive: point it somewhere and
+        // the default ~/.config/manicode channels are not scanned. Freebuff
+        // writes into that same tree, so with only CODEBUFF_DATA_DIR set it has
+        // to follow the redirect. Falling back to the default channel roots for
+        // the Freebuff half of an all-clients run would re-scan the very
+        // directory the user redirected away from.
+        let mut env = EnvGuard::capture(&["FREEBUFF_DATA_DIR", "CODEBUFF_DATA_DIR"]);
+        env.remove("FREEBUFF_DATA_DIR");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // The default location the user redirected away from.
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+
+        // The redirect target, with its own chat.
+        let override_home = TempDir::new().unwrap();
+        let override_root = override_home.path().join("elsewhere");
+        let redirected_chat = override_root
+            .join("projects")
+            .join("sandbox")
+            .join("chats")
+            .join("2025-12-14T11-00-00.000Z");
+        fs::create_dir_all(&redirected_chat).unwrap();
+        writeln!(
+            File::create(redirected_chat.join("chat-messages.json")).unwrap(),
+            "[]"
+        )
+        .unwrap();
+        env.set(
+            "CODEBUFF_DATA_DIR",
+            override_root.to_string_lossy().as_ref(),
+        );
+
+        let result = scan_without_extra_dirs(
+            home.to_str().unwrap(),
+            &["codebuff".to_string(), "freebuff".to_string()],
+        );
+
+        let found = result.get(ClientId::Codebuff);
+        assert_eq!(
+            found.len(),
+            1,
+            "only the redirected root should be scanned, got {found:?}"
+        );
+        assert!(
+            !found[0].to_string_lossy().contains("manicode"),
+            "the default manicode root must not be re-scanned via the Freebuff \
+             fallback, got {found:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_ignores_freebuff_override_when_not_enabled() {
+        let mut env = EnvGuard::capture(&["FREEBUFF_DATA_DIR", "CODEBUFF_DATA_DIR"]);
+        env.remove("CODEBUFF_DATA_DIR");
+        let override_dir = TempDir::new().unwrap();
+        // The Freebuff override must NOT redirect a codebuff-only scan: each
+        // client resolves only its own override (see the shared-manicode scan).
+        unsafe {
+            std::env::set_var(
+                "FREEBUFF_DATA_DIR",
+                override_dir.path().to_string_lossy().as_ref(),
+            )
+        };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+        // Compare against a natively joined suffix: scan roots are built with
+        // `join_native`, so this path is `manicode\projects` on Windows and a
+        // hardcoded `manicode/projects` never matches there.
+        let found = result.get(ClientId::Codebuff)[0]
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            found.contains(&join_native("manicode", "projects")),
+            "expected the default manicode root, got {found}"
+        );
     }
 
     #[test]

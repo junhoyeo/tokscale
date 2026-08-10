@@ -1,0 +1,1 @@
+ALTER TABLE "submitted_devices" ADD COLUMN "parser_states" jsonb DEFAULT '{}'::jsonb NOT NULL;

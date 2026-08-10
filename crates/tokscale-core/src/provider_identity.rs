@@ -23,6 +23,31 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
         "ai21" => "ai21",
+        // The `-ai` suffix is a spelling of the vendor, not a different
+        // vendor. DeepSeek is the case that actually costs us: the live
+        // datasets split the same model almost evenly between the two
+        // spellings depending on who is reselling it —
+        // `zenmux/deepseek/deepseek-v3.2-exp` and `kilo/deepseek/...` against
+        // `nano-gpt/deepseek-ai/deepseek-v3.2-exp` and `siliconflow/...` — so
+        // whether usage of one model carried the vendor tag `deepseek` or
+        // `deepseek_ai` was decided by which reseller served it.
+        //
+        // Folding is only safe because the two spellings never name the same
+        // row: no reseller in either dataset lists a model under both, and
+        // `deepseek-ai` is never a top-level provider (it is the HuggingFace
+        // org name, always a nested segment), so nothing here collapses two
+        // separately-priced rows into one.
+        "deepseek" | "deepseek_ai" => "deepseek",
+        "novita" | "novita_ai" => "novita",
+        "stepfun" | "stepfun_ai" => "stepfun",
+        // A `-cn` suffix is NOT a spelling variant and must never be folded in
+        // here, however much it looks like one. It marks a regional endpoint
+        // with its own price sheet: `alibaba` and `alibaba-cn` share 45 models
+        // and disagree on 41 of them, with `qwen-max` at $1.60/$6.40 against
+        // $0.345/$1.377 — a 4.6x error in whichever direction the fold went.
+        // `siliconflow` and `siliconflow-cn` disagree on 7 of 35. Adding those
+        // arms to "finish the pattern" would silently misprice every user on
+        // the endpoint that lost the fold.
         // For unknown segments, reject if they contain digits — those are
         // almost certainly model-name fragments (e.g., "gpt-4", "claude-3")
         // rather than provider identifiers.
@@ -82,6 +107,79 @@ pub fn key_provider_tags(dataset_key: &str) -> Vec<String> {
     }
 
     tags
+}
+
+/// Provider segments a value names *verbatim*, with no alias folding.
+///
+/// Lowercased and underscore-normalized so `DeepSeek-AI`, `deepseek-ai` and
+/// `deepseek_ai` compare equal, but `deepseek` and `deepseek_ai` do not.
+fn raw_provider_segments(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut push = |segment: &str| {
+        let normalized = segment
+            .trim()
+            .trim_end_matches('/')
+            .to_lowercase()
+            .replace('-', "_");
+        if normalized.is_empty() || segments.iter().any(|existing| existing == &normalized) {
+            return;
+        }
+        segments.push(normalized);
+    };
+
+    for segment in value.trim().trim_end_matches('/').split('/') {
+        push(segment);
+        if segment.contains('.') {
+            for dotted in segment.split('.') {
+                push(dotted);
+            }
+        }
+    }
+
+    segments
+}
+
+/// Whether `dataset_key` spells a vendor exactly the way `provider_id` does.
+///
+/// `canonicalize_provider_segment` folds spelling variants of one vendor
+/// together (`deepseek-ai` -> `deepseek`) so a hint can reach rows that spell
+/// the vendor the other way. That fold also widens the candidate pool: a
+/// `deepseek` hint now matches both `novita/deepseek/<model>` and
+/// `cloudflare/@cf/deepseek-ai/<model>`, which are two resellers with
+/// different price sheets for the same weights. When the hinted vendor
+/// publishes no first-party row for the model, nothing else in
+/// `select_best_match` distinguishes those two, and the winner falls out of
+/// dataset key ordering. This predicate is the tiebreak that keeps the fold
+/// from re-rolling that choice: a row spelling the vendor exactly as the hint
+/// does wins over one that only matches after folding.
+pub(crate) fn matches_provider_spelling(dataset_key: &str, provider_id: &str) -> bool {
+    let hint_segments = raw_provider_segments(provider_id);
+    if hint_segments.is_empty() {
+        return false;
+    }
+
+    let key_parts: Vec<&str> = dataset_key.split('/').collect();
+    if key_parts.len() < 2 {
+        return false;
+    }
+
+    // The final component is the model name, but an AWS-style id carries the
+    // provider in a dotted prefix of it — `amazon-bedrock/us.deepseek.r1-v1:0`
+    // is DeepSeek's row, not Amazon's own model. `key_provider_tags` already
+    // splits that component on `.` for exactly this reason, so read the same
+    // segments here: dropping them lets a `deepseek` hint miss the row that
+    // spells the vendor its way and fall through to a differently spelled
+    // reseller. Only the dotted *prefix* counts; the trailing piece is the
+    // model name and is never a vendor spelling.
+    let last = key_parts[key_parts.len() - 1];
+    let dotted_provider_prefix = last.rsplit_once('.').map(|(prefix, _)| prefix);
+
+    key_parts[..key_parts.len() - 1]
+        .iter()
+        .copied()
+        .chain(dotted_provider_prefix)
+        .flat_map(raw_provider_segments)
+        .any(|key_segment| hint_segments.iter().any(|hint| hint == &key_segment))
 }
 
 pub fn matches_provider_hint(dataset_key: &str, provider_id: Option<&str>) -> bool {
@@ -474,5 +572,125 @@ mod tests {
         // misattributing it. This guards the unknown-provider passthrough path.
         assert_eq!(canonical_provider("gjc-model-4o"), None);
         assert_eq!(canonical_provider("<unset>"), None);
+    }
+
+    #[test]
+    fn vendor_ai_suffix_is_one_vendor() {
+        // The datasets split the same DeepSeek model between two vendor
+        // spellings depending on the reseller, so before this fold the tag a
+        // user's usage carried was decided by who served it.
+        for spelling in ["deepseek", "deepseek-ai", "deepseek_ai", "DeepSeek-AI"] {
+            assert_eq!(
+                canonical_provider(spelling),
+                Some("deepseek".into()),
+                "{spelling} must canonicalize to deepseek"
+            );
+        }
+
+        // Real dataset keys, where the vendor sits in a nested segment.
+        assert_eq!(
+            provider_tags("nano-gpt/deepseek-ai/deepseek-v3.2-exp"),
+            vec!["nano_gpt", "deepseek"]
+        );
+        assert_eq!(
+            provider_tags("zenmux/deepseek/deepseek-v3.2-exp"),
+            vec!["zenmux", "deepseek"]
+        );
+
+        assert_eq!(canonical_provider("novita-ai"), Some("novita".into()));
+        assert_eq!(canonical_provider("stepfun-ai"), Some("stepfun".into()));
+    }
+
+    #[test]
+    fn regional_cn_endpoint_is_not_folded_into_the_global_one() {
+        // Guards the comment above the `-ai` arms. `-cn` reads like the same
+        // kind of suffix and is not: alibaba and alibaba-cn share 45 models
+        // and disagree on 41, qwen-max among them at $1.60/$6.40 against
+        // $0.345/$1.377. Folding these would misprice by 4.6x, so they must
+        // stay distinct providers.
+        assert_ne!(
+            canonical_provider("alibaba-cn"),
+            canonical_provider("alibaba")
+        );
+        assert_ne!(
+            canonical_provider("siliconflow-cn"),
+            canonical_provider("siliconflow")
+        );
+        assert_eq!(canonical_provider("alibaba-cn"), Some("alibaba_cn".into()));
+    }
+
+    #[test]
+    fn provider_spelling_match_is_exact_where_canonicalization_is_not() {
+        // canonical_provider folds the two spellings together; this predicate
+        // deliberately does not, so `select_best_match` can prefer the row that
+        // spells the vendor the way the hint does.
+        assert_eq!(
+            canonical_provider("deepseek-ai"),
+            canonical_provider("deepseek")
+        );
+
+        assert!(matches_provider_spelling(
+            "novita/deepseek/deepseek-r1-distill-qwen-32b",
+            "deepseek"
+        ));
+        assert!(!matches_provider_spelling(
+            "cloudflare/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+            "deepseek"
+        ));
+
+        // Case and `-`/`_` are spelling noise, not a different spelling.
+        for hint in ["deepseek-ai", "deepseek_ai", "DeepSeek-AI"] {
+            assert!(
+                matches_provider_spelling("hyperbolic/deepseek-ai/DeepSeek-V3", hint),
+                "{hint} spells the vendor the way this key does"
+            );
+            assert!(!matches_provider_spelling(
+                "novita/deepseek/deepseek-v3-0324",
+                hint
+            ));
+        }
+
+        // The last segment is the model name, never a vendor spelling.
+        assert!(!matches_provider_spelling("deepseek-ai", "deepseek-ai"));
+        assert!(!matches_provider_spelling(
+            "some-vendor/deepseek",
+            "deepseek"
+        ));
+    }
+
+    #[test]
+    fn provider_spelling_reads_the_dotted_prefix_of_the_final_key_component() {
+        // AWS-style ids carry the provider in a dotted prefix of the final key
+        // component, which is why `key_provider_tags` splits it on `.`. The
+        // spelling predicate has to read the same segments, or a `deepseek`
+        // hint fails to recognise the row that spells the vendor its way and
+        // falls through to a differently spelled reseller.
+        assert_eq!(
+            key_provider_tags("amazon-bedrock/us.deepseek.r1-v1:0"),
+            vec!["amazon_bedrock", "us", "deepseek"]
+        );
+        assert!(matches_provider_spelling(
+            "amazon-bedrock/us.deepseek.r1-v1:0",
+            "deepseek"
+        ));
+        assert!(matches_provider_spelling(
+            "bedrock/us-east-1/deepseek.v3.2",
+            "deepseek"
+        ));
+        assert!(!matches_provider_spelling(
+            "amazon-bedrock/us.deepseek.r1-v1:0",
+            "deepseek-ai"
+        ));
+
+        // The trailing piece is still the model name, not a vendor spelling,
+        // and an undotted final component contributes nothing at all.
+        assert!(!matches_provider_spelling(
+            "amazon-bedrock/us.deepseek.r1-v1:0",
+            "r1-v1:0"
+        ));
+        assert!(!matches_provider_spelling(
+            "some-router/deepseek-ai",
+            "deepseek-ai"
+        ));
     }
 }

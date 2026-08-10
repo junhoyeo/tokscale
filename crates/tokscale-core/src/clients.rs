@@ -740,6 +740,23 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Freebuff is a compile-time build variant of the Codebuff CLI, so it
+    // writes to the same `~/.config/manicode*` tree and the same
+    // `projects/<project>/chats/<chatId>/chat-messages.json` layout. The two
+    // products are told apart per chat by the persisted root agent id, not by
+    // location (see `sessions::freebuff`).
+    Freebuff = 44 => {
+        id: "freebuff",
+        root: PathRoot::EnvVar {
+            var: "FREEBUFF_DATA_DIR",
+            fallback_relative: ".config/manicode",
+        },
+        relative: "projects",
+        pattern: "chat-messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -823,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 44);
+        assert_eq!(ClientId::COUNT, 45);
     }
 
     #[test]
@@ -1553,6 +1570,20 @@ mod tests {
             }
         );
         assert_eq!(ClientId::Codebuff.data().pattern, "chat-messages.json");
+    }
+
+    #[test]
+    fn test_freebuff_root_uses_freebuff_data_dir_env_var() {
+        // Freebuff shares Codebuff's ~/.config/manicode layout (built on the
+        // same runtime), keyed via its own FREEBUFF_DATA_DIR override.
+        assert_eq!(
+            ClientId::Freebuff.data().root,
+            PathRoot::EnvVar {
+                var: "FREEBUFF_DATA_DIR",
+                fallback_relative: ".config/manicode",
+            }
+        );
+        assert_eq!(ClientId::Freebuff.data().pattern, "chat-messages.json");
     }
 
     #[test]
