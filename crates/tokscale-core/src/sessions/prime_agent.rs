@@ -38,8 +38,19 @@ static ACCOUNTING_BACKFILL_REWRITE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
+static STABLE_PARSE_REWRITE: std::sync::LazyLock<std::sync::Mutex<Option<(PathBuf, String)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
 pub(crate) fn schedule_accounting_backfill_test_rewrite(path: &Path, contents: String) {
     *ACCOUNTING_BACKFILL_REWRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((path.to_path_buf(), contents));
+}
+
+#[cfg(test)]
+pub(crate) fn schedule_stable_parse_test_rewrite(path: &Path, contents: String) {
+    *STABLE_PARSE_REWRITE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((path.to_path_buf(), contents));
 }
@@ -62,6 +73,20 @@ pub(crate) fn run_accounting_backfill_test_hook(path: &Path) {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_stable_parse_test_hook(path: &Path) {
+    let mut scheduled = STABLE_PARSE_REWRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if scheduled
+        .as_ref()
+        .is_some_and(|(scheduled_path, _)| scheduled_path == path)
+    {
+        let (_, contents) = scheduled.take().unwrap();
+        std::fs::write(path, contents).unwrap();
     }
 }
 

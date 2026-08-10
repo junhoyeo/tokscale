@@ -1815,11 +1815,13 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 /// Whether a fingerprint carries a whole-file `content_hash`.
 ///
-/// Validation uses size + mtime + samples ([`primary_fingerprint_matches`] and
-/// [`related_fingerprint_metadata_matches`]) for every source. Only Codex reads
-/// `content_hash` for incremental resume;
-/// generic parsers and SQLite sources store a zero sentinel so changed or cold
-/// files do not pay for a second whole-file hash that cannot affect parsing.
+/// Most warm validation uses size + mtime + samples
+/// ([`primary_fingerprint_matches`] and [`related_fingerprint_metadata_matches`]).
+/// Codex reads `content_hash` for incremental resume, while Prime hashes the
+/// complete transcript on every warm hit because its cached messages and
+/// reconciliation accounting must describe one exact byte snapshot. Generic
+/// parsers and SQLite sources store a zero sentinel so their changed or cold
+/// files do not pay for a whole-file hash that cannot affect parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentHashMode {
     Full,
