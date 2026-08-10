@@ -1062,6 +1062,13 @@ fn parser_version(client: ClientId) -> u32 {
         // v2->v3: duplicate merging now upgrades the retained row when a later
         // copy carries an explicit cost, including zero.
         ClientId::MiMoCode => 3,
+        // Droid's cumulative session totals now anchor on the settings file's
+        // mtime (floored at providerLockTimestamp) instead of the lock
+        // timestamp alone, so a long-running session stops reporting every
+        // token it ever spent against the day it was started. A session that
+        // has since ended never changes its bytes again, so its fingerprint
+        // stays valid forever and only this bump discards the v1 anchor.
+        ClientId::Droid => 2,
         _ => 1,
     }
 }
@@ -2587,6 +2594,14 @@ mod tests {
         // fingerprint forever, so only the version bump discards the truncated
         // v6 parse and forces a cold reparse.
         assert_eq!(parser_version(ClientId::Grok), 7);
+    }
+
+    #[test]
+    fn test_droid_usage_anchor_parser_version_invalidates_v1_entries() {
+        // A finished Droid session's settings.json is never rewritten again, so
+        // its fingerprint keeps matching and only the version bump discards the
+        // v1 lock-timestamp anchor.
+        assert_eq!(parser_version(ClientId::Droid), 2);
     }
 
     #[test]

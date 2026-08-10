@@ -2,7 +2,7 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
-use super::utils::{file_modified_timestamp_ms, read_file_or_none};
+use super::utils::{file_modified_timestamp_ms_opt, read_file_or_none};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -142,6 +142,38 @@ pub(crate) fn droid_jsonl_path(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{stem}.jsonl")))
 }
 
+/// Pick the instant a Droid session's cumulative `tokenUsage` is attributed to.
+///
+/// A Droid `*.settings.json` holds one running total for the whole session and
+/// is rewritten every time the agent spends tokens, so the parser emits a
+/// single record and has to anchor it somewhere.
+///
+/// `providerLockTimestamp` is the wrong anchor: it records when the provider
+/// was *selected*, not when the tokens were spent. Droid rewrites the totals
+/// in place without touching that field, so a session left running across days
+/// (a `/loop`, a long autonomous run) keeps reporting its very first instant
+/// while the totals climb. Every token it has ever spent lands in the bucket
+/// for the day it started, and the session reads as silent in `--today` and
+/// `--yesterday` even while it is actively burning tokens.
+///
+/// The file's mtime is when the totals being read were written, which is the
+/// closest available marker for when they were last accrued, so it wins. The
+/// lock timestamp becomes a floor rather than the answer: usage cannot predate
+/// provider selection, so a stale mtime (a restore or copy that rewound it)
+/// cannot drag the record earlier than the session could possibly have run.
+///
+/// When the filesystem reports no mtime at all, fall back to the lock
+/// timestamp, then to now() — a record with real token usage is never dropped
+/// just because its timestamp could not be resolved.
+fn resolve_usage_timestamp(lock_timestamp: Option<i64>, modified: Option<i64>) -> i64 {
+    match (modified, lock_timestamp) {
+        (Some(modified), Some(lock)) => modified.max(lock),
+        (Some(modified), None) => modified,
+        (None, Some(lock)) => lock,
+        (None, None) => chrono::Utc::now().timestamp_millis(),
+    }
+}
+
 /// Parse a Droid settings.json file
 pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(data) = read_file_or_none(path) else {
@@ -198,15 +230,14 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    // Get timestamp from providerLockTimestamp, falling back to file mtime
-    // (which itself falls back to now()). Never drop a record with real token
-    // usage just because the timestamp could not be resolved.
-    let timestamp = settings
+    let lock_timestamp = settings
         .provider_lock_timestamp
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+        .as_deref()
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
         .map(|dt| dt.timestamp_millis())
-        .filter(|&ts| ts != 0)
-        .unwrap_or_else(|| file_modified_timestamp_ms(path));
+        .filter(|&ts| ts != 0);
+
+    let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
     vec![UnifiedMessage::new(
         "droid",
@@ -277,6 +308,84 @@ mod tests {
         assert_eq!(get_default_model_from_provider("google"), "gemini-unknown");
         assert_eq!(get_default_model_from_provider("xai"), "grok-unknown");
         assert_eq!(get_default_model_from_provider("custom"), "custom-unknown");
+    }
+
+    #[test]
+    fn test_resolve_usage_timestamp_prefers_mtime_over_stale_lock() {
+        // The regression: a session locked its provider on day 1 and was still
+        // spending tokens on day 4. Anchoring on the lock timestamp reported
+        // all of it against day 1 and left the session invisible in --today.
+        let lock = 1_700_000_000_000;
+        let modified = lock + 3 * 86_400_000;
+
+        assert_eq!(
+            resolve_usage_timestamp(Some(lock), Some(modified)),
+            modified
+        );
+    }
+
+    #[test]
+    fn test_resolve_usage_timestamp_floors_stale_mtime_at_lock() {
+        // A copy or restore can rewind mtime below the instant the provider was
+        // locked. Usage cannot predate provider selection, so the lock wins.
+        let lock = 1_700_000_000_000;
+        let modified = lock - 86_400_000;
+
+        assert_eq!(resolve_usage_timestamp(Some(lock), Some(modified)), lock);
+    }
+
+    #[test]
+    fn test_resolve_usage_timestamp_falls_back_across_missing_inputs() {
+        let lock = 1_700_000_000_000;
+        let modified = 1_700_000_500_000;
+
+        // Droid omits providerLockTimestamp on plenty of sessions.
+        assert_eq!(resolve_usage_timestamp(None, Some(modified)), modified);
+        // Filesystem reported no mtime: the lock is still better than now().
+        assert_eq!(resolve_usage_timestamp(Some(lock), None), lock);
+    }
+
+    #[test]
+    fn test_resolve_usage_timestamp_without_any_anchor_is_not_pre_epoch() {
+        // Neither anchor available: the record still carries real token usage,
+        // so it must land in a present-day bucket rather than at the epoch.
+        assert!(resolve_usage_timestamp(None, None) > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_droid_file_anchors_long_running_session_at_last_write() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir
+            .path()
+            .join("11111111-2222-3333-4444-555555555555.settings.json");
+
+        // providerLockTimestamp far in the past, totals written just now —
+        // the shape of a session that has been looping for days.
+        let lock_ms = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:Kimi-K3-(free)-0",
+                "providerLockTimestamp": "2024-01-01T00:00:00Z",
+                "tokenUsage": { "inputTokens": 1000, "outputTokens": 200 }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_id,
+            "11111111-2222-3333-4444-555555555555"
+        );
+        assert!(
+            messages[0].timestamp > lock_ms,
+            "cumulative usage anchored on the stale lock timestamp ({lock_ms}), \
+             got {}",
+            messages[0].timestamp
+        );
     }
 
     #[test]

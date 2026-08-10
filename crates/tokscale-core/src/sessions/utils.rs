@@ -135,13 +135,27 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     None
 }
 
-pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+/// Modification time in epoch milliseconds, or `None` when the filesystem does
+/// not report one.
+///
+/// `SystemTime::modified` is the one timestamp every tier-1 target supports
+/// (unlike `created`, which is absent on many Linux filesystems), so callers
+/// that need a portable "when was this last written" anchor use this.
+///
+/// Returns `None` rather than substituting a value so a caller with its own
+/// fallback can reach for it instead of silently anchoring on the wrong
+/// instant. Pre-epoch mtimes also collapse to `None`: `duration_since` fails
+/// for them, and a negative anchor would bucket the record before 1970.
+pub(crate) fn file_modified_timestamp_ms_opt(path: &Path) -> Option<i64> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+}
+
+pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+    file_modified_timestamp_ms_opt(path).unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
 }
 
 /// Open a SQLite file for read-only access with no mutex (single-threaded parser use).
