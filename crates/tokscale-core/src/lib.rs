@@ -3120,10 +3120,10 @@ fn exclude_unpriced_submission_messages(
             // Nothing regresses for unpriced labels: the resolver refuses
             // routing labels outright, so with no custom entry this returns
             // None and the routing-label reason still applies.
-            let resolution = pricing.lookup_with_source_and_provider(
+            let resolution = pricing.resolve_for_usage_with_provider(
                 &message.model_id,
-                None,
                 Some(&message.provider_id),
+                &message.tokens,
             );
             // The gap is read from the resolution that made the row
             // unpublishable rather than restated here: a lookup with a single
@@ -8805,6 +8805,77 @@ mod tests {
             &crate::bucket_tz::BucketTimezone::Local,
         )
         .expect("an ambiguous estimate must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            AMBIGUOUS_MODEL_PRICING_REASON
+        );
+    }
+
+    #[test]
+    fn submission_reports_ambiguous_evidence_from_a_borrowed_bucket_rate() {
+        let disputed_cache_row = |cache_read: f64| pricing::ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            cache_read_input_token_cost: Some(cache_read),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            (
+                "azure_ai/atlas-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-a/atlas-chat-preview".to_string(),
+                disputed_cache_row(5e-7),
+            ),
+            (
+                "vendor-b/atlas-chat-beta".to_string(),
+                disputed_cache_row(9e-7),
+            ),
+        ]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "azure",
+            "borrowed-ambiguous-cache-rate",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                cache_read: 20,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let resolution = pricing
+            .resolve_for_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            )
+            .expect("the estimate should remain visible");
+        assert_eq!(
+            resolution.evidence.submission_safety_gap(),
+            Some(pricing::lookup::SubmissionSafetyGap::PriceDisagreement)
+        );
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("ambiguous borrowed pricing must be excluded, not abort the graph");
 
         assert!(graph.contributions.is_empty());
         assert_eq!(graph.unpriced_submission_exclusions.len(), 1);

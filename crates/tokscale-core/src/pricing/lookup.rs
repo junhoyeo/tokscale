@@ -1463,18 +1463,6 @@ impl PricingLookup {
         compute_cost_for_lookup(&result, provider_id, usage)
     }
 
-    pub(crate) fn covers_usage_with_provider(
-        &self,
-        model_id: &str,
-        provider_id: Option<&str>,
-        usage: &TokenBreakdown,
-    ) -> bool {
-        self.resolve_for_usage(model_id, provider_id, usage)
-            .is_some_and(|result| {
-                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
-            })
-    }
-
     /// Resolve `model_id` for pricing `usage`, borrowing the rates the
     /// provider-hinted row omits from the canonical unhinted row.
     ///
@@ -1490,7 +1478,7 @@ impl PricingLookup {
     /// keeps its own markup rather than silently repricing to the author's
     /// cheaper rate. If the filled row still cannot cover the usage, the
     /// hinted row is returned unchanged and the usage stays unpriced.
-    fn resolve_for_usage(
+    pub(super) fn resolve_for_usage(
         &self,
         model_id: &str,
         provider_id: Option<&str>,
@@ -5355,11 +5343,7 @@ mod tests {
             .expect("the hinted row still resolves");
         assert_eq!(resolved.matched_key, "azure_ai/atlas-chat");
         assert_eq!(resolved.pricing.cache_read_input_token_cost, Some(5e-7));
-        assert!(
-            !lookup.covers_usage_with_provider("atlas-chat", Some("azure"), &usage),
-            "a rate borrowed from an ambiguous canonical row must not be publishable \
-             through a submission-safe hinted row"
-        );
+        assert!(resolved.pricing.covers_usage(&usage));
         assert_eq!(
             resolved.evidence.submission_safety_gap(),
             Some(SubmissionSafetyGap::PriceDisagreement)
@@ -5411,7 +5395,7 @@ mod tests {
         assert_eq!(resolved.matched_key, "azure_ai/atlas-chat");
         assert_eq!(resolved.pricing.cache_read_input_token_cost, Some(5e-7));
         assert!(resolved.evidence.is_submission_safe());
-        assert!(lookup.covers_usage_with_provider("atlas-chat", Some("azure"), &usage));
+        assert!(resolved.pricing.covers_usage(&usage));
     }
 
     #[test]

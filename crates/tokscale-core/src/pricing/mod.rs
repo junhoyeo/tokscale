@@ -431,12 +431,31 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> bool {
-        if let Some(result) = self.custom.lookup_with_key(model_id) {
-            return result.pricing.covers_usage(usage);
+        self.resolve_for_usage_with_provider(model_id, provider_id, usage)
+            .is_some_and(|result| {
+                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
+            })
+    }
+
+    /// Resolve the exact pricing evidence used to judge this usage for a
+    /// leaderboard submission.
+    ///
+    /// This differs from a plain lookup when a provider-scoped row borrows a
+    /// missing bucket rate from the canonical row. Callers that explain a
+    /// rejection must inspect this composed result, otherwise they can report
+    /// an incomplete price while the real blocker is the donor row's unsafe
+    /// model or price evidence.
+    pub(crate) fn resolve_for_usage_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> Option<LookupResult> {
+        if let Some(result) = self.lookup_custom(model_id) {
+            return Some(result);
         }
 
-        self.lookup
-            .covers_usage_with_provider(model_id, provider_id, usage)
+        self.lookup.resolve_for_usage(model_id, provider_id, usage)
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
