@@ -1037,9 +1037,20 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
+        // v1->v2: Prime Agent now strips a leading BOM and recovers records
+        // containing undecodable bytes; its accounting scan also continues past
+        // those records instead of truncating and misaligning message indices.
+        // The bump intentionally forces a full re-decode and accounting/matching
+        // rebuild; it makes the legacy v4 accounting-backfill path unreachable
+        // for live caches, but avoids mixing v1 cached messages with v2 scans.
+        // Without the bump, malformed-line loss could be mistaken for complete
+        // accounting rather than a truncated source.
+        ClientId::PrimeAgent => 2,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
-        ClientId::Reasonix => 1,
+        // v1->v2: strip a leading BOM and recover records containing
+        // undecodable bytes instead of silently dropping the whole record.
+        ClientId::Reasonix => 2,
         // v1->v2: per-model token attribution now comes from
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
@@ -2962,6 +2973,12 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v3_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    #[test]
+    fn test_lossy_jsonl_parser_versions_invalidate_v1_entries() {
+        assert_eq!(parser_version(ClientId::PrimeAgent), 2);
+        assert_eq!(parser_version(ClientId::Reasonix), 2);
     }
 
     #[test]

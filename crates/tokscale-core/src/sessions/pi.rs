@@ -8,11 +8,12 @@
 //! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
 //! is shared: see `sessions::senpi` for Senpi (OmO Native).
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, lossy_lines};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -44,7 +45,18 @@ struct PiEntryTypeProbe {
 /// auto-generated-title record). The parser skips these while looking for
 /// `session` rather than discarding the whole file. Any other unrecognized
 /// type before `session` is still treated as a malformed file.
-const PRE_SESSION_METADATA_TYPES: &[&str] = &["title"];
+pub(crate) const PRE_SESSION_METADATA_TYPES: &[&str] = &["title"];
+
+/// A lossy pre-header line is skippable only when it could not be parsed for
+/// its record type. A replacement-bearing line that parses as a real type is
+/// still treated as a foreign/malformed file, keeping both Prime scans aligned.
+pub(crate) fn has_replacement_character(value: &str) -> bool {
+    value.contains(char::REPLACEMENT_CHARACTER)
+}
+
+pub(crate) fn pre_header_line_is_skippable(trimmed: &str, parsed_type: Option<&str>) -> bool {
+    parsed_type.is_none() && has_replacement_character(trimmed)
+}
 
 /// Pi session entry (subsequent lines of JSONL)
 #[derive(Debug, Deserialize)]
@@ -151,8 +163,7 @@ pub(crate) fn parse_pi_format_file(
         client,
         fallback_provider,
         None,
-        false,
-        false,
+        PiParseOptions::standard(),
         &mut observer,
     )
 }
@@ -171,8 +182,7 @@ pub(crate) fn parse_pi_format_file_with_dedup(
         client,
         fallback_provider,
         Some(client),
-        false,
-        false,
+        PiParseOptions::standard(),
         &mut observer,
     )
 }
@@ -192,12 +202,16 @@ struct NoopPiFormatObserver;
 
 impl PiFormatObserver for NoopPiFormatObserver {}
 
-/// Parse a Pi-format session whose `session_info.name` identifies an RLM
-/// subagent when the session header has `rlmDepth > 0`.
+/// Parse the Prime Agent Pi-compatible format whose `session_info.name`
+/// identifies an RLM subagent when the session header has `rlmDepth > 0`.
 ///
 /// Deduplication is intentionally cross-session: Prime Agent forks copy prior
 /// message entries into a file with a new session id. Provider response ids are
 /// preferred; the message id plus immutable event fields is the fallback.
+///
+/// Prime Agent's append-only JSONL may contain a UTF-8 BOM or undecodable
+/// records. Lossy line handling keeps malformed records local to their own
+/// line without changing the historical behavior of other Pi clients.
 pub(crate) fn parse_pi_format_rlm_file_with_observer(
     path: &Path,
     client: &str,
@@ -209,10 +223,79 @@ pub(crate) fn parse_pi_format_rlm_file_with_observer(
         client,
         fallback_provider,
         Some(client),
-        true,
-        true,
+        PiParseOptions::prime_agent(),
         observer,
     )
+}
+
+#[derive(Clone, Copy)]
+struct PiParseOptions {
+    rlm_session_name_as_agent: bool,
+    cross_session_dedup: bool,
+    lossy_line_reader: bool,
+}
+
+impl PiParseOptions {
+    /// Keep the historical byte-strict behavior for Pi, Senpi, and Kimchi.
+    /// Their cache namespaces are intentionally not invalidated by this
+    /// Prime-Agent-only migration; revisit this when those clients opt into
+    /// lossy decoding and receive their own parser-version bumps.
+    const fn standard() -> Self {
+        Self {
+            rlm_session_name_as_agent: false,
+            cross_session_dedup: false,
+            lossy_line_reader: false,
+        }
+    }
+
+    const fn prime_agent() -> Self {
+        Self {
+            rlm_session_name_as_agent: true,
+            cross_session_dedup: true,
+            lossy_line_reader: true,
+        }
+    }
+}
+
+enum PiLines {
+    Standard(std::io::Lines<BufReader<std::fs::File>>),
+    Lossy(super::utils::LossyLines<BufReader<std::fs::File>>),
+}
+
+impl Iterator for PiLines {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self {
+                Self::Standard(lines) => match lines.next() {
+                    Some(Ok(line)) => return Some(line),
+                    Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Some(Err(_)) => return None,
+                    None => return None,
+                },
+                Self::Lossy(lines) => return lines.next(),
+            }
+        }
+    }
+}
+
+fn accepts_replacement_field(value: &str, lossy_line_reader: bool) -> bool {
+    !lossy_line_reader || !has_replacement_character(value)
+}
+
+fn damaged_cross_session_dedup_key(namespace: &str, damaged_id: &str, raw_line: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(damaged_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(raw_line.as_bytes());
+    format!("{namespace}:damaged:{:x}", hasher.finalize())
+}
+
+fn damaged_session_placeholder(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(|| "unknown".to_string(), |stem| format!("unknown:{stem}"))
 }
 
 fn parse_pi_format_file_inner(
@@ -220,8 +303,7 @@ fn parse_pi_format_file_inner(
     client: &str,
     fallback_provider: &'static str,
     dedup_namespace: Option<&str>,
-    rlm_session_name_as_agent: bool,
-    cross_session_dedup: bool,
+    options: PiParseOptions,
     observer: &mut impl PiFormatObserver,
 ) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
@@ -232,6 +314,11 @@ fn parse_pi_format_file_inner(
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     let reader = BufReader::new(file);
+    let lines = if options.lossy_line_reader {
+        PiLines::Lossy(lossy_lines(reader))
+    } else {
+        PiLines::Standard(reader.lines())
+    };
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
 
@@ -240,13 +327,9 @@ fn parse_pi_format_file_inner(
     let mut workspace_label: Option<String> = None;
     let mut agent: Option<String> = None;
     let mut is_rlm_subagent = false;
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
+    for line in lines {
         let trimmed = line.trim();
+        let raw_line = trimmed;
         if trimmed.is_empty() {
             continue;
         }
@@ -256,6 +339,11 @@ fn parse_pi_format_file_inner(
             buffer.extend_from_slice(trimmed.as_bytes());
             let entry_type = match simd_json::from_slice::<PiEntryTypeProbe>(&mut buffer) {
                 Ok(probe) => probe.entry_type,
+                Err(_)
+                    if options.lossy_line_reader && pre_header_line_is_skippable(trimmed, None) =>
+                {
+                    continue;
+                }
                 Err(_) => return Vec::new(),
             };
 
@@ -274,8 +362,18 @@ fn parse_pi_format_file_inner(
             };
 
             observer.observe_header(&header);
-            session_id = Some(header.id.clone());
-            workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
+            let clean_cwd = header
+                .cwd
+                .as_deref()
+                .filter(|cwd| accepts_replacement_field(cwd, options.lossy_line_reader));
+            session_id = Some(
+                if !accepts_replacement_field(&header.id, options.lossy_line_reader) {
+                    damaged_session_placeholder(path)
+                } else {
+                    header.id.clone()
+                },
+            );
+            workspace_key = clean_cwd.and_then(normalize_workspace_key);
             workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
             is_rlm_subagent = header.rlm_depth.unwrap_or(0) > 0;
             continue;
@@ -289,14 +387,21 @@ fn parse_pi_format_file_inner(
         };
 
         if entry.entry_type == "session_info" {
-            agent = if rlm_session_name_as_agent && is_rlm_subagent {
+            agent = if options.rlm_session_name_as_agent && is_rlm_subagent {
                 entry
                     .name
                     .as_ref()
-                    .filter(|name| !name.trim().is_empty())
+                    .filter(|name| {
+                        !name.trim().is_empty()
+                            && accepts_replacement_field(name, options.lossy_line_reader)
+                    })
                     .cloned()
             } else {
-                entry.name.as_deref().and_then(pi_subagent_name)
+                entry
+                    .name
+                    .as_deref()
+                    .filter(|name| accepts_replacement_field(name, options.lossy_line_reader))
+                    .and_then(pi_subagent_name)
             };
             observer.observe_entry(&entry, None);
             continue;
@@ -322,9 +427,14 @@ fn parse_pi_format_file_inner(
             continue;
         };
 
-        let Some(model) = message.model.as_deref() else {
+        let Some(recorded_model) = message.model.as_deref() else {
             observer.observe_entry(&entry, None);
             continue;
+        };
+        let model = if !accepts_replacement_field(recorded_model, options.lossy_line_reader) {
+            "unknown"
+        } else {
+            recorded_model
         };
 
         // A missing/blank provider field is recoverable: infer it from the
@@ -333,7 +443,12 @@ fn parse_pi_format_file_inner(
         // identify the model, rather than dropping a message that carries
         // valid tokens.
         let provider = match message.provider.as_deref() {
-            Some(provider) if !provider.is_empty() => provider.to_string(),
+            Some(provider)
+                if !provider.is_empty()
+                    && accepts_replacement_field(provider, options.lossy_line_reader) =>
+            {
+                provider.to_string()
+            }
             _ => inferred_provider_from_model(model)
                 .unwrap_or(fallback_provider)
                 .to_string(),
@@ -368,30 +483,49 @@ fn parse_pi_format_file_inner(
             agent.clone(),
         );
         if let Some(namespace) = dedup_namespace {
-            if cross_session_dedup {
-                unified.dedup_key = message
+            if options.cross_session_dedup {
+                let clean_response_key = message
                     .response_id
                     .as_deref()
-                    .filter(|id| !id.trim().is_empty())
-                    .map(|id| format!("{namespace}:response:{id}"))
-                    .or_else(|| {
-                        entry
-                            .id
-                            .as_deref()
-                            .filter(|id| !id.trim().is_empty())
-                            .map(|id| {
-                                let stable_timestamp = recorded_timestamp
-                                    .map(|timestamp| timestamp.to_string())
-                                    .unwrap_or_else(|| "missing".to_string());
-                                format!(
-                                    "{namespace}:message:{id}:{stable_timestamp}:{provider}:{model}:{}:{}:{}:{}",
-                                    unified.tokens.input,
-                                    unified.tokens.output,
-                                    unified.tokens.cache_read,
-                                    unified.tokens.cache_write,
-                                )
+                    .filter(|id| {
+                        !id.trim().is_empty()
+                            && accepts_replacement_field(id, options.lossy_line_reader)
+                    })
+                    .map(|id| format!("{namespace}:response:{id}"));
+                let clean_message_key = entry.id.as_deref().filter(|id| {
+                    !id.trim().is_empty()
+                        && accepts_replacement_field(id, options.lossy_line_reader)
+                });
+                unified.dedup_key = clean_response_key.or_else(|| {
+                    clean_message_key.map(|id| {
+                        let stable_timestamp = recorded_timestamp
+                            .map(|timestamp| timestamp.to_string())
+                            .unwrap_or_else(|| "missing".to_string());
+                        format!(
+                            "{namespace}:message:{id}:{stable_timestamp}:{provider}:{model}:{}:{}:{}:{}",
+                            unified.tokens.input,
+                            unified.tokens.output,
+                            unified.tokens.cache_read,
+                            unified.tokens.cache_write,
+                        )
+                    })
+                });
+                if unified.dedup_key.is_none() && options.lossy_line_reader {
+                    if let Some(damaged_id) = entry
+                        .id
+                        .as_deref()
+                        .filter(|id| !accepts_replacement_field(id, options.lossy_line_reader))
+                        .or_else(|| {
+                            message.response_id.as_deref().filter(|id| {
+                                !accepts_replacement_field(id, options.lossy_line_reader)
                             })
-                    });
+                        })
+                    {
+                        unified.dedup_key = Some(damaged_cross_session_dedup_key(
+                            namespace, damaged_id, raw_line,
+                        ));
+                    }
+                }
             } else if let Some(message_id) = entry.id.as_deref().filter(|id| !id.trim().is_empty())
             {
                 let session_id = session_id.as_deref().unwrap_or("unknown");
