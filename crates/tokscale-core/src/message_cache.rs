@@ -1072,7 +1072,12 @@ fn parser_version(client: ClientId) -> u32 {
         // instant. It is now apportioned across the assistant replies in the
         // sibling transcript, weighted by the context each reply read, so a
         // multi-day session reports against the days it actually ran.
-        ClientId::Droid => 3,
+        // v3->v4: a reply is weighted by the context standing before it rather
+        // than including its own bytes, so a long answer no longer charges
+        // itself for its own output. Versions 2 and 3 only ever existed in
+        // pre-release builds of this change; the bump past them keeps anyone
+        // who ran one from holding the superseded weighting.
+        ClientId::Droid => 4,
         _ => 1,
     }
 }
@@ -2605,7 +2610,7 @@ mod tests {
         // A finished Droid session's settings.json is never rewritten again, so
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
-        assert_eq!(parser_version(ClientId::Droid), 3);
+        assert_eq!(parser_version(ClientId::Droid), 4);
     }
 
     #[test]

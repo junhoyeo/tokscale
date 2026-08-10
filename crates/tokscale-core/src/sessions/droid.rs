@@ -208,9 +208,11 @@ struct TranscriptTurn {
 /// another, which is all the apportioning below needs.
 ///
 /// Only assistant replies are counted, since one reply corresponds to one API
-/// call; user and tool records ride along inside the call that reads them.
-/// Compaction resets the running context because it discards the transcript
-/// the following calls would otherwise re-read.
+/// call; user and tool records ride along inside the call that reads them. Each
+/// reply is weighted by the context standing *before* it, since its own bytes
+/// are output rather than something it paid to read. Compaction resets the
+/// running context because it discards the transcript the following calls would
+/// otherwise re-read.
 fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
     let Ok(file) = std::fs::File::open(jsonl) else {
         return Vec::new();
@@ -232,6 +234,12 @@ fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
             context_bytes = line_bytes;
             continue;
         }
+
+        // What the call read is the conversation as it stood *before* this
+        // record. A reply's own bytes are its output; charging them back to the
+        // same reply would let a long answer inflate its own share of the
+        // input and cache-read totals. They join the context for later calls.
+        let context_read = context_bytes;
         context_bytes = context_bytes.saturating_add(line_bytes);
 
         if record_type != Some("message") {
@@ -252,7 +260,9 @@ fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
 
         turns.push(TranscriptTurn {
             timestamp,
-            weight: context_bytes.max(1),
+            // The first reply in a session reads a context of zero bytes but
+            // still cost something, so every turn carries at least one unit.
+            weight: context_read.max(1),
         });
     }
 
@@ -470,6 +480,13 @@ mod tests {
         )
     }
 
+    fn user(timestamp: &str, filler: usize) -> String {
+        format!(
+            r#"{{"type":"message","timestamp":"{timestamp}","message":{{"role":"user","content":"{}"}}}}"#,
+            "x".repeat(filler)
+        )
+    }
+
     #[test]
     fn test_apportion_parts_sum_to_the_original_total() {
         // Truncation must never lose or invent tokens: the daily figures have to
@@ -518,6 +535,38 @@ mod tests {
     }
 
     #[test]
+    fn test_a_long_reply_does_not_charge_itself_for_its_own_output() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Two replies on an identical context, one of them enormously long.
+        // What each call *read* is the same, so the split must be even: the
+        // long answer's own bytes are output, not context it paid to read.
+        let settings = write_session(
+            temp_dir.path(),
+            "44444444-4444-4444-4444-444444444444",
+            r#"{"inputTokens":1000}"#,
+            &[
+                r#"{"type":"message","timestamp":"2026-08-07T11:00:00Z","message":{"role":"user","content":"seed"}}"#,
+                &assistant("2026-08-07T12:00:00Z", 50_000),
+                &assistant("2026-08-07T13:00:00Z", 10),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
+        // The first reply read only the short seed; the second read that plus a
+        // 50KB answer, so it should carry overwhelmingly more. Charging a reply
+        // for its own output would instead hand the first one that same 50KB
+        // and leave the two nearly equal, so the ratio is what discriminates.
+        assert!(
+            messages[1].tokens.input > messages[0].tokens.input * 10,
+            "a long reply inflated its own share: {:?}",
+            messages.iter().map(|m| m.tokens.input).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_compaction_resets_the_context_weighting() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         // A big conversation, compacted, then one short reply afterwards. The
@@ -527,7 +576,11 @@ mod tests {
             "11111111-1111-1111-1111-111111111111",
             r#"{"inputTokens":1000}"#,
             &[
-                &assistant("2026-08-07T12:00:00Z", 2000),
+                // A long conversation the first reply had to read...
+                &user("2026-08-07T11:00:00Z", 4000),
+                &assistant("2026-08-07T12:00:00Z", 10),
+                // ...then compaction discards it, so the reply after it reads
+                // only the compacted summary.
                 r#"{"type":"compaction_state","timestamp":"2026-08-08T12:00:00Z"}"#,
                 &assistant("2026-08-09T12:00:00Z", 10),
             ],
@@ -539,7 +592,8 @@ mod tests {
         assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
         assert!(
             messages[0].tokens.input > messages[1].tokens.input,
-            "the compacted-away context should not keep charging later replies"
+            "the compacted-away context should not keep charging later replies: {:?}",
+            messages.iter().map(|m| m.tokens.input).collect::<Vec<_>>()
         );
     }
 
