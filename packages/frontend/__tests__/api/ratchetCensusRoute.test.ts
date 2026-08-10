@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 const { mockRequireAdminSession, mockGetRatchetCensusReport } = vi.hoisted(() => ({
@@ -26,6 +26,10 @@ describe("GET /api/admin/reconciliation/census", () => {
   beforeEach(() => {
     mockRequireAdminSession.mockReset();
     mockGetRatchetCensusReport.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("returns the concealed admin response without touching census data", async () => {
@@ -90,7 +94,7 @@ describe("GET /api/admin/reconciliation/census", () => {
   it("does not leak database errors", async () => {
     mockRequireAdminSession.mockResolvedValue({ session: { id: "admin" } });
     mockGetRatchetCensusReport.mockRejectedValue(new Error("private db detail"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await GET(
       new Request("https://tokscale.ai/api/admin/reconciliation/census")
@@ -100,6 +104,5 @@ describe("GET /api/admin/reconciliation/census", () => {
     expect(await response.json()).toEqual({
       error: "Failed to load reconciliation census",
     });
-    errorSpy.mockRestore();
   });
 });

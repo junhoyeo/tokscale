@@ -193,7 +193,6 @@ export async function getRatchetCensusReport(params?: {
           COALESCE(c.expected_cells, 0) > 0
           AND c.measured_cells = c.expected_cells
           AND COALESCE(p.pending_work, 0) = 0
-          AND COALESCE(h.highwater_tokens, 0) > 0
         ) AS fully_measured
       FROM submissions AS s
       JOIN users AS u ON u.id = s.user_id
@@ -208,14 +207,18 @@ export async function getRatchetCensusReport(params?: {
         CASE
           WHEN p.pending_work > 0 THEN 'pending'
           WHEN NOT p.fully_measured THEN 'warming'
+          WHEN p.total_tokens = 0 AND p.highwater_tokens = 0 THEN 'clean'
+          WHEN p.highwater_tokens = 0 THEN 'severe'
           WHEN p.total_tokens / NULLIF(p.highwater_tokens, 0) < 0.95 THEN 'under'
           WHEN p.total_tokens / NULLIF(p.highwater_tokens, 0) <= 1.05 THEN 'clean'
           WHEN p.total_tokens / NULLIF(p.highwater_tokens, 0) <= 1.25 THEN 'mild'
           WHEN p.total_tokens / NULLIF(p.highwater_tokens, 0) <= 2.0 THEN 'clear'
           ELSE 'severe'
         END AS band,
-        CASE WHEN p.fully_measured
-          THEN p.total_tokens / NULLIF(p.highwater_tokens, 0)
+        CASE
+          WHEN p.fully_measured AND p.total_tokens = 0 AND p.highwater_tokens = 0 THEN 1
+          WHEN p.fully_measured AND p.highwater_tokens > 0
+            THEN p.total_tokens / p.highwater_tokens
           ELSE NULL
         END AS ratio
       FROM per_user AS p
@@ -295,6 +298,7 @@ export async function getRatchetCensusReport(params?: {
       FROM classified
       WHERE fully_measured
         AND band IN ('under', 'mild', 'clear', 'severe')
+        AND ratio IS NOT NULL
       ORDER BY ABS(ratio - 1) DESC, total_tokens DESC, username
       LIMIT ${candidateLimit}
     )

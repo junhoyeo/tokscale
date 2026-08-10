@@ -31,6 +31,7 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
   // zero-padded so the `ORDER BY users DESC, cli_version` tiebreak is a plain
   // lexicographic sort.
   const personas = [
+    "zero",
     "severe",
     "warming",
     "pending",
@@ -83,6 +84,7 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
         Persona,
         { tokens: string; cliVersion: string }
       > = {
+        zero: { tokens: "0", cliVersion: "4.00.0" },
         under: { tokens: "900", cliVersion: "4.01.0" },
         clean: { tokens: "1000", cliVersion: "4.02.0" },
         clear: { tokens: "1500", cliVersion: "4.03.0" },
@@ -204,6 +206,12 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
         highwaterTotal.toString()
       );
 
+      // `zero`: a durable zero-valued high-water row is complete evidence,
+      // not a missing measurement. The 0/0 comparison is clean and has no
+      // reason to appear in the ranked repair candidates.
+      await guardedDay("zero", "2026-01-01", "claude", "cli", 0);
+      await highwater("zero", "claude", "cli", "2026-01", "0");
+
       // `warming`: a backfill-origin cell with no high-water row yet.
       await guardedDay("warming", "2026-01-01", "claude", "backfill", 100);
 
@@ -256,15 +264,14 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
     });
 
     expect(report.coverage).toEqual({
-      totalUsers: 7,
-      // severe + under + clean + clear; warming/partial are incomplete and
-      // pending still has durable work.
-      measuredUsers: 4,
+      totalUsers: 8,
+      // zero + severe + under + clean + clear; warming/partial are incomplete
+      // and pending still has durable work.
+      measuredUsers: 5,
       totalTokens: (largeTokenTotal + BigInt(3890)).toString(),
       measuredTokens: (largeTokenTotal + BigInt(3400)).toString(),
-      // 4/7 does not terminate, so this pins ROUND(..., 6) rather than any
-      // rounding that happens to agree on a short decimal.
-      userCoverage: 0.571429,
+      // 5/8 is exact; client coverage below pins ROUND(..., 6).
+      userCoverage: 0.625,
       tokenCoverage: 1,
       pendingWorkItems: 1,
     });
@@ -280,7 +287,7 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
       // whose cells are only partially measured.
       { band: "warming", users: 2, tokens: "400" },
       { band: "under", users: 1, tokens: "900" },
-      { band: "clean", users: 1, tokens: "1000" },
+      { band: "clean", users: 2, tokens: "1000" },
       { band: "clear", users: 1, tokens: "1500" },
       { band: "severe", users: 1, tokens: largeTokenTotal.toString() },
     ]);
@@ -307,13 +314,12 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
 
     expect(report.segments.byOrigin).toEqual([
       { key: "backfill", expectedCells: 2, measuredCells: 0, cellCoverage: 0 },
-      // 6/7 does not terminate: this pins the segment rounding too. It also
-      // drops if the coverage join stops matching on origin or bucket key,
+      // It drops if the coverage join stops matching on origin or bucket key,
       // because `partial` would then measure cells it must not.
-      { key: "cli", expectedCells: 7, measuredCells: 6, cellCoverage: 0.857143 },
+      { key: "cli", expectedCells: 8, measuredCells: 7, cellCoverage: 0.875 },
     ]);
     expect(report.segments.byClient).toEqual([
-      { key: "claude", expectedCells: 6, measuredCells: 5, cellCoverage: 0.833333 },
+      { key: "claude", expectedCells: 7, measuredCells: 6, cellCoverage: 0.857143 },
       { key: "codex", expectedCells: 2, measuredCells: 1, cellCoverage: 0.5 },
       { key: "gemini", expectedCells: 1, measuredCells: 0, cellCoverage: 0 },
     ]);
@@ -321,6 +327,7 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
     // version, so this is a lexicographic sort. Asserting the exact token
     // strings is what pins the `::text` casts on the per-version totals.
     expect(report.segments.byCliVersion).toEqual([
+      { cliVersion: "4.00.0", users: 1, measuredUsers: 1, totalTokens: "0", measuredTokens: "0" },
       { cliVersion: "4.01.0", users: 1, measuredUsers: 1, totalTokens: "900", measuredTokens: "900" },
       { cliVersion: "4.02.0", users: 1, measuredUsers: 1, totalTokens: "1000", measuredTokens: "1000" },
       { cliVersion: "4.03.0", users: 1, measuredUsers: 1, totalTokens: "1500", measuredTokens: "1500" },
@@ -340,8 +347,9 @@ describeWithPostgres("ratchet census PostgreSQL integration", () => {
   it("ranks measured candidates by divergence and preserves bigint columns", async () => {
     const report = await getRatchetCensusReport({ candidateLimit: 10 });
 
-    // `clean` is measured but never a candidate; `warming`/`pending` are not
-    // measured at all. Ordering is `ABS(ratio - 1) DESC`.
+    // `zero` and `clean` are measured but never candidates;
+    // `warming`/`pending` are not measured at all. Ordering is
+    // `ABS(ratio - 1) DESC`.
     expect(
       report.candidates.map((candidate) => [candidate.username, candidate.band])
     ).toEqual([
