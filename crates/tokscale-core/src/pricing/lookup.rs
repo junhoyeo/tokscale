@@ -177,13 +177,13 @@ impl PricingLookup {
         models_dev: HashMap<String, ModelPricing>,
     ) -> Self {
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
-        litellm_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        litellm_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut openrouter_keys: Vec<String> = openrouter.keys().cloned().collect();
-        openrouter_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        openrouter_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut models_dev_keys: Vec<String> = models_dev.keys().cloned().collect();
-        models_dev_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        models_dev_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut litellm_lower = HashMap::with_capacity(litellm.len());
         for key in &litellm_keys {
@@ -6578,6 +6578,66 @@ mod tests {
             r_unknown.matched_key, r_none.matched_key,
             "unknown hint via source_and_provider should behave like None"
         );
+    }
+
+    #[test]
+    fn test_pricing_index_deterministic_key_sorting_equal_length() {
+        // Equal length keys inserted in different orders must produce identical candidate key ordering
+        let mut map_a = HashMap::new();
+        map_a.insert(
+            "bedrock/us-east-1/zai.glm-5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+        map_a.insert(
+            "bedrock/us-west-2/zai.glm-5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+
+        let mut map_b = HashMap::new();
+        map_b.insert(
+            "bedrock/us-west-2/zai.glm-5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        map_b.insert(
+            "bedrock/us-east-1/zai.glm-5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+
+        let index_a = PricingLookup::new_with_models_dev(
+            map_a.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            map_a,
+        );
+        let index_b = PricingLookup::new_with_models_dev(
+            map_b.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            map_b,
+        );
+
+        let res_a = index_a.lookup("zai.glm-5").unwrap();
+        let res_b = index_b.lookup("zai.glm-5").unwrap();
+
+        assert_eq!(
+            res_a.matched_key, res_b.matched_key,
+            "Pricing lookup for equal length keys must be deterministic regardless of insertion order"
+        );
+        assert_eq!(res_a.matched_key, "bedrock/us-east-1/zai.glm-5");
     }
 
     /// Regression (#1062): a bare router label must not be priced from a
