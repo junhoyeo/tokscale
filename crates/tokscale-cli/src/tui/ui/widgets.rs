@@ -486,6 +486,7 @@ pub fn get_client_color(client: &str) -> Color {
         "hermes" => Color::Rgb(255, 215, 0),       // #ffd700
         "goose" => Color::Rgb(100, 180, 220),      // #64b4dc
         "codebuff" => Color::Rgb(124, 58, 237),    // #7C3AED Codebuff brand purple
+        "freebuff" => Color::Rgb(56, 189, 248),    // #38BDF8 Freebuff sky blue
         "antigravity" => Color::Rgb(99, 102, 241), // #6366F1 Antigravity indigo
         "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
         "warp" => Color::Rgb(1, 155, 150),         // #019B96 Warp teal

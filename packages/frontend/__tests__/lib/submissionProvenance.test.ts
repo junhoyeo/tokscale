@@ -100,3 +100,49 @@ describe("submission provenance", () => {
     expect(generateSubmissionHash(cli.data as SubmissionData)).toBe(baseHash);
   });
 });
+
+
+describe("submission scan scope", () => {
+  it("accepts parser identity separately from full-history eligibility", () => {
+    const full = buildSubmission();
+    full.scanScope = { parserVersions: { codex: 1 }, fullHistory: true };
+    const partial = buildSubmission();
+    partial.scanScope = { parserVersions: { codex: 1 }, fullHistory: false };
+
+    expect(validateSubmission(full).data?.scanScope).toEqual({
+      parserVersions: { codex: 1 },
+      fullHistory: true,
+    });
+    expect(validateSubmission(partial).data?.scanScope).toEqual({
+      parserVersions: { codex: 1 },
+      fullHistory: false,
+    });
+  });
+
+  it("rejects invalid parser generations and unregistered clients", () => {
+    const zero = buildSubmission();
+    zero.scanScope = { parserVersions: { copilot: 0 }, fullHistory: true };
+    const unknown = buildSubmission();
+    unknown.scanScope = {
+      parserVersions: { "not-a-client": 2 },
+      fullHistory: true,
+    };
+
+    expect(validateSubmission(zero).valid).toBe(false);
+    expect(validateSubmission(unknown).valid).toBe(false);
+  });
+
+  it("keeps rollout metadata out of the usage idempotency hash", () => {
+    const without = validateSubmission(buildSubmission()).data!;
+    const withScope = buildSubmission();
+    withScope.scanScope = {
+      parserVersions: { codex: 1, copilot: 2 },
+      fullHistory: true,
+    };
+    const validated = validateSubmission(withScope).data!;
+
+    expect(generateSubmissionHash(validated)).toBe(
+      generateSubmissionHash(without)
+    );
+  });
+});

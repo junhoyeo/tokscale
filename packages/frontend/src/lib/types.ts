@@ -7,6 +7,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "cursor",
   "amp",
   "codebuff",
+  "freebuff",
   "droid",
   "openclaw",
   "hermes",

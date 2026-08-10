@@ -197,6 +197,20 @@
       "when": 1786091532644,
       "tag": "0027_harsh_sabra",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1786310513816,
+      "tag": "0028_furry_thunderbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1786313750747,
+      "tag": "0029_bent_red_ghost",
+      "breakpoints": true
     }
   ]
 }

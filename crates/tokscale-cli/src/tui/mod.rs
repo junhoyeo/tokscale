@@ -240,7 +240,6 @@ pub fn run(
 }
 
 fn restore_terminal_best_effort() {
-    tokscale_core::tui_signal::set_tui_active(false);
     let _ = execute!(
         io::stdout(),
         LeaveAlternateScreen,
@@ -248,10 +247,12 @@ fn restore_terminal_best_effort() {
         SetTitle("")
     );
     let _ = disable_raw_mode();
+    // Flush diagnostics that were deferred while the TUI owned raw mode only
+    // after normal stderr is visible again.
+    tokscale_core::tui_signal::set_tui_active(false);
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    tokscale_core::tui_signal::set_tui_active(false);
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),
@@ -260,6 +261,9 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         SetTitle("")
     );
     let _ = terminal.show_cursor();
+    // set_tui_active(false) drains deferred stderr, so it must be the last
+    // restoration step rather than writing into the alternate screen.
+    tokscale_core::tui_signal::set_tui_active(false);
 }
 
 fn run_loop_with_background(
@@ -381,6 +385,7 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Crush,
         ClientId::Hermes,
         ClientId::Codebuff,
+        ClientId::Freebuff,
     ];
 
     let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;

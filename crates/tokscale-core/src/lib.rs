@@ -1042,6 +1042,174 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         )
     }
 
+    fn uncached_prime_outcome(
+        mut messages: Vec<UnifiedMessage>,
+        accounting: sessions::prime_agent::PrimeFileAccounting,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    ) {
+        apply_pricing_to_messages(&mut messages, pricing);
+        (
+            CachedParseOutcome {
+                messages,
+                cache_entry: None,
+                invalidate_cache: false,
+            },
+            accounting,
+        )
+    }
+
+    fn parse_stable_prime_source(
+        path: &Path,
+        identity: message_cache::CacheIdentity,
+        mut fingerprint_before: message_cache::SourceFingerprint,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    ) {
+        const MAX_STABLE_PARSE_ATTEMPTS: usize = 2;
+
+        let mut last_parse = None;
+        for _ in 0..MAX_STABLE_PARSE_ATTEMPTS {
+            #[cfg(test)]
+            sessions::prime_agent::run_stable_parse_test_hook(path);
+
+            // Both views come from this one decoded record stream. Exact hashes
+            // on either side ensure that the pair is only cached when the bytes
+            // stayed at the fingerprint under which the entry is stored.
+            let parsed = sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+            let Some(fingerprint_after) = message_cache::SourceFingerprint::from_path(path) else {
+                return uncached_prime_outcome(parsed.0, parsed.1, pricing);
+            };
+            if fingerprint_after == fingerprint_before {
+                let (mut messages, accounting) = parsed;
+                let cache_entry = (!messages.is_empty()).then(|| {
+                    message_cache::CachedSourceEntry::new(
+                        identity,
+                        path,
+                        fingerprint_after,
+                        messages.clone(),
+                        Vec::new(),
+                        None,
+                    )
+                    .with_prime_accounting(accounting.clone())
+                });
+                apply_pricing_to_messages(&mut messages, pricing);
+                return (
+                    CachedParseOutcome {
+                        messages,
+                        cache_entry,
+                        invalidate_cache: false,
+                    },
+                    accounting,
+                );
+            }
+
+            fingerprint_before = fingerprint_after;
+            last_parse = Some(parsed);
+        }
+
+        // A continuously rewritten file still yields a coherent messages +
+        // accounting pair from one pass, but no cache entry may claim that pair
+        // belongs to either exact fingerprint observed around the read.
+        let (messages, accounting) = last_parse.expect("the retry bound is non-zero");
+        uncached_prime_outcome(messages, accounting, pricing)
+    }
+
+    fn load_or_parse_prime_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    ) {
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let cached = source_cache.get(identity, path);
+        let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
+            path,
+            cached.map(|entry| &entry.fingerprint),
+        ) else {
+            let (messages, accounting) =
+                sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+            return uncached_prime_outcome(messages, accounting, pricing);
+        };
+
+        let mut fingerprint = match fingerprint_status {
+            message_cache::FingerprintStatus::Unchanged => cached
+                .expect("an uncached source always builds a complete fingerprint")
+                .fingerprint
+                .clone(),
+            message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+        };
+
+        if let Some(cached) = cached {
+            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
+                if let Some(accounting) = cached.prime_accounting.as_ref() {
+                    // Prime's accounting is byte-coupled to its messages. Warm
+                    // v5 scans therefore hash the complete transcript before a
+                    // hit, while still avoiding JSON decode and accounting walk.
+                    match message_cache::SourceFingerprint::from_path(path) {
+                        Some(refreshed) if refreshed == cached.fingerprint => {
+                            return (
+                                CachedParseOutcome {
+                                    messages: cached_messages(cached, pricing),
+                                    cache_entry: None,
+                                    invalidate_cache: false,
+                                },
+                                accounting.clone(),
+                            );
+                        }
+                        Some(refreshed) => fingerprint = refreshed,
+                        None => {
+                            let (messages, accounting) =
+                                sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+                            return uncached_prime_outcome(messages, accounting, pricing);
+                        }
+                    }
+                } else {
+                    // Version-4 entries already contain valid messages but predate
+                    // Prime accounting metadata. Decode just the accounting view
+                    // once, but never combine it with those messages until the
+                    // fingerprint is revalidated with a full content hash: the
+                    // file can change between the first bounded-sample check and
+                    // this second transcript read, including outside sample windows.
+                    #[cfg(test)]
+                    sessions::prime_agent::run_accounting_backfill_test_hook(path);
+                    let accounting = sessions::prime_agent::analyze_prime_agent_accounting(
+                        path,
+                        &cached.messages,
+                    );
+                    match message_cache::SourceFingerprint::from_path(path) {
+                        Some(refreshed) if refreshed == fingerprint => {
+                            return (
+                                CachedParseOutcome {
+                                    messages: cached_messages(cached, pricing),
+                                    cache_entry: Some(
+                                        cached.clone().with_prime_accounting(accounting.clone()),
+                                    ),
+                                    invalidate_cache: false,
+                                },
+                                accounting,
+                            );
+                        }
+                        Some(refreshed) => fingerprint = refreshed,
+                        None => {
+                            let (messages, accounting) =
+                                sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
+                            return uncached_prime_outcome(messages, accounting, pricing);
+                        }
+                    }
+                }
+            }
+        }
+
+        parse_stable_prime_source(path, identity, fingerprint, pricing)
+    }
+
     fn load_or_parse_sqlite_source<F>(
         identity: message_cache::CacheIdentity,
         path: &Path,
@@ -1184,6 +1352,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
     let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
+    // Freebuff and Codebuff share the manicode scan bucket in the scanner (the
+    // two parsers partition the same file set). Each product parses and counts
+    // only when it was actually requested, so a codebuff-only filter cannot
+    // pick up estimated Freebuff rows and vice versa.
+    let include_codebuff = include_all || clients.iter().any(|c| c == "codebuff");
+    let include_freebuff = include_all || clients.iter().any(|c| c == "freebuff");
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1588,20 +1762,53 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Codebuff),
-                path,
-                &source_cache,
-                pricing,
-                sessions::codebuff::parse_codebuff_file,
-            )
-        })
-        .collect();
+    let codebuff_outcomes: Vec<CachedParseOutcome> = if include_codebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::Codebuff),
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::codebuff::parse_codebuff_file,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for outcome in codebuff_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    // Freebuff shares Codebuff's ~/.config/manicode scan (same layout, same
+    // directory — a separate product built on the same runtime). The two
+    // parsers partition the shared file set under distinct cache identities:
+    // codebuff emits chats with authoritative usage, freebuff emits estimated
+    // rows for the rest.
+    let freebuff_outcomes: Vec<CachedParseOutcome> = if include_freebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::Freebuff),
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::freebuff::parse_freebuff_file,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for outcome in freebuff_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -1669,31 +1876,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let prime_agent_outcomes: Vec<CachedParseOutcome> = scan_result
+    let prime_agent_outcomes: Vec<(
+        CachedParseOutcome,
+        sessions::prime_agent::PrimeFileAccounting,
+    )> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::PrimeAgent),
-                path,
-                &source_cache,
-                pricing,
-                sessions::prime_agent::parse_prime_agent_file,
-            )
-        })
+        .map(|path| load_or_parse_prime_source(path, &source_cache, pricing))
         .collect();
-    let mut prime_agent_seen: HashSet<String> = HashSet::new();
-    for outcome in prime_agent_outcomes {
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut prime_agent_seen, message)),
-        );
+    let mut prime_agent_messages = Vec::new();
+    let mut prime_agent_accounting = Vec::new();
+    for (outcome, accounting) in prime_agent_outcomes {
+        prime_agent_accounting.push(accounting);
+        prime_agent_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    let mut prime_agent_messages = sessions::prime_agent::reconcile_prime_agent_messages(
+        prime_agent_messages,
+        &prime_agent_accounting,
+    );
+    apply_pricing_to_messages(&mut prime_agent_messages, pricing);
+    all_messages.extend(prime_agent_messages);
 
     let kimchi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimchi)
@@ -3500,6 +3705,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
     let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
+    // Freebuff and Codebuff share the manicode scan bucket in the scanner (the
+    // two parsers partition the same file set). Each product parses and counts
+    // only when it was actually requested, so a codebuff-only filter cannot
+    // pick up estimated Freebuff rows and vice versa.
+    let include_codebuff = include_all || clients.iter().any(|c| c == "codebuff");
+    let include_freebuff = include_all || clients.iter().any(|c| c == "freebuff");
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -3697,19 +3908,43 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Amp, amp_count);
     messages.extend(amp_msgs);
 
-    let codebuff_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::codebuff::parse_codebuff_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let codebuff_msgs: Vec<ParsedMessage> = if include_codebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .flat_map(|path| {
+                sessions::codebuff::parse_codebuff_file(path)
+                    .into_iter()
+                    .map(|msg| unified_to_parsed(&msg))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let codebuff_count = codebuff_msgs.len() as i32;
     counts.set(ClientId::Codebuff, codebuff_count);
     messages.extend(codebuff_msgs);
+
+    // Freebuff shares the manicode scan; the estimated parser runs over the
+    // same file set (see the main dispatch block above).
+    let freebuff_msgs: Vec<ParsedMessage> = if include_freebuff {
+        scan_result
+            .get(ClientId::Codebuff)
+            .par_iter()
+            .flat_map(|path| {
+                sessions::freebuff::parse_freebuff_file(path)
+                    .into_iter()
+                    .map(|msg| unified_to_parsed(&msg))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let freebuff_count = freebuff_msgs.len() as i32;
+    counts.set(ClientId::Freebuff, freebuff_count);
+    messages.extend(freebuff_msgs);
 
     let droid_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Droid)
@@ -3753,15 +3988,26 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
-    let prime_agent_msgs_raw: Vec<UnifiedMessage> = scan_result
+    let prime_agent_files: Vec<(
+        Vec<UnifiedMessage>,
+        sessions::prime_agent::PrimeFileAccounting,
+    )> = scan_result
         .get(ClientId::PrimeAgent)
         .par_iter()
-        .flat_map(|path| sessions::prime_agent::parse_prime_agent_file(path))
+        .map(|path| sessions::prime_agent::parse_prime_agent_file_with_accounting(path))
         .collect();
-    let mut prime_agent_seen: HashSet<String> = HashSet::new();
-    let prime_agent_msgs: Vec<ParsedMessage> = prime_agent_msgs_raw
+    let mut prime_agent_msgs_raw = Vec::new();
+    let mut prime_agent_accounting = Vec::new();
+    for (file_messages, file_accounting) in prime_agent_files {
+        prime_agent_msgs_raw.extend(file_messages);
+        prime_agent_accounting.push(file_accounting);
+    }
+    let prime_agent_msgs: Vec<ParsedMessage> =
+        sessions::prime_agent::reconcile_prime_agent_messages(
+            prime_agent_msgs_raw,
+            &prime_agent_accounting,
+        )
         .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut prime_agent_seen, message))
         .map(|message| unified_to_parsed(&message))
         .collect();
     let prime_agent_count = prime_agent_msgs.len() as i32;
@@ -4471,8 +4717,8 @@ mod tests {
         message_cache, normalize_model_for_grouping,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
         paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement, GroupBy,
-        LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        sessions, unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement,
+        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
         UnpricedSubmissionExclusion, AMBIGUOUS_MODEL_PRICING_REASON,
         INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
         ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL, UNVERIFIED_MODEL_IDENTITY_REASON,
@@ -4495,6 +4741,39 @@ mod tests {
             false,
             &scanner::ScannerSettings::default(),
         )
+    }
+
+    fn large_prime_contents(input: i64, child_input: i64) -> String {
+        const FILE_BYTES: usize = 100_000;
+        const SEMANTIC_OFFSET: usize = 10_000;
+        let before_padding = r#"{"type":"session","version":3,"id":"legacy","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","padding":""#;
+        let before_semantic = r#"","usage":{"#;
+        let padding_bytes = SEMANTIC_OFFSET
+            .checked_sub(before_padding.len() + before_semantic.len())
+            .unwrap();
+        let mut contents = String::with_capacity(FILE_BYTES);
+        contents.push_str(before_padding);
+        contents.push_str(&"p".repeat(padding_bytes));
+        contents.push_str(before_semantic);
+        assert_eq!(contents.len(), SEMANTIC_OFFSET);
+        contents.push_str(&format!(
+            r#""input":{input},"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":{}}}}}}}
+{{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{{"input":{child_input},"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":{child_input}}},"aggregateUsage":{{"input":{input},"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":{}}},"origin":"spawn_task"}}
+"#,
+            input + 10,
+            input + 10,
+        ));
+        let tail_prefix = r#"{"type":"ignored","padding":""#;
+        let tail_suffix = "\"}\n";
+        let tail_bytes = FILE_BYTES
+            .checked_sub(contents.len() + tail_prefix.len() + tail_suffix.len())
+            .unwrap();
+        contents.push_str(tail_prefix);
+        contents.push_str(&"t".repeat(tail_bytes));
+        contents.push_str(tail_suffix);
+        assert_eq!(contents.len(), FILE_BYTES);
+        contents
     }
 
     fn home_guard() -> crate::paths::test_env::EnvGuard {
@@ -6488,6 +6767,96 @@ mod tests {
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("kimchi:kimchi-session:kimchi-message")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_codebuff_freebuff_filters_stay_isolated() {
+        // Freebuff and Codebuff share the manicode scan bucket (parser
+        // partition the same file set). A single-client filter must not pick
+        // up the other product's rows: codebuff-only must produce clean code
+        // rows/zero freebuff count, and vice versa.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let manicode = source_home.path().join(".config").join("manicode");
+        // An authoritative Codebuff chat: assistant message carries usage.
+        let codebuff_chat = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-08-07T05-21-00.000Z");
+        std::fs::create_dir_all(&codebuff_chat).unwrap();
+        std::fs::write(
+            codebuff_chat.join("chat-messages.json"),
+            r#"[
+                { "variant": "user", "content": "hi", "timestamp": "2026-08-07T05:21:00.000Z" },
+                { "variant": "ai", "timestamp": "2026-08-07T05:22:00.000Z",
+                  "metadata": { "model": "claude-sonnet-4-20250514",
+                                "usage": { "inputTokens": 500, "outputTokens": 200 } } }
+            ]"#,
+        )
+        .unwrap();
+        // A Freebuff chat: marked by its `base2-free*` root agent id, with no
+        // authoritative usage — only estimated text.
+        let freebuff_chat = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-08-07T13-00-00.000Z");
+        std::fs::create_dir_all(&freebuff_chat).unwrap();
+        std::fs::write(
+            freebuff_chat.join("chat-messages.json"),
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T13:00:00.000Z" },
+                { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ],
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base2-free-deepseek-flash" } } } } }
+            ]"#,
+        )
+        .unwrap();
+
+        let options_for = |clients: Vec<String>| LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        };
+
+        // codebuff-only: authoritative Codebuff row, zero estimated Freebuff rows.
+        let codebuff_only = parse_local_clients(options_for(vec!["codebuff".to_string()])).unwrap();
+        assert_eq!(codebuff_only.counts.get(ClientId::Codebuff), 1);
+        assert_eq!(codebuff_only.counts.get(ClientId::Freebuff), 0);
+        assert!(
+            codebuff_only
+                .messages
+                .iter()
+                .all(|m| m.client == "codebuff"),
+            "all reported rows must be codebuff, got {:?}",
+            codebuff_only
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
+        );
+
+        // freebuff-only → estimated Freebuff rows, zero Codebuff rows.
+        let free_only = parse_local_clients(options_for(vec!["freebuff".to_string()])).unwrap();
+        assert_eq!(free_only.counts.get(ClientId::Freebuff), 1);
+        assert_eq!(free_only.counts.get(ClientId::Codebuff), 0);
+        assert!(
+            free_only.messages.iter().all(|m| m.client == "freebuff"),
+            "all reported rows must be freebuff, got {:?}",
+            free_only
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -11236,6 +11605,584 @@ mod tests {
         };
         assert!(dates.contains(&local_date(thread_created + 2000)));
         assert!(dates.contains(&local_date(ledger_timestamp)));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_forked_parent_and_rlm_child_are_counted_once() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/z-original/sub-child");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let original_path = sessions.join("z-original.jsonl");
+        std::fs::write(
+            sessions.join("a-fork.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"fork","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":0}}
+{{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250}}}}}}
+{{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}},"aggregateUsage":{{"input":130,"output":60,"cacheRead":20,"cacheWrite":10,"totalTokens":220}},"origin":"spawn_task"}}
+{{"type":"child_usage_attributed","id":"usage-2","parentId":"usage-1","timestamp":"2026-08-08T00:00:03.000Z","targetId":"parent","childUsage":{{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}},"aggregateUsage":{{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250}},"origin":"spawn_task"}}
+"#,
+                paths::json_path_literal(&original_path)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &original_path,
+            r#"{"type":"session","version":3,"id":"original","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":10,"totalTokens":180}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40},"aggregateUsage":{"input":130,"output":60,"cacheRead":20,"cacheWrite":10,"totalTokens":220},"origin":"spawn_task"}
+{"type":"child_usage_attributed","id":"usage-2","parentId":"usage-1","timestamp":"2026-08-08T00:00:03.000Z","targetId":"parent","childUsage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30},"aggregateUsage":{"input":150,"output":70,"cacheRead":20,"cacheWrite":10,"totalTokens":250},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message-1","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response-1","usage":{{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}}}}
+{{"type":"message","id":"child-message-2","parentId":"child-message-1","timestamp":"2026-08-08T00:00:03.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response-2","usage":{{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}}}}
+"#,
+                paths::json_path_literal(&original_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_decode_calls, (3, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_decode_calls,
+            "an unchanged warm scan must decode neither messages nor accounting"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 3);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                150
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.output)
+                    .sum::<i64>(),
+                70
+            );
+        }
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.counts.get(ClientId::PrimeAgent), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            150
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.output)
+                .sum::<i64>(),
+            70
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_warm_cache_hashes_unsampled_semantic_rewrite() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/legacy/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let source_path = sessions_dir.join("legacy.jsonl");
+        let child_path = child_dir.join("child.jsonl");
+        let old_contents = large_prime_contents(120, 20);
+        let new_contents = large_prime_contents(240, 40);
+        assert_eq!(old_contents.len(), new_contents.len());
+        assert_eq!(&old_contents[..4_096], &new_contents[..4_096]);
+        assert_eq!(&old_contents[23_976..], &new_contents[23_976..]);
+        std::fs::write(&source_path, old_contents).unwrap();
+        std::fs::write(
+            &child_path,
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response","usage":{{"input":40,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}}}}
+"#,
+                paths::json_path_literal(&source_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        let established =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            established
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            160
+        );
+
+        let original_modified = std::fs::metadata(&source_path).unwrap().modified().unwrap();
+        std::fs::write(&source_path, new_contents).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&source_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (1, 0),
+            "the rewritten root is decoded once while the unchanged child stays decode-free"
+        );
+
+        let (root_messages, root_accounting) =
+            sessions::prime_agent::parse_prime_agent_file_with_accounting(&source_path);
+        let (child_messages, child_accounting) =
+            sessions::prime_agent::parse_prime_agent_file_with_accounting(&child_path);
+        let expected_cold = sessions::prime_agent::reconcile_prime_agent_messages(
+            root_messages.into_iter().chain(child_messages).collect(),
+            &[root_accounting, child_accounting],
+        );
+        assert_eq!(warm, expected_cold);
+        assert_eq!(
+            warm.iter().map(|message| message.tokens.input).sum::<i64>(),
+            240,
+            "stale accounting would fail to subtract the rewritten 40-token child aggregate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_retries_when_source_changes_before_combined_parse() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("parse-race.jsonl");
+        std::fs::write(&source_path, large_prime_contents(120, 20)).unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        let established =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(established[0].tokens.input, 120);
+
+        std::fs::write(&source_path, large_prime_contents(360, 60)).unwrap();
+        sessions::prime_agent::schedule_stable_parse_test_rewrite(
+            &source_path,
+            large_prime_contents(480, 80),
+        );
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let rebuilt =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(rebuilt[0].tokens.input, 480);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (2, 0),
+            "the first parse belongs to a different pre-parse fingerprint and must be retried"
+        );
+
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let cached = message_cache::SourceMessageCache::load();
+        let entry = cached.get(identity, &source_path).unwrap();
+        assert_eq!(
+            entry.fingerprint,
+            message_cache::SourceFingerprint::from_path(&source_path).unwrap()
+        );
+        assert_eq!(entry.messages[0].tokens.input, 480);
+        assert!(entry.prime_accounting.is_some());
+
+        let decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(warm[0].tokens.input, 480);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            decode_calls,
+            "the exact stable retry snapshot should be a decode-free warm hit"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_legacy_cache_backfills_accounting_once() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("legacy.jsonl");
+        std::fs::write(
+            &source_path,
+            r#"{"type":"session","version":3,"id":"legacy","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130}}}
+{"type":"child_usage_attributed","id":"usage-1","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20},"aggregateUsage":{"input":120,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":130},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+
+        // Reproduce a successfully migrated v4 entry: messages and the exact
+        // fingerprint survive, while the newly-added Prime accounting payload
+        // is absent until the next scan backfills it.
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let messages = sessions::prime_agent::parse_prime_agent_file(&source_path);
+        let legacy_fingerprint =
+            match message_cache::SourceFingerprint::check_path_samples_only(&source_path, None)
+                .unwrap()
+            {
+                message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+                message_cache::FingerprintStatus::Unchanged => unreachable!(),
+            };
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new(
+            identity,
+            &source_path,
+            legacy_fingerprint,
+            messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let first =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let first_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(first_calls, (1, 1));
+        assert_eq!(first[0].tokens.input, 120);
+
+        let second =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            first_calls
+        );
+        assert_eq!(second[0].tokens.input, 120);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(identity, &source_path)
+            .unwrap()
+            .prime_accounting
+            .is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_legacy_backfill_rebuilds_if_source_changes_during_read() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("legacy-race.jsonl");
+
+        let old_contents = large_prime_contents(120, 20);
+        let new_contents = large_prime_contents(240, 40);
+        assert_eq!(old_contents.len(), new_contents.len());
+        assert_eq!(&old_contents[..4_096], &new_contents[..4_096]);
+        assert_eq!(&old_contents[23_976..], &new_contents[23_976..]);
+        std::fs::write(&source_path, &old_contents).unwrap();
+
+        let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
+        let messages = sessions::prime_agent::parse_prime_agent_file(&source_path);
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new(
+            identity,
+            &source_path,
+            message_cache::SourceFingerprint::from_path(&source_path).unwrap(),
+            messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        sessions::prime_agent::schedule_accounting_backfill_test_rewrite(
+            &source_path,
+            new_contents,
+        );
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let clients = ["prime-agent".to_string()];
+        let rebuilt =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let rebuild_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(rebuild_calls, (1, 1));
+        assert_eq!(rebuilt[0].tokens.input, 240);
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            rebuild_calls
+        );
+        assert_eq!(warm[0].tokens.input, 240);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_concurrent_equal_children_are_counted_once() {
+        // Two children of the same parent spent identical tokens and finished in
+        // the same millisecond, so no timestamp separates one child's response
+        // from the other's attribution. Both must still be paired off: keeping
+        // the aggregate parent while also counting both transcripts would report
+        // their usage twice.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let root_path = sessions.join("a-root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300}}}
+{"type":"child_usage_attributed","id":"usage-a","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":200,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":200},"origin":"spawn_task"}
+{"type":"child_usage_attributed","id":"usage-b","parentId":"usage-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100},"aggregateUsage":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":300},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        for child in ["sub-a", "sub-b"] {
+            let child_dir = source_home
+                .path()
+                .join(".prime/agent/session-artifacts/a-root")
+                .join(child);
+            std::fs::create_dir_all(&child_dir).unwrap();
+            std::fs::write(
+                child_dir.join("child.jsonl"),
+                format!(
+                    r#"{{"type":"session","version":3,"id":"{child}","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"{child}-response","usage":{{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":100}}}}}}
+"#,
+                    paths::json_path_literal(&root_path)
+                ),
+            )
+            .unwrap();
+        }
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // Warm source-cache lane must agree with the cold parse exactly.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            assert_eq!(messages.len(), 3);
+            // 100 own parent usage plus the two 100-token children, each counted
+            // once from its own transcript.
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                300
+            );
+        }
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            300
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_colliding_attribution_ids_do_not_cross_lineages() {
+        // Prime mints attribution ids as `randomUUID().slice(0, 8)` and only
+        // checks them against the session it is writing, so two unrelated
+        // sessions can carry the same id. Resolving one lineage's child must
+        // not mark the other lineage's attribution as accounted for.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/a-lineage/sub-a");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let lineage_a = sessions.join("a-lineage.jsonl");
+        std::fs::write(
+            &lineage_a,
+            r#"{"type":"session","version":3,"id":"parent-a","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-a-response","usage":{"input":120,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}
+{"type":"child_usage_attributed","id":"deadbeef","parentId":"parent","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20},"aggregateUsage":{"input":120,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":120},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child-a","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.001Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-a-response","usage":{{"input":20,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}}}}
+"#,
+                paths::json_path_literal(&lineage_a)
+            ),
+        )
+        .unwrap();
+        // Same 8-hex id, unrelated session, and its child transcript is gone.
+        std::fs::write(
+            sessions.join("b-lineage.jsonl"),
+            r#"{"type":"session","version":3,"id":"parent-b","timestamp":"2026-08-09T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","parentId":null,"timestamp":"2026-08-09T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-b-response","usage":{"input":130,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":130}}}
+{"type":"child_usage_attributed","id":"deadbeef","parentId":"parent","timestamp":"2026-08-09T00:00:02.000Z","targetId":"parent","childUsage":{"input":30,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":30},"aggregateUsage":{"input":130,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":130},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // Warm source-cache lane must agree with the cold parse exactly.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            assert_eq!(messages.len(), 3);
+            // 100 reconciled parent + 20 parsed child + 130 aggregate parent
+            // whose own child was pruned.
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                250
+            );
+        }
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            250
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_contested_child_is_attributed_to_the_nearest_model() {
+        // Two parent responses on different models each persist an aggregate that
+        // contains one 50-token child, and only the second parent's child
+        // transcript survives. Both attributions are inside the tolerance window,
+        // so a maximum-cardinality match could reduce either aggregate and leave
+        // the global total intact -- but pricing is applied per model after
+        // reconciliation, so the wrong choice moves cost between models.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/parent/sub-child");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let parent_path = sessions.join("parent.jsonl");
+        std::fs::write(
+            &parent_path,
+            r#"{"type":"session","version":3,"id":"parent","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent-a","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"model-a","responseId":"parent-response-a","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"00000000","parentId":"parent-a","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent-a","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+{"type":"message","id":"parent-b","parentId":"00000000","timestamp":"2026-08-08T00:00:01.500Z","message":{"role":"assistant","provider":"anthropic","model":"model-b","responseId":"parent-response-b","usage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}
+{"type":"child_usage_attributed","id":"ffffffff","parentId":"parent-b","timestamp":"2026-08-08T00:00:02.002Z","targetId":"parent-b","childUsage":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50},"aggregateUsage":{"input":150,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":150},"origin":"spawn_task"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.600Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-08-08T00:00:02.002Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":50}}}}}}
+"#,
+                paths::json_path_literal(&parent_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        for messages in [
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+            // The warm source-cache lane must produce the same per-model rows,
+            // not just the same total.
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None),
+        ] {
+            let mut per_model: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            for message in &messages {
+                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+            }
+            assert_eq!(per_model.get("model-a").copied(), Some(150));
+            assert_eq!(per_model.get("model-b").copied(), Some(100));
+            assert_eq!(per_model.get("child-model").copied(), Some(50));
+            assert_eq!(per_model.values().sum::<i64>(), 300);
+        }
     }
 
     #[test]

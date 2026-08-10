@@ -25,7 +25,11 @@ use std::time::UNIX_EPOCH;
 // warning), so the format version moves with the struct.
 // 4: UnifiedMessage gained model_attribution_conflicted, changing the bincode
 // payload layout. Old shards must be silently rebuilt rather than decoded.
-const CACHE_FORMAT_VERSION: u32 = 4;
+// 5: Prime Agent entries cache reconciliation accounting beside their messages.
+// Version-4 shards have an explicit wire migration below, so other clients stay
+// warm and Prime entries need only one rebuild/backfill.
+const CACHE_FORMAT_VERSION: u32 = 5;
+const LEGACY_CACHE_FORMAT_VERSION: u32 = 4;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -102,22 +106,50 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+
+fn warned_contexts() -> &'static Mutex<HashSet<&'static str>> {
+    WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std::fmt::Display) {
+    warn_cache_failure_once_in(warned_contexts(), context, path, error);
+}
+
+/// The once-only set is a parameter purely so the poisoned-set regression test
+/// can supply its own. Mutex poisoning is irreversible, so a test that poisoned
+/// the process-global set would leave every later test in the binary depending
+/// on the very recovery it is checking. Production has exactly one caller and
+/// it always passes `warned_contexts()`, so the once-per-process,
+/// once-per-context semantics are unchanged.
+fn warn_cache_failure_once_in(
+    warned: &Mutex<HashSet<&'static str>>,
+    context: &'static str,
+    path: &Path,
+    error: &impl std::fmt::Display,
+) {
     tracing::warn!(path = %path.display(), %error, %context, "source message cache failure");
 
     // Most non-TUI commands (including `submit`) do not install a tracing
     // subscriber. Surface persistence failures directly once per process so a
     // permanently cold cache can never fail silently again. The TUI owns raw
     // mode and the alternate screen for its whole run, so a raw stdio write
-    // there corrupts the rendered display instead of being visible as a log
-    // line — suppress it in that case and rely on tracing::warn! (or the
-    // TUI's own status/error UI) instead.
-    static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().is_ok_and(|mut warned| warned.insert(context))
-        && !crate::tui_signal::is_tui_active()
+    // there corrupts the rendered display. Defer that fallback until the TUI
+    // restores the terminal instead of consuming the once-only warning while
+    // leaving the user with no visible diagnostic (#941).
+    // Recover from a poisoned set the way tui_signal does: an unrelated panic
+    // elsewhere must not be what silences the diagnostic this block exists to
+    // guarantee. The set only tracks which contexts were already reported, so
+    // its contents stay meaningful across an unwind.
+    if warned
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(context)
     {
-        eprintln!("tokscale: warning: {context} ({}): {error}", path.display());
+        crate::tui_signal::emit_or_defer_stderr(format!(
+            "tokscale: warning: {context} ({}): {error}",
+            path.display()
+        ));
     }
 }
 
@@ -1088,6 +1120,40 @@ pub(crate) struct CachedSourceEntry {
     pub messages: Vec<UnifiedMessage>,
     pub fallback_timestamp_indices: Vec<usize>,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    /// Prime-only metadata used to reconcile fork aggregates with child
+    /// transcripts. It shares this entry's parser identity and fingerprint, so
+    /// a message cache hit can never pair with accounting from different bytes.
+    pub prime_accounting: Option<crate::sessions::prime_agent::PrimeFileAccounting>,
+}
+
+/// Exact version-4 entry layout. Keeping this wire type lets existing shards
+/// migrate without discarding cached messages for unrelated clients. Prime
+/// entries convert with no accounting and are backfilled once on their next
+/// unchanged scan.
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyCachedSourceEntryV4 {
+    parser_namespace: String,
+    parser_version: u32,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    messages: Vec<UnifiedMessage>,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+}
+
+impl From<LegacyCachedSourceEntryV4> for CachedSourceEntry {
+    fn from(entry: LegacyCachedSourceEntryV4) -> Self {
+        Self {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages,
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: None,
+        }
+    }
 }
 
 impl CachedSourceEntry {
@@ -1107,7 +1173,16 @@ impl CachedSourceEntry {
             messages,
             fallback_timestamp_indices,
             codex_incremental,
+            prime_accounting: None,
         }
+    }
+
+    pub(crate) fn with_prime_accounting(
+        mut self,
+        accounting: crate::sessions::prime_agent::PrimeFileAccounting,
+    ) -> Self {
+        self.prime_accounting = Some(accounting);
+        self
     }
 
     fn identity_is_current(&self) -> bool {
@@ -1262,31 +1337,13 @@ impl SourceMessageCache {
                     index,
                 };
                 let path = dir_entry.path();
-                match read_shard(&path, identity) {
-                    ShardReadStatus::Loaded(entries) => {
-                        for mut entry in entries {
-                            let key = CacheKey::from_entry(&entry);
-                            if key.shard() == shard_key && entry.identity_is_current() {
-                                if entry.parser_namespace == ClientId::Claude.as_str()
-                                    && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                        &mut entry.messages,
-                                    )
-                                {
-                                    // Do not bump Claude's parser version here: compacted
-                                    // transcripts rely on cached assistant history that a
-                                    // full invalidation cannot recover. Repair only the bad
-                                    // `<synthetic>` rows and persist that narrow migration.
-                                    cache.dirty_keys.insert(key.clone());
-                                }
-                                cache.entries.insert(key, entry);
-                            } else {
-                                cache.rewrite_shards.insert(shard_key.clone());
-                            }
-                        }
-                    }
-                    ShardReadStatus::Missing => {}
+                let (entries, migrated) = match read_shard(&path, identity) {
+                    ShardReadStatus::Loaded(entries) => (entries, false),
+                    ShardReadStatus::Migrated(entries) => (entries, true),
+                    ShardReadStatus::Missing => continue,
                     ShardReadStatus::Stale => {
                         cache.rewrite_shards.insert(shard_key);
+                        continue;
                     }
                     ShardReadStatus::Invalid(error) => {
                         warn_cache_failure_once(
@@ -1295,6 +1352,29 @@ impl SourceMessageCache {
                             &error,
                         );
                         cache.rewrite_shards.insert(shard_key);
+                        continue;
+                    }
+                };
+                if migrated {
+                    cache.rewrite_shards.insert(shard_key.clone());
+                }
+                for mut entry in entries {
+                    let key = CacheKey::from_entry(&entry);
+                    if key.shard() == shard_key && entry.identity_is_current() {
+                        if entry.parser_namespace == ClientId::Claude.as_str()
+                            && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
+                                &mut entry.messages,
+                            )
+                        {
+                            // Do not bump Claude's parser version here: compacted
+                            // transcripts rely on cached assistant history that a
+                            // full invalidation cannot recover. Repair only the bad
+                            // `<synthetic>` rows and persist that narrow migration.
+                            cache.dirty_keys.insert(key.clone());
+                        }
+                        cache.entries.insert(key, entry);
+                    } else {
+                        cache.rewrite_shards.insert(shard_key.clone());
                     }
                 }
             }
@@ -1435,12 +1515,14 @@ impl SourceMessageCache {
 
             let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
                 match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
-                    ShardReadStatus::Loaded(entries) => entries
-                        .into_iter()
-                        .filter(|entry| entry.identity_is_current())
-                        .map(|entry| (CacheKey::from_entry(&entry), entry))
-                        .filter(|(key, _)| key.shard() == shard_key)
-                        .collect(),
+                    ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
+                        entries
+                            .into_iter()
+                            .filter(|entry| entry.identity_is_current())
+                            .map(|entry| (CacheKey::from_entry(&entry), entry))
+                            .filter(|(key, _)| key.shard() == shard_key)
+                            .collect()
+                    }
                     ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
                     ShardReadStatus::Invalid(error) => {
                         warn_cache_failure_once(
@@ -1534,6 +1616,7 @@ enum ShardReadStatus {
     Stale,
     Invalid(String),
     Loaded(Vec<CachedSourceEntry>),
+    Migrated(Vec<CachedSourceEntry>),
 }
 
 fn read_shard(path: &Path, identity: CacheIdentity) -> ShardReadStatus {
@@ -1571,12 +1654,24 @@ fn read_shard_with_limit(
         Ok(envelope) => envelope,
         Err(error) => return ShardReadStatus::Invalid(error.to_string()),
     };
-    if envelope.format_version != CACHE_FORMAT_VERSION {
-        return ShardReadStatus::Stale;
-    }
     if envelope.parser_namespace != identity.namespace
         || envelope.parser_version != identity.parser_version
     {
+        return ShardReadStatus::Stale;
+    }
+
+    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION {
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyCachedSourceEntryV4>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries.into_iter().map(CachedSourceEntry::from).collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+    if envelope.format_version != CACHE_FORMAT_VERSION {
         return ShardReadStatus::Stale;
     }
 
@@ -1720,11 +1815,13 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 /// Whether a fingerprint carries a whole-file `content_hash`.
 ///
-/// Validation uses size + mtime + samples ([`primary_fingerprint_matches`] and
-/// [`related_fingerprint_metadata_matches`]) for every source. Only Codex reads
-/// `content_hash` for incremental resume;
-/// generic parsers and SQLite sources store a zero sentinel so changed or cold
-/// files do not pay for a second whole-file hash that cannot affect parsing.
+/// Most warm validation uses size + mtime + samples
+/// ([`primary_fingerprint_matches`] and [`related_fingerprint_metadata_matches`]).
+/// Codex reads `content_hash` for incremental resume, while Prime hashes the
+/// complete transcript on every warm hit because its cached messages and
+/// reconciliation accounting must describe one exact byte snapshot. Generic
+/// parsers and SQLite sources store a zero sentinel so their changed or cold
+/// files do not pay for a whole-file hash that cannot affect parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentHashMode {
     Full,
@@ -1878,6 +1975,85 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_warning_is_deferred_once_while_the_tui_is_active() {
+        const CONTEXT: &str = "test source cache warning deferral";
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        assert!(
+            crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
+            "the test must not inherit deferred diagnostics"
+        );
+
+        // Deliberately the real process-global set, so the production entry
+        // point and its once-per-context bookkeeping stay covered. The
+        // poisoning test below is the one that needs an isolated set.
+        tui.set(true);
+        let path = Path::new("cache-warning-test");
+        let error = std::io::Error::other("simulated cache failure");
+        warn_cache_failure_once(CONTEXT, path, &error);
+        warn_cache_failure_once(CONTEXT, path, &error);
+
+        assert_eq!(
+            crate::tui_signal::take_deferred_stderr_for_test(),
+            vec![format!(
+                "tokscale: warning: {CONTEXT} ({}): {error}",
+                path.display()
+            )],
+            "a repeated failure should leave one complete warning for terminal restore"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_warning_survives_a_poisoned_once_only_set() {
+        const CONTEXT: &str = "test source cache warning after poisoning";
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        assert!(
+            crate::tui_signal::take_deferred_stderr_for_test().is_empty(),
+            "the test must not inherit deferred diagnostics"
+        );
+
+        // Poison a set scoped to this test rather than the process-global one:
+        // poisoning cannot be undone, so poisoning the real set would make
+        // every later test in this binary depend on the recovery under test.
+        let warned: Mutex<HashSet<&'static str>> = Mutex::new(HashSet::new());
+
+        // An unrelated panic while the once-only set is locked poisons the
+        // mutex. The warning must still reach the user instead of being
+        // silently swallowed by the poison.
+        //
+        // No panic hook is installed here. The hook is process-global, so
+        // swapping it would suppress the diagnostics of whatever else runs in
+        // parallel; this unwind happens on the test's own thread, which
+        // libtest already captures, so the expected panic message is only
+        // printed if this test fails.
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = warned.lock().expect("set is not yet poisoned");
+            panic!("unrelated panic while holding the once-only set");
+        });
+        assert!(poisoned.is_err(), "the helper panic must have unwound");
+        assert!(
+            warned.is_poisoned(),
+            "the once-only set must be poisoned for this test to mean anything"
+        );
+
+        tui.set(true);
+        let path = Path::new("cache-warning-poison-test");
+        let error = std::io::Error::other("simulated cache failure");
+        warn_cache_failure_once_in(&warned, CONTEXT, path, &error);
+        warn_cache_failure_once_in(&warned, CONTEXT, path, &error);
+
+        assert_eq!(
+            crate::tui_signal::take_deferred_stderr_for_test(),
+            vec![format!(
+                "tokscale: warning: {CONTEXT} ({}): {error}",
+                path.display()
+            )],
+            "a poisoned once-only set must still defer exactly one warning"
+        );
+    }
 
     #[test]
     fn from_roo_path_invalidates_on_history_only_change() {
@@ -3268,7 +3444,7 @@ mod tests {
         let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
         ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
         let stale_envelope = CachedShardEnvelope {
-            format_version: CACHE_FORMAT_VERSION - 1,
+            format_version: LEGACY_CACHE_FORMAT_VERSION - 1,
             parser_namespace: codex.namespace.to_string(),
             parser_version: codex.parser_version,
             payload: b"prior UnifiedMessage layout".to_vec(),
@@ -3282,6 +3458,62 @@ mod tests {
         assert!(matches!(
             read_shard(&stale_path, codex),
             ShardReadStatus::Stale
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_v4_shard_migrates_messages_and_rewrites_once() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::PrimeAgent);
+        let entry = test_entry(identity, source.path(), "legacy-prime");
+        let key = CacheKey::from_entry(&entry);
+        let shard_key = key.shard();
+        let legacy_path = shard_path(&cache_shard_dir().unwrap(), &shard_key);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let legacy_entry = LegacyCachedSourceEntryV4 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages,
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CACHE_FORMAT_VERSION,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![legacy_entry]).unwrap(),
+        };
+        let mut writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &envelope)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Migrated(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].session_id == "legacy-prime"
+                    && entries[0].prime_accounting.is_none()
+        ));
+
+        let mut cache = SourceMessageCache::load();
+        assert_eq!(
+            cache.get(identity, source.path()).unwrap().messages[0].session_id,
+            "legacy-prime"
+        );
+        assert!(cache.rewrite_shards.contains(&shard_key));
+        cache.save_if_dirty();
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].prime_accounting.is_none()
         ));
     }
 

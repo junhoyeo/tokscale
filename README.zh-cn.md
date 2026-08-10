@@ -68,6 +68,7 @@
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 导出缓存于 `~/.config/tokscale/cursor-cache/usage*.csv`（桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/`（+ `manicode-dev`、`manicode-staging`；可通过 `CODEBUFF_DATA_DIR` 覆盖） |
+| <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | 与 Codebuff 共用 `~/.config/manicode/`（同一运行时）；令牌消耗从转录估算（无本地用量；可通过 `FREEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` 和 `~/.omp/agent/sessions/`（[Oh My Pi](https://github.com/can1357/oh-my-pi)） |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |

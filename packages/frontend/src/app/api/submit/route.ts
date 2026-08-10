@@ -31,9 +31,16 @@ import {
   foldContributionsIntoReportedRows,
   recordDailyBreakdownReported,
 } from "@/lib/db/dailyBreakdownReported";
+import {
+  addClientBreakdownIncrement,
+  foldParserClientSnapshot,
+  planParserHighWaterSubmission,
+  type DeviceParserStates,
+} from "@/lib/db/parserHighWater";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
+import { createSafeRecord, ownValue } from "@/lib/safeRecord";
 
 const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
@@ -57,7 +64,7 @@ function mergeModelBreakdowns(
   incoming: Record<string, ClientBreakdownData["models"][string]>
 ): void {
   for (const [modelId, modelData] of Object.entries(incoming)) {
-    const existingModel = target[modelId];
+    const existingModel = ownValue(target, modelId);
     if (existingModel) {
       existingModel.tokens += modelData.tokens || 0;
       existingModel.cost += modelData.cost || 0;
@@ -89,7 +96,7 @@ function mergeModelBreakdowns(
 // is why day totals and the leaderboard stayed correct while per-model views
 // drifted.
 function cloneClientBreakdownForFold(data: ClientBreakdownData): ClientBreakdownData {
-  const models: ClientBreakdownData["models"] = {};
+  const models = createSafeRecord<ClientBreakdownData["models"][string]>();
   for (const [modelId, modelData] of Object.entries(data.models ?? {})) {
     models[modelId] = { ...modelData };
   }
@@ -99,6 +106,54 @@ function cloneClientBreakdownForFold(data: ClientBreakdownData): ClientBreakdown
     models,
     ...(data.provenance ? { provenance: { ...data.provenance } } : {}),
   };
+}
+
+type FoldableClientContribution = Parameters<
+  typeof clientContributionToBreakdownData
+>[0] & { client: string };
+
+export function foldIncomingClientContributions(
+  clients: FoldableClientContribution[]
+): Record<string, ClientBreakdownData> {
+  const incomingClientBreakdown = createSafeRecord<ClientBreakdownData>();
+  for (const clientContribution of clients) {
+    const modelData = clientContributionToBreakdownData(clientContribution);
+    const existing = ownValue(incomingClientBreakdown, clientContribution.client);
+    if (existing) {
+      existing.tokens += modelData.tokens;
+      existing.cost += modelData.cost;
+      existing.input += modelData.input;
+      existing.output += modelData.output;
+      existing.cacheRead += modelData.cacheRead;
+      existing.cacheWrite += modelData.cacheWrite;
+      existing.reasoning = (existing.reasoning || 0) + modelData.reasoning;
+      existing.messages += modelData.messages;
+      const existingModel = ownValue(existing.models, clientContribution.modelId);
+      if (existingModel) {
+        existingModel.tokens += modelData.tokens;
+        existingModel.cost += modelData.cost;
+        existingModel.input += modelData.input;
+        existingModel.output += modelData.output;
+        existingModel.cacheRead += modelData.cacheRead;
+        existingModel.cacheWrite += modelData.cacheWrite;
+        existingModel.reasoning =
+          (existingModel.reasoning || 0) + modelData.reasoning;
+        existingModel.messages += modelData.messages;
+      } else {
+        existing.models[clientContribution.modelId] = { ...modelData };
+      }
+      existing.provenance = deriveClientBreakdownProvenance(existing);
+    } else {
+      const models = createSafeRecord<ClientBreakdownData["models"][string]>();
+      models[clientContribution.modelId] = { ...modelData };
+      const clientBreakdown = { ...modelData, models };
+      incomingClientBreakdown[clientContribution.client] = {
+        ...clientBreakdown,
+        provenance: deriveClientBreakdownProvenance(clientBreakdown),
+      };
+    }
+  }
+  return incomingClientBreakdown;
 }
 
 interface NormalizedClientBreakdownAliases {
@@ -119,13 +174,13 @@ interface NormalizedClientBreakdownAliases {
 function normalizeClientBreakdownAliases(
   breakdown: Record<string, ClientBreakdownData>
 ): NormalizedClientBreakdownAliases {
-  const normalized: Record<string, ClientBreakdownData> = {};
+  const normalized = createSafeRecord<ClientBreakdownData>();
   const foldedClients = new Set<string>();
   const largestComponentTokens = new Map<string, number>();
 
   for (const [rawClientName, data] of Object.entries(breakdown)) {
-    const clientName = LEGACY_CLIENT_ALIASES[rawClientName] ?? rawClientName;
-    const existing = normalized[clientName];
+    const clientName = ownValue(LEGACY_CLIENT_ALIASES, rawClientName) ?? rawClientName;
+    const existing = ownValue(normalized, clientName);
 
     largestComponentTokens.set(
       clientName,
@@ -535,7 +590,11 @@ export async function POST(request: Request) {
               : {}),
           },
         })
-        .returning({ id: submittedDevices.id });
+        .returning({
+          id: submittedDevices.id,
+          parserVersions: submittedDevices.parserVersions,
+          parserStates: submittedDevices.parserStates,
+        });
 
       // ------------------------------------------
       // STEP 3b: Fetch existing daily breakdown for merge
@@ -634,6 +693,53 @@ export async function POST(request: Request) {
         existingDeviceDays = await fetchExistingDeviceDays();
       }
 
+      const deviceParserStates = (submittedDevice.parserStates ?? {}) as DeviceParserStates;
+      const copilotIncomingDays = foldParserClientSnapshot(
+        data.contributions,
+        "copilot"
+      );
+      const existingCopilotDays = Object.fromEntries(
+        existingDeviceDays.flatMap((day) => {
+          const breakdown = day.sourceBreakdown as Record<string, ClientBreakdownData> | null;
+          return breakdown?.copilot ? [[day.date, breakdown.copilot] as const] : [];
+        })
+      );
+      const copilotWasScanned =
+        submittedClients.has("copilot") ||
+        Boolean(
+          data.scanScope &&
+            Object.prototype.hasOwnProperty.call(
+              data.scanScope.parserVersions,
+              "copilot"
+            )
+        );
+      const copilotPlan = copilotWasScanned
+        ? planParserHighWaterSubmission({
+            client: "copilot",
+            incomingVersion: isBackfill
+              ? undefined
+              : data.scanScope?.parserVersions.copilot,
+            fullHistory: data.scanScope?.fullHistory === true,
+            existingLegacyDays: existingCopilotDays,
+            incomingDays: copilotIncomingDays,
+            state: deviceParserStates.copilot,
+            persistedVersion: submittedDevice.parserVersions?.copilot,
+          })
+        : { mode: "status-quo" as const, increments: {} };
+      const freezeCopilot = copilotPlan.mode === "freeze";
+      const applyCopilotIncrements =
+        copilotPlan.mode === "incremental" ||
+        copilotPlan.mode === "baseline-legacy";
+      if (copilotPlan.mode === "baseline-legacy") {
+        warnings.push(
+          "Established the Copilot parser generation 2 baseline; existing same-device history was preserved and only bounded lifetime growth was added."
+        );
+      } else if (copilotPlan.mode === "freeze") {
+        warnings.push(
+          "Ignored Copilot changes because this parser generation or partial snapshot cannot safely advance the device high-water."
+        );
+      }
+
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
       );
@@ -668,44 +774,9 @@ export async function POST(request: Request) {
       }> = [];
 
       for (const incomingDay of data.contributions) {
-        const incomingClientBreakdown: Record<string, ClientBreakdownData> = {};
-        for (const client_contrib of incomingDay.clients) {
-          const modelData = clientContributionToBreakdownData(client_contrib);
-          const existing = incomingClientBreakdown[client_contrib.client];
-          if (existing) {
-            existing.tokens += modelData.tokens;
-            existing.cost += modelData.cost;
-            existing.input += modelData.input;
-            existing.output += modelData.output;
-            existing.cacheRead += modelData.cacheRead;
-            existing.cacheWrite += modelData.cacheWrite;
-            existing.reasoning = (existing.reasoning || 0) + modelData.reasoning;
-            existing.messages += modelData.messages;
-            const existingModel = existing.models[client_contrib.modelId];
-            if (existingModel) {
-              existingModel.tokens += modelData.tokens;
-              existingModel.cost += modelData.cost;
-              existingModel.input += modelData.input;
-              existingModel.output += modelData.output;
-              existingModel.cacheRead += modelData.cacheRead;
-              existingModel.cacheWrite += modelData.cacheWrite;
-              existingModel.reasoning = (existingModel.reasoning || 0) + modelData.reasoning;
-              existingModel.messages += modelData.messages;
-            } else {
-              existing.models[client_contrib.modelId] = modelData;
-            }
-            existing.provenance = deriveClientBreakdownProvenance(existing);
-          } else {
-            const clientBreakdown = {
-              ...modelData,
-              models: { [client_contrib.modelId]: modelData },
-            };
-            incomingClientBreakdown[client_contrib.client] = {
-              ...clientBreakdown,
-              provenance: deriveClientBreakdownProvenance(clientBreakdown),
-            };
-          }
-        }
+        const incomingClientBreakdown = foldIncomingClientContributions(
+          incomingDay.clients
+        );
 
         if (isBackfill) {
           // Stamp the per-client origin tag AFTER provenance derivation so it
@@ -721,6 +792,29 @@ export async function POST(request: Request) {
           }
         }
 
+        if (freezeCopilot) {
+          delete incomingClientBreakdown.copilot;
+        } else if (applyCopilotIncrements) {
+          // The full snapshot itself is never merged. Only the bounded growth
+          // calculated against the persisted generation high-water is eligible.
+          const increment = copilotPlan.increments[incomingDay.date];
+          if (increment) {
+            incomingClientBreakdown.copilot = increment;
+          } else {
+            delete incomingClientBreakdown.copilot;
+          }
+        }
+
+        const clientsToMerge = new Set(submittedClients);
+        if (
+          (freezeCopilot || applyCopilotIncrements) &&
+          !incomingClientBreakdown.copilot
+        ) {
+          // A frozen/zero-increment Copilot plan is a no-op for that client,
+          // not a request to delete its stored row from this day.
+          clientsToMerge.delete("copilot");
+        }
+
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
@@ -730,10 +824,18 @@ export async function POST(request: Request) {
           >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
             normalizeClientBreakdownAliases(rawExistingBreakdown);
+          if (
+            applyCopilotIncrements && incomingClientBreakdown.copilot
+          ) {
+            incomingClientBreakdown.copilot = addClientBreakdownIncrement(
+              existingClientBreakdown.copilot,
+              incomingClientBreakdown.copilot
+            );
+          }
           const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
             incomingClientBreakdown,
-            submittedClients,
+            clientsToMerge,
             foldedClientFloors,
             incomingDay.totals?.costIsComplete ?? true
           );
@@ -750,6 +852,16 @@ export async function POST(request: Request) {
             );
           }
           const mergedClientBreakdown = mergeResult.merged;
+          if (
+            applyCopilotIncrements &&
+            existingClientBreakdown.copilot?.provenance?.costIsComplete === false &&
+            mergedClientBreakdown.copilot
+          ) {
+            mergedClientBreakdown.copilot.provenance = {
+              ...deriveClientBreakdownProvenance(mergedClientBreakdown.copilot),
+              costIsComplete: false,
+            };
+          }
           // A preserved fold must keep its ORIGINAL raw alias keys in storage
           // (e.g. both "kilocode" and "kilo"), not the collapsed sum: the
           // collapsed form is indistinguishable from real usage, so writing it
@@ -790,6 +902,7 @@ export async function POST(request: Request) {
             incomingDay.totals?.costIsComplete ?? true
           );
           const dayTotals = recalculateDayTotals(insertedClientBreakdown);
+          if (Object.keys(insertedClientBreakdown).length === 0) continue;
 
           toInsert.push({
             submissionId,
@@ -805,6 +918,22 @@ export async function POST(request: Request) {
             costIsComplete: breakdownCostIsComplete(insertedClientBreakdown),
           });
         }
+      }
+
+      if (copilotPlan.nextState) {
+        await tx
+          .update(submittedDevices)
+          .set({
+            parserVersions: {
+              ...(submittedDevice.parserVersions ?? {}),
+              copilot: copilotPlan.nextState.version,
+            },
+            parserStates: {
+              ...deviceParserStates,
+              copilot: copilotPlan.nextState,
+            },
+          })
+          .where(eq(submittedDevices.id, submittedDevice.id));
       }
 
       // Batch INSERT new days via raw SQL VALUES list, chunked to stay under

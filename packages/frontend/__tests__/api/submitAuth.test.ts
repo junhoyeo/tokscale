@@ -136,10 +136,12 @@ vi.mock("@/lib/groups/cache", () => ({
 type ModuleExports = typeof import("../../src/app/api/submit/route");
 
 let POST: ModuleExports["POST"];
+let foldIncomingClientContributions: ModuleExports["foldIncomingClientContributions"];
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/submit/route");
   POST = routeModule.POST;
+  foldIncomingClientContributions = routeModule.foldIncomingClientContributions;
 });
 
 beforeEach(() => {
@@ -199,6 +201,45 @@ function dailyBreakdownReportedExecuteArgs(tx: {
 }
 
 describe("POST /api/submit auth path", () => {
+  it("folds prototype-named models without touching Object.prototype", () => {
+    mockState.clientContributionToBreakdownData.mockImplementation((contribution) => ({
+      tokens: contribution.tokens.input,
+      cost: contribution.cost,
+      input: contribution.tokens.input,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: contribution.messages,
+    }));
+
+    const breakdown = foldIncomingClientContributions([
+      {
+        client: "copilot",
+        modelId: "__proto__",
+        tokens: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: 1,
+        messages: 1,
+      },
+      {
+        client: "copilot",
+        modelId: "__proto__",
+        tokens: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: 0.5,
+        messages: 1,
+      },
+    ]);
+
+    expect(Object.getPrototypeOf(breakdown.copilot.models)).toBeNull();
+    expect(breakdown.copilot.models["__proto__"]).toMatchObject({
+      tokens: 15,
+      input: 15,
+      cost: 1.5,
+      messages: 2,
+    });
+    expect((Object.prototype as { tokens?: number }).tokens).toBeUndefined();
+  });
+
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
 
