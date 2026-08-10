@@ -165,6 +165,22 @@ pub(crate) fn droid_jsonl_path(path: &Path) -> Option<PathBuf> {
 /// When the filesystem reports no mtime at all, fall back to the lock
 /// timestamp, then to now() — a record with real token usage is never dropped
 /// just because its timestamp could not be resolved.
+/// Parse `providerLockTimestamp` into epoch milliseconds, rejecting values that
+/// cannot describe a real provider lock.
+///
+/// Zero is Droid's unset sentinel, and a negative value is a clock or
+/// corruption artifact — neither is a usable anchor. Both collapse to `None` so
+/// the resolver treats them as absent, which keeps this anchor's validity rule
+/// symmetric with the mtime one: `file_modified_timestamp_ms_opt` already
+/// reports `None` for a pre-epoch mtime. Without that symmetry a negative lock
+/// would survive as the resolved anchor whenever mtime was unavailable, and the
+/// record would land in a 1969 bucket that no date filter can reach.
+fn parse_lock_timestamp(raw: Option<&str>) -> Option<i64> {
+    raw.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis())
+        .filter(|&ts| ts > 0)
+}
+
 fn resolve_usage_timestamp(lock_timestamp: Option<i64>, modified: Option<i64>) -> i64 {
     match (modified, lock_timestamp) {
         (Some(modified), Some(lock)) => modified.max(lock),
@@ -230,12 +246,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    let lock_timestamp = settings
-        .provider_lock_timestamp
-        .as_deref()
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.timestamp_millis())
-        .filter(|&ts| ts != 0);
+    let lock_timestamp = parse_lock_timestamp(settings.provider_lock_timestamp.as_deref());
 
     let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
@@ -308,6 +319,33 @@ mod tests {
         assert_eq!(get_default_model_from_provider("google"), "gemini-unknown");
         assert_eq!(get_default_model_from_provider("xai"), "grok-unknown");
         assert_eq!(get_default_model_from_provider("custom"), "custom-unknown");
+    }
+
+    #[test]
+    fn test_parse_lock_timestamp_rejects_unusable_anchors() {
+        // Zero is Droid's unset sentinel.
+        assert_eq!(parse_lock_timestamp(Some("1970-01-01T00:00:00Z")), None);
+        // A pre-epoch lock is a clock/corruption artifact. Keeping it would
+        // outlive the mtime fallback and bucket the record in 1969, where no
+        // date filter can reach it.
+        assert_eq!(parse_lock_timestamp(Some("1969-07-20T20:17:00Z")), None);
+        assert_eq!(parse_lock_timestamp(Some("not-a-timestamp")), None);
+        assert_eq!(parse_lock_timestamp(None), None);
+
+        assert_eq!(
+            parse_lock_timestamp(Some("2026-08-07T03:32:46.663Z")),
+            Some(1_786_073_566_663)
+        );
+    }
+
+    #[test]
+    fn test_pre_epoch_lock_falls_through_to_now_without_mtime() {
+        // The resolver only reaches its now() fallback if the rejected lock
+        // arrives as None, so this pins the two halves together: an unusable
+        // lock plus an unavailable mtime must not yield a pre-epoch anchor.
+        let lock = parse_lock_timestamp(Some("1969-07-20T20:17:00Z"));
+
+        assert!(resolve_usage_timestamp(lock, None) > 1_700_000_000_000);
     }
 
     #[test]
