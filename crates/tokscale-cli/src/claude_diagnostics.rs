@@ -103,15 +103,18 @@ fn diagnostic_paths(home_dir: &Path, desktop_paths: Vec<PathBuf>) -> Vec<Diagnos
         })
         .collect();
 
+    // Resolve through the client registry (CLAUDE_CONFIG_DIR-aware) instead of
+    // a fixed `.claude` offset from home, so this diagnostic reports the same
+    // paths the scanner actually reads.
+    let claude_root = PathBuf::from(
+        tokscale_core::ClientId::Claude
+            .data()
+            .root
+            .resolve(&home_dir.to_string_lossy()),
+    );
     for (label, path) in [
-        (
-            "claudeCodeProjects",
-            home_dir.join(".claude").join("projects"),
-        ),
-        (
-            "claudeCodeTranscripts",
-            home_dir.join(".claude").join("transcripts"),
-        ),
+        ("claudeCodeProjects", claude_root.join("projects")),
+        ("claudeCodeTranscripts", claude_root.join("transcripts")),
     ] {
         let exists = path.exists();
         paths.push(DiagnosticPath {

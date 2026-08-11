@@ -4061,7 +4061,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     } else {
         Vec::new()
     };
-    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir_str, &all_clients);
+    let built_in_extra_paths =
+        built_in_extra_scan_paths_for(&home_dir_str, &all_clients, use_env_roots);
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
     let copilot_exporter_path =
         tokscale_core::copilot_exporter_path_with_env_strategy(use_env_roots);

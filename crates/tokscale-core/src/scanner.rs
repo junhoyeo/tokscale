@@ -598,13 +598,24 @@ fn join_native(root: &str, relative: &str) -> String {
 pub fn built_in_extra_scan_paths_for(
     home_dir: &str,
     enabled: &HashSet<ClientId>,
+    use_env_roots: bool,
 ) -> Vec<(ClientId, PathBuf)> {
     let mut paths = Vec::new();
 
     if enabled.contains(&ClientId::Claude) {
+        // `transcripts` is a sibling of the registered `projects` root, not a
+        // fixed offset from `home_dir` — resolving through the client's own
+        // `root` keeps this in sync with CLAUDE_CONFIG_DIR (#1048-adjacent:
+        // this dir moves whenever the primary root does), and respecting
+        // `use_env_roots` keeps parity with the `Grok` root resolved just
+        // above this function's only caller.
+        let claude_root = ClientId::Claude
+            .data()
+            .root
+            .resolve_with_env_strategy(home_dir, use_env_roots);
         paths.push((
             ClientId::Claude,
-            PathBuf::from(join_native(home_dir, ".claude/transcripts")),
+            PathBuf::from(join_native(&claude_root, "transcripts")),
         ));
         paths.extend(
             crate::cc_mirror::discover_claude_project_roots(Path::new(home_dir))
@@ -1406,7 +1417,7 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
+    for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled, use_env_roots) {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -4446,6 +4457,62 @@ mod tests {
 
         assert_eq!(result.get(ClientId::Claude), &vec![transcript]);
         assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_claude_honors_claude_config_dir() {
+        let mut env = EnvGuard::capture(&["CLAUDE_CONFIG_DIR"]);
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // A stray ~/.claude/projects entry must be ignored once
+        // CLAUDE_CONFIG_DIR redirects the client elsewhere.
+        setup_mock_claude_dir(home);
+
+        let custom_root = home.join("custom-claude-config");
+        let custom_projects = custom_root.join("projects").join("myproject");
+        fs::create_dir_all(&custom_projects).unwrap();
+        let custom_conversation = custom_projects.join("conversation.jsonl");
+        File::create(&custom_conversation)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+        let custom_transcripts = custom_root.join("transcripts");
+        fs::create_dir_all(&custom_transcripts).unwrap();
+        let custom_transcript = custom_transcripts.join("ses_123456789012345678901234567.jsonl");
+        File::create(&custom_transcript)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+
+        env.set("CLAUDE_CONFIG_DIR", custom_root);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            true,
+        );
+
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+        assert!(
+            result
+                .get(ClientId::Claude)
+                .iter()
+                .any(|p| p == &custom_conversation),
+            "expected {} in {:?}",
+            custom_conversation.display(),
+            result.get(ClientId::Claude)
+        );
+        assert!(
+            result
+                .get(ClientId::Claude)
+                .iter()
+                .any(|p| p == &custom_transcript),
+            "expected {} in {:?}",
+            custom_transcript.display(),
+            result.get(ClientId::Claude)
+        );
     }
 
     #[test]

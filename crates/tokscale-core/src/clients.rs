@@ -318,8 +318,11 @@ define_clients!(
     Claude = 1 => {
         id: "claude",
         display: "Claude Code",
-        logo: Some("https://tokscale.ai/assets/logos/claude.jpg"),root: PathRoot::Home,
-        relative: ".claude/projects",
+        logo: Some("https://tokscale.ai/assets/logos/claude.jpg"),root: PathRoot::EnvVar {
+            var: "CLAUDE_CONFIG_DIR",
+            fallback_relative: ".claude",
+        },
+        relative: "projects",
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
@@ -1598,6 +1601,41 @@ mod tests {
                 var: "CODEX_HOME",
                 fallback_relative: ".codex",
             }
+        );
+    }
+
+    #[test]
+    fn test_claude_root_uses_claude_config_dir_env_var() {
+        assert_eq!(
+            ClientId::Claude.data().root,
+            PathRoot::EnvVar {
+                var: "CLAUDE_CONFIG_DIR",
+                fallback_relative: ".claude",
+            }
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_defaults_to_home_dot_claude_without_env_override() {
+        let mut env = EnvGuard::capture(&["CLAUDE_CONFIG_DIR"]);
+        env.remove("CLAUDE_CONFIG_DIR");
+
+        assert_eq!(
+            ClientId::Claude.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".claude/projects")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_honors_claude_config_dir_env_override() {
+        let mut env = EnvGuard::capture(&["CLAUDE_CONFIG_DIR"]);
+        env.set("CLAUDE_CONFIG_DIR", "/custom/claude");
+
+        assert_eq!(
+            ClientId::Claude.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/custom/claude"), "projects")
         );
     }
 

@@ -1,6 +1,8 @@
 //! Claude Code session parser
 //!
-//! Parses JSONL files from ~/.claude/projects/
+//! Parses JSONL files from `<claude_config_dir>/projects/`, where
+//! `claude_config_dir` defaults to `~/.claude` but honors `CLAUDE_CONFIG_DIR`
+//! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
