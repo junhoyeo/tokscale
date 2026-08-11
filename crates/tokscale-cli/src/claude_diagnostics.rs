@@ -24,12 +24,13 @@ const CLAUDE_DESKTOP_MESSAGE: &str =
 
 const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. Use `tokscale usage` for Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
 
-pub fn diagnostics_for_clients_row(home_dir: &Path) -> Vec<ClientDiagnostic> {
-    claude_diagnostics(home_dir, true)
+pub fn diagnostics_for_clients_row(home_dir: &Path, use_env_roots: bool) -> Vec<ClientDiagnostic> {
+    claude_diagnostics(home_dir, use_env_roots, true)
 }
 
 pub fn diagnostics_for_empty_explicit_report(
     home_dir: &Path,
+    use_env_roots: bool,
     clients: &Option<Vec<String>>,
     claude_message_count: i32,
 ) -> Vec<ClientDiagnostic> {
@@ -37,7 +38,7 @@ pub fn diagnostics_for_empty_explicit_report(
         return Vec::new();
     }
 
-    claude_diagnostics(home_dir, false)
+    claude_diagnostics(home_dir, use_env_roots, false)
 }
 
 fn explicitly_requests_claude(clients: &Option<Vec<String>>) -> bool {
@@ -46,7 +47,11 @@ fn explicitly_requests_claude(clients: &Option<Vec<String>>) -> bool {
         .is_some_and(|ids| ids.iter().any(|id| id == "claude"))
 }
 
-fn claude_diagnostics(home_dir: &Path, include_info: bool) -> Vec<ClientDiagnostic> {
+fn claude_diagnostics(
+    home_dir: &Path,
+    use_env_roots: bool,
+    include_info: bool,
+) -> Vec<ClientDiagnostic> {
     let mut diagnostics = Vec::new();
 
     let desktop_paths: Vec<PathBuf> = claude_desktop_storage_paths(home_dir)
@@ -60,7 +65,7 @@ fn claude_diagnostics(home_dir: &Path, include_info: bool) -> Vec<ClientDiagnost
             severity: "warning",
             message: CLAUDE_DESKTOP_MESSAGE,
             help: CLAUDE_DESKTOP_HELP,
-            paths: diagnostic_paths(home_dir, desktop_paths),
+            paths: diagnostic_paths(home_dir, use_env_roots, desktop_paths),
         });
     }
 
@@ -93,7 +98,11 @@ fn claude_desktop_storage_paths(home_dir: &Path) -> Vec<PathBuf> {
     ]
 }
 
-fn diagnostic_paths(home_dir: &Path, desktop_paths: Vec<PathBuf>) -> Vec<DiagnosticPath> {
+fn diagnostic_paths(
+    home_dir: &Path,
+    use_env_roots: bool,
+    desktop_paths: Vec<PathBuf>,
+) -> Vec<DiagnosticPath> {
     let mut paths: Vec<DiagnosticPath> = desktop_paths
         .into_iter()
         .map(|path| DiagnosticPath {
@@ -105,12 +114,14 @@ fn diagnostic_paths(home_dir: &Path, desktop_paths: Vec<PathBuf>) -> Vec<Diagnos
 
     // Resolve through the client registry (CLAUDE_CONFIG_DIR-aware) instead of
     // a fixed `.claude` offset from home, so this diagnostic reports the same
-    // paths the scanner actually reads.
+    // paths the scanner actually reads — and respect `use_env_roots` so a
+    // `--home` override keeps its documented ignore-conflicting-env-vars
+    // semantics instead of always following CLAUDE_CONFIG_DIR.
     let claude_root = PathBuf::from(
         tokscale_core::ClientId::Claude
             .data()
             .root
-            .resolve(&home_dir.to_string_lossy()),
+            .resolve_with_env_strategy(&home_dir.to_string_lossy(), use_env_roots),
     );
     for (label, path) in [
         ("claudeCodeProjects", claude_root.join("projects")),

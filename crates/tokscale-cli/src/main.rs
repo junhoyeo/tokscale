@@ -2014,6 +2014,7 @@ fn run_models_report(
         .map(|home| {
             claude_diagnostics::diagnostics_for_empty_explicit_report(
                 home,
+                use_env_roots,
                 &clients,
                 claude_message_count,
             )
@@ -4197,7 +4198,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                 ));
 
                 let diagnostics = if client == ClientId::Claude {
-                    claude_diagnostics::diagnostics_for_clients_row(&home_dir)
+                    claude_diagnostics::diagnostics_for_clients_row(&home_dir, use_env_roots)
                 } else {
                     Vec::new()
                 };

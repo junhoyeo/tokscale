@@ -809,6 +809,7 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env_remove("TOKSCALE_EXTRA_DIRS")
         .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
@@ -848,6 +849,7 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env_remove("TOKSCALE_EXTRA_DIRS")
         .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
@@ -3603,6 +3605,61 @@ fn test_clients_json_includes_claude_desktop_diagnostic() {
                 .unwrap()
                 .contains("Claude Desktop app data was detected")
     }));
+}
+
+#[test]
+fn test_clients_home_override_ignores_conflicting_claude_config_dir_env() {
+    let real_home = create_empty_fixture_dir();
+    fs::create_dir_all(real_home.path().join("Library/Application Support/Claude")).unwrap();
+    let conflicting_home = TempDir::new().expect("failed to create temp dir");
+    let conflicting_claude_dir = TempDir::new().expect("failed to create temp dir");
+
+    let output = cmd_with_conflicting_env(conflicting_home.path())
+        .env("CLAUDE_CONFIG_DIR", conflicting_claude_dir.path())
+        .args([
+            "clients",
+            "--json",
+            "--home",
+            real_home.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let diagnostics = claude["diagnostics"].as_array().unwrap();
+    let desktop_diagnostic = diagnostics
+        .iter()
+        .find(|item| item["code"] == "claude_desktop_not_scanned")
+        .expect("claude_desktop_not_scanned diagnostic should be present");
+    let paths = desktop_diagnostic["paths"].as_array().unwrap();
+
+    for label in ["claudeCodeProjects", "claudeCodeTranscripts"] {
+        let path = paths
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap_or_else(|| panic!("expected a {label} diagnostic path"))["path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            path.starts_with(real_home.path().to_str().unwrap()),
+            "{label} should stay under the --home override, got {path}"
+        );
+        assert!(
+            !path.contains(conflicting_claude_dir.path().to_str().unwrap()),
+            "{label} must not follow CLAUDE_CONFIG_DIR when --home is explicit, got {path}"
+        );
+    }
 }
 
 #[test]
