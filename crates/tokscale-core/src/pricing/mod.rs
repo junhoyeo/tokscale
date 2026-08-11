@@ -8,7 +8,7 @@ pub mod models_dev;
 pub mod openrouter;
 
 use custom::CustomPricing;
-use lookup::{compute_cost, LookupResult, PricingLookup};
+use lookup::{compute_cost, LookupResult, PricingLookup, ResolutionEvidence, ResolutionKind};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -431,12 +431,31 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> bool {
-        if let Some(result) = self.custom.lookup_with_key(model_id) {
-            return result.pricing.covers_usage(usage);
+        self.resolve_for_usage_with_provider(model_id, provider_id, usage)
+            .is_some_and(|result| {
+                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
+            })
+    }
+
+    /// Resolve the exact pricing evidence used to judge this usage for a
+    /// leaderboard submission.
+    ///
+    /// This differs from a plain lookup when a provider-scoped row borrows a
+    /// missing bucket rate from the canonical row. Callers that explain a
+    /// rejection must inspect this composed result, otherwise they can report
+    /// an incomplete price while the real blocker is the donor row's unsafe
+    /// model or price evidence.
+    pub(crate) fn resolve_for_usage_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> Option<LookupResult> {
+        if let Some(result) = self.lookup_custom(model_id) {
+            return Some(result);
         }
 
-        self.lookup
-            .covers_usage_with_provider(model_id, provider_id, usage)
+        self.lookup.resolve_for_usage(model_id, provider_id, usage)
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -446,6 +465,18 @@ impl PricingService {
                 pricing: result.pricing.clone(),
                 source: "Custom".into(),
                 matched_key: result.matched_key.to_string(),
+                evidence: ResolutionEvidence {
+                    kind: ResolutionKind::Custom,
+                    candidate_count: 1,
+                    price_consensus: true,
+                    exact_model_identity: true,
+                    alias_applied: false,
+                    // A custom entry can be reached through synthetic-model
+                    // normalization, which is exactly the case provenance has
+                    // to disclose: the matched key is not the requested id.
+                    normalized: result.normalized,
+                    stripped: false,
+                },
             })
     }
 }
@@ -1694,5 +1725,64 @@ mod tests {
 
         let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    /// A custom entry keyed by the normalized model name still prices a raw
+    /// synthetic id, and provenance has to say the match came from that
+    /// normalized key rather than from the id as written.
+    #[test]
+    fn custom_match_through_synthetic_normalization_reports_normalized_provenance() {
+        let service = custom_service(
+            HashMap::from([("glm-4.7".to_string(), model_pricing(0.000001, 0.000002))]),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let normalized = service
+            .lookup_with_source("hf:zai-org/GLM-4.7", None)
+            .expect("the normalized custom key prices the synthetic id");
+        assert_eq!(normalized.source, "Custom");
+        assert_eq!(normalized.matched_key, "glm-4.7");
+        assert!(
+            normalized.evidence.normalized,
+            "a match reached through synthetic-model normalization is normalized"
+        );
+        assert!(normalized.evidence.is_submission_safe());
+
+        // The raw key is untouched: only the fallback path is normalized.
+        let raw = service
+            .lookup_with_source("glm-4.7", None)
+            .expect("the custom key still matches as written");
+        assert_eq!(raw.matched_key, "glm-4.7");
+        assert!(!raw.evidence.normalized);
+    }
+
+    #[test]
+    fn ambiguous_fuzzy_price_remains_visible_but_does_not_cover_submission() {
+        let litellm = HashMap::from([
+            (
+                "vendor-a/atlas-chat-preview".into(),
+                model_pricing(0.000001, 0.000002),
+            ),
+            (
+                "vendor-b/atlas-chat-beta".into(),
+                model_pricing(0.000003, 0.000006),
+            ),
+        ]);
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolution = service
+            .lookup_with_source("atlas-chat", None)
+            .expect("lenient reporting keeps the estimated price visible");
+        assert!(!resolution.evidence.is_submission_safe());
+        assert!(service.calculate_cost_with_provider("atlas-chat", None, &usage) > 0.0);
+        assert!(!service.covers_usage_with_provider("atlas-chat", None, &usage));
     }
 }

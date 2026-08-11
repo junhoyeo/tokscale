@@ -2811,7 +2811,7 @@ fn run_monthly_report(
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
-    use tokscale_core::{get_monthly_report, GroupBy, ReportOptions};
+    use tokscale_core::{get_monthly_report_v2, GroupBy, ReportOptions};
 
     let (since, until) = build_date_filter(date, &home_dir);
     let year = normalize_year_filter(date);
@@ -2831,7 +2831,7 @@ fn run_monthly_report(
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
-            get_monthly_report(ReportOptions {
+            get_monthly_report_v2(ReportOptions {
                 home_dir: home_dir.clone(),
                 use_env_roots,
                 clients,
@@ -2852,6 +2852,7 @@ fn run_monthly_report(
                 || e.output != 0
                 || e.cache_read != 0
                 || e.cache_write != 0
+                || e.reasoning != 0
                 || e.cost != 0.0
         });
     }
@@ -2878,6 +2879,7 @@ fn run_monthly_report(
             output: i64,
             cache_read: i64,
             cache_write: i64,
+            reasoning: i64,
             message_count: i32,
             cost: f64,
         }
@@ -2903,6 +2905,7 @@ fn run_monthly_report(
                     output: e.output,
                     cache_read: e.cache_read,
                     cache_write: e.cache_write,
+                    reasoning: e.reasoning,
                     message_count: e.message_count,
                     cost: e.cost,
                 })
@@ -2964,7 +2967,8 @@ fn run_monthly_report(
                     entry.output,
                     entry.cache_read,
                     entry.cache_write,
-                );
+                )
+                .saturating_add(entry.reasoning);
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -2979,14 +2983,15 @@ fn run_monthly_report(
                 ]);
             }
 
-            let (total_input, total_output, total_cache_read, total_cache_write) =
+            let (total_input, total_output, total_cache_read, total_cache_write, total_reasoning) =
                 monthly_token_field_totals(&report.entries);
             let total_tokens = saturating_token_total(
                 total_input,
                 total_output,
                 total_cache_read,
                 total_cache_write,
-            );
+            )
+            .saturating_add(total_reasoning);
             table.add_row(vec![
                 Cell::new("Total")
                     .fg(Color::Yellow)
@@ -3013,6 +3018,7 @@ fn run_monthly_report(
                 Cell::new("Output").fg(Color::Cyan),
                 Cell::new("Cache Write").fg(Color::Cyan),
                 Cell::new("Cache Read").fg(Color::Cyan),
+                Cell::new("Reasoning").fg(Color::Cyan),
                 Cell::new("Total").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
                 Cell::new("Cost/1M").fg(Color::Cyan),
@@ -3041,7 +3047,8 @@ fn run_monthly_report(
                     entry.output,
                     entry.cache_read,
                     entry.cache_write,
-                );
+                )
+                .saturating_add(entry.reasoning);
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -3054,6 +3061,8 @@ fn run_monthly_report(
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.cache_read))
                         .set_alignment(CellAlignment::Right),
+                    Cell::new(format_tokens_with_commas(entry.reasoning))
+                        .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(total)).set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
                     Cell::new(format_cost_per_million(entry.cost, total))
@@ -3061,14 +3070,15 @@ fn run_monthly_report(
                 ]);
             }
 
-            let (total_input, total_output, total_cache_read, total_cache_write) =
+            let (total_input, total_output, total_cache_read, total_cache_write, total_reasoning) =
                 monthly_token_field_totals(&report.entries);
             let total_all = saturating_token_total(
                 total_input,
                 total_output,
                 total_cache_read,
                 total_cache_write,
-            );
+            )
+            .saturating_add(total_reasoning);
 
             table.add_row(vec![
                 Cell::new("Total")
@@ -3085,6 +3095,9 @@ fn run_monthly_report(
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_cache_read))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_tokens_with_commas(total_reasoning))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_all))
@@ -3565,13 +3578,37 @@ fn run_pricing_lookup(
                     model_id: String,
                     matched_key: String,
                     source: String,
+                    resolution: ResolutionOutput,
                     pricing: PricingValues,
+                }
+
+                #[derive(serde::Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ResolutionOutput {
+                    kind: &'static str,
+                    candidate_count: usize,
+                    price_consensus: bool,
+                    exact_model_identity: bool,
+                    alias_applied: bool,
+                    normalized: bool,
+                    stripped: bool,
+                    submission_safe: bool,
                 }
 
                 let output = PricingOutput {
                     model_id: model_id.to_string(),
                     matched_key: pricing.matched_key,
                     source: pricing.source,
+                    resolution: ResolutionOutput {
+                        kind: pricing.evidence.kind.as_str(),
+                        candidate_count: pricing.evidence.candidate_count,
+                        price_consensus: pricing.evidence.price_consensus,
+                        exact_model_identity: pricing.evidence.exact_model_identity,
+                        alias_applied: pricing.evidence.alias_applied,
+                        normalized: pricing.evidence.normalized,
+                        stripped: pricing.evidence.stripped,
+                        submission_safe: pricing.evidence.is_submission_safe(),
+                    },
                     pricing: PricingValues {
                         input_cost_per_token: pricing.pricing.input_cost_per_token.unwrap_or(0.0),
                         output_cost_per_token: pricing.pricing.output_cost_per_token.unwrap_or(0.0),
@@ -3614,6 +3651,22 @@ fn run_pricing_lookup(
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
+                let safety = if pricing.evidence.is_submission_safe() {
+                    "submission-safe"
+                } else {
+                    "estimate only"
+                };
+                println!(
+                    "  Resolution: {} ({}, {} candidate{})",
+                    pricing.evidence.kind.as_str(),
+                    safety,
+                    pricing.evidence.candidate_count,
+                    if pricing.evidence.candidate_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                );
                 println!();
                 let input = pricing.pricing.input_cost_per_token.unwrap_or(0.0);
                 let output = pricing.pricing.output_cost_per_token.unwrap_or(0.0);
@@ -3787,20 +3840,23 @@ fn saturating_token_total(input: i64, output: i64, cache_read: i64, cache_write:
         .saturating_add(cache_write)
 }
 
-/// Sum the (input, output, cache_read, cache_write) token fields across
-/// monthly usage entries with saturating_add. `MonthlyReport` (unlike
-/// `ModelReport`) doesn't carry precomputed grand totals, so the display
+/// Sum every monthly token field (input, output, cache read, cache write, and
+/// reasoning) across usage entries with saturating_add. `MonthlyReportV2`
+/// (unlike `ModelReport`) doesn't carry precomputed grand totals, so the display
 /// layer aggregates `report.entries` itself; a saturating fold keeps that
 /// aggregation safe against clamped (i64::MAX) entry buckets.
-fn monthly_token_field_totals(entries: &[tokscale_core::MonthlyUsage]) -> (i64, i64, i64, i64) {
+fn monthly_token_field_totals(
+    entries: &[tokscale_core::MonthlyUsageV2],
+) -> (i64, i64, i64, i64, i64) {
     entries.iter().fold(
-        (0, 0, 0, 0),
-        |(input, output, cache_read, cache_write), entry| {
+        (0, 0, 0, 0, 0),
+        |(input, output, cache_read, cache_write, reasoning), entry| {
             (
                 input.saturating_add(entry.input),
                 output.saturating_add(entry.output),
                 cache_read.saturating_add(entry.cache_read),
                 cache_write.saturating_add(entry.cache_write),
+                reasoning.saturating_add(entry.reasoning),
             )
         },
     )
@@ -3895,39 +3951,15 @@ fn format_model_name(model: &str) -> String {
 }
 
 fn capitalize_client(client: &str) -> String {
-    match client {
-        "opencode" => "OpenCode".to_string(),
-        "claude" => "Claude".to_string(),
-        "codex" => "Codex".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "amp" => "Amp".to_string(),
-        "codebuff" => "Codebuff".to_string(),
-        "freebuff" => "Freebuff".to_string(),
-        "droid" => "Droid".to_string(),
-        "crush" => "Crush".to_string(),
-        "openclaw" => "openclaw".to_string(),
-        "hermes" => "Hermes Agent".to_string(),
-        "goose" => "Goose".to_string(),
-        "warp" => "Warp".to_string(),
-        "grok" => "Grok Build".to_string(),
-        "9router" => "9Router".to_string(),
-        "pi" => "Pi".to_string(),
-        "gjc" => "Gajae-Code".to_string(),
-        "jcode" => "Jcode".to_string(),
-        "commandcode" => "Command Code".to_string(),
-        "junie" => "Junie".to_string(),
-        "zcode" => "ZCode".to_string(),
-        "codebuddy" => "CodeBuddy".to_string(),
-        "workbuddy" => "WorkBuddy".to_string(),
-        "devin-cli" => "Devin CLI".to_string(),
-        "devin-desktop" => "Devin Desktop".to_string(),
-        "senpi" => "Senpi (OmO Native)".to_string(),
-        "augment" => "Augment Code".to_string(),
-        "kimchi" => "Kimchi".to_string(),
-        "prime-agent" => "Prime Agent".to_string(),
-        other => other.to_string(),
-    }
+    tokscale_core::ClientId::from_str(client)
+        .map(|client_id| client_id.display_name().to_string())
+        .unwrap_or_else(|| match client {
+            // 9Router is a gjc-compatible source alias, not a separately
+            // scannable client, so it intentionally remains outside ClientDef.
+            "9router" => "9Router".to_string(),
+            "synthetic" => "Synthetic".to_string(),
+            other => other.to_string(),
+        })
 }
 
 fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
@@ -6537,26 +6569,28 @@ mod tests {
 
     #[test]
     fn monthly_token_field_totals_saturate_across_entries() {
-        // MonthlyReport has no precomputed grand totals, so the display layer
+        // MonthlyReportV2 has no precomputed grand totals, so the display layer
         // aggregates report.entries itself. Two entries each carrying a
         // clamped (i64::MAX) input bucket must not overflow that aggregation.
-        let make = |input: i64| tokscale_core::MonthlyUsage {
+        let make = |input: i64, reasoning: i64| tokscale_core::MonthlyUsageV2 {
             month: "2026-07".to_string(),
             models: vec![],
             input,
             output: 0,
             cache_read: 0,
             cache_write: 0,
+            reasoning,
             message_count: 1,
             cost: 0.0,
         };
-        let entries = vec![make(i64::MAX), make(i64::MAX)];
-        let (total_input, total_output, total_cache_read, total_cache_write) =
+        let entries = vec![make(i64::MAX, 100), make(i64::MAX, 23)];
+        let (total_input, total_output, total_cache_read, total_cache_write, total_reasoning) =
             monthly_token_field_totals(&entries);
         assert_eq!(total_input, i64::MAX);
         assert_eq!(total_output, 0);
         assert_eq!(total_cache_read, 0);
         assert_eq!(total_cache_write, 0);
+        assert_eq!(total_reasoning, 123);
     }
 
     #[test]
@@ -7658,22 +7692,22 @@ mod tests {
 
     #[test]
     fn test_capitalize_client_claude() {
-        assert_eq!(capitalize_client("claude"), "Claude");
+        assert_eq!(capitalize_client("claude"), "Claude Code");
     }
 
     #[test]
     fn test_capitalize_client_codex() {
-        assert_eq!(capitalize_client("codex"), "Codex");
+        assert_eq!(capitalize_client("codex"), "Codex CLI");
     }
 
     #[test]
     fn test_capitalize_client_cursor() {
-        assert_eq!(capitalize_client("cursor"), "Cursor");
+        assert_eq!(capitalize_client("cursor"), "Cursor IDE");
     }
 
     #[test]
     fn test_capitalize_client_gemini() {
-        assert_eq!(capitalize_client("gemini"), "Gemini");
+        assert_eq!(capitalize_client("gemini"), "Gemini CLI");
     }
 
     #[test]
@@ -7693,7 +7727,7 @@ mod tests {
 
     #[test]
     fn test_capitalize_client_openclaw() {
-        assert_eq!(capitalize_client("openclaw"), "openclaw");
+        assert_eq!(capitalize_client("openclaw"), "OpenClaw");
     }
 
     #[test]
@@ -7714,6 +7748,13 @@ mod tests {
     #[test]
     fn test_capitalize_client_jcode() {
         assert_eq!(capitalize_client("jcode"), "Jcode");
+    }
+
+    #[test]
+    fn test_capitalize_client_covers_every_registered_client() {
+        for client in tokscale_core::ClientId::iter() {
+            assert_eq!(capitalize_client(client.as_str()), client.display_name());
+        }
     }
 
     #[test]

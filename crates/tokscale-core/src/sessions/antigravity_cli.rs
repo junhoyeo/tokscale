@@ -41,7 +41,7 @@
 //! server-supplied name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash
 //! (High)`) and could be localized.
 
-use super::utils::open_readonly_sqlite;
+use super::utils::open_readonly_sqlite_opt;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -49,7 +49,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(path) else {
+    let Some(conn) = open_readonly_sqlite_opt(path) else {
         return Vec::new();
     };
 

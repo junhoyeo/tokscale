@@ -3,7 +3,7 @@
 //! Parses messages from:
 //! - SQLite database: ~/.local/share/mimocode/mimocode.db
 
-use super::utils::open_readonly_sqlite;
+use super::utils::open_readonly_sqlite_opt;
 use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
@@ -158,7 +158,7 @@ fn micode_duration_ms(time: &MiMoCodeTime) -> Option<i64> {
 }
 
 pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 

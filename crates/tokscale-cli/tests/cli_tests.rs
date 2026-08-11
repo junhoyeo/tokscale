@@ -956,6 +956,31 @@ fn add_zero_usage_opencode_message(base: &Path) {
     fs::write(session3.join("msg_z.json"), msg_z).unwrap();
 }
 
+/// Add a month whose only non-zero token bucket is reasoning. This catches
+/// callers that accidentally fall back to the original MonthlyUsage shape.
+fn add_reasoning_only_opencode_message(base: &Path) {
+    let session = base.join(".local/share/opencode/storage/message/reasoning-session");
+    fs::create_dir_all(&session).unwrap();
+
+    // 2026-02-15 12:00:00 UTC = 1771156800000 ms
+    let message = r#"{
+        "id": "reasoning-msg",
+        "sessionID": "reasoning-session",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "cost": 0.0321,
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 321,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1771156800000.0 }
+    }"#;
+    fs::write(session.join("reasoning-msg.json"), message).unwrap();
+}
+
 fn write_fireworks_pricing_cache(base: &Path) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2543,6 +2568,7 @@ fn test_empty_report_total_cost_is_positive_zero() {
 fn test_hide_zero_drops_all_zero_entries_but_keeps_totals() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     add_zero_usage_opencode_message(tmp.path());
+    add_reasoning_only_opencode_message(tmp.path());
 
     let run = |args: &[&str]| -> serde_json::Value {
         let output = offline_cmd_with_home(tmp.path())
@@ -2592,6 +2618,17 @@ fn test_hide_zero_drops_all_zero_entries_but_keeps_totals() {
     };
     assert!(months(&full).contains(&"2023-03".to_string()));
     assert!(!months(&filtered).contains(&"2023-03".to_string()));
+    assert!(
+        months(&filtered).contains(&"2026-02".to_string()),
+        "--hide-zero must retain a reasoning-only month"
+    );
+    let reasoning_month = filtered["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["month"] == "2026-02")
+        .unwrap();
+    assert_eq!(reasoning_month["reasoning"], 321);
     assert_eq!(full["totalCost"], filtered["totalCost"]);
 
     // hourly: exactly one all-zero hour bucket disappears with the flag
@@ -2659,8 +2696,46 @@ fn test_monthly_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(first.get("reasoning").is_some());
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
+}
+
+#[test]
+fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
+    let tmp = create_temp_fixture_dir();
+    add_reasoning_only_opencode_message(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "monthly JSON failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reasoning_month = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["month"] == "2026-02")
+        .expect("reasoning-only month must be retained");
+    assert_eq!(reasoning_month["input"], 0);
+    assert_eq!(reasoning_month["output"], 0);
+    assert_eq!(reasoning_month["cacheRead"], 0);
+    assert_eq!(reasoning_month["cacheWrite"], 0);
+    assert_eq!(reasoning_month["reasoning"], 321);
+
+    cmd_with_home(tmp.path())
+        .args(["monthly", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026-02"))
+        // With no input/output/cache tokens, this finite Cost/1M value proves
+        // the table's token total includes the 321 reasoning tokens.
+        .stdout(predicate::str::contains("$100.00/M"));
 }
 
 #[test]
@@ -3314,6 +3389,8 @@ fn test_pricing_command_success() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Pricing for"))
+        .stdout(predicate::str::contains("Resolution:"))
+        .stdout(predicate::str::contains("submission-safe"))
         .stdout(predicate::str::contains("Input"))
         .stdout(predicate::str::contains("Output"));
 }
@@ -3334,7 +3411,13 @@ fn test_pricing_command_json() {
     assert!(json.get("modelId").is_some(), "Missing modelId");
     assert!(json.get("matchedKey").is_some(), "Missing matchedKey");
     assert!(json.get("source").is_some(), "Missing source");
+    assert!(json.get("resolution").is_some(), "Missing resolution");
     assert!(json.get("pricing").is_some(), "Missing pricing");
+
+    let resolution = &json["resolution"];
+    assert!(resolution.get("kind").is_some());
+    assert!(resolution.get("candidateCount").is_some());
+    assert_eq!(resolution["submissionSafe"].as_bool(), Some(true));
 
     let pricing = &json["pricing"];
     assert!(pricing.get("inputCostPerToken").is_some());

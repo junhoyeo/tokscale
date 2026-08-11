@@ -4,6 +4,7 @@
 //! - `~/.hermes/state.db`
 //! - `$HERMES_HOME/state.db`
 
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -222,10 +223,7 @@ fn has_session_model_usage(db_path: &Path, conn: &Connection) -> bool {
 }
 
 pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match open_readonly_sqlite(db_path) {
         Ok(c) => c,
         Err(err) => {
             warn!(

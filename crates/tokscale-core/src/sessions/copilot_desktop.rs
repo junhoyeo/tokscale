@@ -3,11 +3,10 @@
 //! The macOS desktop app stores aggregate token totals in `~/.copilot/data.db`
 //! and per-session event metadata in `~/.copilot/session-state/{session_id}`.
 
-use super::utils::lossy_lines;
+use super::utils::{lossy_lines, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use chrono::{DateTime, NaiveDateTime};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -240,10 +239,7 @@ fn shutdown_deltas(
 }
 
 pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match open_readonly_sqlite(db_path) {
         Ok(conn) => conn,
         Err(err) => {
             warn!(
@@ -670,6 +666,13 @@ mod tests {
     use rusqlite::{params, Connection};
     use std::fs::{self, File};
     use std::io::Write;
+
+    #[test]
+    fn parse_copilot_desktop_db_returns_empty_for_missing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        assert!(parse_copilot_desktop_db(&missing).is_empty());
+    }
 
     fn create_copilot_desktop_db(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();

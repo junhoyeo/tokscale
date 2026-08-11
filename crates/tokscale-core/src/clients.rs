@@ -222,7 +222,7 @@ impl ClientDef {
 }
 
 macro_rules! define_clients {
-    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
+    ( $( $variant:ident = $index:expr => { id: $id:expr, display: $display:expr, logo: $logo:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(usize)]
         pub enum ClientId {
@@ -239,6 +239,14 @@ macro_rules! define_clients {
 
             pub fn as_str(&self) -> &'static str {
                 self.data().id
+            }
+
+            pub fn display_name(&self) -> &'static str {
+                CLIENT_DISPLAY_NAMES[*self as usize]
+            }
+
+            pub fn logo_url(&self) -> Option<&'static str> {
+                CLIENT_LOGO_URLS[*self as usize]
             }
 
             pub fn file_pattern(&self) -> &'static str {
@@ -279,6 +287,12 @@ macro_rules! define_clients {
             } ),+
         ];
 
+        // Display metadata is generated from the same exhaustive registry but
+        // kept out of public ClientDef so downstream struct literals remain
+        // source-compatible.
+        const CLIENT_DISPLAY_NAMES: [&str; ClientId::COUNT] = [ $( $display ),+ ];
+        const CLIENT_LOGO_URLS: [Option<&str>; ClientId::COUNT] = [ $( $logo ),+ ];
+
         const _: () = {
             let mut i = 0;
             $(
@@ -293,7 +307,8 @@ macro_rules! define_clients {
 define_clients!(
     OpenCode = 0 => {
         id: "opencode",
-        root: PathRoot::XdgData,
+        display: "OpenCode",
+        logo: Some("https://tokscale.ai/assets/logos/opencode.png"),root: PathRoot::XdgData,
         relative: "opencode/storage/message",
         pattern: "*.json",
         headless: false,
@@ -302,7 +317,8 @@ define_clients!(
     },
     Claude = 1 => {
         id: "claude",
-        root: PathRoot::Home,
+        display: "Claude Code",
+        logo: Some("https://tokscale.ai/assets/logos/claude.jpg"),root: PathRoot::Home,
         relative: ".claude/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -311,7 +327,8 @@ define_clients!(
     },
     Codex = 2 => {
         id: "codex",
-        root: PathRoot::EnvVar {
+        display: "Codex CLI",
+        logo: Some("https://tokscale.ai/assets/logos/openai.jpg"),root: PathRoot::EnvVar {
             var: "CODEX_HOME",
             fallback_relative: ".codex",
         },
@@ -323,7 +340,8 @@ define_clients!(
     },
     Cursor = 3 => {
         id: "cursor",
-        root: PathRoot::Home,
+        display: "Cursor IDE",
+        logo: Some("https://tokscale.ai/assets/logos/cursor.jpg"),root: PathRoot::Home,
         relative: ".config/tokscale/cursor-cache",
         pattern: "usage*.csv",
         headless: false,
@@ -332,7 +350,8 @@ define_clients!(
     },
     Gemini = 4 => {
         id: "gemini",
-        root: PathRoot::EnvVar {
+        display: "Gemini CLI",
+        logo: Some("https://tokscale.ai/assets/logos/gemini.png"),root: PathRoot::EnvVar {
             var: "GEMINI_CLI_HOME",
             fallback_relative: ".gemini",
         },
@@ -344,7 +363,8 @@ define_clients!(
     },
     Amp = 5 => {
         id: "amp",
-        root: PathRoot::XdgData,
+        display: "Amp",
+        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::XdgData,
         relative: "amp/threads",
         pattern: "T-*.json",
         headless: false,
@@ -353,7 +373,8 @@ define_clients!(
     },
     Droid = 6 => {
         id: "droid",
-        root: PathRoot::Home,
+        display: "Droid",
+        logo: Some("https://tokscale.ai/assets/logos/droid.png"),root: PathRoot::Home,
         relative: ".factory/sessions",
         pattern: "*.settings.json",
         headless: false,
@@ -362,7 +383,8 @@ define_clients!(
     },
     OpenClaw = 7 => {
         id: "openclaw",
-        root: PathRoot::Home,
+        display: "OpenClaw",
+        logo: Some("https://tokscale.ai/assets/logos/openclaw.png"),root: PathRoot::Home,
         relative: ".openclaw/agents",
         pattern: "*.jsonl*",
         headless: false,
@@ -371,7 +393,8 @@ define_clients!(
     },
     Pi = 8 => {
         id: "pi",
-        root: PathRoot::Home,
+        display: "Pi",
+        logo: Some("https://tokscale.ai/assets/logos/pi.png"),root: PathRoot::Home,
         relative: ".pi/agent/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -380,7 +403,8 @@ define_clients!(
     },
     Kimi = 9 => {
         id: "kimi",
-        root: PathRoot::Home,
+        display: "Kimi CLI",
+        logo: Some("https://tokscale.ai/assets/logos/kimi.png"),root: PathRoot::Home,
         relative: ".kimi/sessions",
         pattern: "wire.jsonl",
         headless: false,
@@ -389,7 +413,8 @@ define_clients!(
     },
     Qwen = 10 => {
         id: "qwen",
-        root: PathRoot::Home,
+        display: "Qwen CLI",
+        logo: Some("https://tokscale.ai/assets/logos/qwen.png"),root: PathRoot::Home,
         relative: ".qwen/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -398,7 +423,8 @@ define_clients!(
     },
     RooCode = 11 => {
         id: "roocode",
-        root: PathRoot::Home,
+        display: "Roo Code",
+        logo: Some("https://tokscale.ai/assets/logos/roocode.png"),root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -407,7 +433,8 @@ define_clients!(
     },
     KiloCode = 12 => {
         id: "kilocode",
-        root: PathRoot::Home,
+        display: "Kilo Code",
+        logo: Some("https://tokscale.ai/assets/logos/kilocode.png"),root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -416,7 +443,8 @@ define_clients!(
     },
     Mux = 13 => {
         id: "mux",
-        root: PathRoot::Home,
+        display: "Mux",
+        logo: Some("https://tokscale.ai/assets/logos/mux.png"),root: PathRoot::Home,
         relative: ".mux/sessions",
         pattern: "session-usage.json",
         headless: false,
@@ -425,7 +453,8 @@ define_clients!(
     },
     Kilo = 14 => {
         id: "kilo",
-        root: PathRoot::XdgData,
+        display: "Kilo CLI",
+        logo: Some("https://tokscale.ai/assets/logos/kilocode.png"),root: PathRoot::XdgData,
         relative: "kilo/kilo.db",
         pattern: "kilo.db",
         headless: false,
@@ -434,7 +463,8 @@ define_clients!(
     },
     Crush = 15 => {
         id: "crush",
-        root: PathRoot::XdgData,
+        display: "Crush",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"),root: PathRoot::XdgData,
         relative: "crush/projects.json",
         pattern: "projects.json",
         headless: false,
@@ -443,7 +473,8 @@ define_clients!(
     },
     Hermes = 16 => {
         id: "hermes",
-        root: PathRoot::EnvVar {
+        display: "Hermes Agent",
+        logo: Some("https://tokscale.ai/assets/logos/hermes.png"),root: PathRoot::EnvVar {
             var: "HERMES_HOME",
             fallback_relative: ".hermes",
         },
@@ -455,7 +486,8 @@ define_clients!(
     },
     Copilot = 17 => {
         id: "copilot",
-        root: PathRoot::Home,
+        display: "Copilot CLI",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg"),root: PathRoot::Home,
         relative: ".copilot/otel",
         pattern: "*.jsonl",
         headless: false,
@@ -464,7 +496,8 @@ define_clients!(
     },
     Goose = 18 => {
         id: "goose",
-        root: PathRoot::XdgData,
+        display: "Goose",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png"),root: PathRoot::XdgData,
         relative: "goose/sessions/sessions.db",
         pattern: "sessions.db",
         headless: false,
@@ -473,7 +506,8 @@ define_clients!(
     },
     Codebuff = 19 => {
         id: "codebuff",
-        root: PathRoot::EnvVar {
+        display: "Codebuff",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png"),root: PathRoot::EnvVar {
             var: "CODEBUFF_DATA_DIR",
             fallback_relative: ".config/manicode",
         },
@@ -485,7 +519,8 @@ define_clients!(
     },
     Antigravity = 20 => {
         id: "antigravity",
-        root: PathRoot::Config,
+        display: "Antigravity",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"),root: PathRoot::Config,
         relative: "antigravity-cache/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -494,7 +529,8 @@ define_clients!(
     },
     Zed = 21 => {
         id: "zed",
-        root: PathRoot::XdgData,
+        display: "Zed Agent",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"),root: PathRoot::XdgData,
         relative: "zed/threads/threads.db",
         pattern: "threads.db",
         headless: false,
@@ -503,7 +539,8 @@ define_clients!(
     },
     Kiro = 22 => {
         id: "kiro",
-        root: PathRoot::Home,
+        display: "Kiro",
+        logo: None,root: PathRoot::Home,
         relative: ".kiro/sessions/cli",
         pattern: "*.json",
         headless: false,
@@ -512,7 +549,8 @@ define_clients!(
     },
     Trae = 23 => {
         id: "trae",
-        root: PathRoot::Config,
+        display: "Trae",
+        logo: None,root: PathRoot::Config,
         relative: "trae-cache/sessions",
         pattern: "*.json",
         headless: false,
@@ -521,7 +559,8 @@ define_clients!(
     },
     Warp = 24 => {
         id: "warp",
-        root: PathRoot::Config,
+        display: "Warp",
+        logo: None,root: PathRoot::Config,
         relative: "warp-cache",
         pattern: "usage*.json",
         headless: false,
@@ -530,7 +569,8 @@ define_clients!(
     },
     Cline = 25 => {
         id: "cline",
-        root: PathRoot::Home,
+        display: "Cline",
+        logo: None,root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -539,7 +579,8 @@ define_clients!(
     },
     Gjc = 26 => {
         id: "gjc",
-        root: PathRoot::EnvVar {
+        display: "Gajae-Code",
+        logo: None,root: PathRoot::EnvVar {
             var: "GJC_CODING_AGENT_DIR",
             fallback_relative: ".gjc/agent",
         },
@@ -551,7 +592,8 @@ define_clients!(
     },
     Grok = 27 => {
         id: "grok",
-        root: PathRoot::EnvVar {
+        display: "Grok Build",
+        logo: None,root: PathRoot::EnvVar {
             var: "GROK_HOME",
             fallback_relative: ".grok",
         },
@@ -563,7 +605,8 @@ define_clients!(
     },
     Jcode = 28 => {
         id: "jcode",
-        root: PathRoot::EnvVar {
+        display: "Jcode",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),root: PathRoot::EnvVar {
             var: "JCODE_HOME",
             fallback_relative: ".jcode",
         },
@@ -575,7 +618,8 @@ define_clients!(
     },
     CommandCode = 29 => {
         id: "commandcode",
-        root: PathRoot::Home,
+        display: "Command Code",
+        logo: None,root: PathRoot::Home,
         relative: ".commandcode/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -584,7 +628,8 @@ define_clients!(
     },
     MiMoCode = 30 => {
         id: "micode",
-        root: PathRoot::XdgData,
+        display: "MiMo Code",
+        logo: None,root: PathRoot::XdgData,
         relative: "mimocode",
         pattern: "*.db",
         headless: false,
@@ -599,7 +644,8 @@ define_clients!(
     // `GEMINI_CLI_HOME` so a relocated Gemini home is picked up.
     AntigravityCli = 31 => {
         id: "antigravity-cli",
-        root: PathRoot::EnvVar {
+        display: "Antigravity CLI",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"),root: PathRoot::EnvVar {
             var: "GEMINI_CLI_HOME",
             fallback_relative: ".gemini",
         },
@@ -611,7 +657,8 @@ define_clients!(
     },
     Junie = 32 => {
         id: "junie",
-        root: PathRoot::Home,
+        display: "Junie",
+        logo: Some("https://github.com/JetBrains.png"),root: PathRoot::Home,
         relative: ".junie/sessions",
         pattern: "events.jsonl",
         headless: false,
@@ -620,7 +667,8 @@ define_clients!(
     },
     Zcode = 33 => {
         id: "zcode",
-        root: PathRoot::Home,
+        display: "ZCode",
+        logo: None,root: PathRoot::Home,
         relative: ".zcode/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -629,7 +677,8 @@ define_clients!(
     },
     OpenCodeReview = 34 => {
         id: "opencodereview",
-        root: PathRoot::Home,
+        display: "OpenCodeReview",
+        logo: None,root: PathRoot::Home,
         relative: ".opencodereview/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -638,7 +687,8 @@ define_clients!(
     },
     CodeBuddy = 35 => {
         id: "codebuddy",
-        root: PathRoot::Home,
+        display: "CodeBuddy",
+        logo: None,root: PathRoot::Home,
         relative: ".codebuddy/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -647,7 +697,8 @@ define_clients!(
     },
     WorkBuddy = 36 => {
         id: "workbuddy",
-        root: PathRoot::Home,
+        display: "WorkBuddy",
+        logo: None,root: PathRoot::Home,
         relative: ".workbuddy",
         pattern: "workbuddy.db",
         headless: false,
@@ -656,7 +707,8 @@ define_clients!(
     },
     DevinCli = 37 => {
         id: "devin-cli",
-        root: PathRoot::XdgData,
+        display: "Devin CLI",
+        logo: None,root: PathRoot::XdgData,
         relative: "devin/cli/sessions.db",
         pattern: "sessions.db",
         headless: false,
@@ -665,7 +717,8 @@ define_clients!(
     },
     DevinDesktop = 38 => {
         id: "devin-desktop",
-        root: PathRoot::Home,
+        display: "Devin Desktop",
+        logo: None,root: PathRoot::Home,
         relative: "Library/Application Support/Devin/User/acp-events",
         pattern: "*.ndjson",
         headless: false,
@@ -678,7 +731,8 @@ define_clients!(
     // mirroring the `gjc` layout.
     Senpi = 39 => {
         id: "senpi",
-        root: PathRoot::EnvVar {
+        display: "Senpi (OmO Native)",
+        logo: None,root: PathRoot::EnvVar {
             var: "SENPI_CODING_AGENT_DIR",
             fallback_relative: ".senpi/agent",
         },
@@ -693,7 +747,8 @@ define_clients!(
     // exchange.response_nodes.
     Augment = 40 => {
         id: "augment",
-        root: PathRoot::Home,
+        display: "Augment Code",
+        logo: Some("https://github.com/augmentcode.png"),root: PathRoot::Home,
         relative: ".augment/sessions",
         pattern: "*.json",
         headless: false,
@@ -704,7 +759,8 @@ define_clients!(
     // The launcher exposes KIMCHI_CODING_AGENT_DIR for relocated installs.
     Kimchi = 41 => {
         id: "kimchi",
-        root: PathRoot::EnvVar {
+        display: "Kimchi",
+        logo: Some("https://github.com/getkimchi.png"),root: PathRoot::EnvVar {
             var: "KIMCHI_CODING_AGENT_DIR",
             fallback_relative: ".config/kimchi/harness",
         },
@@ -719,7 +775,8 @@ define_clients!(
     // excluded: it lacks exact token counters and overlaps these records.
     Reasonix = 42 => {
         id: "reasonix",
-        root: PathRoot::ReasonixHome,
+        display: "Reasonix",
+        logo: None,root: PathRoot::ReasonixHome,
         relative: "stats",
         pattern: "*.jsonl",
         headless: false,
@@ -731,7 +788,8 @@ define_clients!(
     // the sibling `session-artifacts` tree by the scanner.
     PrimeAgent = 43 => {
         id: "prime-agent",
-        root: PathRoot::EnvVar {
+        display: "Prime Agent",
+        logo: Some("https://github.com/PrimeIntellect-ai.png"),root: PathRoot::EnvVar {
             var: "PRIME_AGENT_CODING_AGENT_DIR",
             fallback_relative: ".prime/agent",
         },
@@ -748,7 +806,8 @@ define_clients!(
     // location (see `sessions::freebuff`).
     Freebuff = 44 => {
         id: "freebuff",
-        root: PathRoot::EnvVar {
+        display: "Freebuff",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-freebuff.png"),root: PathRoot::EnvVar {
             var: "FREEBUFF_DATA_DIR",
             fallback_relative: ".config/manicode",
         },
@@ -836,6 +895,38 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(var, value) },
             None => unsafe { std::env::remove_var(var) },
         }
+    }
+
+    #[test]
+    fn every_registered_client_has_human_readable_display_metadata() {
+        for client in ClientId::iter() {
+            let display_name = client.display_name();
+            assert!(
+                !display_name.trim().is_empty(),
+                "{} has no display name",
+                client.as_str()
+            );
+            assert_ne!(
+                display_name,
+                client.as_str(),
+                "{} falls back to its raw lowercase id",
+                client.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_client_brand_labels_and_logos_are_registered() {
+        assert_eq!(ClientId::Claude.display_name(), "Claude Code");
+        assert_eq!(ClientId::Codex.display_name(), "Codex CLI");
+        assert_eq!(ClientId::Cursor.display_name(), "Cursor IDE");
+        assert_eq!(ClientId::KiloCode.display_name(), "Kilo Code");
+        assert_eq!(ClientId::Kilo.display_name(), "Kilo CLI");
+        assert_eq!(ClientId::Senpi.display_name(), "Senpi (OmO Native)");
+        assert_eq!(
+            ClientId::OpenCode.logo_url(),
+            Some("https://tokscale.ai/assets/logos/opencode.png")
+        );
     }
 
     #[test]

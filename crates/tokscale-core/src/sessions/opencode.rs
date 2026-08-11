@@ -4,7 +4,7 @@
 //! - SQLite database (OpenCode 1.2+): ~/.local/share/opencode/opencode.db
 //! - Legacy JSON files: ~/.local/share/opencode/storage/message/
 
-use super::utils::{open_readonly_sqlite, read_file_or_none};
+use super::utils::{open_readonly_sqlite_opt, read_file_or_none};
 use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
@@ -458,7 +458,7 @@ fn collect_opencode_rows(
 }
 
 pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 

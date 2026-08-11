@@ -71,22 +71,9 @@ impl SessionBlock {
 
     fn add(&mut self, span: &SessionMessageSpan<'_>) {
         self.end_ts = self.end_ts.max(span.end_ts);
-        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
-        // can't overflow the fold.
-        self.tokens.input = self.tokens.input.saturating_add(span.msg.tokens.input);
-        self.tokens.output = self.tokens.output.saturating_add(span.msg.tokens.output);
-        self.tokens.cache_read = self
-            .tokens
-            .cache_read
-            .saturating_add(span.msg.tokens.cache_read);
-        self.tokens.cache_write = self
-            .tokens
-            .cache_write
-            .saturating_add(span.msg.tokens.cache_write);
-        self.tokens.reasoning = self
-            .tokens
-            .reasoning
-            .saturating_add(span.msg.tokens.reasoning);
+        // Aggregate the complete breakdown so future token buckets cannot be
+        // omitted from session totals.
+        self.tokens += &span.msg.tokens;
         self.cost += span.msg.cost;
         // Zero is intentional for attribution fragments split from one
         // authoritative source row; default construction already supplies one

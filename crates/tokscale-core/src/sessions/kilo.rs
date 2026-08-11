@@ -5,7 +5,7 @@
 //!
 //! Kilo CLI uses a SQLite database similar to OpenCode.
 
-use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite_opt};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -59,7 +59,7 @@ pub fn parse_kilo_sqlite_with_fallback(
     db_path: &Path,
     fallback_timestamp: i64,
 ) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 

@@ -1620,122 +1620,59 @@ mod tests {
     }
 
     #[test]
-    fn test_client_as_str() {
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::OpenCode),
-            "OpenCode"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Claude),
-            "Claude"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Codex),
-            "Codex"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Copilot),
-            "Copilot"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Cursor),
-            "Cursor"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Gemini),
-            "Gemini"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Amp), "Amp");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Droid),
-            "Droid"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::OpenClaw),
-            "OpenClaw"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Pi), "Pi");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kimi), "Kimi");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Qwen), "Qwen");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::RooCode),
-            "Roo Code"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::KiloCode),
-            "KiloCode"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Kilo),
-            "Kilo CLI"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Crush),
-            "Crush"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Hermes),
-            "Hermes Agent"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Codebuff),
-            "Codebuff"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Freebuff),
-            "Freebuff"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Antigravity),
-            "Antigravity"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Zed),
-            "Zed Agent"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Cline),
-            "Cline"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Grok),
-            "Grok Build"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Jcode),
-            "Jcode"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::AntigravityCli),
-            "Antigravity CLI"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Junie),
-            "Junie"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::CodeBuddy),
-            "CodeBuddy"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::WorkBuddy),
-            "WorkBuddy"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Augment),
-            "Augment"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Kimchi),
-            "Kimchi"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::PrimeAgent),
-            "Prime Agent"
-        );
+    fn test_client_display_names_match_canonical_registry() {
+        let expected = [
+            "OpenCode",
+            "Claude Code",
+            "Codex CLI",
+            "Cursor IDE",
+            "Gemini CLI",
+            "Amp",
+            "Droid",
+            "OpenClaw",
+            "Pi",
+            "Kimi CLI",
+            "Qwen CLI",
+            "Roo Code",
+            "Kilo Code",
+            "Mux",
+            "Kilo CLI",
+            "Crush",
+            "Hermes Agent",
+            "Copilot CLI",
+            "Goose",
+            "Codebuff",
+            "Antigravity",
+            "Zed Agent",
+            "Kiro",
+            "Trae",
+            "Warp",
+            "Cline",
+            "Gajae-Code",
+            "Grok Build",
+            "Jcode",
+            "Command Code",
+            "MiMo Code",
+            "Antigravity CLI",
+            "Junie",
+            "ZCode",
+            "OpenCodeReview",
+            "CodeBuddy",
+            "WorkBuddy",
+            "Devin CLI",
+            "Devin Desktop",
+            "Senpi (OmO Native)",
+            "Augment Code",
+            "Kimchi",
+            "Reasonix",
+            "Prime Agent",
+            "Freebuff",
+        ];
+
+        assert_eq!(expected.len(), ClientId::COUNT);
+        for (client, expected_name) in ClientId::iter().zip(expected) {
+            assert_eq!(crate::tui::client_ui::display_name(client), expected_name);
+        }
     }
 
     #[test]
