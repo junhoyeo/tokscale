@@ -3,6 +3,13 @@ use std::collections::HashSet;
 use tempfile::TempDir;
 use tokscale_core::sessions::hermes::parse_hermes_sqlite;
 
+#[test]
+fn test_parse_hermes_sqlite_returns_empty_for_missing_database() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("missing.db");
+    assert!(parse_hermes_sqlite(&missing).is_empty());
+}
+
 fn create_test_db(dir: &TempDir) -> std::path::PathBuf {
     let db_path = dir.path().join("state.db");
     let conn = Connection::open(&db_path).unwrap();

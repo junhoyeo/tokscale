@@ -1441,91 +1441,19 @@ fn format_number_with_commas_i64(value: i64) -> String {
 }
 
 fn client_display_name(client: &str) -> Option<&'static str> {
-    match client {
-        "opencode" => Some("OpenCode"),
-        "claude" => Some("Claude Code"),
-        "codex" => Some("Codex CLI"),
-        "copilot" => Some("Copilot CLI"),
-        "gemini" => Some("Gemini CLI"),
-        s if s == ClientId::Cursor.as_str() => Some("Cursor IDE"),
-        "amp" => Some("Amp"),
-        "codebuff" => Some("Codebuff"),
-        "freebuff" => Some("Freebuff"),
-        "droid" => Some("Droid"),
-        "openclaw" => Some("OpenClaw"),
-        "hermes" => Some("Hermes Agent"),
-        "pi" => Some("Pi"),
-        "kimi" => Some("Kimi CLI"),
-        "qwen" => Some("Qwen CLI"),
-        "roocode" => Some("Roo Code"),
-        "kilocode" => Some("Kilo"),
-        "kilo" => Some("Kilo CLI"),
-        "mux" => Some("Mux"),
-        "crush" => Some("Crush"),
-        "goose" => Some("Goose"),
-        "antigravity" => Some("Antigravity"),
-        "antigravity-cli" => Some("Antigravity CLI"),
-        "zed" => Some("Zed Agent"),
-        "warp" => Some("Warp"),
-        "cline" => Some("Cline"),
-        "gjc" => Some("Gajae-Code"),
-        "jcode" => Some("Jcode"),
-        "junie" => Some("Junie"),
-        "augment" => Some("Augment Code"),
-        "kimchi" => Some("Kimchi"),
-        "prime-agent" => Some("Prime Agent"),
-        "synthetic" => Some("Synthetic"),
-        _ => None,
-    }
+    ClientId::from_str(client)
+        .map(|client| client.display_name())
+        .or_else(|| (client == "9router").then_some("9Router"))
+        .or_else(|| (client == "synthetic").then_some("Synthetic"))
 }
 
 fn client_logo_url(client_name: &str) -> Option<&'static str> {
-    match client_name {
-        "OpenCode" => Some("https://tokscale.ai/assets/logos/opencode.png"),
-        "Claude Code" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
-        "Codex CLI" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
-        "Copilot CLI" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
-        ),
-        "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
-        "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
-        "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
-        "Codebuff" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
-        ),
-        "Freebuff" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-freebuff.png",
-        ),
-        "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
-        "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
-        "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
-        "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
-        "Prime Agent" => Some("https://github.com/PrimeIntellect-ai.png"),
-        "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
-        "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
-        "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
-        "Kilo" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
-        "Kilo CLI" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
-        "Mux" => Some("https://tokscale.ai/assets/logos/mux.png"),
-        "Crush" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png",
-        ),
-        "Goose" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
-        ),
-        "Antigravity" | "Antigravity CLI" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
-        ),
-        "Zed Agent" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
-        ),
-        "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
-        "Junie" => Some("https://github.com/JetBrains.png"),
-        "Augment Code" => Some("https://github.com/augmentcode.png"),
-        "Kimchi" => Some("https://github.com/getkimchi.png"),
-        "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
-        _ => None,
-    }
+    ClientId::iter()
+        .find(|client| client.display_name() == client_name)
+        .and_then(|client| client.logo_url())
+        .or_else(|| {
+            (client_name == "Synthetic").then_some("https://tokscale.ai/assets/logos/synthetic.png")
+        })
 }
 
 fn provider_logo_url(provider: &str) -> Option<&'static str> {
@@ -2490,6 +2418,21 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_covers_every_registered_client() {
+        for client in ClientId::iter() {
+            assert_eq!(
+                client_display_name(client.as_str()),
+                Some(client.display_name())
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_display_name_9router_alias() {
+        assert_eq!(client_display_name("9router"), Some("9Router"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2696,6 +2639,13 @@ mod tests {
             client_logo_url("Junie"),
             Some("https://github.com/JetBrains.png")
         );
+    }
+
+    #[test]
+    fn test_client_logo_url_uses_registered_metadata() {
+        for client in ClientId::iter() {
+            assert_eq!(client_logo_url(client.display_name()), client.logo_url());
+        }
     }
 
     #[test]

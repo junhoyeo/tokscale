@@ -6,9 +6,9 @@
 //! - Legacy Block/goose: `~/.local/share/Block/goose/sessions/sessions.db`
 //! - Custom: `$GOOSE_PATH_ROOT/data/sessions/sessions.db`
 
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
-use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::Path;
 use tracing::warn;
@@ -71,10 +71,7 @@ fn parse_created_at(s: &str) -> f64 {
 }
 
 pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match open_readonly_sqlite(db_path) {
         Ok(c) => c,
         Err(err) => {
             warn!(
@@ -220,6 +217,14 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_goose_sqlite_returns_empty_for_missing_database() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_db = temp_dir.path().join("missing.db");
+
+        assert!(parse_goose_sqlite(&missing_db).is_empty());
+    }
 
     #[test]
     fn test_parse_model_config_valid() {

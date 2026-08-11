@@ -9,10 +9,10 @@
 //! ACP agents are billed and logged by their own providers/CLIs, and counting
 //! their Zed UI rows would duplicate those sources.
 
-use super::utils::parse_timestamp_str;
+use super::utils::{open_readonly_sqlite, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Read;
@@ -34,10 +34,7 @@ struct ZedThreadRow {
 }
 
 pub fn parse_zed_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match open_readonly_sqlite(db_path) {
         Ok(conn) => conn,
         Err(err) => {
             warn!(
@@ -268,11 +265,7 @@ fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
         if usage.total() <= 0 {
             continue;
         }
-        total.input = total.input.saturating_add(usage.input);
-        total.output = total.output.saturating_add(usage.output);
-        total.cache_read = total.cache_read.saturating_add(usage.cache_read);
-        total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.reasoning = total.reasoning.saturating_add(usage.reasoning);
+        total += &usage;
         count = count.saturating_add(1);
     }
 

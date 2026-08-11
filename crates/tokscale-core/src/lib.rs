@@ -248,6 +248,18 @@ pub struct TokenBreakdown {
 }
 
 impl TokenBreakdown {
+    /// Add every token bucket from `other`, saturating each field independently.
+    ///
+    /// Use this for whole-breakdown aggregation so adding a new bucket cannot
+    /// silently leave one hand-written accumulation site incomplete.
+    pub fn add_assign_saturating(&mut self, other: &Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+    }
+
     pub fn total(&self) -> i64 {
         // saturating so clamped (i64::MAX) buckets from a corrupt source can't
         // overflow the sum.
@@ -256,6 +268,12 @@ impl TokenBreakdown {
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
             .saturating_add(self.reasoning)
+    }
+}
+
+impl std::ops::AddAssign<&TokenBreakdown> for TokenBreakdown {
+    fn add_assign(&mut self, other: &TokenBreakdown) {
+        self.add_assign_saturating(other);
     }
 }
 
@@ -544,6 +562,11 @@ pub struct ModelUsage {
     pub performance: ModelPerformance,
 }
 
+/// Original monthly usage shape returned by [`get_monthly_report`].
+///
+/// This type intentionally remains unchanged so downstream struct literals stay
+/// source-compatible. Use [`MonthlyUsageV2`] and [`get_monthly_report_v2`] when
+/// reasoning tokens are required.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyUsage {
     pub month: String,
@@ -552,6 +575,24 @@ pub struct MonthlyUsage {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    pub message_count: i32,
+    pub cost: f64,
+}
+
+/// Complete monthly usage including reasoning tokens.
+///
+/// This versioned type keeps downstream [`MonthlyUsage`] struct literals
+/// source-compatible while allowing CLI and API consumers to opt into the
+/// complete token breakdown.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonthlyUsageV2 {
+    pub month: String,
+    pub models: Vec<String>,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub reasoning: i64,
     pub message_count: i32,
     pub cost: f64,
 }
@@ -576,6 +617,53 @@ pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
+}
+
+/// Complete monthly report whose entries retain reasoning tokens.
+///
+/// Use [`get_monthly_report_v2`] to generate this shape. The original
+/// [`MonthlyReport`] and [`get_monthly_report`] remain available for source
+/// compatibility.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonthlyReportV2 {
+    pub entries: Vec<MonthlyUsageV2>,
+    pub total_cost: f64,
+    pub processing_time_ms: u32,
+}
+
+impl MonthlyUsageV2 {
+    /// Convert to the original public shape, intentionally discarding the
+    /// `reasoning` bucket that [`MonthlyUsage`] predates.
+    pub fn into_legacy(self) -> MonthlyUsage {
+        MonthlyUsage {
+            month: self.month,
+            models: self.models,
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            message_count: self.message_count,
+            cost: self.cost,
+        }
+    }
+}
+
+impl MonthlyReportV2 {
+    /// Convert to the original public report shape.
+    ///
+    /// Each entry's `reasoning` bucket is intentionally discarded because
+    /// [`MonthlyUsage`] predates that field.
+    pub fn into_legacy(self) -> MonthlyReport {
+        MonthlyReport {
+            entries: self
+                .entries
+                .into_iter()
+                .map(MonthlyUsageV2::into_legacy)
+                .collect(),
+            total_cost: self.total_cost,
+            processing_time_ms: self.processing_time_ms,
+        }
+    }
 }
 
 /// Hourly usage entry for a single hour slot (e.g. "2026-03-23 14:00")
@@ -641,12 +729,36 @@ fn parse_all_messages_with_pricing(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceCachePolicy {
+    Persistent,
+    InMemory,
+}
+
 fn parse_all_messages_with_pricing_with_env_strategy(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
+) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_pricing_with_cache_policy(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        SourceCachePolicy::Persistent,
+    )
+}
+
+fn parse_all_messages_with_pricing_with_cache_policy(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    cache_policy: SourceCachePolicy,
 ) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -1345,8 +1457,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         scanner_settings,
     );
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
-    let mut source_cache = message_cache::SourceMessageCache::load();
-    source_cache.prune_missing_files();
+    let mut source_cache = match cache_policy {
+        SourceCachePolicy::Persistent => {
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.prune_missing_files();
+            cache
+        }
+        SourceCachePolicy::InMemory => message_cache::SourceMessageCache::default(),
+    };
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
@@ -2620,7 +2738,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    source_cache.save_if_dirty();
+    if cache_policy == SourceCachePolicy::Persistent {
+        source_cache.save_if_dirty();
+    }
 
     rebucket_days(&mut all_messages, scanner_settings);
 
@@ -2966,11 +3086,61 @@ struct MonthAggregator {
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    reasoning: i64,
     message_count: i32,
     cost: f64,
 }
 
-pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
+fn aggregate_monthly_usage_v2_entries(
+    messages: impl IntoIterator<Item = UnifiedMessage>,
+) -> Vec<MonthlyUsageV2> {
+    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
+
+    for msg in messages {
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&msg.date, "%Y-%m-%d") else {
+            continue;
+        };
+        let month = date.format("%Y-%m").to_string();
+
+        let entry = month_map.entry(month).or_default();
+
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
+        // Saturating arithmetic matches the model/hourly aggregators: parser
+        // clamps can legitimately produce i64::MAX, and a corrupt source must
+        // not make report generation overflow.
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
+        entry.message_count = entry.message_count.saturating_add(msg.message_count.max(0));
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<MonthlyUsageV2> = month_map
+        .into_iter()
+        .map(|(month, agg)| MonthlyUsageV2 {
+            month,
+            models: agg.models.into_iter().collect(),
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            reasoning: agg.reasoning,
+            message_count: agg.message_count,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.month.cmp(&b.month));
+    entries
+}
+
+pub async fn get_monthly_report_v2(options: ReportOptions) -> Result<MonthlyReportV2, String> {
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -2994,59 +3164,25 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let month = if msg.date.len() >= 7 {
-            msg.date[..7].to_string()
-        } else {
-            continue;
-        };
-
-        let entry = month_map.entry(month).or_default();
-
-        entry.models.insert(model_name_for_grouping(
-            &msg.client,
-            &msg.provider_id,
-            &msg.model_id,
-        ));
-        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
-        // can't overflow the fold.
-        entry.input = entry.input.saturating_add(msg.tokens.input);
-        entry.output = entry.output.saturating_add(msg.tokens.output);
-        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
-        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
-    }
-
-    let mut entries: Vec<MonthlyUsage> = month_map
-        .into_iter()
-        .map(|(month, agg)| MonthlyUsage {
-            month,
-            models: agg.models.into_iter().collect(),
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.month.cmp(&b.month));
+    let entries = aggregate_monthly_usage_v2_entries(filtered);
 
     // f64's Sum identity is -0.0, so an empty report would serialize as
     // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
     // any non-zero total.
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
-    Ok(MonthlyReport {
+    Ok(MonthlyReportV2 {
         entries,
         total_cost,
         processing_time_ms: start.elapsed().as_millis() as u32,
     })
+}
+
+/// Generate the original monthly report shape.
+///
+/// New callers that need reasoning tokens should use [`get_monthly_report_v2`].
+pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
+    Ok(get_monthly_report_v2(options).await?.into_legacy())
 }
 
 #[derive(Default)]
@@ -3061,6 +3197,69 @@ struct HourAggregator {
     message_count: i32,
     turn_count: i32,
     cost: f64,
+}
+
+fn aggregate_hourly_usage_entries(
+    messages: impl IntoIterator<Item = UnifiedMessage>,
+    bucket_timezone: bucket_tz::BucketTimezone,
+) -> Vec<HourlyUsage> {
+    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
+
+    for msg in messages {
+        let hour_key = if msg.timestamp > 0 {
+            bucket_timezone
+                .hour_key(msg.timestamp)
+                .unwrap_or_else(|| format!("{} 00:00", msg.date))
+        } else {
+            format!("{} 00:00", msg.date)
+        };
+
+        let entry = hour_map.entry(hour_key).or_default();
+        entry.clients.insert(msg.client.clone());
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
+        entry.message_count += msg.message_count.max(0);
+        if msg.is_turn_start {
+            entry.turn_count += 1;
+        }
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<HourlyUsage> = hour_map
+        .into_iter()
+        .map(|(hour, agg)| HourlyUsage {
+            hour,
+            clients: {
+                let mut clients: Vec<String> = agg.clients.into_iter().collect();
+                clients.sort();
+                clients
+            },
+            models: {
+                let mut models: Vec<String> = agg.models.into_iter().collect();
+                models.sort();
+                models
+            },
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            message_count: agg.message_count,
+            turn_count: agg.turn_count,
+            reasoning: agg.reasoning,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+    entries
 }
 
 /// Generate hourly usage report, keyed by "YYYY-MM-DD HH:00".
@@ -3092,72 +3291,13 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
-    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
-
-    // The hour key embeds a date, and the timestamp-less fallback below builds
-    // one out of `msg.date` — which the rebucket pass has already moved to the
-    // pinned zone. Deriving the primary key from the host instead would let a
-    // single report disagree with itself about which day an hour belongs to.
+    // The hour key embeds a date, and the timestamp-less fallback builds one
+    // out of `msg.date`, which the rebucket pass already moved to the pinned
+    // zone. Deriving it from the host would let one report disagree with
+    // itself about which day an hour belongs to.
     let bucket_timezone =
         bucket_tz::BucketTimezone::from_scanner_settings(&options.scanner_settings);
-
-    for msg in filtered {
-        let hour_key = if msg.timestamp > 0 {
-            bucket_timezone
-                .hour_key(msg.timestamp)
-                .unwrap_or_else(|| format!("{} 00:00", msg.date))
-        } else {
-            format!("{} 00:00", msg.date)
-        };
-
-        let entry = hour_map.entry(hour_key).or_default();
-
-        entry.clients.insert(msg.client.clone());
-        entry.models.insert(model_name_for_grouping(
-            &msg.client,
-            &msg.provider_id,
-            &msg.model_id,
-        ));
-        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
-        // can't overflow the fold.
-        entry.input = entry.input.saturating_add(msg.tokens.input);
-        entry.output = entry.output.saturating_add(msg.tokens.output);
-        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
-        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
-        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
-    }
-
-    let mut entries: Vec<HourlyUsage> = hour_map
-        .into_iter()
-        .map(|(hour, agg)| HourlyUsage {
-            hour,
-            clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
-                v.sort();
-                v
-            },
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            turn_count: agg.turn_count,
-            reasoning: agg.reasoning,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+    let entries = aggregate_hourly_usage_entries(filtered, bucket_timezone);
 
     // f64's Sum identity is -0.0, so an empty report would serialize as
     // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
@@ -3678,13 +3818,15 @@ fn parse_local_unified_messages_resolved(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
+    cache_policy: SourceCachePolicy,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing_with_env_strategy(
+    let messages = parse_all_messages_with_pricing_with_cache_policy(
         home_dir,
         clients,
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
+        cache_policy,
     );
     Ok(filter_unified_messages(messages, &options))
 }
@@ -4612,7 +4754,33 @@ pub async fn parse_local_unified_messages_with_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing)
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing,
+        SourceCachePolicy::Persistent,
+    )
+}
+
+/// Parse local messages without reading or writing the persistent source cache.
+///
+/// A fresh in-memory cache is still shared by every source parsed during this
+/// call, preserving normal within-call reuse and deduplication. This entry point
+/// is intended for isolated callers such as integration tests.
+#[doc(hidden)]
+pub async fn parse_local_unified_messages_with_pricing_uncached(
+    options: LocalParseOptions,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<Vec<UnifiedMessage>, String> {
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing,
+        SourceCachePolicy::InMemory,
+    )
 }
 
 pub async fn parse_local_unified_messages(
@@ -4620,7 +4788,13 @@ pub async fn parse_local_unified_messages(
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        SourceCachePolicy::Persistent,
+    )
 }
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
@@ -4711,21 +4885,285 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_model_usage_entries, apply_pricing_if_available, build_graph_from_messages,
+        aggregate_hourly_usage_entries, aggregate_model_usage_entries,
+        aggregate_monthly_usage_v2_entries, apply_pricing_if_available, build_graph_from_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
         message_cache, normalize_model_for_grouping,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
         paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
         sessions, unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement,
-        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
-        UnpricedSubmissionExclusion, AMBIGUOUS_MODEL_PRICING_REASON,
-        INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
-        ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL, UNVERIFIED_MODEL_IDENTITY_REASON,
+        GroupBy, LocalParseOptions, MonthlyReportV2, MonthlyUsage, MonthlyUsageV2, ReportOptions,
+        TokenBreakdown, UnifiedMessage, UnpricedSubmissionExclusion,
+        AMBIGUOUS_MODEL_PRICING_REASON, INCOMPLETE_MODEL_PRICING_REASON,
+        MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
+        UNVERIFIED_MODEL_IDENTITY_REASON,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
+
+    #[test]
+    fn token_breakdown_add_assign_includes_every_field() {
+        let mut total = TokenBreakdown {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
+        total += &TokenBreakdown {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            reasoning: 50,
+        };
+
+        assert_eq!(
+            total,
+            TokenBreakdown {
+                input: 11,
+                output: 22,
+                cache_read: 33,
+                cache_write: 44,
+                reasoning: 55,
+            }
+        );
+    }
+
+    #[test]
+    fn token_breakdown_add_assign_saturates_each_field() {
+        let mut total = TokenBreakdown {
+            input: i64::MAX,
+            output: i64::MIN,
+            cache_read: i64::MAX - 1,
+            cache_write: i64::MIN + 1,
+            reasoning: 100,
+        };
+        total += &TokenBreakdown {
+            input: 1,
+            output: -1,
+            cache_read: 10,
+            cache_write: -10,
+            reasoning: 23,
+        };
+
+        assert_eq!(total.input, i64::MAX);
+        assert_eq!(total.output, i64::MIN);
+        assert_eq!(total.cache_read, i64::MAX);
+        assert_eq!(total.cache_write, i64::MIN);
+        assert_eq!(total.reasoning, 123);
+    }
+
+    #[test]
+    fn legacy_monthly_usage_struct_literal_remains_source_compatible() {
+        let usage = MonthlyUsage {
+            month: "2026-01".to_string(),
+            models: vec!["model".to_string()],
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            message_count: 5,
+            cost: 0.5,
+        };
+
+        let serialized = serde_json::to_value(usage).unwrap();
+        assert!(serialized.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn monthly_usage_v2_serializes_reasoning_additively() {
+        let usage = MonthlyUsageV2 {
+            month: "2026-01".to_string(),
+            models: vec!["model".to_string()],
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 6,
+            message_count: 5,
+            cost: 0.5,
+        };
+
+        let serialized = serde_json::to_value(&usage).unwrap();
+        assert_eq!(serialized["reasoning"], 6);
+
+        let legacy = usage.into_legacy();
+        assert_eq!(legacy.month, "2026-01");
+        assert_eq!(legacy.models, ["model"]);
+        assert_eq!(legacy.input, 1);
+        assert_eq!(legacy.output, 2);
+        assert_eq!(legacy.cache_read, 3);
+        assert_eq!(legacy.cache_write, 4);
+        assert_eq!(legacy.message_count, 5);
+        assert_eq!(legacy.cost, 0.5);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("reasoning")
+            .is_none());
+    }
+
+    #[test]
+    fn monthly_report_v2_legacy_conversion_preserves_report_metadata() {
+        let report = MonthlyReportV2 {
+            entries: vec![MonthlyUsageV2 {
+                month: "2026-02".to_string(),
+                models: vec![],
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                reasoning: 5,
+                message_count: 6,
+                cost: 0.75,
+            }],
+            total_cost: 0.75,
+            processing_time_ms: 42,
+        };
+
+        let legacy = report.into_legacy();
+        assert_eq!(legacy.entries.len(), 1);
+        assert_eq!(legacy.entries[0].month, "2026-02");
+        assert_eq!(legacy.entries[0].input, 1);
+        assert_eq!(legacy.entries[0].output, 2);
+        assert_eq!(legacy.entries[0].cache_read, 3);
+        assert_eq!(legacy.entries[0].cache_write, 4);
+        assert_eq!(legacy.entries[0].message_count, 6);
+        assert_eq!(legacy.entries[0].cost, 0.75);
+        assert_eq!(legacy.total_cost, 0.75);
+        assert_eq!(legacy.processing_time_ms, 42);
+    }
+
+    #[test]
+    fn monthly_reasoning_matches_model_and_hourly_aggregation() {
+        let messages = vec![
+            UnifiedMessage::new(
+                "opencode",
+                "reasoning-model",
+                "openai",
+                "session-a",
+                1_767_225_600_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 2,
+                    cache_write: 1,
+                    reasoning: 7,
+                },
+                0.1,
+            ),
+            UnifiedMessage::new(
+                "codex",
+                "reasoning-model",
+                "openai",
+                "session-b",
+                1_767_229_200_000,
+                TokenBreakdown {
+                    input: 20,
+                    output: 8,
+                    cache_read: 3,
+                    cache_write: 2,
+                    reasoning: 11,
+                },
+                0.2,
+            ),
+        ];
+
+        let monthly = aggregate_monthly_usage_v2_entries(messages.clone());
+        let models = aggregate_model_usage_entries(messages.clone(), &GroupBy::Model);
+        let hourly = aggregate_hourly_usage_entries(
+            messages,
+            super::bucket_tz::BucketTimezone::from_pinned_name(Some("UTC")),
+        );
+
+        assert_eq!(monthly.len(), 1);
+        let monthly_reasoning = monthly[0].reasoning;
+        let model_reasoning = models
+            .iter()
+            .fold(0_i64, |total, entry| total.saturating_add(entry.reasoning));
+        let hourly_reasoning = hourly
+            .iter()
+            .fold(0_i64, |total, entry| total.saturating_add(entry.reasoning));
+        assert_eq!(monthly_reasoning, 18);
+        assert_eq!(monthly_reasoning, model_reasoning);
+        assert_eq!(monthly_reasoning, hourly_reasoning);
+    }
+
+    #[test]
+    fn monthly_aggregation_rejects_malformed_calendar_dates() {
+        let message_with_date = |date: &str, input: i64| {
+            let mut message = UnifiedMessage::new(
+                "codex",
+                "model",
+                "openai",
+                format!("session-{input}"),
+                1_767_225_600_000,
+                TokenBreakdown {
+                    input,
+                    ..TokenBreakdown::default()
+                },
+                0.0,
+            );
+            message.date = date.to_string();
+            message
+        };
+
+        let monthly = aggregate_monthly_usage_v2_entries([
+            message_with_date("2024-02-29", 1),
+            message_with_date("2023-02-29", 2),
+            message_with_date("2026-00-01", 4),
+            message_with_date("2026-13-01", 8),
+            message_with_date("2026-04-31", 16),
+            message_with_date("2026-💥", 32),
+            message_with_date("2026-01-31", 64),
+        ]);
+
+        assert_eq!(monthly.len(), 2);
+        assert_eq!(
+            monthly
+                .iter()
+                .find(|entry| entry.month == "2024-02")
+                .unwrap()
+                .input,
+            1
+        );
+        assert_eq!(
+            monthly
+                .iter()
+                .find(|entry| entry.month == "2026-01")
+                .unwrap()
+                .input,
+            64
+        );
+    }
+
+    #[test]
+    fn monthly_message_count_saturates() {
+        let mut first = UnifiedMessage::new(
+            "codex",
+            "model",
+            "openai",
+            "session-a",
+            1_767_225_600_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        first.message_count = i32::MAX;
+        let second = UnifiedMessage::new(
+            "codex",
+            "model",
+            "openai",
+            "session-b",
+            1_767_225_601_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+
+        let monthly = aggregate_monthly_usage_v2_entries([first, second]);
+        assert_eq!(monthly[0].message_count, i32::MAX);
+    }
     use std::str::FromStr;
     use std::sync::Arc;
 

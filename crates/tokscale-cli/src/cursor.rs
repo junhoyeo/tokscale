@@ -301,8 +301,10 @@ fn find_cursor_state_vscdb(home_dir: &Path) -> Option<PathBuf> {
 pub fn read_access_token_from_state_vscdb(db_path: &Path) -> Result<String> {
     use rusqlite::{Connection, OpenFlags};
 
-    // Prefer URI read-only so a running Cursor IDE holding a write lock does
-    // not block us (WAL readers are allowed while the app is open).
+    // Keep this opener separate from sessions::utils::open_readonly_sqlite:
+    // it accepts a URI string (`file:...?mode=ro`), intentionally omits
+    // SQLITE_OPEN_NO_MUTEX, and adds the anyhow context needed by this CLI
+    // token lookup.
     let uri = format!("file:{}?mode=ro", db_path.display());
     let conn = Connection::open_with_flags(
         &uri,

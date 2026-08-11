@@ -11,7 +11,7 @@
 //! report showing 0 tokens for crush is EXPECTED behavior, NOT a bug — the
 //! signal Crush provides is cost, not tokens.
 
-use super::utils::open_readonly_sqlite;
+use super::utils::open_readonly_sqlite_opt;
 use super::UnifiedMessage;
 use crate::bucket_tz::BucketTimezone;
 use crate::TokenBreakdown;
@@ -61,7 +61,7 @@ pub fn parse_crush_sqlite_in(
     db_path: &Path,
     bucket_timezone: &BucketTimezone,
 ) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 

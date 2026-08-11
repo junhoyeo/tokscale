@@ -418,11 +418,7 @@ fn add_row(day: &mut DayBuilder, client: &str, model: &str, tokens: TokenBreakdo
             cost: 0.0,
             messages: 0,
         });
-    entry.tokens.input = entry.tokens.input.saturating_add(tokens.input);
-    entry.tokens.output = entry.tokens.output.saturating_add(tokens.output);
-    entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(tokens.cache_read);
-    entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(tokens.cache_write);
-    entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
+    entry.tokens += &tokens;
     entry.cost += cost;
 }
 
@@ -436,17 +432,7 @@ fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
     let mut clients: Vec<ClientContribution> = Vec::with_capacity(builder.clients.len());
 
     for client in builder.clients.into_values() {
-        token_breakdown.input = token_breakdown.input.saturating_add(client.tokens.input);
-        token_breakdown.output = token_breakdown.output.saturating_add(client.tokens.output);
-        token_breakdown.cache_read = token_breakdown
-            .cache_read
-            .saturating_add(client.tokens.cache_read);
-        token_breakdown.cache_write = token_breakdown
-            .cache_write
-            .saturating_add(client.tokens.cache_write);
-        token_breakdown.reasoning = token_breakdown
-            .reasoning
-            .saturating_add(client.tokens.reasoning);
+        token_breakdown += &client.tokens;
         cost += client.cost;
         clients.push(client);
     }
@@ -597,11 +583,7 @@ mod tests {
             let mut summed = TokenBreakdown::default();
             let mut cost = 0.0;
             for c in &day.clients {
-                summed.input += c.tokens.input;
-                summed.output += c.tokens.output;
-                summed.cache_read += c.tokens.cache_read;
-                summed.cache_write += c.tokens.cache_write;
-                summed.reasoning += c.tokens.reasoning;
+                summed += &c.tokens;
                 cost += c.cost;
             }
             assert_eq!(summed.total(), day.totals.tokens);
