@@ -884,6 +884,80 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
     (duration > 0).then_some(duration)
 }
 
+/// Reconcile two already-parsed copies of the same Claude turn (same dedup
+/// key) into `existing`, field by field, rather than picking one whole
+/// message over the other.
+///
+/// Retention can carry a message across an in-place transcript rewrite, and a
+/// scan can equally observe an assistant record before its usage is final —
+/// the same reason `merge_claude_duplicate` folds same-file duplicates with a
+/// per-field max. Once two copies of one key exist in different places
+/// (across files, or across cache-writer generations for the same file),
+/// neither is authoritative: every way they can differ is the same
+/// disagreement, one side observed the turn before its usage was final and
+/// the other after. So this uses the same per-field max convention, plus
+/// `is_turn_start` by OR since that marker is a claim that something was
+/// observed.
+///
+/// `cost` cannot be taken as `max(a, b)`: each copy was already priced from
+/// its own token vector before reaching this merge, and when the maxima are
+/// complementary (one copy high on input, the other high on output) the
+/// reconciled token vector prices strictly higher than either input whenever
+/// both buckets carry a positive rate. So cost is re-derived from the
+/// reconciled tokens via `apply_pricing_if_available` -- the same helper
+/// every parser uses to price a `UnifiedMessage` from its tokens, kept as the
+/// one pricing path -- unless either copy's cost is `CostSource::
+/// ProviderReported`: that figure came from the provider directly, not from
+/// this crate's rate table, and recomputing over it would replace a real
+/// number with a guess. `cost_source` itself is merged by authority
+/// (`ProviderReported` > `Estimated` > `Unknown`) so a reconciled message
+/// never regresses to a less trustworthy label than either input carried.
+/// The plain `max(a, b)` on cost still runs first as the floor this produces
+/// when no pricing service is reachable at the call site (`absorb_retained_
+/// history` in `message_cache.rs` reconciles cache entries before pricing is
+/// ever applied to them, so both copies' cost there is 0 in practice; the
+/// floor is what keeps this function correct if that ever changes).
+///
+/// Used both by the cross-file Claude merge in `lib.rs` and by
+/// `absorb_retained_history` in `message_cache.rs`, which hits the same
+/// disagreement when two cache writers race to save the same source file.
+/// The cache layer has no pricing service in scope, so it passes `None`;
+/// repricing happens at read time regardless, via the same `apply_pricing_
+/// if_available` call every cache hit already makes over the (correctly
+/// merged) stored tokens.
+pub(crate) fn reconcile_claude_duplicate_message(
+    existing: &mut UnifiedMessage,
+    other: &UnifiedMessage,
+    pricing: Option<&pricing::PricingService>,
+) {
+    let t = &mut existing.tokens;
+    t.input = t.input.max(other.tokens.input);
+    t.output = t.output.max(other.tokens.output);
+    t.cache_read = t.cache_read.max(other.tokens.cache_read);
+    t.cache_write = t.cache_write.max(other.tokens.cache_write);
+    t.reasoning = t.reasoning.max(other.tokens.reasoning);
+
+    if let Some(other_duration) = other.duration_ms {
+        existing.duration_ms = Some(existing.duration_ms.unwrap_or(0).max(other_duration));
+    }
+    existing.is_turn_start |= other.is_turn_start;
+
+    let merged_cost_source = match (existing.cost_source, other.cost_source) {
+        (super::CostSource::ProviderReported, _) | (_, super::CostSource::ProviderReported) => {
+            super::CostSource::ProviderReported
+        }
+        (super::CostSource::Estimated, _) | (_, super::CostSource::Estimated) => {
+            super::CostSource::Estimated
+        }
+        _ => super::CostSource::Unknown,
+    };
+    existing.cost = existing.cost.max(other.cost);
+    existing.cost_source = merged_cost_source;
+    if merged_cost_source != super::CostSource::ProviderReported {
+        crate::apply_pricing_if_available(existing, pricing);
+    }
+}
+
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
@@ -3427,6 +3501,133 @@ mod tests {
             msgs_b[0].agent,
             Some("Executor".to_string()),
             "Second agent should be executor"
+        );
+    }
+
+    fn priced_reconcile_fixture() -> (
+        UnifiedMessage,
+        UnifiedMessage,
+        crate::pricing::PricingService,
+    ) {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-3-5-sonnet".into(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = crate::pricing::PricingService::new(litellm, HashMap::new());
+
+        // Partial-shaped: leads on input, trails on output. Priced from its
+        // own tokens: 500 * 0.001 = 0.5.
+        let mut existing = UnifiedMessage::new(
+            "claude",
+            "claude-3-5-sonnet",
+            "anthropic",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 500,
+                output: 60,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.5,
+        );
+        existing.mark_estimated_cost();
+
+        // Completed-shaped: trails on input, leads on output. Priced from its
+        // own tokens: 200 * 0.001 + 999 * 0.002 = 0.2 + 1.998 = 2.198.
+        let mut other = UnifiedMessage::new(
+            "claude",
+            "claude-3-5-sonnet",
+            "anthropic",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 200,
+                output: 999,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            2.198,
+        );
+        other.mark_estimated_cost();
+
+        (existing, other, pricing)
+    }
+
+    /// The defect: `existing.cost.max(other.cost)` (0.5 vs 2.198 => 2.198)
+    /// understates the reconciled token vector's actual price. Reconciled
+    /// tokens are input=max(500,200)=500, output=max(60,999)=999, which
+    /// prices to 500 * 0.001 + 999 * 0.002 = 0.5 + 1.998 = 2.498 -- higher
+    /// than either input cost because the maxima are complementary.
+    #[test]
+    fn reconcile_claude_duplicate_message_reprices_from_merged_tokens() {
+        let (mut existing, other, pricing) = priced_reconcile_fixture();
+
+        reconcile_claude_duplicate_message(&mut existing, &other, Some(&pricing));
+
+        assert_eq!(existing.tokens.input, 500);
+        assert_eq!(existing.tokens.output, 999);
+        assert!(
+            (existing.cost - 2.498).abs() < 1e-9,
+            "expected merged-token price 2.498, got {}",
+            existing.cost
+        );
+        assert!(
+            existing.cost > other.cost.max(0.5),
+            "reconciled cost must exceed max(a, b) = 2.198, got {}",
+            existing.cost
+        );
+        assert_eq!(existing.cost_source, super::super::CostSource::Estimated);
+    }
+
+    /// No pricing service reachable (the cache-layer call site): cost falls
+    /// back to `max(a, b)`, same as before this fix, since there is nothing
+    /// to reprice from.
+    #[test]
+    fn reconcile_claude_duplicate_message_falls_back_to_max_without_pricing_service() {
+        let (mut existing, other, _pricing) = priced_reconcile_fixture();
+
+        reconcile_claude_duplicate_message(&mut existing, &other, None);
+
+        assert!(
+            (existing.cost - 2.198).abs() < 1e-9,
+            "expected max(0.5, 2.198) = 2.198 fallback, got {}",
+            existing.cost
+        );
+        assert_eq!(existing.cost_source, super::super::CostSource::Estimated);
+    }
+
+    /// A provider-reported cost is a real number, not a rate-table guess.
+    /// When either copy carries one, the merge must not call the pricing
+    /// service over the reconciled tokens -- that would silently replace an
+    /// authoritative figure with an estimate -- and the merged `cost_source`
+    /// must record that authority rather than regressing to `Estimated`.
+    #[test]
+    fn reconcile_claude_duplicate_message_preserves_provider_reported_cost_and_skips_repricing() {
+        let (mut existing, mut other, pricing) = priced_reconcile_fixture();
+        // `other` carries the provider's own figure for its own tokens,
+        // distinct from what repricing the merged tokens would produce.
+        other.cost = 9.0;
+        other.mark_provider_reported_cost();
+
+        reconcile_claude_duplicate_message(&mut existing, &other, Some(&pricing));
+
+        assert_eq!(
+            existing.cost_source,
+            super::super::CostSource::ProviderReported,
+            "merged cost_source must carry the authoritative label forward"
+        );
+        assert!(
+            (existing.cost - 9.0).abs() < 1e-9,
+            "expected max(0.5, 9.0) = 9.0, not a repriced 2.498, got {}",
+            existing.cost
         );
     }
 }

@@ -1203,6 +1203,20 @@ impl CachedSourceEntry {
     ///
     /// Same filter as the parse-time merge: a key that is only unique within
     /// one file must not outlive the bytes that produced it.
+    ///
+    /// A key present in both entries is never resolved by picking one copy
+    /// over the other. Two scanners can fingerprint the same partial file and
+    /// have the response complete between their parses, so even two live
+    /// copies under one fingerprint can disagree; and across a fingerprint
+    /// mismatch neither side can reparse what the other saw once compaction
+    /// drops the turn. Every way two copies of one key can differ is the same
+    /// disagreement — one observed the turn before its usage was final, the
+    /// other after — so content is always reconciled field by field via
+    /// `sessions::claudecode::reconcile_claude_duplicate_message`, the same
+    /// per-field max convention `merge_claude_duplicate` uses to fold
+    /// same-file streaming duplicates. No provenance label is tracked:
+    /// reconciliation does not need to know which side was retained, only
+    /// that neither side is discarded.
     fn absorb_retained_history(&mut self, stored: &CachedSourceEntry) {
         let Some(key_is_globally_stable) = retained_history_key_filter(&self.parser_namespace)
         else {
@@ -1216,10 +1230,11 @@ impl CachedSourceEntry {
             return;
         }
 
-        let mut seen: HashSet<String> = self
+        let mut self_keys: HashMap<String, usize> = self
             .messages
             .iter()
-            .filter_map(|message| message.dedup_key.clone())
+            .enumerate()
+            .filter_map(|(index, message)| message.dedup_key.clone().map(|key| (key, index)))
             .collect();
         for message in &stored.messages {
             let Some(key) = message.dedup_key.as_ref() else {
@@ -1228,8 +1243,24 @@ impl CachedSourceEntry {
             if !key_is_globally_stable(key) {
                 continue;
             }
-            if seen.insert(key.clone()) {
-                self.messages.push(message.clone());
+
+            match self_keys.get(key) {
+                None => {
+                    self.messages.push(message.clone());
+                    self_keys.insert(key.clone(), self.messages.len() - 1);
+                }
+                Some(&index) => {
+                    // Both entries hold their own copy of this key: reconcile
+                    // field by field rather than preferring either side.
+                    // No pricing service is reachable at the cache layer;
+                    // see `reconcile_claude_duplicate_message`'s doc comment
+                    // for why that is fine here.
+                    crate::sessions::claudecode::reconcile_claude_duplicate_message(
+                        &mut self.messages[index],
+                        message,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -4111,6 +4142,181 @@ mod tests {
             let loaded = SourceMessageCache::load();
             let entry = loaded.get(identity, &path).expect("entry should survive");
             assert_eq!(entry.messages.len(), 1);
+        }
+    }
+
+    /// Neither copy of a key is ever authoritative over the other once both
+    /// entries hold their own. A scan can observe an assistant record while
+    /// its usage is still partial (the same reason `merge_claude_duplicate`
+    /// folds same-file duplicates with a per-field max), so when a straddled
+    /// rewrite leaves one writer holding a partial under one fingerprint and
+    /// another holding the completed form under a different one, picking
+    /// either whole message loses something.
+    ///
+    /// The partial writer saves *last* — the direction that can actually lose
+    /// data, since the last writer's own in-memory entry is the one doing the
+    /// merging and already holds its own values regardless of whether the
+    /// reconciliation runs at all.
+    #[test]
+    #[serial_test::serial]
+    fn test_save_if_dirty_reconciles_two_copies_under_a_fingerprint_mismatch() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let source_dir = TempDir::new().unwrap();
+            let path = source_dir.path().join("conversation.jsonl");
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let namespace = ClientId::Claude.as_str();
+            let key = "msg_shared:req_shared";
+
+            // `completed` leads on output, cache_read, cache_write and
+            // duration; `partial` leads on input. Neither is the true
+            // maximum, so a fix that picks one whole message over the other
+            // would still fail this.
+            let mut completed = keyed_message(namespace, "session", key);
+            completed.tokens.output = 999;
+            completed.tokens.cache_read = 10;
+            completed.tokens.cache_write = 5;
+            completed.duration_ms = Some(4_200);
+
+            let mut partial = keyed_message(namespace, "session", key);
+            partial.tokens.input = 100;
+            partial.tokens.output = 50;
+            partial.duration_ms = Some(900);
+
+            // Writer B parses the completed form and saves first, under this
+            // generation's fingerprint.
+            std::fs::write(&path, b"{\"id\":\"generation-b\"}\n").unwrap();
+            let mut writer_b = SourceMessageCache::load();
+            writer_b.insert(entry_with_messages(identity, &path, vec![completed]));
+            writer_b.save_if_dirty();
+
+            // The file changes generation again (a straddled rewrite), and
+            // writer A -- which had already parsed a stalled partial of the
+            // same turn under its own earlier generation -- saves last.
+            std::fs::write(&path, b"{\"id\":\"generation-a\"}\n").unwrap();
+            let mut writer_a = SourceMessageCache::load();
+            writer_a.insert(entry_with_messages(identity, &path, vec![partial]));
+            writer_a.save_if_dirty();
+
+            let loaded = SourceMessageCache::load();
+            let entry = loaded.get(identity, &path).expect("entry should survive");
+            assert_eq!(
+                entry.messages.len(),
+                1,
+                "the shared turn must not duplicate"
+            );
+            let merged = &entry.messages[0];
+            assert_eq!(
+                merged.tokens.input, 100,
+                "input: partial's field was the max"
+            );
+            assert_eq!(
+                merged.tokens.output, 999,
+                "output: completed's field was the max"
+            );
+            assert_eq!(
+                merged.duration_ms,
+                Some(4_200),
+                "duration: the completed timing must not be lost to the partial's shorter one"
+            );
+            assert_eq!(
+                merged.tokens.cache_read, 10,
+                "cache_read: completed's field was the max"
+            );
+            assert_eq!(
+                merged.tokens.cache_write, 5,
+                "cache_write: completed's field was the max"
+            );
+
+            // A following cache-hit scan (no further writes) must keep
+            // reporting the reconciled figures, not just hold them in memory.
+            let rescan = SourceMessageCache::load();
+            let entry = rescan.get(identity, &path).expect("entry should survive");
+            assert_eq!(entry.messages.len(), 1);
+            let merged = &entry.messages[0];
+            assert_eq!(merged.tokens.input, 100);
+            assert_eq!(merged.tokens.output, 999);
+            assert_eq!(merged.duration_ms, Some(4_200));
+        }
+    }
+
+    /// Two scanners can fingerprint the same partial file and have the
+    /// response complete between their parses, so two *live* copies can
+    /// disagree under one fingerprint too. Preferring the stored one because
+    /// it is live discards the completed usage whenever the completed writer
+    /// saved first and the partial writer saved last.
+    #[test]
+    #[serial_test::serial]
+    fn test_save_if_dirty_reconciles_two_live_copies_under_one_fingerprint() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let source_dir = TempDir::new().unwrap();
+            let path = source_dir.path().join("transcript.jsonl");
+            std::fs::write(&path, b"{\"id\":\"one-generation\"}\n").unwrap();
+
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let namespace = ClientId::Claude.as_str();
+            let key = "msg_shared:req_shared";
+
+            // Neither writer labels the key retained: both parsed it live.
+            let mut partial = keyed_message(namespace, "session", key);
+            partial.tokens.input = 100;
+            partial.tokens.output = 50;
+            partial.duration_ms = Some(900);
+
+            let mut completed = keyed_message(namespace, "session", key);
+            completed.tokens.output = 999;
+            completed.tokens.cache_read = 10;
+            completed.duration_ms = Some(4_200);
+            completed.cost = 0.25;
+            // The full generation still had the preceding user row, so it saw
+            // this reply as a turn start; the compacted parse does not.
+            completed.is_turn_start = true;
+
+            // The completed writer saves first, so its copy is the one
+            // already on disk; the partial writer saves last and its entry
+            // is the one doing the merging. This is the losing direction:
+            // whatever the merge fails to pull across from the stored copy
+            // is gone.
+            let mut writer_completed = SourceMessageCache::load();
+            writer_completed.insert(entry_with_messages(identity, &path, vec![completed]));
+            writer_completed.save_if_dirty();
+
+            let mut writer_partial = SourceMessageCache::load();
+            writer_partial.insert(entry_with_messages(identity, &path, vec![partial]));
+            writer_partial.save_if_dirty();
+
+            let loaded = SourceMessageCache::load();
+            let entry = loaded.get(identity, &path).expect("entry should survive");
+            assert_eq!(
+                entry.messages.len(),
+                1,
+                "the shared turn must not duplicate"
+            );
+            let merged = &entry.messages[0];
+            assert_eq!(merged.tokens.input, 100, "input: partial held the max");
+            assert_eq!(merged.tokens.output, 999, "output: completed held the max");
+            assert_eq!(
+                merged.tokens.cache_read, 10,
+                "cache_read: completed held the max"
+            );
+            assert_eq!(
+                merged.duration_ms,
+                Some(4_200),
+                "duration: the completed timing must survive"
+            );
+            assert!(
+                merged.is_turn_start,
+                "turn start: a marker either side asserted must survive"
+            );
+            assert_eq!(
+                merged.cost, 0.25,
+                "cost must track the reconciled tokens, not the copy this entry started from"
+            );
         }
     }
 

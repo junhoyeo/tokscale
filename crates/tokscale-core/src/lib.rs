@@ -911,9 +911,9 @@ fn parse_all_messages_with_pricing_with_cache_policy(
     /// still contains: a key present on both sides keeps the freshly parsed
     /// message, so a corrected re-parse still wins and nothing is frozen at a
     /// stale value. Only keys the file no longer carries are carried forward.
-    /// (Across entries the Claude lane is first-wins on lexical path order, so
-    /// a retained copy in an earlier-sorting file still beats a live copy of
-    /// the same key in a later one.)
+    /// (Across entries the Claude lane reconciles a duplicate key field by
+    /// field instead of picking a file order to trust — see the cross-file
+    /// merge below and `absorb_retained_history` in `message_cache.rs`.)
     ///
     /// Messages without a dedup key are never retained. The key is what lets a
     /// later scan recognise the message as already-seen; re-emitting an
@@ -1628,12 +1628,36 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         }
     }
 
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_messages: Vec<UnifiedMessage> = claude_messages_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
+    // A retained message survives an in-place transcript rewrite (see
+    // `HistoryRetention::RetainObserved`), and the same turn's completed form
+    // can independently show up live in another file (e.g. a forked/resumed
+    // transcript) if a scan observed the retained copy while its usage was
+    // still partial. Neither copy is authoritative over the other — a scan
+    // can equally land mid-stream on the "live" side — so a duplicate key is
+    // reconciled field by field instead of one file's copy winning by sort
+    // order. Reconciliation is symmetric, so file iteration order does not
+    // matter.
+    let mut seen_keys: HashMap<String, usize> = HashMap::new();
+    let mut claude_messages: Vec<UnifiedMessage> = Vec::new();
+    for (key, msg) in claude_messages_raw {
+        if key.is_empty() {
+            claude_messages.push(msg);
+            continue;
+        }
+        match seen_keys.get(&key) {
+            Some(&index) => {
+                sessions::claudecode::reconcile_claude_duplicate_message(
+                    &mut claude_messages[index],
+                    &msg,
+                    pricing,
+                );
+            }
+            None => {
+                seen_keys.insert(key, claude_messages.len());
+                claude_messages.push(msg);
+            }
+        }
+    }
     all_messages.extend(claude_messages);
 
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
@@ -6715,6 +6739,284 @@ mod tests {
     /// collapse against the same tool result replayed under a fork's filename
     /// — both would count — so retention has to leave those records behind
     /// even though it means a compaction still retires their input tokens.
+    /// The sibling tests below assume both copies of a replayed turn carry the
+    /// same tokens. A scan that lands mid-stream breaks that assumption: the
+    /// parser merges duplicates with a per-field max precisely because an
+    /// assistant record can be observed before its usage is final. When one
+    /// copy of a turn is retained across a rewrite and the other shows up live
+    /// in a different (forked) file, first-occurrence-wins cross-file dedup
+    /// keeps whichever file the scanner happens to sort first and discards
+    /// the other copy's fields outright, however incomplete.
+    ///
+    /// One helper drives every direction and file-order combination below: it
+    /// writes an original transcript holding `turn_one` plus a first version
+    /// of `turn_two` (`retained_usage`), scans cold so that version gets
+    /// cached, rewrites the original to compact `turn_two` away, and writes a
+    /// second transcript — named `second_file_name`, so callers control
+    /// whether it sorts before or after the original — holding a second
+    /// version of `turn_two` (`other_usage`). It returns the post-rewrite
+    /// scan's messages for the caller to assert on.
+    ///
+    /// Every fixture below picks `retained_usage`/`other_usage` so neither
+    /// holds the maximum of both fields: one leads on input, the other on
+    /// output. A fix that resolved the duplicate by picking one whole message
+    /// — by file order, or by which copy retention labeled — would still
+    /// under-report one of the two fields, and a fix that only reconciles in
+    /// one direction would pass some combinations here and fail others.
+    fn run_claude_two_copy_merge_scan(
+        second_file_name: &str,
+        retained_input: i64,
+        retained_output: i64,
+        other_input: i64,
+        other_output: i64,
+    ) -> Vec<UnifiedMessage> {
+        run_claude_two_copy_merge_scan_priced(
+            second_file_name,
+            retained_input,
+            retained_output,
+            other_input,
+            other_output,
+            None,
+        )
+    }
+
+    fn run_claude_two_copy_merge_scan_priced(
+        second_file_name: &str,
+        retained_input: i64,
+        retained_output: i64,
+        other_input: i64,
+        other_output: i64,
+        pricing: Option<&pricing::PricingService>,
+    ) -> Vec<UnifiedMessage> {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = source_home.path().join(".claude/projects/myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let original = claude_dir.join("original.jsonl");
+
+        let turn_one = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#.to_string();
+        let turn_two_retained = format!(
+            r#"{{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{{"id":"msg_002","model":"claude-3-5-sonnet","usage":{{"input_tokens":{retained_input},"output_tokens":{retained_output}}}}}}}"#
+        );
+        let turn_two_other = format!(
+            r#"{{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{{"id":"msg_002","model":"claude-3-5-sonnet","usage":{{"input_tokens":{other_input},"output_tokens":{other_output}}}}}}}"#
+        );
+
+        std::fs::write(&original, format!("{turn_one}\n{turn_two_retained}\n")).unwrap();
+        let before = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            pricing,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(
+            before.len(),
+            2,
+            "cold scan caches the first version of turn two"
+        );
+
+        // Compaction drops turn two from the original file; the second file
+        // (a fork, or an independent resumed session) carries the other
+        // version of the same turn.
+        std::fs::write(&original, format!("{turn_one}\n")).unwrap();
+        std::fs::write(
+            claude_dir.join(second_file_name),
+            format!("{turn_two_other}\n"),
+        )
+        .unwrap();
+
+        parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            pricing,
+            false,
+            &scanner::ScannerSettings::default(),
+        )
+    }
+
+    fn assert_claude_two_copy_merge(
+        messages: &[UnifiedMessage],
+        expected_input: i64,
+        expected_output: i64,
+    ) {
+        assert_eq!(messages.len(), 2, "turn two must survive exactly once");
+        assert_eq!(
+            messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+            100 + expected_input,
+            "input must reconcile to the max across both copies"
+        );
+        assert_eq!(
+            messages.iter().map(|m| m.tokens.output).sum::<i64>(),
+            50 + expected_output,
+            "output must reconcile to the max across both copies"
+        );
+    }
+
+    /// The reported case (#1050): a retained partial versus a live completed
+    /// replay, with the retaining file sorting before the fork.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_partial_reconciles_with_completed_live_replay() {
+        // Retained (partial-shaped): leads on input, trails on output.
+        // Other (completed-shaped): trails on input, leads on output.
+        let messages = run_claude_two_copy_merge_scan("zzz-fork.jsonl", 500, 60, 200, 999);
+        assert_claude_two_copy_merge(&messages, 500, 999);
+    }
+
+    /// Same direction, opposite file order: the fork sorts before the
+    /// retaining file. A symmetric reconciliation must not care.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_partial_reconciles_with_completed_live_replay_reordered() {
+        let messages = run_claude_two_copy_merge_scan("aaa-fork.jsonl", 500, 60, 200, 999);
+        assert_claude_two_copy_merge(&messages, 500, 999);
+    }
+
+    /// The mirror case: the *retained* copy is the completed one and the
+    /// other file holds only a partial. Ranking a live copy over a retained
+    /// one gets this backwards — it would admit the partial and discard the
+    /// completed row. Reconciliation does not have a preferred side, so this
+    /// must reach the same merged values as the direct case above.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_reconciles_with_live_partial() {
+        // Retained (completed-shaped): trails on input, leads on output.
+        // Other (partial-shaped): leads on input, trails on output.
+        let messages = run_claude_two_copy_merge_scan("zzz-fork.jsonl", 200, 999, 500, 60);
+        assert_claude_two_copy_merge(&messages, 500, 999);
+    }
+
+    /// Mirror case, opposite file order.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_reconciles_with_live_partial_reordered() {
+        let messages = run_claude_two_copy_merge_scan("aaa-fork.jsonl", 200, 999, 500, 60);
+        assert_claude_two_copy_merge(&messages, 500, 999);
+    }
+
+    /// End-to-end through the real scan pipeline (not a direct call into
+    /// `reconcile_claude_duplicate_message`): with a pricing service in
+    /// scope, the reconciled turn's cost must equal the price of its merged
+    /// tokens, not `max` of the two copies' individually-priced costs.
+    /// `input_cost_per_token: 0.001`, `output_cost_per_token: 0.002`. Turn
+    /// one (100 in / 50 out) prices to 0.1 + 0.1 = 0.2. Turn two reconciles
+    /// to input=max(500,200)=500, output=max(60,999)=999, pricing to
+    /// 500 * 0.001 + 999 * 0.002 = 0.5 + 1.998 = 2.498 -- strictly more than
+    /// either input copy's own cost (0.5 and 0.2 + 1.998 = 2.198), which is
+    /// what a `max(a, b)` merge would have reported instead.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_two_copy_merge_reprices_from_reconciled_tokens() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-3-5-sonnet".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let messages = run_claude_two_copy_merge_scan_priced(
+            "zzz-fork.jsonl",
+            500,
+            60,
+            200,
+            999,
+            Some(&pricing),
+        );
+        assert_claude_two_copy_merge(&messages, 500, 999);
+
+        let turn_two = messages
+            .iter()
+            .find(|m| m.tokens.input == 500)
+            .expect("reconciled turn two must be present");
+        assert!(
+            (turn_two.cost - 2.498).abs() < 1e-9,
+            "expected merged-token price 2.498, got {}",
+            turn_two.cost
+        );
+
+        let turn_one = messages
+            .iter()
+            .find(|m| m.tokens.input == 100)
+            .expect("turn one must be present");
+        assert!(
+            (turn_one.cost - 0.2).abs() < 1e-9,
+            "turn one is unaffected by reconciliation, expected 0.2, got {}",
+            turn_one.cost
+        );
+    }
+
+    /// A rewrite's reconciled value must survive a further, completely
+    /// unchanged scan — a warm cache hit for both source files, not a
+    /// reparse. With no persisted provenance this has to hold structurally:
+    /// each file's own cache entry already carries the values that scan
+    /// contributed (retention bakes a carried-forward message straight into
+    /// the messages a cache hit returns), and the cross-file merge re-runs
+    /// fresh from those on every scan. If this failed, the design would be
+    /// relying on some form of hidden state the previous ranking-based
+    /// version needed a dedicated `CACHE_FORMAT_VERSION` bump to persist.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_reconciled_duplicate_survives_a_third_unchanged_scan() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = source_home.path().join(".claude/projects/myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let original = claude_dir.join("aaa-original.jsonl");
+
+        let turn_one = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let turn_two_partial = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":500,"output_tokens":60}}}"#;
+        let turn_two_complete = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":999}}}"#;
+
+        std::fs::write(&original, format!("{turn_one}\n{turn_two_partial}\n")).unwrap();
+        let before = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(before.len(), 2, "cold scan caches the partial");
+
+        // Compaction drops turn two from the live file; the fork carries a
+        // second version of the same turn. This scan performs the merge and
+        // writes each file's own (unmerged) parse back to its own cache entry.
+        std::fs::write(&original, format!("{turn_one}\n")).unwrap();
+        std::fs::write(
+            claude_dir.join("zzz-fork.jsonl"),
+            format!("{turn_two_complete}\n"),
+        )
+        .unwrap();
+        let second = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_claude_two_copy_merge(&second, 500, 999);
+
+        // Nothing on disk changes between the second and third scan: both the
+        // compacted original and the fork are unchanged, so both cache
+        // entries are warm hits, not reparses.
+        let third = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_claude_two_copy_merge(&third, 500, 999);
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_claude_path_scoped_tool_result_is_not_retained_across_a_rewrite() {
