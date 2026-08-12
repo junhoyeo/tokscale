@@ -6440,11 +6440,13 @@ mod tests {
         let result =
             scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
 
+        let files = result.get(ClientId::Senpi);
         assert_eq!(
-            result.get(ClientId::Senpi).as_slice(),
-            std::slice::from_ref(&child_session),
+            files.len(),
+            1,
             "current-project OmO child sessions must be auto-discovered"
         );
+        assert_eq!(files[0].canonicalize().unwrap(), child_session);
     }
 
     #[test]
@@ -6463,9 +6465,14 @@ mod tests {
         let result =
             scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
 
-        assert_eq!(result.get(ClientId::Senpi).len(), 2);
-        assert!(result.get(ClientId::Senpi).contains(&child_session));
-        assert!(result.get(ClientId::Senpi).contains(&redirected_session));
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert_eq!(canonical_files.len(), 2);
+        assert!(canonical_files.contains(&child_session));
+        assert!(canonical_files.contains(&redirected_session.canonicalize().unwrap()));
     }
 
     #[test]
