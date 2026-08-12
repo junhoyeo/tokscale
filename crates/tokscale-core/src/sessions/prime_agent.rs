@@ -10,10 +10,10 @@
 
 use super::pi::{
     has_replacement_character, parse_pi_format_rlm_file_with_observer,
-    pre_header_line_is_skippable, PiFormatObserver, PiSessionEntry, PiSessionHeader, PiUsage,
-    PRE_SESSION_METADATA_TYPES,
+    pre_header_line_is_skippable, raw_json_has_damaged_top_level_key, PiFormatObserver,
+    PiSessionEntry, PiSessionHeader, PiUsage, PRE_SESSION_METADATA_TYPES,
 };
-use super::utils::{lossy_lines, parse_timestamp_str};
+use super::utils::{lossy_lines_with_bytes, parse_timestamp_str};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -460,15 +460,18 @@ pub(crate) fn analyze_prime_agent_accounting(
     let mut found_header = false;
     let mut message_index = 0usize;
     let mut buffer = Vec::with_capacity(4096);
-    for line in lossy_lines(BufReader::new(file)) {
-        let trimmed = line.trim();
+    for line in lossy_lines_with_bytes(BufReader::new(file)) {
+        let trimmed = line.text.trim();
         if trimmed.is_empty() {
             continue;
         }
         if !found_header {
             if let Some(header) = parse_pi_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
                 if header.entry_type == "session" {
-                    if header.has_damaged_lineage_key() {
+                    let has_raw_damaged_lineage_key =
+                        raw_json_has_damaged_top_level_key(&line.bytes, "parentSession")
+                            || raw_json_has_damaged_top_level_key(&line.bytes, "rlmDepth");
+                    if header.has_invalid_lineage() || has_raw_damaged_lineage_key {
                         return PrimeFileAccounting::default();
                     }
                     found_header = true;
@@ -1179,11 +1182,15 @@ mod tests {
             (b"".as_slice(), b"arentSession".as_slice(), true),
             // These can only be damaged extension keys adjacent to, rather
             // than damaged spellings of, the complete structural key.
-            (b"parentSession".as_slice(), b"".as_slice(), false),
-            (b"".as_slice(), b"parentSession".as_slice(), false),
+            // Raw-byte identity distinguishes invalid UTF-8 damage from a
+            // clean literal replacement-bearing extension name.
+            (b"parentSession".as_slice(), b"".as_slice(), true),
+            (b"".as_slice(), b"parentSession".as_slice(), true),
             (b"parentSession".as_slice(), b"Extra".as_slice(), false),
             (b"xparentSess".as_slice(), b"on".as_slice(), false),
-            (b"rlmDepth".as_slice(), b"".as_slice(), false),
+            (b"rlmDepth".as_slice(), b"".as_slice(), true),
+            (br"rlmDepth".as_slice(), b"".as_slice(), true),
+            (br"parentSession".as_slice(), b"".as_slice(), true),
             (b"extension".as_slice(), b"Field".as_slice(), false),
         ] {
             let mut file = NamedTempFile::new().unwrap();
@@ -1218,6 +1225,17 @@ mod tests {
 {"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}"#,
         );
         assert_eq!(parse_prime_agent_file(file.path()).len(), 1);
+
+        for extension_key in ["rlmDepth�", "�parentSession", "parentSession�"] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\",\"{extension_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            assert_eq!(
+                parse_prime_agent_file(file.path()).len(),
+                1,
+                "valid UTF-8 extension key {extension_key:?}"
+            );
+        }
     }
 
     #[test]
@@ -1368,7 +1386,19 @@ mod tests {
     }
 
     #[test]
-    fn ignores_mangled_parent_session_join_key() {
+    fn rejects_rlm_child_without_usable_parent_session() {
+        for parent_field in ["", ",\"parentSession\":\"\""] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"id\":\"child\",\"rlmDepth\":1{parent_field}}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert!(messages.is_empty(), "parent field {parent_field:?}");
+            assert!(accounting.child_message_usages.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_mangled_parent_session_value() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(
             b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent-\xff.jsonl\",\"rlmDepth\":1}\n",
@@ -1384,15 +1414,16 @@ mod tests {
         let messages = parse_prime_agent_file(file.path());
         let accounting = analyze_prime_agent_accounting(file.path(), &messages);
 
-        assert_eq!(messages.len(), 1);
+        assert!(messages.is_empty());
         assert!(accounting.child_parent_path.is_none());
+        assert!(accounting.child_message_usages.is_empty());
     }
 
     #[test]
     fn sanitizes_replacement_mangled_model_and_provider() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(
-            b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/\xff/project\",\"rlmDepth\":1}\n",
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/\xff/project\",\"rlmDepth\":0}\n",
         )
         .unwrap();
         file.write_all(b"{\"type\":\"session_info\",\"name\":\"agent-\xff\"}\n")

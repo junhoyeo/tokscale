@@ -13796,6 +13796,150 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_prime_agent_rejects_damaged_child_lineage_and_timestamp_cold_and_warm() {
+        for damage in ["parent-value", "timestamp-value"] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let sessions_dir = source_home.path().join(".prime/agent/sessions");
+            let child_dir = source_home
+                .path()
+                .join(".prime/agent/session-artifacts/root/sub-child");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::create_dir_all(&child_dir).unwrap();
+            let root_path = sessions_dir.join("root.jsonl");
+            std::fs::write(
+                &root_path,
+                r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":150,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"output":0},"aggregateUsage":{"input":150,"output":0}}
+"#,
+            )
+            .unwrap();
+
+            let child_path = child_dir.join(format!("{damage}.jsonl"));
+            let clean_parent = paths::json_path_literal(&root_path);
+            let mut child = Vec::new();
+            if damage == "parent-value" {
+                child.extend_from_slice(b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":");
+                child.extend_from_slice(
+                    clean_parent
+                        .as_bytes()
+                        .get(0..clean_parent.len() - 1)
+                        .unwrap(),
+                );
+                child.extend_from_slice(b"\xff\",\"rlmDepth\":1}\n");
+            } else {
+                child.extend_from_slice(format!("{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":{clean_parent},\"rlmDepth\":1}}\n").as_bytes());
+            }
+            if damage == "timestamp-value" {
+                child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:0\xffZ\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
+            } else {
+                child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
+            }
+            std::fs::write(child_path, child).unwrap();
+
+            let clients = ["prime-agent".to_string()];
+            sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+            let cold = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
+            assert_eq!(cold_calls, (2, 0), "{damage}");
+            let warm = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            assert_eq!(
+                sessions::prime_agent::transcript_decode_call_counts(),
+                (3, 0),
+                "{damage}: warm scan may revalidate the intentionally empty child, but must reuse the parent"
+            );
+
+            for messages in [cold, warm] {
+                assert_eq!(messages.len(), 1, "{damage}");
+                assert_eq!(messages[0].tokens.input, 150, "{damage}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_escaped_lineage_key_damage_is_safe_cold_and_warm() {
+        for damaged_key_prefix in [r"rlmDepth", r"parentSession"] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let sessions_dir = source_home.path().join(".prime/agent/sessions");
+            let child_dir = source_home
+                .path()
+                .join(".prime/agent/session-artifacts/root/sub-child");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::create_dir_all(&child_dir).unwrap();
+            let root_path = sessions_dir.join("root.jsonl");
+            std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":150,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"output":0},"aggregateUsage":{"input":150,"output":0}}
+"#,
+        )
+        .unwrap();
+            let child_path = child_dir.join("child.jsonl");
+            let clean_parent = paths::json_path_literal(&root_path);
+            let mut child = if damaged_key_prefix.starts_with("rlm") {
+                format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":{clean_parent},\"{damaged_key_prefix}"
+            )
+            .into_bytes()
+            } else {
+                format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"{damaged_key_prefix}"
+            )
+            .into_bytes()
+            };
+            child.extend_from_slice(b"\xff\":1}\n");
+            child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
+            std::fs::write(child_path, child).unwrap();
+
+            let clients = ["prime-agent".to_string()];
+            sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+            let cold = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
+            assert_eq!(cold_calls, (2, 0));
+            let warm = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (3, 0),
+            "the intentionally empty rejected child may be revalidated, but the parent stays warm"
+        );
+            for messages in [cold, warm] {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                150,
+                "damaged rlmDepth key must not turn the child into a root and double count to 200"
+            );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_prime_agent_dropped_damaged_usage_keeps_later_adjustment_aligned_cold_and_warm() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();

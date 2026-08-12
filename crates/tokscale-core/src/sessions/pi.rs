@@ -32,15 +32,16 @@ pub struct PiSessionHeader {
     pub parent_session: Option<String>,
     #[serde(rename = "rlmDepth")]
     pub rlm_depth: Option<u32>,
-    #[serde(flatten)]
-    extra_fields: BTreeMap<String, serde_json::Value>,
 }
 
 impl PiSessionHeader {
-    pub(crate) fn has_damaged_lineage_key(&self) -> bool {
-        self.extra_fields.keys().any(|key| {
-            damaged_key_may_name(key, "parentSession") || damaged_key_may_name(key, "rlmDepth")
-        })
+    pub(crate) fn has_invalid_lineage(&self) -> bool {
+        let is_rlm_child = self.rlm_depth.unwrap_or(0) > 0;
+        is_rlm_child
+            && self
+                .parent_session
+                .as_deref()
+                .is_none_or(|parent| parent.trim().is_empty() || has_replacement_character(parent))
     }
 }
 
@@ -59,10 +60,18 @@ fn damaged_key_may_name(key: &str, expected: &str) -> bool {
                 continue;
             }
             if pattern[pattern_index] == char::REPLACEMENT_CHARACTER {
-                for matched in matches[pattern_index + 1]
-                    .iter_mut()
-                    .skip(expected_index + 1)
-                {
+                // A replacement in the middle may represent either damaged
+                // bytes that replaced key characters or an undecodable byte
+                // inserted between otherwise intact characters. At an edge it
+                // must consume at least one expected character, so complete
+                // known keys with a damaged extension prefix/suffix are not
+                // mistaken for the known key itself.
+                let minimum = if pattern_index > 0 && pattern_index + 1 < pattern.len() {
+                    expected_index
+                } else {
+                    expected_index + 1
+                };
+                for matched in matches[pattern_index + 1].iter_mut().skip(minimum) {
                     *matched = true;
                 }
             } else if expected_index < expected.len()
@@ -73,6 +82,66 @@ fn damaged_key_may_name(key: &str, expected: &str) -> bool {
         }
     }
     matches[pattern.len()][expected.len()]
+}
+
+pub(crate) fn raw_json_has_damaged_top_level_key(raw: &[u8], expected: &str) -> bool {
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    while index < raw.len() {
+        match raw[index] {
+            b'{' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'"' => {
+                let key_start = index + 1;
+                index = key_start;
+                let mut escaped = false;
+                while index < raw.len() {
+                    let byte = raw[index];
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index >= raw.len() {
+                    return false;
+                }
+                let key = &raw[key_start..index];
+                let mut after = index + 1;
+                while after < raw.len() && raw[after].is_ascii_whitespace() {
+                    after += 1;
+                }
+                if depth == 1 && raw.get(after) == Some(&b':') && std::str::from_utf8(key).is_err()
+                {
+                    let lossy = String::from_utf8_lossy(key);
+                    let quoted = format!(r#""{lossy}""#);
+                    let Ok(decoded) = serde_json::from_str::<String>(&quoted) else {
+                        return false;
+                    };
+                    let without_replacements: String = decoded
+                        .chars()
+                        .filter(|character| *character != char::REPLACEMENT_CHARACTER)
+                        .collect();
+                    if without_replacements == expected || damaged_key_may_name(&decoded, expected)
+                    {
+                        return true;
+                    }
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 
 /// Loose type-only probe for a JSONL line, used to identify pre-session
@@ -119,6 +188,21 @@ pub struct PiSessionEntry {
     pub child_usage: Option<PiUsage>,
     #[serde(rename = "aggregateUsage")]
     pub aggregate_usage: Option<PiUsage>,
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl PiSessionEntry {
+    fn has_damaged_timestamp(&self) -> bool {
+        self.timestamp
+            .as_deref()
+            .is_some_and(has_replacement_character)
+            || self
+                .extra_fields
+                .keys()
+                .any(|key| damaged_key_may_name(key, "timestamp"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,9 +234,20 @@ pub struct PiUsage {
 
 impl PiUsage {
     pub(crate) fn has_damaged_key(&self) -> bool {
-        self.extra_fields
-            .keys()
-            .any(|key| has_replacement_character(key))
+        const TOKEN_COUNTER_KEYS: &[&str] = &[
+            "input",
+            "output",
+            "cacheRead",
+            "cacheWrite",
+            "totalTokens",
+            "reasoning",
+        ];
+
+        self.extra_fields.keys().any(|key| {
+            TOKEN_COUNTER_KEYS
+                .iter()
+                .any(|expected| damaged_key_may_name(key, expected))
+        })
     }
 }
 
@@ -343,8 +438,10 @@ impl Iterator for PiLines {
             match self {
                 Self::Standard(lines) => match lines.next() {
                     Some(Ok(line)) => return Some(PiLine::Standard(line)),
-                    Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => continue,
-                    Some(Err(_)) => return None,
+                    // `reader.lines()` historically skipped all unreadable
+                    // records and continued. In particular, an invalid-UTF-8
+                    // line must not truncate valid records that follow it.
+                    Some(Err(_)) => continue,
                     None => return None,
                 },
                 Self::Lossy(lines) => return lines.next().map(PiLine::Lossy),
@@ -433,7 +530,13 @@ fn parse_pi_format_file_inner(
                 Ok(h) => h,
                 Err(_) => return Vec::new(),
             };
-            if options.lossy_line_reader && header.has_damaged_lineage_key() {
+            let has_raw_damaged_lineage_key = line.raw_bytes().is_some_and(|raw| {
+                raw_json_has_damaged_top_level_key(raw, "parentSession")
+                    || raw_json_has_damaged_top_level_key(raw, "rlmDepth")
+            });
+            if options.lossy_line_reader
+                && (header.has_invalid_lineage() || has_raw_damaged_lineage_key)
+            {
                 return Vec::new();
             }
 
@@ -494,6 +597,23 @@ fn parse_pi_format_file_inner(
         };
 
         if message.role.as_deref() != Some("assistant") {
+            observer.observe_entry(&entry, None);
+            continue;
+        }
+
+        // An RLM child's completion timestamp participates in matching its
+        // usage back to the parent attribution. Recovering a replacement-
+        // damaged value as "missing" would make that match impossible while
+        // still emitting the child, so the parent's aggregate and child would
+        // both be counted. Other Pi messages do not use this timestamp as a
+        // reconciliation join and remain recoverable.
+        if options.lossy_line_reader
+            && is_rlm_subagent
+            && (entry.has_damaged_timestamp()
+                || entry.timestamp.as_deref().is_some_and(|timestamp| {
+                    chrono::DateTime::parse_from_rfc3339(timestamp).is_err()
+                }))
+        {
             observer.observe_entry(&entry, None);
             continue;
         }
@@ -661,6 +781,89 @@ mod tests {
             .as_deref()
             .is_some_and(|key| key.starts_with("prime-agent:message:clean:")));
         assert_eq!(messages[0].tokens.total(), 28);
+    }
+
+    #[test]
+    fn damaged_usage_extension_keys_do_not_hide_known_counters() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"{\"type\":\"session\",\"id\":\"root\"}\n")
+            .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"kept\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8,\"future-\xff-field\":999}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_test_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 28);
+    }
+
+    #[test]
+    fn standard_pi_skips_invalid_utf8_line_and_reads_later_records() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"{\"type\":\"session\",\"id\":\"root\"}\n")
+            .unwrap();
+        file.write_all(b"invalid \xff record\n").unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"later\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_pi_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 28);
+    }
+
+    #[test]
+    fn prime_rejects_only_matching_critical_child_timestamps() {
+        for (depth, expected_ids) in [(1, vec!["clean"]), (0, vec!["damaged", "clean"])] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(
+                file,
+                "{{\"type\":\"session\",\"id\":\"root\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":{depth}}}"
+            )
+            .unwrap();
+            file.write_all(
+                b"{\"type\":\"message\",\"id\":\"damaged\",\"timestamp\":\"2026-08-08T00:00:0\xffZ\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10}}}\n",
+            ).unwrap();
+            file.write_all(b"{\"type\":\"message\",\"id\":\"clean\",\"timestamp\":\"2026-08-08T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20}}}\n").unwrap();
+            file.flush().unwrap();
+
+            let messages = parse_prime_test_file(file.path());
+            let ids = messages
+                .iter()
+                .map(|message| {
+                    message
+                        .dedup_key
+                        .as_deref()
+                        .unwrap()
+                        .split(':')
+                        .nth(2)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected_ids, "rlmDepth={depth}");
+        }
+    }
+
+    #[test]
+    fn prime_rejects_child_message_with_damaged_timestamp_key() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"{\"type\":\"session\",\"id\":\"child\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":1}\n")
+            .unwrap();
+        file.write_all(b"{\"type\":\"message\",\"id\":\"damaged\",\"time\xffstamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10}}}\n").unwrap();
+        file.write_all(b"{\"type\":\"message\",\"id\":\"clean\",\"timestamp\":\"2026-08-08T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20}}}\n").unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_test_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .contains(":clean:"));
     }
 
     #[test]

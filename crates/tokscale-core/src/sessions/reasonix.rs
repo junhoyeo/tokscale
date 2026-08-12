@@ -207,8 +207,13 @@ mod tests {
         for (model, expected_provider) in [
             ("agpt-foo", "reasonix"),
             ("declaude-x", "reasonix"),
+            ("unqwened-model", "reasonix"),
+            ("minimaximal", "reasonix"),
             ("gpt-5", "openai"),
+            ("gpt4-turbo", "openai"),
             ("claude-sonnet-4", "anthropic"),
+            ("claude3-opus", "anthropic"),
+            ("qwen3-coder", "qwen"),
         ] {
             let mut file = NamedTempFile::new().unwrap();
             writeln!(

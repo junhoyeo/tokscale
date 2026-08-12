@@ -1046,13 +1046,17 @@ fn parser_version(client: ClientId) -> u32 {
         // Without the bump, malformed-line loss could be mistaken for complete
         // accounting rather than a truncated source. v2->v3 rejects damaged
         // lineage and usage structural keys before reconciliation bookkeeping.
-        ClientId::PrimeAgent => 3,
+        // v3->v4 rejects damaged lineage values and matching-critical child
+        // timestamps while preserving unrelated damaged usage extensions.
+        ClientId::PrimeAgent => 4,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
         // undecodable bytes instead of silently dropping the whole record.
         // v2->v3: damaged providers use delimiter-aware family inference.
-        ClientId::Reasonix => 3,
+        // v3->v4 applies that recovery to every family with version-aware
+        // boundaries, rejecting family-name substrings inside ordinary words.
+        ClientId::Reasonix => 4,
         // v1->v2: per-model token attribution now comes from
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
@@ -2978,25 +2982,25 @@ mod tests {
     }
 
     #[test]
-    fn test_lossy_jsonl_parser_versions_invalidate_v2_entries() {
-        assert_eq!(parser_version(ClientId::PrimeAgent), 3);
-        assert_eq!(parser_version(ClientId::Reasonix), 3);
+    fn test_lossy_jsonl_parser_versions_invalidate_v3_entries() {
+        assert_eq!(parser_version(ClientId::PrimeAgent), 4);
+        assert_eq!(parser_version(ClientId::Reasonix), 4);
     }
 
     #[test]
     #[serial_test::serial]
-    fn prime_and_reasonix_v2_shards_are_rejected_before_changed_bytes_are_parsed() {
+    fn prime_and_reasonix_v3_shards_are_rejected_before_changed_bytes_are_parsed() {
         for (client, source_bytes, stale_provider, expected_provider) in [
             (
                 ClientId::PrimeAgent,
                 b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"valid\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n".as_slice(),
-                "stale-prime-v2",
+                "stale-prime-v3",
                 "anthropic",
             ),
             (
                 ClientId::Reasonix,
                 b"{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"deepseek/chat\",\"prompt\":100,\"completion\":20,\"total\":120}\n".as_slice(),
-                "stale-reasonix-v2",
+                "stale-reasonix-v3",
                 "deepseek",
             ),
         ] {
@@ -3004,10 +3008,10 @@ mod tests {
             let _cache_env = sandbox_cache_env(temp_home.path());
             let source = write_temp_file(source_bytes);
             let current_identity = CacheIdentity::for_client(client);
-            assert_eq!(current_identity.parser_version, 3);
+            assert_eq!(current_identity.parser_version, 4);
             let stale_identity = CacheIdentity {
                 namespace: current_identity.namespace,
-                parser_version: 2,
+                parser_version: 3,
             };
             let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
             let stale_entry = CachedSourceEntry::new(
@@ -3066,7 +3070,7 @@ mod tests {
 
             let warm = SourceMessageCache::load();
             let cached = warm.get(current_identity, source.path()).unwrap();
-            assert_eq!(cached.parser_version, 3);
+            assert_eq!(cached.parser_version, 4);
             assert_eq!(cached.messages, rebuilt);
         }
     }
