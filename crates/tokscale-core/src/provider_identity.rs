@@ -220,6 +220,17 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
 }
 
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
+    inferred_provider_from_model_inner(model, false)
+}
+
+pub(crate) fn inferred_provider_from_model_delimited(model: &str) -> Option<&'static str> {
+    inferred_provider_from_model_inner(model, true)
+}
+
+fn inferred_provider_from_model_inner(
+    model: &str,
+    delimit_family_names: bool,
+) -> Option<&'static str> {
     let lower = model.to_lowercase();
 
     // Ollama is a routing prefix, not part of the upstream model family. In
@@ -227,11 +238,14 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     // otherwise-unknown Ollama model as Meta. Re-run inference on the routed
     // model so known families retain their actual providers.
     if let Some(routed_model) = lower.strip_prefix("ollama/") {
-        return inferred_provider_from_model(routed_model);
+        return inferred_provider_from_model_inner(routed_model, delimit_family_names);
     }
 
-    if lower.contains("claude")
-        || lower.contains("anthropic")
+    if (if delimit_family_names {
+        contains_delimited(&lower, "claude")
+    } else {
+        lower.contains("claude")
+    }) || lower.contains("anthropic")
         || contains_delimited(&lower, "opus")
         || contains_delimited(&lower, "sonnet")
         || contains_delimited(&lower, "haiku")
@@ -240,8 +254,11 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("anthropic");
     }
 
-    if lower.contains("gpt")
-        || lower.contains("openai")
+    if (if delimit_family_names {
+        contains_delimited(&lower, "gpt")
+    } else {
+        lower.contains("gpt")
+    }) || lower.contains("openai")
         || contains_delimited(&lower, "o1")
         || contains_delimited(&lower, "o3")
         || contains_delimited(&lower, "o4")

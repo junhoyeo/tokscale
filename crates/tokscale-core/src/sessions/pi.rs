@@ -32,6 +32,47 @@ pub struct PiSessionHeader {
     pub parent_session: Option<String>,
     #[serde(rename = "rlmDepth")]
     pub rlm_depth: Option<u32>,
+    #[serde(flatten)]
+    extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl PiSessionHeader {
+    pub(crate) fn has_damaged_lineage_key(&self) -> bool {
+        self.extra_fields.keys().any(|key| {
+            damaged_key_may_name(key, "parentSession") || damaged_key_may_name(key, "rlmDepth")
+        })
+    }
+}
+
+fn damaged_key_may_name(key: &str, expected: &str) -> bool {
+    if !has_replacement_character(key) {
+        return false;
+    }
+
+    let pattern: Vec<char> = key.chars().collect();
+    let expected: Vec<char> = expected.chars().collect();
+    let mut matches = vec![vec![false; expected.len() + 1]; pattern.len() + 1];
+    matches[0][0] = true;
+    for pattern_index in 0..pattern.len() {
+        for expected_index in 0..=expected.len() {
+            if !matches[pattern_index][expected_index] {
+                continue;
+            }
+            if pattern[pattern_index] == char::REPLACEMENT_CHARACTER {
+                for matched in matches[pattern_index + 1]
+                    .iter_mut()
+                    .skip(expected_index + 1)
+                {
+                    *matched = true;
+                }
+            } else if expected_index < expected.len()
+                && pattern[pattern_index] == expected[expected_index]
+            {
+                matches[pattern_index + 1][expected_index + 1] = true;
+            }
+        }
+    }
+    matches[pattern.len()][expected.len()]
 }
 
 /// Loose type-only probe for a JSONL line, used to identify pre-session
@@ -392,6 +433,9 @@ fn parse_pi_format_file_inner(
                 Ok(h) => h,
                 Err(_) => return Vec::new(),
             };
+            if options.lossy_line_reader && header.has_damaged_lineage_key() {
+                return Vec::new();
+            }
 
             observer.observe_header(&header);
             let clean_cwd = header
@@ -459,7 +503,6 @@ fn parse_pi_format_file_inner(
             continue;
         };
         if options.lossy_line_reader && usage.has_damaged_key() {
-            observer.observe_entry(&entry, None);
             continue;
         }
 

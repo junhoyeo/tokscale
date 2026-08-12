@@ -468,6 +468,9 @@ pub(crate) fn analyze_prime_agent_accounting(
         if !found_header {
             if let Some(header) = parse_pi_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
                 if header.entry_type == "session" {
+                    if header.has_damaged_lineage_key() {
+                        return PrimeFileAccounting::default();
+                    }
                     found_header = true;
                     accounting.observe_header(&header);
                     continue;
@@ -500,7 +503,10 @@ pub(crate) fn analyze_prime_agent_accounting(
             .filter(|message| {
                 entry.entry_type == "message"
                     && message.role.as_deref() == Some("assistant")
-                    && message.usage.is_some()
+                    && message
+                        .usage
+                        .as_ref()
+                        .is_some_and(|usage| !usage.has_damaged_key())
                     && message.model.is_some()
             })
             .and_then(|_| {
@@ -1162,6 +1168,85 @@ mod tests {
             "prime-agent:response:response-2"
         );
         assert_eq!(accounting.adjustments[0].attributions[0].id, "usage-2");
+    }
+
+    #[test]
+    fn rejects_only_headers_with_damaged_lineage_keys() {
+        for (prefix, suffix, rejected) in [
+            // A replacement consumes at least one byte of a real lineage key.
+            (b"parentSess".as_slice(), b"on".as_slice(), true),
+            (b"rlmDep".as_slice(), b"h".as_slice(), true),
+            (b"".as_slice(), b"arentSession".as_slice(), true),
+            // These can only be damaged extension keys adjacent to, rather
+            // than damaged spellings of, the complete structural key.
+            (b"parentSession".as_slice(), b"".as_slice(), false),
+            (b"".as_slice(), b"parentSession".as_slice(), false),
+            (b"parentSession".as_slice(), b"Extra".as_slice(), false),
+            (b"xparentSess".as_slice(), b"on".as_slice(), false),
+            (b"rlmDepth".as_slice(), b"".as_slice(), false),
+            (b"extension".as_slice(), b"Field".as_slice(), false),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(
+                b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"",
+            )
+            .unwrap();
+            file.write_all(prefix).unwrap();
+            file.write_all(b"\xff").unwrap();
+            file.write_all(suffix).unwrap();
+            file.write_all(b"\":1}\n").unwrap();
+            file.write_all(
+                br#"{"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}
+"#,
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+
+            assert_eq!(messages.is_empty(), rejected);
+            if rejected {
+                assert!(accounting.attributions.is_empty());
+                assert!(accounting.adjustments.is_empty());
+                assert!(accounting.child_parent_path.is_none());
+                assert!(accounting.fork_parent_path.is_none());
+            }
+        }
+
+        let file = session_file(
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","extensionField":1}
+{"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}"#,
+        );
+        assert_eq!(parse_prime_agent_file(file.path()).len(), 1);
+    }
+
+    #[test]
+    fn damaged_message_usage_does_not_advance_accounting_alignment() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+{"type":"message","id":"assistant-damaged","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-damaged","usage":{"in�put":999,"output":1}}}
+{"type":"message","id":"assistant-valid","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-valid","usage":{"input":20,"output":8}}}
+{"type":"child_usage_attributed","id":"usage-valid","targetId":"assistant-valid","childUsage":{"input":3,"output":2},"aggregateUsage":{"input":20,"output":8}}
+"#.as_bytes(),
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("prime-agent:response:response-valid")
+        );
+
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+        assert_eq!(accounting.adjustments.len(), 1);
+        assert_eq!(
+            accounting.adjustments[0].dedup_key,
+            "prime-agent:response:response-valid"
+        );
+        assert_eq!(accounting.adjustments[0].attributions[0].id, "usage-valid");
     }
 
     #[test]

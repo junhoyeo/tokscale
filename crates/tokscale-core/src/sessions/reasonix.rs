@@ -7,7 +7,9 @@
 use super::pi::has_replacement_character;
 use super::utils::{lossy_lines, parse_timestamp_value};
 use super::UnifiedMessage;
-use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
+use crate::provider_identity::{
+    canonical_provider, inferred_provider_from_model, inferred_provider_from_model_delimited,
+};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -55,7 +57,7 @@ fn split_model_ref(model_ref: &str) -> (String, String) {
             model
         };
         let provider = if has_replacement_character(provider) {
-            inferred_provider_from_model(model)
+            inferred_provider_from_model_delimited(model)
                 .unwrap_or("reasonix")
                 .to_string()
         } else {
@@ -198,6 +200,30 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "reasonix");
         assert_eq!(messages[0].model_id, "unknown");
+    }
+
+    #[test]
+    fn damaged_provider_uses_delimiter_aware_model_inference() {
+        for (model, expected_provider) in [
+            ("agpt-foo", "reasonix"),
+            ("declaude-x", "reasonix"),
+            ("gpt-5", "openai"),
+            ("claude-sonnet-4", "anthropic"),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(
+                file,
+                "{{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"bad-�/{model}\",\"prompt\":100,\"completion\":20,\"total\":120}}"
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let messages = parse_reasonix_file(file.path());
+
+            assert_eq!(messages.len(), 1, "{model}");
+            assert_eq!(messages[0].provider_id, expected_provider, "{model}");
+            assert_eq!(messages[0].model_id, model, "{model}");
+        }
     }
 
     #[test]
