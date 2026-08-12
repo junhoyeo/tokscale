@@ -2164,11 +2164,15 @@ fn scan_all_clients_with_env_strategy_inner(
         })
         .collect();
 
-    // Aggregate results, deduplicating file paths across overlapping directories
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // Aggregate results, deduplicating canonical file paths across overlapping
+    // roots while preserving one copy per client. Canonical keys collapse a
+    // symlinked root onto its real path; keeping the client in the key avoids
+    // suppressing an independent client that intentionally scans the same file.
+    let mut seen: HashSet<(ClientId, PathBuf)> = HashSet::new();
     for (client_id, files) in scan_results {
         for file in files {
-            if seen.insert(file.clone()) {
+            let key = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            if seen.insert((client_id, key)) {
                 result.get_mut(client_id).push(file);
             }
         }
@@ -2183,7 +2187,8 @@ fn scan_all_clients_with_env_strategy_inner(
         result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
 
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
-            if path.is_file() && seen.insert(path.clone()) {
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if path.is_file() && seen.insert((ClientId::Copilot, key)) {
                 let copilot_files = result.get_mut(ClientId::Copilot);
                 copilot_files.push(path);
                 copilot_files.sort_unstable();
@@ -2319,6 +2324,37 @@ mod tests {
         let result = ScanResult::default();
         assert_eq!(result.total_files(), 0);
         assert!(result.all_files().is_empty());
+    }
+
+    #[test]
+    fn test_overlapping_roots_do_not_suppress_independent_clients() {
+        let dir = TempDir::new().unwrap();
+        let session = dir.path().join("shared.jsonl");
+        File::create(&session).unwrap();
+        let mut settings = ScannerSettings::default();
+        settings
+            .extra_scan_paths
+            .insert("pi".to_string(), vec![dir.path().to_path_buf()]);
+        settings
+            .extra_scan_paths
+            .insert("senpi".to_string(), vec![dir.path().to_path_buf()]);
+
+        let result = scan_all_clients_with_scanner_settings(
+            dir.path().to_str().unwrap(),
+            &["pi".to_string(), "senpi".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(
+            result.get(ClientId::Pi).as_slice(),
+            std::slice::from_ref(&session)
+        );
+        assert_eq!(
+            result.get(ClientId::Senpi).as_slice(),
+            std::slice::from_ref(&session)
+        );
+        assert_eq!(result.all_files().len(), 2);
     }
 
     #[test]
@@ -6351,44 +6387,113 @@ mod tests {
         restore_env("XDG_DATA_HOME", prev_xdg);
     }
 
+    fn setup_mock_senpi_omo_child(project_dir: &Path) -> PathBuf {
+        let child_session = project_dir
+            .join(".omo/senpi-task/children/task-123/sessions/task-123")
+            .join("child.jsonl");
+        fs::create_dir_all(child_session.parent().unwrap()).unwrap();
+        File::create(&child_session).unwrap();
+        child_session.canonicalize().unwrap()
+    }
+
     #[test]
     #[serial]
     fn test_senpi_discovers_omo_task_children_in_current_project() {
         let home_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let child_sessions = project_dir
-            .path()
-            .join(".omo/senpi-task/children/task-123/sessions/encoded-cwd");
-        fs::create_dir_all(&child_sessions).unwrap();
-        let child_session = child_sessions.join("child.jsonl");
-        File::create(&child_session).unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
+        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
         let result =
             scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
 
-        assert!(
-            result.get(ClientId::Senpi).contains(&child_session),
+        assert_eq!(
+            result.get(ClientId::Senpi).as_slice(),
+            std::slice::from_ref(&child_session),
             "current-project OmO child sessions must be auto-discovered"
         );
     }
 
     #[test]
     #[serial]
-    fn test_senpi_honors_coding_agent_session_dir() {
+    fn test_senpi_honors_independent_coding_agent_session_dir() {
         let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
         let redirected_sessions = TempDir::new().unwrap();
         let redirected_session = redirected_sessions.path().join("redirected.jsonl");
         File::create(&redirected_session).unwrap();
         let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
         env.set("SENPI_CODING_AGENT_SESSION_DIR", redirected_sessions.path());
+        let _current_dir = CurrentDirGuard::set(project_dir.path());
 
         let result =
             scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
 
-        assert!(
-            result.get(ClientId::Senpi).contains(&redirected_session),
-            "SENPI_CODING_AGENT_SESSION_DIR must be scanned"
-        );
+        assert_eq!(result.get(ClientId::Senpi).len(), 2);
+        assert!(result.get(ClientId::Senpi).contains(&child_session));
+        assert!(result.get(ClientId::Senpi).contains(&redirected_session));
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_overlapping_session_roots_return_each_file_once() {
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let children_dir = project_dir.path().join(".omo/senpi-task/children");
+        let task_dir = children_dir.join("task-123");
+        let exact_session_dir = task_dir.join("sessions/task-123");
+        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
+        let _current_dir = CurrentDirGuard::set(project_dir.path());
+
+        for env_root in [
+            project_dir.path(),
+            children_dir.as_path(),
+            task_dir.as_path(),
+            exact_session_dir.as_path(),
+            child_session.as_path(),
+        ] {
+            env.set("SENPI_CODING_AGENT_SESSION_DIR", env_root);
+            let result =
+                scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+            let files = result.get(ClientId::Senpi);
+            assert_eq!(
+                files.len(),
+                1,
+                "overlapping env root {} must not duplicate the child session",
+                env_root.display()
+            );
+            assert_eq!(files[0].canonicalize().unwrap(), child_session);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_senpi_symlinked_overlapping_session_root_returns_each_file_once() {
+        use std::os::unix::fs::symlink;
+
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let symlink_root = project_dir.path().join("redirected-sessions");
+        symlink(
+            project_dir.path().join(".omo/senpi-task/children"),
+            &symlink_root,
+        )
+        .unwrap();
+        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
+        env.set("SENPI_CODING_AGENT_SESSION_DIR", &symlink_root);
+        let _current_dir = CurrentDirGuard::set(project_dir.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        let files = result.get(ClientId::Senpi);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].canonicalize().unwrap(), child_session);
     }
 }
