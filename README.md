@@ -787,7 +787,7 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 
 | Provider | Auth Method | Metrics | Setup |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, Opus quotas | Run `claude` to log in |
+| **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, model-scoped quotas | Run `claude` to log in |
 | **Codex** (OpenAI) | OAuth (Codex auth, saved Tokscale accounts, or OpenCode's `$XDG_DATA_HOME/opencode/auth.json`) | Session, Weekly quotas | Use `[Add Codex]`, run `codex`, import with `tokscale codex import --name work`, or connect OpenAI with ChatGPT Plus/Pro in OpenCode |
 | **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
 | **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |

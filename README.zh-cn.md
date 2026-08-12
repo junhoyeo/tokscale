@@ -785,7 +785,7 @@ tokscale usage --light
 
 | 提供商 | 认证方式 | 指标 | 设置 |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth（凭据文件或 macOS 钥匙串） | Session（5 小时）、Weekly、Opus 配额 | 运行 `claude` 登录 |
+| **Claude** | OAuth（凭据文件或 macOS 钥匙串） | Session（5 小时）、Weekly、模型专属配额 | 运行 `claude` 登录 |
 | **Codex**（OpenAI） | OAuth（Codex 认证、已保存的 Tokscale 账号，或 OpenCode 的 `$XDG_DATA_HOME/opencode/auth.json`） | Session、Weekly 配额 | 使用 `[Add Codex]`、运行 `codex`、通过 `tokscale codex import --name work` 导入，或在 OpenCode 中连接 OpenAI ChatGPT Plus/Pro |
 | **Z.ai** | API key（环境变量） | Token 限额、Web Searches | 设置 `ZAI_API_KEY` 或 `GLM_API_KEY` |
 | **Amp** | API key（`~/.local/share/amp/secrets.json`） | 免费额度余额、Credits | 运行 `amp` 登录 |

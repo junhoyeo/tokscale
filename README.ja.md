@@ -786,7 +786,7 @@ TUI では **Usage** タブに移動するとサブスクリプションデー�
 
 | プロバイダー | 認証方法 | メトリクス | セットアップ |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth（資格情報ファイルまたは macOS Keychain） | Session（5時間）、Weekly、Opus クォータ | `claude` を実行してログイン |
+| **Claude** | OAuth（資格情報ファイルまたは macOS Keychain） | Session（5時間）、Weekly、モデル別クォータ | `claude` を実行してログイン |
 | **Codex**（OpenAI） | OAuth（Codex 認証、保存済み Tokscale アカウント、または OpenCode の `$XDG_DATA_HOME/opencode/auth.json`） | Session、Weekly クォータ | `[Add Codex]`、`codex`、`tokscale codex import --name work`、または OpenCode で OpenAI の ChatGPT Plus/Pro に接続 |
 | **Z.ai** | API キー（環境変数） | トークン上限、Web 検索 | `ZAI_API_KEY` または `GLM_API_KEY` を設定 |
 | **Amp** | API キー（`~/.local/share/amp/secrets.json`） | 無料枠残高、クレジット | `amp` を実行してログイン |

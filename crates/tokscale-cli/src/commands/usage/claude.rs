@@ -39,12 +39,33 @@ struct UsageResponse {
     five_hour: Option<Window>,
     seven_day: Option<Window>,
     seven_day_opus: Option<Window>,
+    limits: Option<Vec<PlanLimit>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Window {
     utilization: f64,
     resets_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanLimit {
+    kind: Option<String>,
+    percent: Option<f64>,
+    resets_at: Option<String>,
+    scope: Option<LimitScope>,
+    #[serde(default)]
+    is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LimitScope {
+    model: Option<ScopedModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopedModel {
+    display_name: Option<String>,
 }
 
 fn credentials_path() -> std::path::PathBuf {
@@ -116,6 +137,65 @@ fn window_metric(label: &str, w: &Window) -> UsageMetric {
     }
 }
 
+fn scoped_limit_metric(limit: &PlanLimit) -> Option<UsageMetric> {
+    if limit.kind.as_deref() != Some("weekly_scoped") || !limit.is_active {
+        return None;
+    }
+
+    let label = limit
+        .scope
+        .as_ref()?
+        .model
+        .as_ref()?
+        .display_name
+        .as_deref()?
+        .trim();
+    if label.is_empty() {
+        return None;
+    }
+
+    let used = limit.percent?.clamp(0.0, 100.0);
+    Some(UsageMetric {
+        label: label.to_string(),
+        used_percent: used,
+        remaining_percent: 100.0 - used,
+        remaining_label: None,
+        resets_at: limit.resets_at.clone(),
+    })
+}
+
+fn usage_metrics(resp: &UsageResponse) -> Vec<UsageMetric> {
+    let mut metrics = Vec::new();
+    if let Some(ref w) = resp.five_hour {
+        metrics.push(window_metric("Session", w));
+    }
+    if let Some(ref w) = resp.seven_day {
+        metrics.push(window_metric("Weekly", w));
+    }
+    if let Some(ref w) = resp.seven_day_opus {
+        metrics.push(window_metric("Opus", w));
+    }
+
+    for metric in resp
+        .limits
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(scoped_limit_metric)
+    {
+        if let Some(existing) = metrics
+            .iter_mut()
+            .find(|existing| existing.label.eq_ignore_ascii_case(&metric.label))
+        {
+            *existing = metric;
+        } else {
+            metrics.push(metric);
+        }
+    }
+
+    metrics
+}
+
 /// The whole Claude usage path, with the only two things a test cannot supply
 /// for real -- the usage endpoint and the credential source -- as parameters.
 /// The destructive refresh-and-write this module was fixed for lived in exactly
@@ -148,16 +228,7 @@ fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput
         let client = reqwest::Client::new();
         let resp = fetch_usage(&client, usage_url, access_token).await?;
 
-        let mut metrics = Vec::new();
-        if let Some(ref w) = resp.five_hour {
-            metrics.push(window_metric("Session", w));
-        }
-        if let Some(ref w) = resp.seven_day {
-            metrics.push(window_metric("Weekly", w));
-        }
-        if let Some(ref w) = resp.seven_day_opus {
-            metrics.push(window_metric("Opus", w));
-        }
+        let metrics = usage_metrics(&resp);
 
         Ok(UsageOutput {
             provider: "Claude".into(),
@@ -202,6 +273,32 @@ mod tests {
 
     const USAGE_BODY: &str =
         r#"{"five_hour":{"utilization":12.5,"resets_at":"2026-08-03T12:00:00Z"}}"#;
+
+    const SCOPED_USAGE_BODY: &str = r#"{
+  "five_hour": { "utilization": 0, "resets_at": "2026-08-12T05:30:00Z" },
+  "seven_day": { "utilization": 30, "resets_at": "2026-08-17T04:00:00Z" },
+  "seven_day_opus": null,
+  "limits": [
+    { "kind": "session", "group": "session", "percent": 0, "is_active": false },
+    { "kind": "weekly_all", "group": "weekly", "percent": 30, "is_active": false },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 47,
+      "resets_at": "2026-08-17T04:00:00Z",
+      "scope": { "model": { "id": null, "display_name": "Fable" } },
+      "is_active": true
+    },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 90,
+      "scope": { "model": { "display_name": "Retired model" } },
+      "is_active": false
+    },
+    { "kind": "weekly_scoped", "percent": 99, "is_active": true }
+  ]
+}"#;
 
     /// Mirrors the path component of [`USAGE_URL`] so the recorded request line
     /// is the same string production would produce.
@@ -381,6 +478,50 @@ mod tests {
             "tokscale rewrote Claude Code's credential file"
         );
         assert_only_usage_request(&log);
+    }
+
+    #[test]
+    fn exposes_active_model_scoped_weekly_limit() {
+        let response: UsageResponse =
+            serde_json::from_str(SCOPED_USAGE_BODY).expect("scoped usage response parses");
+
+        let metrics = usage_metrics(&response);
+
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|metric| metric.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Session", "Weekly", "Fable"]
+        );
+        let fable = &metrics[2];
+        assert!((fable.used_percent - 47.0).abs() < f64::EPSILON);
+        assert!((fable.remaining_percent - 53.0).abs() < f64::EPSILON);
+        assert_eq!(fable.resets_at.as_deref(), Some("2026-08-17T04:00:00Z"));
+    }
+
+    #[test]
+    fn scoped_limit_replaces_matching_legacy_model_window() {
+        let response: UsageResponse = serde_json::from_str(
+            r#"{
+  "seven_day_opus": { "utilization": 60, "resets_at": "legacy" },
+  "limits": [{
+    "kind": "weekly_scoped",
+    "percent": 25,
+    "resets_at": "current",
+    "scope": { "model": { "display_name": "Opus" } },
+    "is_active": true
+  }]
+}"#,
+        )
+        .expect("legacy and scoped usage response parses");
+
+        let metrics = usage_metrics(&response);
+
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].label, "Opus");
+        assert!((metrics[0].used_percent - 25.0).abs() < f64::EPSILON);
+        assert_eq!(metrics[0].resets_at.as_deref(), Some("current"));
     }
 
     /// `read_credentials()` is the source of truth for what tokscale parses.
