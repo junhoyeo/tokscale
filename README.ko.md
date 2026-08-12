@@ -783,7 +783,7 @@ TUI에서는 **Usage** 탭으로 이동해 구독 데이터를 확인하세요. 
 
 | 프로바이더 | 인증 방식 | 지표 | 설정 |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth (자격 증명 파일 또는 macOS Keychain) | 세션(5시간), 주간, Opus 할당량 | `claude`를 실행해 로그인 |
+| **Claude** | OAuth (자격 증명 파일 또는 macOS Keychain) | 세션(5시간), 주간, 모델별 할당량 | `claude`를 실행해 로그인 |
 | **Codex** (OpenAI) | OAuth (Codex 인증, 저장된 Tokscale 계정 또는 OpenCode의 `$XDG_DATA_HOME/opencode/auth.json`) | 세션, 주간 할당량 | `[Add Codex]`, `codex`, `tokscale codex import --name work` 또는 OpenCode에서 OpenAI ChatGPT Plus/Pro 연결 사용 |
 | **Z.ai** | API 키 (환경 변수) | 토큰 한도, 웹 검색 | `ZAI_API_KEY` 또는 `GLM_API_KEY` 설정 |
 | **Amp** | API 키 (`~/.local/share/amp/secrets.json`) | 무료 티어 잔액, 크레딧 | `amp`를 실행해 로그인 |
