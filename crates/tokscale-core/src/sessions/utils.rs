@@ -20,7 +20,9 @@ use std::time::SystemTime;
 /// stripped, and a final line without a newline is still yielded.
 pub(crate) fn lossy_lines<R: BufRead>(reader: R) -> LossyLines<R> {
     LossyLines {
-        inner: lossy_lines_with_bytes(reader),
+        reader,
+        buf: Vec::new(),
+        at_start: true,
     }
 }
 
@@ -44,14 +46,42 @@ pub(crate) struct LossyLine {
 }
 
 pub(crate) struct LossyLines<R> {
-    inner: LossyLinesWithBytes<R>,
+    reader: R,
+    buf: Vec<u8>,
+    at_start: bool,
+}
+
+fn read_lossy_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    at_start: &mut bool,
+) -> Option<String> {
+    buf.clear();
+    match reader.read_until(b'\n', buf) {
+        Ok(0) => None,
+        Ok(_) => {
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+            }
+
+            let mut bytes = buf.as_slice();
+            if std::mem::take(at_start) {
+                bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
+            }
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        Err(_) => None,
+    }
 }
 
 impl<R: BufRead> Iterator for LossyLines<R> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|line| line.text)
+        read_lossy_line(&mut self.reader, &mut self.buf, &mut self.at_start)
     }
 }
 

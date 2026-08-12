@@ -10,6 +10,7 @@ use super::UnifiedMessage;
 use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
 use crate::TokenBreakdown;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -33,6 +34,16 @@ struct ReasonixStat {
     requests: i64,
     #[serde(default)]
     turn: bool,
+    #[serde(flatten)]
+    extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl ReasonixStat {
+    fn has_damaged_key(&self) -> bool {
+        self.extra_fields
+            .keys()
+            .any(|key| has_replacement_character(key))
+    }
 }
 
 fn split_model_ref(model_ref: &str) -> (String, String) {
@@ -74,7 +85,8 @@ pub fn parse_reasonix_file(path: &Path) -> Vec<UnifiedMessage> {
         .enumerate()
         .filter_map(|(line_index, line)| {
             let record: ReasonixStat = serde_json::from_str(line.trim()).ok()?;
-            if record.turn
+            if record.has_damaged_key()
+                || record.turn
                 || record.model.trim().is_empty()
                 || (record.total <= 0 && record.requests <= 0)
             {
@@ -146,6 +158,30 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.total(), 120);
         assert_eq!(messages[1].tokens.total(), 12);
+    }
+
+    #[test]
+    fn rejects_replacement_mangled_counter_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"deepseek/chat\",\"prom\xffpt\":100,\"completion\":20,\"total\":120}\n",
+        )
+        .unwrap();
+        file.write_all(
+            "{\"ts\":\"2026-08-04T09:10:12Z\",\"model\":\"deepseek/chat\",\"cache_�hit\":30,\"prompt\":100,\"completion\":20,\"total\":120}\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"ts\":\"2026-08-04T09:10:13Z\",\"model\":\"deepseek/chat\",\"prompt\":10,\"completion\":2,\"total\":12}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_reasonix_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 12);
     }
 
     #[test]

@@ -13736,6 +13736,66 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_prime_agent_cold_and_warm_reject_damaged_nested_attribution_usage() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/root/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let root_path = sessions_dir.join("root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":100,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"out�put":999},"aggregateUsage":{"input":100,"output":0}}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response","usage":{{"input":50,"output":0}}}}}}
+"#,
+                paths::json_path_literal(&root_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_decode_calls, (2, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_decode_calls,
+            "the unchanged warm scan must reuse the safely rejected accounting record"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                150,
+                "damaged child usage must not subtract the matching child from the parent"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_prime_agent_warm_cache_preserves_distinct_invalid_utf8_ids() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();

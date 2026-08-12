@@ -236,7 +236,11 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
                 entry.child_usage.as_ref(),
                 entry.aggregate_usage.as_ref(),
             ) {
-                if has_replacement_character(id) || has_replacement_character(target_id) {
+                if has_replacement_character(id)
+                    || has_replacement_character(target_id)
+                    || child_usage.has_damaged_key()
+                    || aggregate_usage.has_damaged_key()
+                {
                     return;
                 }
                 self.attributions
@@ -1217,6 +1221,63 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some("prime-agent:response:response-clean")
         );
+        assert!(accounting.attributions.is_empty());
+        assert!(accounting.adjustments.is_empty());
+    }
+
+    #[test]
+    fn skips_attributions_with_damaged_nested_usage_keys() {
+        for damaged_key in ["out�put", "cache�Read"] {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(
+                br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+            )
+            .unwrap();
+            file.write_all(
+                br#"{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":100,"output":8}}}
+"#,
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{{\"type\":\"child_usage_attributed\",\"id\":\"usage-clean\",\"targetId\":\"assistant-clean\",\"childUsage\":{{\"input\":50,\"{damaged_key}\":999}},\"aggregateUsage\":{{\"input\":100,\"output\":8}}}}"
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let messages = parse_prime_agent_file(file.path());
+            let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+            assert_eq!(messages.len(), 1);
+            assert!(accounting.attributions.is_empty());
+            assert!(accounting.adjustments.is_empty());
+        }
+    }
+
+    #[test]
+    fn skips_attributions_with_invalid_bytes_in_nested_usage_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":100,"output":8}}}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-child\",\"targetId\":\"assistant-clean\",\"childUsage\":{\"input\":50,\"out\xffput\":999},\"aggregateUsage\":{\"input\":100,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-aggregate\",\"targetId\":\"assistant-clean\",\"childUsage\":{\"input\":50,\"output\":0},\"aggregateUsage\":{\"in\xfeput\":100,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
         assert!(accounting.attributions.is_empty());
         assert!(accounting.adjustments.is_empty());
     }

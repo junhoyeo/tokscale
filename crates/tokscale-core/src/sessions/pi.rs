@@ -14,6 +14,7 @@ use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -102,6 +103,16 @@ pub struct PiUsage {
     /// of the schema, but never summed: see the note at the emit site.
     #[allow(dead_code)]
     pub reasoning: Option<i64>,
+    #[serde(flatten)]
+    extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl PiUsage {
+    pub(crate) fn has_damaged_key(&self) -> bool {
+        self.extra_fields
+            .keys()
+            .any(|key| has_replacement_character(key))
+    }
 }
 
 fn is_generated_id(value: &str) -> bool {
@@ -262,24 +273,40 @@ enum PiLines {
     Lossy(super::utils::LossyLinesWithBytes<BufReader<std::fs::File>>),
 }
 
+enum PiLine {
+    Standard(String),
+    Lossy(LossyLine),
+}
+
+impl PiLine {
+    fn text(&self) -> &str {
+        match self {
+            Self::Standard(text) => text,
+            Self::Lossy(line) => &line.text,
+        }
+    }
+
+    fn raw_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Standard(_) => None,
+            Self::Lossy(line) => Some(&line.bytes),
+        }
+    }
+}
+
 impl Iterator for PiLines {
-    type Item = LossyLine;
+    type Item = PiLine;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self {
                 Self::Standard(lines) => match lines.next() {
-                    Some(Ok(line)) => {
-                        return Some(LossyLine {
-                            bytes: line.as_bytes().to_vec(),
-                            text: line,
-                        });
-                    }
+                    Some(Ok(line)) => return Some(PiLine::Standard(line)),
                     Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => continue,
                     Some(Err(_)) => return None,
                     None => return None,
                 },
-                Self::Lossy(lines) => return lines.next(),
+                Self::Lossy(lines) => return lines.next().map(PiLine::Lossy),
             }
         }
     }
@@ -298,9 +325,10 @@ fn damaged_cross_session_dedup_key(namespace: &str, raw_line: &[u8]) -> String {
 }
 
 fn damaged_session_placeholder(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map_or_else(|| "unknown".to_string(), |stem| format!("unknown:{stem}"))
+    let source_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(source_path.as_os_str().as_encoded_bytes());
+    format!("unknown:path:{:x}", hasher.finalize())
 }
 
 fn parse_pi_format_file_inner(
@@ -333,7 +361,7 @@ fn parse_pi_format_file_inner(
     let mut agent: Option<String> = None;
     let mut is_rlm_subagent = false;
     for line in lines {
-        let trimmed = line.text.trim();
+        let trimmed = line.text().trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -430,6 +458,10 @@ fn parse_pi_format_file_inner(
             observer.observe_entry(&entry, None);
             continue;
         };
+        if options.lossy_line_reader && usage.has_damaged_key() {
+            observer.observe_entry(&entry, None);
+            continue;
+        }
 
         let Some(recorded_model) = message.model.as_deref() else {
             observer.observe_entry(&entry, None);
@@ -521,8 +553,9 @@ fn parse_pi_format_file_inner(
                         !accepts_replacement_field(id, options.lossy_line_reader)
                     });
                     if has_damaged_id {
+                        let raw_line = line.raw_bytes().unwrap_or_else(|| line.text().as_bytes());
                         unified.dedup_key =
-                            Some(damaged_cross_session_dedup_key(namespace, &line.bytes));
+                            Some(damaged_cross_session_dedup_key(namespace, raw_line));
                     }
                 }
             } else if let Some(message_id) = entry.id.as_deref().filter(|id| !id.trim().is_empty())
@@ -550,6 +583,63 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    fn parse_prime_test_file(path: &Path) -> Vec<UnifiedMessage> {
+        let mut observer = NoopPiFormatObserver;
+        parse_pi_format_rlm_file_with_observer(path, "prime-agent", "prime-agent", &mut observer)
+    }
+
+    #[test]
+    fn prime_rejects_replacement_mangled_usage_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"{\"type\":\"session\",\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n")
+            .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"damaged-byte\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"in\xffput\":100,\"output\":5}}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            "{\"type\":\"message\",\"id\":\"damaged-unicode\",\"timestamp\":\"2026-08-08T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"out�put\":7,\"input\":10}}}\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"clean\",\"timestamp\":\"2026-08-08T00:00:03Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_test_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("prime-agent:message:clean:")));
+        assert_eq!(messages[0].tokens.total(), 28);
+    }
+
+    #[test]
+    fn damaged_prime_session_placeholders_are_unique_by_source_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_dir = temp.path().join("first");
+        let second_dir = temp.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        let first = first_dir.join("session.jsonl");
+        let second = second_dir.join("session.jsonl");
+        let contents = b"{\"type\":\"session\",\"id\":\"root-\xff\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"clean\",\"timestamp\":\"2026-08-08T00:00:03Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n";
+        std::fs::write(&first, contents).unwrap();
+        std::fs::write(&second, contents).unwrap();
+
+        let first_messages = parse_prime_test_file(&first);
+        let second_messages = parse_prime_test_file(&second);
+
+        assert_eq!(first_messages.len(), 1);
+        assert_eq!(second_messages.len(), 1);
+        assert!(first_messages[0].session_id.starts_with("unknown:path:"));
+        assert_ne!(first_messages[0].session_id, second_messages[0].session_id);
     }
 
     #[test]
