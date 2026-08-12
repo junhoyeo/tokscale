@@ -84,7 +84,16 @@ fn damaged_key_may_name(key: &str, expected: &str) -> bool {
     matches[pattern.len()][expected.len()]
 }
 
-pub(crate) fn raw_json_has_damaged_top_level_key(raw: &[u8], expected: &str) -> bool {
+const PRIME_LINEAGE_HEADER_KEYS: &[&str] = &["parentSession", "rlmDepth"];
+
+/// Inspect every top-level JSON key after JSON string decoding and reject a
+/// replacement-bearing spelling that may be a damaged Prime lineage key.
+///
+/// Valid U+FFFD characters are not inherently damage: unrelated extension
+/// keys, including `rlmDepth�`, remain valid. Invalid UTF-8 is tracked
+/// separately because a replacement immediately beside a complete structural
+/// key may have replaced rather than extended that key.
+pub(crate) fn raw_json_has_damaged_lineage_header_key(raw: &[u8]) -> bool {
     let mut index = 0usize;
     let mut depth = 0usize;
     while index < raw.len() {
@@ -98,8 +107,8 @@ pub(crate) fn raw_json_has_damaged_top_level_key(raw: &[u8], expected: &str) -> 
                 index += 1;
             }
             b'"' => {
-                let key_start = index + 1;
-                index = key_start;
+                let quoted_start = index;
+                index += 1;
                 let mut escaped = false;
                 while index < raw.len() {
                     let byte = raw[index];
@@ -115,25 +124,27 @@ pub(crate) fn raw_json_has_damaged_top_level_key(raw: &[u8], expected: &str) -> 
                 if index >= raw.len() {
                     return false;
                 }
-                let key = &raw[key_start..index];
+
+                let quoted = &raw[quoted_start..=index];
+                let key_bytes = &raw[quoted_start + 1..index];
                 let mut after = index + 1;
                 while after < raw.len() && raw[after].is_ascii_whitespace() {
                     after += 1;
                 }
-                if depth == 1 && raw.get(after) == Some(&b':') && std::str::from_utf8(key).is_err()
-                {
-                    let lossy = String::from_utf8_lossy(key);
-                    let quoted = format!(r#""{lossy}""#);
-                    let Ok(decoded) = serde_json::from_str::<String>(&quoted) else {
-                        return false;
-                    };
-                    let without_replacements: String = decoded
-                        .chars()
-                        .filter(|character| *character != char::REPLACEMENT_CHARACTER)
-                        .collect();
-                    if without_replacements == expected || damaged_key_may_name(&decoded, expected)
-                    {
-                        return true;
+                if depth == 1 && raw.get(after) == Some(&b':') {
+                    let key_had_invalid_utf8 = std::str::from_utf8(key_bytes).is_err();
+                    let lossy_quoted = String::from_utf8_lossy(quoted);
+                    if let Ok(decoded) = serde_json::from_str::<String>(&lossy_quoted) {
+                        let without_replacements: String = decoded
+                            .chars()
+                            .filter(|character| *character != char::REPLACEMENT_CHARACTER)
+                            .collect();
+                        if PRIME_LINEAGE_HEADER_KEYS.iter().any(|expected| {
+                            damaged_key_may_name(&decoded, expected)
+                                || (key_had_invalid_utf8 && without_replacements == *expected)
+                        }) {
+                            return true;
+                        }
                     }
                 }
                 index += 1;
@@ -530,10 +541,9 @@ fn parse_pi_format_file_inner(
                 Ok(h) => h,
                 Err(_) => return Vec::new(),
             };
-            let has_raw_damaged_lineage_key = line.raw_bytes().is_some_and(|raw| {
-                raw_json_has_damaged_top_level_key(raw, "parentSession")
-                    || raw_json_has_damaged_top_level_key(raw, "rlmDepth")
-            });
+            let has_raw_damaged_lineage_key = line
+                .raw_bytes()
+                .is_some_and(raw_json_has_damaged_lineage_header_key);
             if options.lossy_line_reader
                 && (header.has_invalid_lineage() || has_raw_damaged_lineage_key)
             {

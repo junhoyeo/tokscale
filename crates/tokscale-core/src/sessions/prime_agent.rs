@@ -10,7 +10,7 @@
 
 use super::pi::{
     has_replacement_character, parse_pi_format_rlm_file_with_observer,
-    pre_header_line_is_skippable, raw_json_has_damaged_top_level_key, PiFormatObserver,
+    pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, PiFormatObserver,
     PiSessionEntry, PiSessionHeader, PiUsage, PRE_SESSION_METADATA_TYPES,
 };
 use super::utils::{lossy_lines_with_bytes, parse_timestamp_str};
@@ -469,8 +469,7 @@ pub(crate) fn analyze_prime_agent_accounting(
             if let Some(header) = parse_pi_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
                 if header.entry_type == "session" {
                     let has_raw_damaged_lineage_key =
-                        raw_json_has_damaged_top_level_key(&line.bytes, "parentSession")
-                            || raw_json_has_damaged_top_level_key(&line.bytes, "rlmDepth");
+                        raw_json_has_damaged_lineage_header_key(&line.bytes);
                     if header.has_invalid_lineage() || has_raw_damaged_lineage_key {
                         return PrimeFileAccounting::default();
                     }
@@ -1225,6 +1224,39 @@ mod tests {
 {"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}"#,
         );
         assert_eq!(parse_prime_agent_file(file.path()).len(), 1);
+
+        for (encoded_key, rejected) in [
+            (r"rlmDep\uFFFDth", true),
+            (r#"unrelated\uD800":1,"rlmDep\uFFFDth"#, true),
+            (r"parentSess\uFFFDon", true),
+            (r"extension\uFFFDField", false),
+            (r#"unrelated\uD800":1,"extension\uFFFDField"#, false),
+            (r"rlmDepth\uFFFD", false),
+            (r"\uFFFDparentSession", false),
+            (r"parentSession\uFFFD", false),
+        ] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":1,\"{encoded_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert_eq!(messages.is_empty(), rejected, "escaped key {encoded_key:?}");
+            assert_eq!(
+                accounting.child_parent_path.is_none(),
+                rejected,
+                "the shared parser and accounting analyzer must agree for {encoded_key:?}"
+            );
+        }
+        for damaged_key in ["rlmDep�th", "parentSess�on"] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":1,\"{damaged_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert!(messages.is_empty(), "literal damaged key {damaged_key:?}");
+            assert!(
+                accounting.child_parent_path.is_none(),
+                "literal damaged key {damaged_key:?}"
+            );
+        }
 
         for extension_key in ["rlmDepth�", "�parentSession", "parentSession�"] {
             let file = session_file(&format!(

@@ -13868,19 +13868,18 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_prime_agent_escaped_lineage_key_damage_is_safe_cold_and_warm() {
-        for damaged_key_prefix in [r"rlmDepth", r"parentSession"] {
-            let cache_home = tempfile::TempDir::new().unwrap();
-            let source_home = tempfile::TempDir::new().unwrap();
-            let _cache_env = redirect_cache_home(cache_home.path());
-            let sessions_dir = source_home.path().join(".prime/agent/sessions");
-            let child_dir = source_home
-                .path()
-                .join(".prime/agent/session-artifacts/root/sub-child");
-            std::fs::create_dir_all(&sessions_dir).unwrap();
-            std::fs::create_dir_all(&child_dir).unwrap();
-            let root_path = sessions_dir.join("root.jsonl");
-            std::fs::write(
+    fn test_prime_agent_escaped_replacement_lineage_key_is_safe_cold_and_warm() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/root/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let root_path = sessions_dir.join("root.jsonl");
+        std::fs::write(
             &root_path,
             r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","rlmDepth":0}
 {"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":150,"output":0}}}
@@ -13888,53 +13887,34 @@ mod tests {
 "#,
         )
         .unwrap();
-            let child_path = child_dir.join("child.jsonl");
-            let clean_parent = paths::json_path_literal(&root_path);
-            let mut child = if damaged_key_prefix.starts_with("rlm") {
-                format!(
-                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":{clean_parent},\"{damaged_key_prefix}"
-            )
-            .into_bytes()
-            } else {
-                format!(
-                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"{damaged_key_prefix}"
-            )
-            .into_bytes()
-            };
-            child.extend_from_slice(b"\xff\":1}\n");
-            child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
-            std::fs::write(child_path, child).unwrap();
+        let clean_parent = paths::json_path_literal(&root_path);
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"unrelated\\uD800\":true,\"parentSession\":{clean_parent},\"rlmDep\\uFFFDth\":1}}\n{{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":50,\"output\":0}}}}}}\n"
+            ),
+        )
+        .unwrap();
 
-            let clients = ["prime-agent".to_string()];
-            sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
-            let cold = parse_all_messages_with_pricing(
-                source_home.path().to_str().unwrap(),
-                &clients,
-                None,
-            );
-            let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
-            assert_eq!(cold_calls, (2, 0));
-            let warm = parse_all_messages_with_pricing(
-                source_home.path().to_str().unwrap(),
-                &clients,
-                None,
-            );
-            assert_eq!(
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (2, 0)
+        );
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
             sessions::prime_agent::transcript_decode_call_counts(),
             (3, 0),
-            "the intentionally empty rejected child may be revalidated, but the parent stays warm"
+            "the rejected child may be revalidated, but the parent stays warm"
         );
-            for messages in [cold, warm] {
-                assert_eq!(messages.len(), 1);
-                assert_eq!(
-                messages
-                    .iter()
-                    .map(|message| message.tokens.input)
-                    .sum::<i64>(),
-                150,
-                "damaged rlmDepth key must not turn the child into a root and double count to 200"
-            );
-            }
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 1, "only the parent aggregate is emitted");
+            assert_eq!(messages[0].session_id, "root");
+            assert_eq!(messages[0].tokens.input, 150);
         }
     }
 
