@@ -1565,6 +1565,46 @@ mod tests {
     }
 
     #[test]
+    fn distinct_invalid_utf8_ids_keep_distinct_dedup_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-\xfe\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
+
+        let reconciled = reconcile_prime_agent_messages(messages, &[]);
+        assert_eq!(reconciled.len(), 2);
+        assert_eq!(
+            reconciled
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            20
+        );
+        assert_eq!(
+            reconciled
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            10
+        );
+    }
+
+    #[test]
     fn copied_fork_history_without_response_or_event_timestamp_still_deduplicates() {
         let original = session_file(
             r#"{"type":"session","version":3,"id":"root-1","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}

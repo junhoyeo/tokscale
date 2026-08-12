@@ -13736,6 +13736,65 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_prime_agent_warm_cache_preserves_distinct_invalid_utf8_ids() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("damaged-ids.jsonl");
+        let mut source = std::fs::File::create(&source_path).unwrap();
+        use std::io::Write as _;
+        source
+            .write_all(
+                b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n",
+            )
+            .unwrap();
+        source
+            .write_all(b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n")
+            .unwrap();
+        source
+            .write_all(b"{\"type\":\"message\",\"id\":\"assistant-\xfe\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n")
+            .unwrap();
+        source.flush().unwrap();
+        drop(source);
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_calls, (1, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_calls,
+            "the warm scan must reuse the two distinct cached records"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                20
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.output)
+                    .sum::<i64>(),
+                10
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_prime_agent_warm_cache_hashes_unsampled_semantic_rewrite() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();

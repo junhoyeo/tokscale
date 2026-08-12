@@ -8,7 +8,7 @@
 //! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
 //! is shared: see `sessions::senpi` for Senpi (OmO Native).
 
-use super::utils::{file_modified_timestamp_ms, lossy_lines};
+use super::utils::{file_modified_timestamp_ms, lossy_lines_with_bytes, LossyLine};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
@@ -259,17 +259,22 @@ impl PiParseOptions {
 
 enum PiLines {
     Standard(std::io::Lines<BufReader<std::fs::File>>),
-    Lossy(super::utils::LossyLines<BufReader<std::fs::File>>),
+    Lossy(super::utils::LossyLinesWithBytes<BufReader<std::fs::File>>),
 }
 
 impl Iterator for PiLines {
-    type Item = String;
+    type Item = LossyLine;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self {
                 Self::Standard(lines) => match lines.next() {
-                    Some(Ok(line)) => return Some(line),
+                    Some(Ok(line)) => {
+                        return Some(LossyLine {
+                            bytes: line.as_bytes().to_vec(),
+                            text: line,
+                        });
+                    }
                     Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => continue,
                     Some(Err(_)) => return None,
                     None => return None,
@@ -284,11 +289,11 @@ fn accepts_replacement_field(value: &str, lossy_line_reader: bool) -> bool {
     !lossy_line_reader || !has_replacement_character(value)
 }
 
-fn damaged_cross_session_dedup_key(namespace: &str, damaged_id: &str, raw_line: &str) -> String {
+fn damaged_cross_session_dedup_key(namespace: &str, raw_line: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(damaged_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(raw_line.as_bytes());
+    // Exact source bytes distinguish invalid UTF-8 sequences that lossy decode
+    // maps to the same U+FFFD while keeping copied fork records stable.
+    hasher.update(raw_line);
     format!("{namespace}:damaged:{:x}", hasher.finalize())
 }
 
@@ -315,7 +320,7 @@ fn parse_pi_format_file_inner(
 
     let reader = BufReader::new(file);
     let lines = if options.lossy_line_reader {
-        PiLines::Lossy(lossy_lines(reader))
+        PiLines::Lossy(lossy_lines_with_bytes(reader))
     } else {
         PiLines::Standard(reader.lines())
     };
@@ -328,8 +333,7 @@ fn parse_pi_format_file_inner(
     let mut agent: Option<String> = None;
     let mut is_rlm_subagent = false;
     for line in lines {
-        let trimmed = line.trim();
-        let raw_line = trimmed;
+        let trimmed = line.text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -511,19 +515,14 @@ fn parse_pi_format_file_inner(
                     })
                 });
                 if unified.dedup_key.is_none() && options.lossy_line_reader {
-                    if let Some(damaged_id) = entry
-                        .id
-                        .as_deref()
-                        .filter(|id| !accepts_replacement_field(id, options.lossy_line_reader))
-                        .or_else(|| {
-                            message.response_id.as_deref().filter(|id| {
-                                !accepts_replacement_field(id, options.lossy_line_reader)
-                            })
-                        })
-                    {
-                        unified.dedup_key = Some(damaged_cross_session_dedup_key(
-                            namespace, damaged_id, raw_line,
-                        ));
+                    let has_damaged_id = entry.id.as_deref().is_some_and(|id| {
+                        !accepts_replacement_field(id, options.lossy_line_reader)
+                    }) || message.response_id.as_deref().is_some_and(|id| {
+                        !accepts_replacement_field(id, options.lossy_line_reader)
+                    });
+                    if has_damaged_id {
+                        unified.dedup_key =
+                            Some(damaged_cross_session_dedup_key(namespace, &line.bytes));
                     }
                 }
             } else if let Some(message_id) = entry.id.as_deref().filter(|id| !id.trim().is_empty())

@@ -20,22 +20,51 @@ use std::time::SystemTime;
 /// stripped, and a final line without a newline is still yielded.
 pub(crate) fn lossy_lines<R: BufRead>(reader: R) -> LossyLines<R> {
     LossyLines {
+        inner: lossy_lines_with_bytes(reader),
+    }
+}
+
+/// Iterate lossy-decoded lines while retaining their exact source bytes.
+///
+/// Most parsers need only [`lossy_lines`]. Prime Agent additionally derives a
+/// stable fallback deduplication key from corrupted records, where hashing the
+/// decoded string would collapse distinct invalid UTF-8 sequences to the same
+/// replacement character.
+pub(crate) fn lossy_lines_with_bytes<R: BufRead>(reader: R) -> LossyLinesWithBytes<R> {
+    LossyLinesWithBytes {
         reader,
         buf: Vec::new(),
         at_start: true,
     }
 }
 
+pub(crate) struct LossyLine {
+    pub text: String,
+    pub bytes: Vec<u8>,
+}
+
 pub(crate) struct LossyLines<R> {
-    reader: R,
-    buf: Vec<u8>,
-    at_start: bool,
+    inner: LossyLinesWithBytes<R>,
 }
 
 impl<R: BufRead> Iterator for LossyLines<R> {
     type Item = String;
 
-    fn next(&mut self) -> Option<String> {
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|line| line.text)
+    }
+}
+
+pub(crate) struct LossyLinesWithBytes<R> {
+    reader: R,
+    buf: Vec<u8>,
+    at_start: bool,
+}
+
+impl<R: BufRead> Iterator for LossyLinesWithBytes<R> {
+    type Item = LossyLine;
+
+    fn next(&mut self) -> Option<Self::Item> {
         self.buf.clear();
         match self.reader.read_until(b'\n', &mut self.buf) {
             Ok(0) => None,
@@ -55,7 +84,10 @@ impl<R: BufRead> Iterator for LossyLines<R> {
                     bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
                 }
 
-                Some(String::from_utf8_lossy(bytes).into_owned())
+                Some(LossyLine {
+                    text: String::from_utf8_lossy(bytes).into_owned(),
+                    bytes: bytes.to_vec(),
+                })
             }
             // Decode failures cannot reach this arm — lossy decoding never
             // fails — so an error here is a hard I/O failure (vanished network
@@ -219,6 +251,15 @@ mod tests {
         let raw: &[u8] = b"a\n\nb\n";
         let lines: Vec<String> = lossy_lines(raw).collect();
         assert_eq!(lines, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn lossy_lines_with_bytes_preserves_distinct_invalid_sequences() {
+        let raw: &[u8] = b"a\xff\na\xfe\n";
+        let lines: Vec<LossyLine> = lossy_lines_with_bytes(raw).collect();
+        assert_eq!(lines[0].text, lines[1].text);
+        assert_eq!(lines[0].bytes, b"a\xff");
+        assert_eq!(lines[1].bytes, b"a\xfe");
     }
 
     #[test]
