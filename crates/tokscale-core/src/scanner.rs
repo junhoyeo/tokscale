@@ -624,6 +624,21 @@ pub fn built_in_extra_scan_paths_for(
         );
     }
 
+    if enabled.contains(&ClientId::Senpi) && use_env_roots {
+        if let Some(path) =
+            std::env::var_os("SENPI_CODING_AGENT_SESSION_DIR").filter(|path| !path.is_empty())
+        {
+            paths.push((ClientId::Senpi, PathBuf::from(path)));
+        }
+
+        if let Ok(current_dir) = std::env::current_dir() {
+            paths.push((
+                ClientId::Senpi,
+                current_dir.join(".omo/senpi-task/children"),
+            ));
+        }
+    }
+
     paths
 }
 
@@ -6334,5 +6349,46 @@ mod tests {
         restore_env("GJC_CONFIG_DIR", prev_config);
         restore_env("PI_CONFIG_DIR", prev_pi);
         restore_env("XDG_DATA_HOME", prev_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_discovers_omo_task_children_in_current_project() {
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let child_sessions = project_dir
+            .path()
+            .join(".omo/senpi-task/children/task-123/sessions/encoded-cwd");
+        fs::create_dir_all(&child_sessions).unwrap();
+        let child_session = child_sessions.join("child.jsonl");
+        File::create(&child_session).unwrap();
+        let _current_dir = CurrentDirGuard::set(project_dir.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        assert!(
+            result.get(ClientId::Senpi).contains(&child_session),
+            "current-project OmO child sessions must be auto-discovered"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_honors_coding_agent_session_dir() {
+        let home_dir = TempDir::new().unwrap();
+        let redirected_sessions = TempDir::new().unwrap();
+        let redirected_session = redirected_sessions.path().join("redirected.jsonl");
+        File::create(&redirected_session).unwrap();
+        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
+        env.set("SENPI_CODING_AGENT_SESSION_DIR", redirected_sessions.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        assert!(
+            result.get(ClientId::Senpi).contains(&redirected_session),
+            "SENPI_CODING_AGENT_SESSION_DIR must be scanned"
+        );
     }
 }
