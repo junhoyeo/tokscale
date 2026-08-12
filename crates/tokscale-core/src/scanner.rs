@@ -634,7 +634,7 @@ pub fn built_in_extra_scan_paths_for(
         if let Ok(current_dir) = std::env::current_dir() {
             paths.push((
                 ClientId::Senpi,
-                current_dir.join(".omo/senpi-task/children"),
+                current_dir.join(".omo").join("senpi-task").join("children"),
             ));
         }
     }
@@ -6394,6 +6394,37 @@ mod tests {
         fs::create_dir_all(child_session.parent().unwrap()).unwrap();
         File::create(&child_session).unwrap();
         child_session.canonicalize().unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn test_senpi_omo_task_children_root_uses_native_separators() {
+        let project_dir = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
+        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
+        let _current_dir = CurrentDirGuard::set(project_dir.path());
+        let enabled = HashSet::from([ClientId::Senpi]);
+
+        let paths = built_in_extra_scan_paths_for("C:\\Users\\test", &enabled, true);
+        let omo_root = paths
+            .into_iter()
+            .find_map(|(client_id, path)| (client_id == ClientId::Senpi).then_some(path))
+            .expect("Senpi OmO child root must be registered");
+
+        assert_eq!(
+            omo_root,
+            project_dir
+                .path()
+                .join(".omo")
+                .join("senpi-task")
+                .join("children")
+        );
+        assert!(
+            !omo_root.to_string_lossy().contains('/'),
+            "Windows scan root must not contain non-native separators: {}",
+            omo_root.display()
+        );
     }
 
     #[test]
