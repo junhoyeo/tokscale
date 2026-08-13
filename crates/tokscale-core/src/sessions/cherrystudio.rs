@@ -44,6 +44,11 @@ const CLIENT_ID: &str = "cherrystudio";
 /// already been emitted by the time the connecting row arrives.
 struct UsageRecord {
     message: UnifiedMessage,
+    /// Event timestamp before the parser falls back to the transcript mtime.
+    ///
+    /// Keep this separate from `message.timestamp`: a missing timestamp is not
+    /// evidence that a replay happened at the file's modification time.
+    event_timestamp: Option<i64>,
     request_id: Option<String>,
     aliases: Vec<String>,
 }
@@ -174,14 +179,21 @@ fn dedupe_usage_records(records: Vec<UsageRecord>) -> Vec<UnifiedMessage> {
 /// Streaming usage counters are cumulative snapshots, not additive deltas. A
 /// final row can therefore contain a larger value in only one usage bucket.
 /// Keep the maximum independently for every bucket. Metadata comes from the
-/// final observation (latest timestamp, then transcript order), making model
-/// attribution and timestamps deterministic without allowing it to influence
-/// call identity.
+/// latest valid event timestamp (then transcript order). A transcript mtime is
+/// only a file-level fallback, never evidence that one timestamp-less replay is
+/// newer than an event with a valid historical timestamp.
 fn merge_streaming_component(records: &[UsageRecord], indices: &[usize]) -> UnifiedMessage {
     let &final_index = indices
         .iter()
-        .max_by_key(|&&index| (records[index].message.timestamp, index))
-        .expect("connected component contains at least one record");
+        .filter(|&&index| records[index].event_timestamp.is_some())
+        .max_by_key(|&&index| (records[index].event_timestamp, index))
+        // When no row supplies a parseable event timestamp, retain the last
+        // source row's metadata and its file-mtime fallback timestamp.
+        .unwrap_or_else(|| {
+            indices
+                .last()
+                .expect("connected component contains at least one record")
+        });
     let mut merged = records[final_index].message.clone();
 
     for &index in indices {
@@ -340,11 +352,11 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             aliases.push(format!("uuid:{uuid}"));
         }
 
-        let timestamp = record
+        let event_timestamp = record
             .get("timestamp")
             .and_then(Value::as_str)
-            .and_then(parse_timestamp_str)
-            .unwrap_or(fallback_timestamp);
+            .and_then(parse_timestamp_str);
+        let timestamp = event_timestamp.unwrap_or(fallback_timestamp);
 
         let tokens = TokenBreakdown {
             input,
@@ -369,6 +381,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
         }
         records.push(UsageRecord {
             message: msg,
+            event_timestamp,
             request_id,
             aliases,
         });
@@ -462,6 +475,27 @@ mod tests {
         assert_eq!(message.tokens.cache_write, 5);
         assert_eq!(message.tokens.output, 300);
         assert_eq!(message.timestamp, 1_777_298_343_000);
+    }
+
+    #[test]
+    fn keeps_valid_event_timestamp_when_later_replay_timestamp_is_invalid() {
+        let dir = tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "session.jsonl",
+            &[
+                r#"{"type":"assistant","requestId":"request-1","timestamp":"2024-01-02T03:04:05.000Z","message":{"id":"message-1","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+                // An invalid later timestamp must not turn this historical
+                // call into the transcript's current file mtime.
+                r#"{"type":"assistant","requestId":"request-1","timestamp":"not-a-timestamp","message":{"id":"message-1","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":300}}}"#,
+            ],
+        );
+
+        let messages = parse_cherrystudio_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_704_164_645_000);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 300);
     }
 
     #[test]

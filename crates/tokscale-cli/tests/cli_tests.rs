@@ -1224,6 +1224,24 @@ fn write_cherrystudio_connected_alias_transcript(base: &Path) {
     .unwrap();
 }
 
+/// A historical Cherry Studio call followed by a timestamp-less streamed
+/// replay. The replay grows output usage but must not take the transcript mtime
+/// as the call timestamp when its component has a valid event timestamp.
+fn write_cherrystudio_historical_replay_without_timestamp(base: &Path) {
+    let path = cherrystudio_projects_root(base).join("workspace/historical.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        concat!(
+            r#"{"type":"assistant","requestId":"historical-request","timestamp":"2024-01-02T03:04:05.000Z","message":{"id":"historical-message","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","requestId":"historical-request","message":{"id":"historical-message","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":300}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
 fn write_jcode_session(base: &Path) {
     let sessions_dir = base.join(".jcode/sessions");
     fs::create_dir_all(&sessions_dir).unwrap();
@@ -2010,6 +2028,58 @@ fn test_cherrystudio_connected_aliases_count_once_cold_and_warm_cache() {
         assert_eq!(json["totalInput"].as_i64(), Some(100), "{pass} cache pass");
         assert_eq!(json["totalOutput"].as_i64(), Some(300), "{pass} cache pass");
     }
+}
+
+#[test]
+fn test_cherrystudio_historical_timestamp_survives_timestampless_replay_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    write_cherrystudio_historical_replay_without_timestamp(tmp.path());
+
+    // The first pass parses the source; the second reads its cache. Neither
+    // may promote the historical call into today because a later replay lacks
+    // an event timestamp. The replay's cumulative output still contributes.
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "models",
+                "--json",
+                "--today",
+                "--client",
+                "cherrystudio",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(0), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(0), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(0), "{pass} cache pass");
+    }
+
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "cherrystudio",
+            "--no-spinner",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "totals report failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1));
+    assert_eq!(json["totalInput"].as_i64(), Some(100));
+    assert_eq!(json["totalOutput"].as_i64(), Some(300));
 }
 
 fn assert_cursor_setup_warning(json: &serde_json::Value) {
