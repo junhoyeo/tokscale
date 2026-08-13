@@ -53,28 +53,47 @@ struct UsageRecord {
 /// any usage is returned to the caller.
 struct UnionFind {
     parent: Vec<usize>,
+    rank: Vec<u8>,
 }
 
 impl UnionFind {
     fn new(len: usize) -> Self {
         Self {
             parent: (0..len).collect(),
+            rank: vec![0; len],
         }
     }
 
-    fn find(&mut self, node: usize) -> usize {
-        if self.parent[node] != node {
-            let root = self.find(self.parent[node]);
-            self.parent[node] = root;
+    fn find(&mut self, mut node: usize) -> usize {
+        let mut root = node;
+        while self.parent[root] != root {
+            root = self.parent[root];
         }
-        self.parent[node]
+
+        while self.parent[node] != node {
+            let parent = self.parent[node];
+            self.parent[node] = root;
+            node = parent;
+        }
+
+        root
     }
 
     fn union(&mut self, left: usize, right: usize) {
         let left = self.find(left);
         let right = self.find(right);
-        if left != right {
-            self.parent[right] = left;
+        if left == right {
+            return;
+        }
+
+        match self.rank[left].cmp(&self.rank[right]) {
+            std::cmp::Ordering::Less => self.parent[left] = right,
+            std::cmp::Ordering::Greater => self.parent[right] = left,
+            std::cmp::Ordering::Equal => {
+                // Retain the existing tie-breaker: the first root wins.
+                self.parent[right] = left;
+                self.rank[left] += 1;
+            }
         }
     }
 }
@@ -375,6 +394,22 @@ mod tests {
             writeln!(file, "{line}").unwrap();
         }
         path
+    }
+
+    #[test]
+    fn union_find_handles_a_long_alias_chain_without_recursion() {
+        // This order reproduces a transcript where each incoming record joins
+        // the prior component. The former recursive find formed a 300,000-node
+        // parent chain here and overflowed the CLI stack while grouping records.
+        const CHAIN_LEN: usize = 300_000;
+        let mut components = UnionFind::new(CHAIN_LEN);
+        for index in 1..CHAIN_LEN {
+            components.union(index, index - 1);
+        }
+
+        let root = components.find(0);
+        assert_eq!(components.find(CHAIN_LEN - 1), root);
+        assert_eq!(components.find(CHAIN_LEN / 2), root);
     }
 
     #[test]
