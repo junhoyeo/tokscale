@@ -1,10 +1,11 @@
 //! Import historical usage from third-party aggregate exports.
 //!
-//! Currently supports the clawdboard.ai account export ("daily aggregates").
-//! The importer normalizes that export into tokscale's native [`GraphResult`],
-//! which the CLI then writes out as standard tokscale JSON (identical in shape
-//! to `tokscale graph`) for review, archival, or a future server-supported
-//! backfill.
+//! Supports the clawdboard.ai account export ("daily aggregates") and
+//! `ccusage`'s own `daily --json` output (the `cc.json` that viberank and
+//! similar dashboards ingest). The importer normalizes either into tokscale's
+//! native [`GraphResult`], which the CLI then writes out as standard tokscale
+//! JSON (identical in shape to `tokscale graph`) for review, archival, or a
+//! future server-supported backfill.
 //!
 //! Motivation: `tokscale submit` computes totals from *raw* local session
 //! files. Once those files are gone (Claude Code deletes transcripts after
@@ -28,7 +29,7 @@ use tokscale_core::{
 };
 
 /// Import source formats understood by [`parse_export`].
-pub const SUPPORTED_FORMATS: &[&str] = &["clawdboard"];
+pub const SUPPORTED_FORMATS: &[&str] = &["clawdboard", "ccusage"];
 
 /// Result of a successful import.
 pub struct ImportOutcome {
@@ -73,6 +74,7 @@ pub struct ImportOutcome {
 pub fn parse_export(format: &str, json: &str) -> Result<ImportOutcome> {
     match format {
         "clawdboard" => parse_clawdboard_export(json),
+        "ccusage" => parse_ccusage_export(json),
         other => bail!(
             "unsupported import format '{}' (supported: {})",
             other,
@@ -314,6 +316,325 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
         multi_model_fallback_rows,
         breakdown_reconciliation_warnings,
     })
+}
+
+// ---------------------------------------------------------------------------
+// ccusage export schema (`ccusage daily --json`, a.k.a. cc.json)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct CcusageExport {
+    #[serde(default)]
+    daily: Vec<CcusageDaily>,
+}
+
+/// One calendar day of the unified report.
+///
+/// Unlike clawdboard, a row is *not* scoped to one client: the unified report
+/// merges every detected agent for that date into a single row and records the
+/// participants in `metadata.agents`. The per-client split has to be recovered
+/// from `modelBreakdowns` — see [`resolve_client`].
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CcusageDaily {
+    /// The unified report emits `period`; the per-agent reports (and older
+    /// ccusage releases) emit `date`. Accept either rather than forcing users
+    /// to know which subcommand produced their file.
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    period: Option<String>,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    #[serde(default)]
+    reasoning_output_tokens: i64,
+    /// Numeric in ccusage, but dashboards that re-serialize cc.json sometimes
+    /// stringify it. [`CostValue`] accepts both.
+    #[serde(default)]
+    total_cost: Option<CostValue>,
+    #[serde(default)]
+    models_used: Vec<String>,
+    #[serde(default)]
+    model_breakdowns: Vec<CcusageModelBreakdown>,
+    #[serde(default)]
+    metadata: Option<CcusageMetadata>,
+}
+
+#[derive(serde::Deserialize)]
+struct CcusageMetadata {
+    #[serde(default)]
+    agents: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CcusageModelBreakdown {
+    model_name: String,
+    #[serde(default)]
+    cost: f64,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+    #[serde(default)]
+    reasoning_output_tokens: i64,
+}
+
+/// A cost field that may arrive as a JSON number or as a stringified number.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CostValue {
+    Number(f64),
+    Text(String),
+}
+
+impl CostValue {
+    fn resolve(&self, unparseable_count: &mut usize) -> f64 {
+        match self {
+            CostValue::Number(v) => *v,
+            CostValue::Text(s) => parse_cost_string(Some(s), unparseable_count),
+        }
+    }
+}
+
+/// Pick the client a model's usage belongs to.
+///
+/// `agents` is the ground truth for *which* clients ran that day, so the
+/// resolver never invents one that is not listed. When the day had a single
+/// agent every model is trivially its own; when several ran, the model family
+/// decides. A model that matches no listed agent is left unattributed rather
+/// than silently folded into the first one — misattributed usage is worse than
+/// usage the caller is told about.
+fn resolve_client(model: &str, agents: &[String]) -> Option<String> {
+    if agents.len() == 1 {
+        return Some(normalize_client_id(&agents[0]));
+    }
+
+    let family = model_family(model)?;
+    let normalized: Vec<String> = agents.iter().map(|a| normalize_client_id(a)).collect();
+
+    if normalized.is_empty() {
+        return Some(family.to_string());
+    }
+    normalized.into_iter().find(|a| a == family)
+}
+
+/// Map a model id to the client that conventionally produces it in a ccusage
+/// report. Mirrors the vendor families `inferred_provider_from_model` knows,
+/// narrowed to the CLIs ccusage attributes usage to.
+fn model_family(model: &str) -> Option<&'static str> {
+    let lower = model.to_lowercase();
+    let has_word = |w: &str| {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|seg| seg == w)
+    };
+
+    if lower.contains("claude")
+        || has_word("opus")
+        || has_word("sonnet")
+        || has_word("haiku")
+        || has_word("fable")
+    {
+        return Some("claude");
+    }
+    if lower.contains("gpt") || lower.contains("codex") || has_word("o1") || has_word("o3") {
+        return Some("codex");
+    }
+    if lower.contains("gemini") {
+        return Some("gemini");
+    }
+    None
+}
+
+/// Parse a `ccusage daily --json` export into normalized tokscale data.
+///
+/// Grouping matches [`parse_clawdboard_export`]: one [`DailyContribution`] per
+/// date, one [`ClientContribution`] per (client, model) within it.
+pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
+    let export: CcusageExport =
+        serde_json::from_str(json).context("failed to parse ccusage export JSON")?;
+
+    if export.daily.is_empty() {
+        bail!("ccusage export contains no daily rows to import");
+    }
+
+    let mut days: BTreeMap<String, DayBuilder> = BTreeMap::new();
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+    let mut negative_values_clamped = 0usize;
+    let mut suspect_cost_rows = 0usize;
+    let mut future_dated_rows = 0usize;
+    let mut unparseable_cost_rows = 0usize;
+    let mut non_finite_cost_rows = 0usize;
+    let mut multi_model_fallback_rows = 0usize;
+    let mut breakdown_reconciliation_warnings: Vec<String> = Vec::new();
+    let today = chrono::Utc::now().date_naive();
+
+    for row in &export.daily {
+        let date = row
+            .period
+            .as_deref()
+            .or(row.date.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!("ccusage daily row is missing both `period` and `date`")
+            })?
+            .to_string();
+        let parsed_date = parse_calendar_date(&date)?;
+        if parsed_date > today {
+            future_dated_rows += 1;
+        }
+
+        let agents: Vec<String> = row
+            .metadata
+            .as_ref()
+            .map(|m| m.agents.clone())
+            .unwrap_or_default();
+        let day = days.entry(date.clone()).or_default();
+
+        if row.model_breakdowns.is_empty() {
+            // No per-model split: attribute the aggregate to the first listed
+            // model, mirroring the clawdboard fallback.
+            let model = row
+                .models_used
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            if row.models_used.len() > 1 {
+                multi_model_fallback_rows += 1;
+            }
+            let client = attribute(&model, &agents, &mut unknown);
+            let raw_cost = row
+                .total_cost
+                .as_ref()
+                .map(|c| c.resolve(&mut unparseable_cost_rows))
+                .unwrap_or(0.0);
+            let raw_cost = sanitize_cost(raw_cost, &mut non_finite_cost_rows);
+            let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
+            let tokens = TokenBreakdown {
+                input: clamp_i64(row.input_tokens, &mut negative_values_clamped),
+                output: clamp_i64(row.output_tokens, &mut negative_values_clamped),
+                cache_read: clamp_i64(row.cache_read_tokens, &mut negative_values_clamped),
+                cache_write: clamp_i64(row.cache_creation_tokens, &mut negative_values_clamped),
+                reasoning: clamp_i64(row.reasoning_output_tokens, &mut negative_values_clamped),
+            };
+            if cost > 0.0 && tokens.total() == 0 && !is_cursor_legacy_tokenless(&client, &model) {
+                suspect_cost_rows += 1;
+            }
+            add_row(day, &client, &model, tokens, cost);
+            continue;
+        }
+
+        let mut mb_input = 0i64;
+        let mut mb_output = 0i64;
+        let mut mb_cache_read = 0i64;
+        let mut mb_cache_write = 0i64;
+        let mut mb_cost = 0.0f64;
+
+        for mb in &row.model_breakdowns {
+            let client = attribute(&mb.model_name, &agents, &mut unknown);
+            let tokens = TokenBreakdown {
+                input: clamp_i64(mb.input_tokens, &mut negative_values_clamped),
+                output: clamp_i64(mb.output_tokens, &mut negative_values_clamped),
+                cache_read: clamp_i64(mb.cache_read_tokens, &mut negative_values_clamped),
+                cache_write: clamp_i64(mb.cache_creation_tokens, &mut negative_values_clamped),
+                reasoning: clamp_i64(mb.reasoning_output_tokens, &mut negative_values_clamped),
+            };
+            let raw_cost = sanitize_cost(mb.cost, &mut non_finite_cost_rows);
+            let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
+            if cost > 0.0
+                && tokens.total() == 0
+                && !is_cursor_legacy_tokenless(&client, &mb.model_name)
+            {
+                suspect_cost_rows += 1;
+            }
+
+            mb_input = mb_input.saturating_add(tokens.input);
+            mb_output = mb_output.saturating_add(tokens.output);
+            mb_cache_read = mb_cache_read.saturating_add(tokens.cache_read);
+            mb_cache_write = mb_cache_write.saturating_add(tokens.cache_write);
+            mb_cost += cost;
+
+            add_row(day, &client, &mb.model_name, tokens, cost);
+        }
+
+        // ccusage always populates the aggregate scalars alongside the
+        // breakdowns, so a divergence here means the file was edited or
+        // truncated — worth surfacing before the numbers reach a leaderboard.
+        let agg_total = row
+            .input_tokens
+            .max(0)
+            .saturating_add(row.output_tokens.max(0))
+            .saturating_add(row.cache_read_tokens.max(0))
+            .saturating_add(row.cache_creation_tokens.max(0));
+        let mb_total = mb_input
+            .saturating_add(mb_output)
+            .saturating_add(mb_cache_read)
+            .saturating_add(mb_cache_write);
+        if agg_total != 0 && tokens_diverge(mb_total, agg_total) {
+            breakdown_reconciliation_warnings.push(format!(
+                "{date}: modelBreakdowns sum to {mb_total} token(s) but aggregate totals report {agg_total}"
+            ));
+        }
+        if let Some(raw) = row.total_cost.as_ref() {
+            let agg_cost = sanitize_cost(
+                raw.resolve(&mut unparseable_cost_rows),
+                &mut non_finite_cost_rows,
+            );
+            if costs_diverge(mb_cost, agg_cost) {
+                breakdown_reconciliation_warnings.push(format!(
+                    "{date}: modelBreakdowns sum to cost {mb_cost:.4} but aggregate totalCost reports {agg_cost:.4}"
+                ));
+            }
+        }
+    }
+
+    let mut contributions: Vec<DailyContribution> = days
+        .into_iter()
+        .map(|(date, builder)| finalize_day(date, builder))
+        .collect();
+    contributions.sort_by(|a, b| a.date.cmp(&b.date));
+    calculate_intensities(&mut contributions);
+
+    let graph = generate_graph_result(contributions, 0);
+
+    Ok(ImportOutcome {
+        graph,
+        unknown_clients: unknown.into_iter().collect(),
+        negative_values_clamped,
+        suspect_cost_rows,
+        future_dated_rows,
+        unparseable_cost_rows,
+        non_finite_cost_rows,
+        multi_model_fallback_rows,
+        breakdown_reconciliation_warnings,
+    })
+}
+
+/// Resolve a model to its client, recording anything unattributable so the
+/// caller can warn. The leaderboard rejects unknown clients, so `"unknown"`
+/// is a visible placeholder rather than a silent default.
+fn attribute(model: &str, agents: &[String], unknown: &mut BTreeSet<String>) -> String {
+    match resolve_client(model, agents) {
+        Some(client) if ClientId::from_str(&client).is_some() => client,
+        Some(client) => {
+            unknown.insert(client.clone());
+            client
+        }
+        None => {
+            unknown.insert("unknown".to_string());
+            "unknown".to_string()
+        }
+    }
 }
 
 /// Validate that `s` is both shaped like `YYYY-MM-DD` (matching the
@@ -862,5 +1183,214 @@ mod tests {
             "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
         let out = parse_clawdboard_export(json).unwrap();
         assert_eq!(out.suspect_cost_rows, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ccusage
+    // -----------------------------------------------------------------------
+
+    /// A `ccusage daily --json` row as the unified report emits it: `period`
+    /// rather than `date`, and one row carrying both agents' models.
+    const CCUSAGE_MIXED: &str = r#"{
+      "daily": [
+        {
+          "agent": "all",
+          "period": "2026-08-14",
+          "inputTokens": 1100,
+          "outputTokens": 2200,
+          "cacheCreationTokens": 300,
+          "cacheReadTokens": 4400,
+          "totalCost": 30.0,
+          "totalTokens": 8000,
+          "metadata": { "agents": ["claude", "codex"] },
+          "modelsUsed": ["claude-opus-5", "gpt-5.6-sol"],
+          "modelBreakdowns": [
+            { "modelName": "claude-opus-5", "cost": 20.0, "inputTokens": 100,
+              "outputTokens": 200, "cacheReadTokens": 400, "cacheCreationTokens": 300 },
+            { "modelName": "gpt-5.6-sol", "cost": 10.0, "inputTokens": 1000,
+              "outputTokens": 2000, "cacheReadTokens": 4000, "cacheCreationTokens": 0,
+              "reasoningOutputTokens": 700 }
+          ]
+        }
+      ]
+    }"#;
+
+    fn client_rows(out: &ImportOutcome, day: usize) -> Vec<(String, String)> {
+        out.graph.contributions[day]
+            .clients
+            .iter()
+            .map(|c| (c.client.clone(), c.model_id.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn ccusage_splits_a_shared_day_by_model_family() {
+        // The point of the format: one row, two agents. Attributing the whole
+        // row to a single client would move $10 of Codex spend onto Claude.
+        let out = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
+        assert_eq!(
+            client_rows(&out, 0),
+            vec![
+                ("claude".to_string(), "claude-opus-5".to_string()),
+                ("codex".to_string(), "gpt-5.6-sol".to_string()),
+            ]
+        );
+
+        let claude = &out.graph.contributions[0].clients[0];
+        let codex = &out.graph.contributions[0].clients[1];
+        assert!((claude.cost - 20.0).abs() < 1e-9);
+        assert!((codex.cost - 10.0).abs() < 1e-9);
+        assert!(out.unknown_clients.is_empty());
+    }
+
+    #[test]
+    fn ccusage_preserves_reasoning_tokens() {
+        // Codex reports reasoning output separately; dropping it understates
+        // the day and breaks the server's token-sum check.
+        let out = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
+        assert_eq!(out.graph.contributions[0].token_breakdown.reasoning, 700);
+        assert_eq!(out.graph.contributions[0].clients[1].tokens.reasoning, 700);
+    }
+
+    #[test]
+    fn ccusage_day_totals_match_client_rows() {
+        let out = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
+        let day = &out.graph.contributions[0];
+        let summed: i64 = day.clients.iter().map(|c| c.tokens.total()).sum();
+        let cost: f64 = day.clients.iter().map(|c| c.cost).sum();
+        assert_eq!(day.totals.tokens, summed);
+        assert_eq!(day.token_breakdown.total(), summed);
+        assert!((day.totals.cost - cost).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ccusage_accepts_date_as_well_as_period() {
+        // Per-agent reports and older releases emit `date`.
+        let json = r#"{"daily":[{"date":"2026-08-14","totalCost":1.0,
+            "metadata":{"agents":["claude"]},
+            "modelBreakdowns":[{"modelName":"claude-opus-5","cost":1.0,"inputTokens":10,
+            "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.graph.contributions[0].date, "2026-08-14");
+    }
+
+    #[test]
+    fn ccusage_row_without_any_date_is_rejected() {
+        let json = r#"{"daily":[{"totalCost":1.0,"modelsUsed":["claude-opus-5"]}]}"#;
+        let err = match parse_ccusage_export(json) {
+            Ok(_) => panic!("a row with neither `period` nor `date` must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("period"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn ccusage_single_agent_day_needs_no_model_inference() {
+        // A day with one agent is unambiguous even for a model the family
+        // matcher has never seen — the export already told us who ran.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":1.0,
+            "metadata":{"agents":["opencode"]},
+            "modelBreakdowns":[{"modelName":"some-private-model","cost":1.0,"inputTokens":10,
+            "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.graph.contributions[0].clients[0].client, "opencode");
+        assert!(out.unknown_clients.is_empty());
+    }
+
+    #[test]
+    fn ccusage_unattributable_model_on_a_shared_day_is_flagged() {
+        // Two agents ran and the model matches neither. Folding it into the
+        // first agent would silently misattribute it, so it is surfaced.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":1.0,
+            "metadata":{"agents":["claude","codex"]},
+            "modelBreakdowns":[{"modelName":"mystery-1","cost":1.0,"inputTokens":10,
+            "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.unknown_clients, vec!["unknown".to_string()]);
+        assert_eq!(out.graph.contributions[0].clients[0].client, "unknown");
+    }
+
+    #[test]
+    fn ccusage_infers_family_when_metadata_is_absent() {
+        // Older exports carry no `metadata.agents` at all.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":1.0,
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":1.0,"inputTokens":10,
+            "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.graph.contributions[0].clients[0].client, "codex");
+    }
+
+    #[test]
+    fn ccusage_accepts_stringified_cost() {
+        // Dashboards that round-trip cc.json sometimes serialize the
+        // aggregate cost as a string.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":"1.25",
+            "inputTokens":10,"outputTokens":20,
+            "metadata":{"agents":["claude"]},"modelsUsed":["claude-opus-5"]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert!((out.graph.contributions[0].totals.cost - 1.25).abs() < 1e-9);
+        assert_eq!(out.unparseable_cost_rows, 0);
+    }
+
+    #[test]
+    fn ccusage_reconciliation_warns_when_breakdowns_diverge() {
+        let json = r#"{"daily":[{"period":"2026-08-14","inputTokens":10000,
+            "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0,"totalCost":1.0,
+            "metadata":{"agents":["claude"]},
+            "modelBreakdowns":[{"modelName":"claude-opus-5","cost":1.0,"inputTokens":10,
+            "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.breakdown_reconciliation_warnings.len(), 1);
+        assert!(out.breakdown_reconciliation_warnings[0].contains("2026-08-14"));
+    }
+
+    #[test]
+    fn ccusage_empty_export_is_an_error() {
+        assert!(parse_ccusage_export(r#"{"daily":[]}"#).is_err());
+    }
+
+    #[test]
+    fn ccusage_negative_values_are_clamped() {
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":1.0,
+            "metadata":{"agents":["claude"]},
+            "modelBreakdowns":[{"modelName":"claude-opus-5","cost":-1.0,"inputTokens":-10,
+            "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(out.negative_values_clamped, 2);
+        assert_eq!(out.graph.contributions[0].token_breakdown.input, 0);
+        assert!(out.graph.contributions[0].totals.cost.abs() < 1e-9);
+    }
+
+    #[test]
+    fn ccusage_days_are_sorted_and_intensities_assigned() {
+        let json = r#"{"daily":[
+            {"period":"2026-08-15","totalCost":1.0,"metadata":{"agents":["claude"]},
+             "modelBreakdowns":[{"modelName":"claude-opus-5","cost":1.0,"inputTokens":10,
+             "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]},
+            {"period":"2026-08-13","totalCost":9.0,"metadata":{"agents":["claude"]},
+             "modelBreakdowns":[{"modelName":"claude-opus-5","cost":9.0,"inputTokens":90,
+             "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        let dates: Vec<&str> = out
+            .graph
+            .contributions
+            .iter()
+            .map(|c| c.date.as_str())
+            .collect();
+        assert_eq!(dates, vec!["2026-08-13", "2026-08-15"]);
+        let top = out
+            .graph
+            .contributions
+            .iter()
+            .max_by(|a, b| a.intensity.cmp(&b.intensity))
+            .unwrap();
+        assert_eq!(top.date, "2026-08-13");
+    }
+
+    #[test]
+    fn ccusage_parse_export_dispatches_by_format() {
+        assert!(parse_export("ccusage", CCUSAGE_MIXED).is_ok());
+        assert!(parse_export("clawdboard", SAMPLE).is_ok());
+        assert!(parse_export("viberank", CCUSAGE_MIXED).is_err());
     }
 }

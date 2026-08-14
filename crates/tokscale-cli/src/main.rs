@@ -241,7 +241,7 @@ enum Commands {
         no_spinner: bool,
     },
     #[command(
-        about = "Import historical usage from a third-party aggregate export (e.g. clawdboard) into tokscale JSON"
+        about = "Import historical usage from an aggregate export (clawdboard, ccusage) into tokscale JSON"
     )]
     Import {
         #[arg(help = "Path to the export file to import")]
@@ -249,7 +249,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "clawdboard",
-            help = "Export format (currently only 'clawdboard')"
+            help = "Export format: 'clawdboard' or 'ccusage' (ccusage daily --json output)"
         )]
         format: String,
         #[arg(
@@ -5270,8 +5270,9 @@ fn run_graph_command(
     Ok(())
 }
 
-/// Import a third-party aggregate export (currently clawdboard) and emit it as
-/// standard tokscale JSON — the same shape `tokscale graph` produces.
+/// Import an aggregate export (clawdboard, or ccusage's own `daily --json`)
+/// and emit it as standard tokscale JSON — the same shape `tokscale graph`
+/// produces.
 ///
 /// This deliberately does NOT upload: backfilled aggregates cannot be verified
 /// the way locally-scanned sessions are, so submitting them requires
