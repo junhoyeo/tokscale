@@ -75,6 +75,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   reasonix: "Reasonix",
   "prime-agent": "Prime Agent",
   cherrystudio: "Cherry Studio",
+  dsh: "DeepSeek Harness",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -133,6 +134,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   reasonix: `${GITHUB_CDN_BASE}/client-synthetic.png`,
   "prime-agent": "https://github.com/PrimeIntellect-ai.png",
   cherrystudio: `${GITHUB_CDN_BASE}/client-cherrystudio.png`,
+  dsh: "https://github.com/deepseek-ai.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -184,6 +186,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   reasonix: "#6366F1",
   "prime-agent": "#6C63FF",
   cherrystudio: "#FA7298",
+  dsh: "#4D6BFE",
 };
 
 // Derived values

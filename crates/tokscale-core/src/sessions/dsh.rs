@@ -220,7 +220,11 @@ mod tests {
         assert!(first.is_turn_start);
         assert_eq!(first.workspace_key.as_deref(), Some("E:/repo/proj"));
         assert_eq!(first.workspace_label.as_deref(), Some("proj"));
-        assert!(first.dedup_key.as_deref().unwrap().starts_with("dsh:session-abc:"));
+        assert!(first
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("dsh:session-abc:"));
 
         // Same turn, later step: not a turn start.
         assert!(!messages[1].is_turn_start);
