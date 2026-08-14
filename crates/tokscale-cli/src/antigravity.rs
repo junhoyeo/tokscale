@@ -1921,6 +1921,7 @@ fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
 fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
             .timeout(Duration::from_secs(10))
