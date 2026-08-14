@@ -934,6 +934,7 @@ impl CacheIdentity {
         ClientId::from_str(namespace).map(Self::for_client)
     }
 
+    #[cfg(test)]
     fn all() -> impl Iterator<Item = Self> {
         ClientId::iter()
             .map(Self::for_client)
@@ -1062,6 +1063,35 @@ fn parser_version(client: ClientId) -> u32 {
         // v2->v3: duplicate merging now upgrades the retained row when a later
         // copy carries an explicit cost, including zero.
         ClientId::MiMoCode => 3,
+        // Droid's cumulative session totals now anchor on the settings file's
+        // mtime (floored at providerLockTimestamp) instead of the lock
+        // timestamp alone, so a long-running session stops reporting every
+        // token it ever spent against the day it was started. A session that
+        // has since ended never changes its bytes again, so its fingerprint
+        // stays valid forever and only this bump discards the v1 anchor.
+        // v2->v3: a session's cumulative total is no longer one record at one
+        // instant. It is now apportioned across the assistant replies in the
+        // sibling transcript, weighted by the context each reply read, so a
+        // multi-day session reports against the days it actually ran.
+        // v3->v4: a reply is weighted by the context standing before it rather
+        // than including its own bytes, so a long answer no longer charges
+        // itself for its own output.
+        // v4->v5: output and reasoning follow the reply's own size instead of
+        // the context it read, a pre-epoch transcript timestamp no longer
+        // anchors a share of the session in 1969, and an oversized transcript
+        // takes the single-record path. Versions 2 through 4 only ever existed
+        // in pre-release builds of this change; the bump past them keeps anyone
+        // who ran one from holding a superseded split.
+        // v5->v6: a coalesced run of replies now reports how many calls it
+        // stands for instead of one, an unreadable file size no longer waives
+        // the transcript ceiling, and a transcript that could not be read whole
+        // takes the single-record path rather than apportioning the session
+        // over the prefix that was read.
+        // v6->v7: the apportioned records are attribution fragments of one
+        // session, so the session's reply count now rides on exactly one of
+        // them. v6 entries carry a count on every record, which `sessionize`
+        // reads as one session per record.
+        ClientId::Droid => 7,
         _ => 1,
     }
 }
@@ -1106,6 +1136,21 @@ struct CacheShardKey {
     index: usize,
 }
 
+/// Marks a Claude entry as carrying retention provenance.
+///
+/// A Claude entry's `fallback_timestamp_indices` lists the messages the live
+/// transcript no longer contains. An entry with nothing retained and an entry
+/// written before provenance existed both leave that vector empty, so the
+/// vector alone cannot answer "is this legacy?" — and answering it wrong
+/// either strands stale rows (see
+/// [`CachedSourceEntry::needs_retention_provenance_migration`]) or re-parses
+/// every Claude transcript on every scan forever.
+///
+/// `usize::MAX` is never a real message index, so appending it records
+/// "provenance is present, retained set may be empty" without changing the
+/// serialized layout.
+const CLAUDE_RETENTION_PROVENANCE_MARKER: usize = usize::MAX;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedSourceEntry {
     parser_namespace: String,
@@ -1118,6 +1163,14 @@ pub(crate) struct CachedSourceEntry {
     /// cache is the only copy. That is what makes a parser_version bump for
     /// those namespaces lossy rather than merely cold.
     pub messages: Vec<UnifiedMessage>,
+    /// Namespace-specific indices that have to survive with the message vector.
+    ///
+    /// For Codex these identify fallback-timestamp messages. For Claude they
+    /// identify messages retained after the live transcript stopped containing
+    /// them, plus a trailing [`CLAUDE_RETENTION_PROVENANCE_MARKER`]. Claude
+    /// never used this vector before retention provenance, so the second
+    /// interpretation preserves the existing bincode layout and avoids a
+    /// cache-format bump that would discard unrecoverable compacted history.
     pub fallback_timestamp_indices: Vec<usize>,
     pub codex_incremental: Option<CodexIncrementalCache>,
     /// Prime-only metadata used to reconcile fork aggregates with child
@@ -1190,6 +1243,145 @@ impl CachedSourceEntry {
             .is_some_and(|identity| identity.parser_version == self.parser_version)
     }
 
+    fn matches_identity(&self, identity: CacheIdentity) -> bool {
+        self.parser_namespace == identity.namespace
+            && self.parser_version == identity.parser_version
+    }
+
+    /// Moves everything that scales with the transcript out of this entry,
+    /// leaving the metadata a later `remove` or shard rewrite still needs.
+    ///
+    /// The husk left behind reports no messages, which every warm-hit check
+    /// already treats as "not usable" — so a second lookup degrades to a
+    /// re-parse rather than serving a truncated entry. See
+    /// [`SourceMessageCache::take`] for why that second lookup cannot happen
+    /// for the namespaces where a re-parse would lose history.
+    fn take_payload(&mut self) -> Self {
+        Self {
+            parser_namespace: self.parser_namespace.clone(),
+            parser_version: self.parser_version,
+            path: self.path.clone(),
+            fingerprint: self.fingerprint.clone(),
+            messages: std::mem::take(&mut self.messages),
+            fallback_timestamp_indices: std::mem::take(&mut self.fallback_timestamp_indices),
+            codex_incremental: self.codex_incremental.take(),
+            prime_accounting: self.prime_accounting.take(),
+        }
+    }
+
+    pub(crate) fn is_claude_namespace(&self) -> bool {
+        self.parser_namespace == ClientId::Claude.as_str()
+    }
+
+    /// Whether this Claude entry predates retention provenance.
+    ///
+    /// Entries written before the provenance marker existed carry retained
+    /// turns mixed in with live ones and no way to tell them apart, so reading
+    /// one as-is presents a stale copy of a response as if the live transcript
+    /// still contained it. The reader rebuilds those entries once (see
+    /// `lib.rs`), which re-derives the retained set from the live bytes and
+    /// writes the marker, and this then reports `false` forever after.
+    ///
+    /// The distinction has to survive on disk, and it cannot be a new struct
+    /// field: `CachedSourceEntry` is bincode-encoded without field names, so
+    /// adding one needs a `CACHE_FORMAT_VERSION` bump, and that discards every
+    /// Claude entry — including the compacted assistant turns only the cache
+    /// still holds. The marker rides inside the existing index vector instead.
+    pub(crate) fn needs_retention_provenance_migration(&self) -> bool {
+        self.is_claude_namespace()
+            && !self
+                .fallback_timestamp_indices
+                .contains(&CLAUDE_RETENTION_PROVENANCE_MARKER)
+    }
+
+    /// Whether this entry is carrying rows the live file may no longer
+    /// contain — either an identified retained set, or a pre-provenance entry
+    /// that cannot say which of its rows are retained and has to be assumed to
+    /// hold some.
+    ///
+    /// Only meaningful for a namespace [`retained_history_key_filter`] covers;
+    /// elsewhere the index vector means something else entirely.
+    pub(crate) fn holds_retained_history(&self) -> bool {
+        self.is_claude_namespace()
+            && (self.needs_retention_provenance_migration()
+                || self
+                    .fallback_timestamp_indices
+                    .iter()
+                    .any(|index| *index != CLAUDE_RETENTION_PROVENANCE_MARKER))
+    }
+
+    pub(crate) fn retained_message_keys(&self) -> HashSet<String> {
+        if !self.is_claude_namespace() {
+            return HashSet::new();
+        }
+        self.fallback_timestamp_indices
+            .iter()
+            .filter(|index| **index != CLAUDE_RETENTION_PROVENANCE_MARKER)
+            .filter_map(|index| self.messages.get(*index))
+            .filter_map(|message| message.dedup_key.clone())
+            .collect()
+    }
+
+    fn claude_retained_indices(
+        messages: &[UnifiedMessage],
+        retained_message_keys: &HashSet<String>,
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                message
+                    .dedup_key
+                    .as_ref()
+                    .is_some_and(|key| retained_message_keys.contains(key))
+                    .then_some(index)
+            })
+            .collect();
+        indices.push(CLAUDE_RETENTION_PROVENANCE_MARKER);
+        indices
+    }
+
+    pub(crate) fn new_with_retained_message_keys(
+        identity: CacheIdentity,
+        path: &Path,
+        fingerprint: SourceFingerprint,
+        messages: Vec<UnifiedMessage>,
+        retained_message_keys: &HashSet<String>,
+    ) -> Self {
+        debug_assert_eq!(identity.namespace, ClientId::Claude.as_str());
+        let retained_indices = Self::claude_retained_indices(&messages, retained_message_keys);
+        Self::new(
+            identity,
+            path,
+            fingerprint,
+            messages,
+            retained_indices,
+            None,
+        )
+    }
+
+    fn remove_claude_synthetic_placeholders(&mut self) -> bool {
+        if !self.is_claude_namespace() {
+            return false;
+        }
+        let retained_keys = self.retained_message_keys();
+        // Repairing placeholder rows tells us nothing about which turns are
+        // retained, so an entry that arrived without provenance still needs
+        // the rebuild afterwards.
+        let had_provenance = !self.needs_retention_provenance_migration();
+        let changed =
+            crate::sessions::claudecode::remove_synthetic_placeholder_messages(&mut self.messages);
+        if changed {
+            self.fallback_timestamp_indices =
+                Self::claude_retained_indices(&self.messages, &retained_keys);
+            if !had_provenance {
+                self.fallback_timestamp_indices
+                    .retain(|index| *index != CLAUDE_RETENTION_PROVENANCE_MARKER);
+            }
+        }
+        changed
+    }
+
     /// Carry forward keyed messages an entry already on disk holds for this
     /// same path and this one does not.
     ///
@@ -1216,10 +1408,11 @@ impl CachedSourceEntry {
             return;
         }
 
-        let mut seen: HashSet<String> = self
+        let mut keyed_indices: HashMap<String, usize> = self
             .messages
             .iter()
-            .filter_map(|message| message.dedup_key.clone())
+            .enumerate()
+            .filter_map(|(index, message)| message.dedup_key.clone().map(|key| (key, index)))
             .collect();
         for message in &stored.messages {
             let Some(key) = message.dedup_key.as_ref() else {
@@ -1228,9 +1421,20 @@ impl CachedSourceEntry {
             if !key_is_globally_stable(key) {
                 continue;
             }
-            if seen.insert(key.clone()) {
-                self.messages.push(message.clone());
+            if let Some(index) = keyed_indices.get(key).copied() {
+                crate::sessions::claudecode::merge_message_completeness(
+                    &mut self.messages[index],
+                    message,
+                );
+                continue;
             }
+            let index = self.messages.len();
+            self.messages.push(message.clone());
+            // Relative to this writer's current source fingerprint, a row only
+            // the stored entry knew about is retained history even if it was
+            // live when the concurrent writer observed it.
+            self.fallback_timestamp_indices.push(index);
+            keyed_indices.insert(key.clone(), index);
         }
     }
 }
@@ -1265,22 +1469,79 @@ enum DeletionReason {
     Missing,
 }
 
+/// The mutable half of [`SourceMessageCache`].
+///
+/// It lives behind one mutex because the parse lanes hold the cache by shared
+/// reference from inside `rayon` closures, and both of the memory properties
+/// this type is responsible for need to mutate through that shared reference:
+/// a namespace's shards are read on first use, and an entry's message payload
+/// is handed to its one consumer instead of being cloned out from under a copy
+/// the cache keeps forever. Every critical section is a hash lookup plus a
+/// couple of `mem::take`s, except the once-per-namespace shard read.
 #[derive(Default)]
-pub(crate) struct SourceMessageCache {
-    pub entries: HashMap<CacheKey, CachedSourceEntry>,
+struct CacheState {
+    entries: HashMap<CacheKey, CachedSourceEntry>,
+    /// Namespaces whose shards were already read (or attempted). Recorded even
+    /// when the read fails so a broken cache directory cannot make every file
+    /// in a lane retry the same I/O.
+    loaded_namespaces: HashSet<&'static str>,
     dirty: bool,
     dirty_keys: HashSet<CacheKey>,
     deleted_keys: HashMap<CacheKey, DeletionReason>,
     rewrite_shards: HashSet<CacheShardKey>,
 }
 
+/// The persisted parse cache, read lazily and drained as it is consumed.
+///
+/// Both behaviours exist for one reason: a scan's memory must be proportional
+/// to what it actually reads, not to everything the machine has ever cached.
+/// Loading every namespace up front and keeping every entry alive for the
+/// whole scan made a `tokscale` run cost the size of the entire cache plus the
+/// size of its own output — a single-message `-c droid` scan peaked at 1.16 GB
+/// against a 358 MB cache, and the TUI paid that peak again on every
+/// auto-refresh until the process was killed (#1100).
+#[derive(Default)]
+pub(crate) struct SourceMessageCache {
+    state: Mutex<CacheState>,
+    /// `false` for [`SourceCachePolicy::InMemory`] callers, who must never
+    /// touch the on-disk shards.
+    persistent: bool,
+}
+
 impl SourceMessageCache {
+    /// Opens the persistent cache without reading any shard.
+    ///
+    /// Shards are read per namespace on first access, so a scan that only
+    /// looks at one client never deserializes another client's history.
     pub(crate) fn load() -> Self {
+        Self {
+            state: Mutex::new(CacheState::default()),
+            persistent: true,
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Reads `namespace`'s shards into `state` the first time it is needed.
+    ///
+    /// Missing-source pruning happens here rather than in one pass over the
+    /// whole cache, so it stays scoped to the namespaces this scan touched.
+    fn ensure_namespace_loaded(&self, state: &mut CacheState, namespace: &'static str) {
+        if !self.persistent || !state.loaded_namespaces.insert(namespace) {
+            return;
+        }
+        let Some(identity) = CacheIdentity::current_for_namespace(namespace) else {
+            return;
+        };
         let Some(shard_root) = cache_shard_dir() else {
-            return Self::default();
+            return;
         };
         let Some(lock_path) = cache_lock_path() else {
-            return Self::default();
+            return;
         };
         if let Err(error) = ensure_cache_dir(&shard_root) {
             warn_cache_failure_once(
@@ -1288,7 +1549,7 @@ impl SourceMessageCache {
                 &shard_root,
                 &error,
             );
-            return Self::default();
+            return;
         }
         let lock_file = match OpenOptions::new()
             .read(true)
@@ -1304,114 +1565,241 @@ impl SourceMessageCache {
                     &lock_path,
                     &error,
                 );
-                return Self::default();
+                return;
             }
         };
         if let Err(error) = fs2::FileExt::lock_shared(&lock_file) {
             warn_cache_failure_once("source message cache lock failed", &lock_path, &error);
-            return Self::default();
+            return;
         }
 
-        let mut cache = Self::default();
-        for identity in CacheIdentity::all() {
-            let parser_dir = shard_root.join(identity.namespace);
-            let read_dir = match fs::read_dir(&parser_dir) {
-                Ok(read_dir) => read_dir,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    warn_cache_failure_once(
-                        "source message cache parser directory is unreadable",
-                        &parser_dir,
-                        &error,
-                    );
+        let parser_dir = shard_root.join(namespace);
+        let read_dir = match fs::read_dir(&parser_dir) {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                warn_cache_failure_once(
+                    "source message cache parser directory is unreadable",
+                    &parser_dir,
+                    &error,
+                );
+                return;
+            }
+        };
+
+        for dir_entry in read_dir.filter_map(Result::ok) {
+            let Some(index) = parse_shard_filename(&dir_entry.file_name()) else {
+                continue;
+            };
+            let shard_key = CacheShardKey {
+                namespace: namespace.to_string(),
+                index,
+            };
+            let path = dir_entry.path();
+            let (entries, migrated) = match read_shard(&path, identity) {
+                ShardReadStatus::Loaded(entries) => (entries, false),
+                ShardReadStatus::Migrated(entries) => (entries, true),
+                ShardReadStatus::Missing => continue,
+                ShardReadStatus::Stale => {
+                    state.rewrite_shards.insert(shard_key);
+                    state.dirty = true;
+                    continue;
+                }
+                ShardReadStatus::Invalid(error) => {
+                    warn_cache_failure_once("source message cache shard is invalid", &path, &error);
+                    state.rewrite_shards.insert(shard_key);
+                    state.dirty = true;
                     continue;
                 }
             };
-
-            for dir_entry in read_dir.filter_map(Result::ok) {
-                let Some(index) = parse_shard_filename(&dir_entry.file_name()) else {
+            if migrated {
+                state.rewrite_shards.insert(shard_key.clone());
+                state.dirty = true;
+            }
+            for mut entry in entries {
+                let key = CacheKey::from_entry(&entry);
+                if key.shard() != shard_key || !entry.identity_is_current() {
+                    state.rewrite_shards.insert(shard_key.clone());
+                    state.dirty = true;
                     continue;
-                };
-                let shard_key = CacheShardKey {
-                    namespace: identity.namespace.to_string(),
-                    index,
-                };
-                let path = dir_entry.path();
-                let (entries, migrated) = match read_shard(&path, identity) {
-                    ShardReadStatus::Loaded(entries) => (entries, false),
-                    ShardReadStatus::Migrated(entries) => (entries, true),
-                    ShardReadStatus::Missing => continue,
-                    ShardReadStatus::Stale => {
-                        cache.rewrite_shards.insert(shard_key);
-                        continue;
-                    }
-                    ShardReadStatus::Invalid(error) => {
-                        warn_cache_failure_once(
-                            "source message cache shard is invalid",
-                            &path,
-                            &error,
-                        );
-                        cache.rewrite_shards.insert(shard_key);
-                        continue;
-                    }
-                };
-                if migrated {
-                    cache.rewrite_shards.insert(shard_key.clone());
                 }
-                for mut entry in entries {
-                    let key = CacheKey::from_entry(&entry);
-                    if key.shard() == shard_key && entry.identity_is_current() {
-                        if entry.parser_namespace == ClientId::Claude.as_str()
-                            && crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                &mut entry.messages,
-                            )
-                        {
-                            // Do not bump Claude's parser version here: compacted
-                            // transcripts rely on cached assistant history that a
-                            // full invalidation cannot recover. Repair only the bad
-                            // `<synthetic>` rows and persist that narrow migration.
-                            cache.dirty_keys.insert(key.clone());
-                        }
-                        cache.entries.insert(key, entry);
-                    } else {
-                        cache.rewrite_shards.insert(shard_key.clone());
-                    }
+                // A source that no longer exists can never be scanned again,
+                // so its entry is dead weight in memory and on disk.
+                if !key.path.to_path_buf().exists() {
+                    state.deleted_keys.insert(key, DeletionReason::Missing);
+                    state.dirty = true;
+                    continue;
                 }
+                // This scan already produced (or deleted) something for this
+                // source, and that is newer than the bytes on disk.
+                if state.entries.contains_key(&key)
+                    || state.dirty_keys.contains(&key)
+                    || state.deleted_keys.contains_key(&key)
+                {
+                    continue;
+                }
+                if entry.remove_claude_synthetic_placeholders() {
+                    // Do not bump Claude's parser version here: compacted
+                    // transcripts rely on cached assistant history that a
+                    // full invalidation cannot recover. Repair only the bad
+                    // `<synthetic>` rows and persist that narrow migration.
+                    state.dirty_keys.insert(key.clone());
+                    state.dirty = true;
+                }
+                state.entries.insert(key, entry);
             }
         }
+    }
 
-        cache.dirty = !(cache.rewrite_shards.is_empty() && cache.dirty_keys.is_empty());
-        cache
+    #[cfg(test)]
+    fn load_all_namespaces(&self, state: &mut CacheState) {
+        for identity in CacheIdentity::all() {
+            self.ensure_namespace_loaded(state, identity.namespace);
+        }
     }
 
     pub(crate) fn insert(&mut self, entry: CachedSourceEntry) {
         let key = CacheKey::from_entry(&entry);
-        self.entries.insert(key.clone(), entry);
-        self.deleted_keys.remove(&key);
-        self.dirty_keys.insert(key);
-        self.dirty = true;
+        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
+        state.entries.insert(key.clone(), entry);
+        state.deleted_keys.remove(&key);
+        state.dirty_keys.insert(key);
+        state.dirty = true;
     }
 
-    pub(crate) fn get(&self, identity: CacheIdentity, path: &Path) -> Option<&CachedSourceEntry> {
+    /// Reads an entry without disturbing the cache's copy.
+    ///
+    /// Production scans use [`Self::take`]; this exists so tests can assert on
+    /// what a load produced without consuming it.
+    #[cfg(test)]
+    pub(crate) fn get(&self, identity: CacheIdentity, path: &Path) -> Option<CachedSourceEntry> {
         let key = CacheKey::new(identity, path);
-        self.entries.get(&key).filter(|entry| {
-            entry.parser_namespace == identity.namespace
-                && entry.parser_version == identity.parser_version
-        })
+        let mut state = self.state();
+        self.ensure_namespace_loaded(&mut state, identity.namespace);
+        state
+            .entries
+            .get(&key)
+            .filter(|entry| entry.matches_identity(identity))
+            .cloned()
+    }
+
+    /// Hands the entry for `path` to its one consumer, moving the message
+    /// payload out of the cache and leaving the entry's metadata behind.
+    ///
+    /// Every source is looked up at most once per scan, and
+    /// [`Self::save_if_dirty`] re-reads each shard it rewrites from disk and
+    /// only overlays the entries this scan marked dirty — so a clean entry's
+    /// messages are never needed again in memory, and releasing them here is
+    /// what keeps a scan from holding the whole cache and its own output at
+    /// the same time.
+    ///
+    /// Two cases keep their payload:
+    ///
+    /// * An entry that is actually carrying retained history (see
+    ///   [`CachedSourceEntry::holds_retained_history`]) holds messages the live
+    ///   file no longer contains, and the cache is the only copy. A second
+    ///   lookup of a drained entry would look like a cold source and re-derive
+    ///   history from the live bytes alone, retiring rows that can never come
+    ///   back (#994). An entry in the same namespace whose retained set is
+    ///   empty is fully reproducible from the live bytes, so it drains like any
+    ///   other.
+    /// * An entry already marked dirty is written back from memory by
+    ///   `save_if_dirty`, so its payload has to still be there.
+    pub(crate) fn take(&self, identity: CacheIdentity, path: &Path) -> Option<CachedSourceEntry> {
+        let key = CacheKey::new(identity, path);
+        let mut state = self.state();
+        self.ensure_namespace_loaded(&mut state, identity.namespace);
+        let retains_history = retained_history_key_filter(identity.namespace).is_some();
+        let dirty = state.dirty_keys.contains(&key);
+        let entry = state.entries.get_mut(&key)?;
+        if !entry.matches_identity(identity) {
+            return None;
+        }
+        if dirty || (retains_history && entry.holds_retained_history()) {
+            return Some(entry.clone());
+        }
+        Some(entry.take_payload())
     }
 
     pub(crate) fn remove(&mut self, identity: CacheIdentity, path: &Path) {
         let key = CacheKey::new(identity, path);
-        if let Some(entry) = self.entries.remove(&key) {
-            self.dirty_keys.remove(&key);
-            self.deleted_keys
+        // Load first: an invalidation has to record the fingerprint it is
+        // replacing, and an unread namespace holds no entry to record.
+        let mut state = self.state();
+        self.ensure_namespace_loaded(&mut state, identity.namespace);
+        if let Some(entry) = state.entries.remove(&key) {
+            state.dirty_keys.remove(&key);
+            state
+                .deleted_keys
                 .insert(key, DeletionReason::Invalidated(entry.fingerprint));
-            self.dirty = true;
+            state.dirty = true;
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn loaded_namespace_count(&self) -> usize {
+        self.state().loaded_namespaces.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn namespace_is_loaded(&self, namespace: &str) -> bool {
+        self.state().loaded_namespaces.contains(namespace)
+    }
+
+    /// Whether the cache is holding a husk: an entry it still knows about
+    /// whose messages were handed to their consumer.
+    #[cfg(test)]
+    pub(crate) fn entry_messages_released(&self, identity: CacheIdentity, path: &Path) -> bool {
+        let state = self.state();
+        state
+            .entries
+            .get(&CacheKey::new(identity, path))
+            .is_some_and(|entry| entry.messages.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_fingerprint(
+        &self,
+        identity: CacheIdentity,
+        path: &Path,
+    ) -> Option<SourceFingerprint> {
+        let state = self.state();
+        state
+            .entries
+            .get(&CacheKey::new(identity, path))
+            .map(|entry| entry.fingerprint.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.all_entries().len()
+    }
+
+    #[cfg(test)]
+    fn is_dirty(&self) -> bool {
+        self.state().dirty
+    }
+
+    #[cfg(test)]
+    fn has_rewrite_shard(&self, shard: &CacheShardKey) -> bool {
+        let mut state = self.state();
+        self.load_all_namespaces(&mut state);
+        state.rewrite_shards.contains(shard)
+    }
+
+    /// Every entry this cache currently holds, loading every namespace first.
+    #[cfg(test)]
+    pub(crate) fn all_entries(&self) -> Vec<CachedSourceEntry> {
+        let mut state = self.state();
+        self.load_all_namespaces(&mut state);
+        state.entries.values().cloned().collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn prune_missing_files(&mut self) {
-        let removed_keys: Vec<CacheKey> = self
+        let mut state = self.state();
+        self.load_all_namespaces(&mut state);
+        let removed_keys: Vec<CacheKey> = state
             .entries
             .keys()
             .filter(|key| !key.path.to_path_buf().exists())
@@ -1419,10 +1807,10 @@ impl SourceMessageCache {
             .collect();
 
         for key in removed_keys {
-            self.entries.remove(&key);
-            self.dirty_keys.remove(&key);
-            self.deleted_keys.insert(key, DeletionReason::Missing);
-            self.dirty = true;
+            state.entries.remove(&key);
+            state.dirty_keys.remove(&key);
+            state.deleted_keys.insert(key, DeletionReason::Missing);
+            state.dirty = true;
         }
     }
 
@@ -1431,7 +1819,8 @@ impl SourceMessageCache {
     }
 
     fn save_if_dirty_with_limit(&mut self, max_shard_bytes: u64) {
-        if !self.dirty {
+        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
+        if !state.dirty {
             return;
         }
 
@@ -1478,7 +1867,7 @@ impl SourceMessageCache {
         // dominated cold-cache builds (hundreds of shards * tens of thousands of
         // files re-hashed).
         let mut dirty_by_shard: HashMap<CacheShardKey, Vec<CacheKey>> = HashMap::new();
-        for key in &self.dirty_keys {
+        for key in &state.dirty_keys {
             dirty_by_shard
                 .entry(key.shard())
                 .or_default()
@@ -1486,14 +1875,14 @@ impl SourceMessageCache {
         }
         let mut deleted_by_shard: HashMap<CacheShardKey, Vec<(CacheKey, DeletionReason)>> =
             HashMap::new();
-        for (key, reason) in &self.deleted_keys {
+        for (key, reason) in &state.deleted_keys {
             deleted_by_shard
                 .entry(key.shard())
                 .or_default()
                 .push((key.clone(), reason.clone()));
         }
 
-        let mut affected_shards = self.rewrite_shards.clone();
+        let mut affected_shards = state.rewrite_shards.clone();
         affected_shards.extend(dirty_by_shard.keys().cloned());
         affected_shards.extend(deleted_by_shard.keys().cloned());
 
@@ -1549,7 +1938,7 @@ impl SourceMessageCache {
             }
             if let Some(dirty) = dirty_by_shard.get(&shard_key) {
                 for key in dirty {
-                    if let Some(entry) = self.entries.get(key) {
+                    if let Some(entry) = state.entries.get(key) {
                         let mut entry = entry.clone();
                         // Another process holding the lock before us may have
                         // stored history for this same path that our in-memory
@@ -1558,11 +1947,7 @@ impl SourceMessageCache {
                         if let Some(stored) = merged_entries.remove(key) {
                             entry.absorb_retained_history(&stored);
                         }
-                        if entry.parser_namespace == ClientId::Claude.as_str() {
-                            crate::sessions::claudecode::remove_synthetic_placeholder_messages(
-                                &mut entry.messages,
-                            );
-                        }
+                        entry.remove_claude_synthetic_placeholders();
                         merged_entries.insert(key.clone(), entry);
                     }
                 }
@@ -1584,15 +1969,18 @@ impl SourceMessageCache {
             }
         }
 
-        self.dirty_keys
+        state
+            .dirty_keys
             .retain(|key| !successful_shards.contains(&key.shard()));
-        self.deleted_keys
+        state
+            .deleted_keys
             .retain(|key, _| !successful_shards.contains(&key.shard()));
-        self.rewrite_shards
+        state
+            .rewrite_shards
             .retain(|shard| !successful_shards.contains(shard));
-        self.dirty = !(self.dirty_keys.is_empty()
-            && self.deleted_keys.is_empty()
-            && self.rewrite_shards.is_empty());
+        state.dirty = !(state.dirty_keys.is_empty()
+            && state.deleted_keys.is_empty()
+            && state.rewrite_shards.is_empty());
     }
 }
 
@@ -2590,6 +2978,14 @@ mod tests {
     }
 
     #[test]
+    fn test_droid_usage_anchor_parser_version_invalidates_v1_entries() {
+        // A finished Droid session's settings.json is never rewritten again, so
+        // its fingerprint keeps matching and only the version bump discards the
+        // v1 lock-timestamp anchor.
+        assert_eq!(parser_version(ClientId::Droid), 7);
+    }
+
+    #[test]
     fn test_micode_parser_version_invalidates_rows_without_cost_provenance() {
         assert_eq!(parser_version(ClientId::MiMoCode), 3);
     }
@@ -3298,7 +3694,7 @@ mod tests {
         assert!(shard_one.is_file());
         assert!(shard_two.is_file());
         let loaded = SourceMessageCache::load();
-        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.entry_count(), 2);
         assert!(loaded.get(identity, &path_one).is_some());
         assert!(loaded.get(identity, &path_two).is_some());
     }
@@ -3324,7 +3720,7 @@ mod tests {
         cache.insert(entry_two);
         cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
         assert!(
-            !cache.dirty,
+            !cache.is_dirty(),
             "both independently bounded shards should save"
         );
 
@@ -3369,7 +3765,7 @@ mod tests {
             "valid-session"
         );
         assert!(
-            loaded.dirty,
+            loaded.is_dirty(),
             "the corrupt shard should be scheduled for rewrite"
         );
     }
@@ -3417,9 +3813,9 @@ mod tests {
             ShardReadStatus::Stale
         ));
         let mut loaded = SourceMessageCache::load();
-        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entry_count(), 1);
         assert!(loaded.get(claude, source.path()).is_some());
-        assert!(loaded.rewrite_shards.contains(&stale_key));
+        assert!(loaded.has_rewrite_shard(&stale_key));
 
         loaded.save_if_dirty();
         assert!(matches!(
@@ -3508,7 +3904,7 @@ mod tests {
             cache.get(identity, source.path()).unwrap().messages[0].session_id,
             "legacy-prime"
         );
-        assert!(cache.rewrite_shards.contains(&shard_key));
+        assert!(cache.has_rewrite_shard(&shard_key));
         cache.save_if_dirty();
         assert!(matches!(
             read_shard(&legacy_path, identity),
@@ -3604,7 +4000,7 @@ mod tests {
             loaded.get(current_identity, &source_path).is_none(),
             "a stale Copilot cache entry must not be served after the parser output change"
         );
-        assert!(loaded.rewrite_shards.contains(&shard_key));
+        assert!(loaded.has_rewrite_shard(&shard_key));
         assert_eq!(
             SourceFingerprint::from_path(&source_path).unwrap(),
             fingerprint,
@@ -3648,6 +4044,293 @@ mod tests {
                     && entries[0].messages[0].agent.as_deref()
                         == Some("github.copilot.default")
         ));
+    }
+
+    /// #1100: a scan must not deserialize namespaces it never reads.
+    ///
+    /// Before this was lazy, `load` read every shard of every client up front,
+    /// so a one-file `-c droid` scan paid for the whole machine's history —
+    /// 1.16 GB against a 358 MB cache on the reporter's class of machine — and
+    /// the TUI paid it again on every auto-refresh.
+    #[test]
+    #[serial_test::serial]
+    fn load_reads_only_the_namespaces_a_scan_touches() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let claude = CacheIdentity::for_client(ClientId::Claude);
+        let codex = CacheIdentity::for_client(ClientId::Codex);
+        let claude_source = write_temp_file(b"claude\n");
+        let codex_source = write_temp_file(b"codex\n");
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(claude, claude_source.path(), "claude-session"));
+        seed.insert(test_entry(codex, codex_source.path(), "codex-session"));
+        seed.save_if_dirty();
+
+        let cache = SourceMessageCache::load();
+        assert_eq!(
+            cache.loaded_namespace_count(),
+            0,
+            "opening the cache must not read a single shard"
+        );
+
+        assert!(cache.take(codex, codex_source.path()).is_some());
+        assert_eq!(
+            cache.loaded_namespace_count(),
+            1,
+            "only the namespace that was asked for may be deserialized"
+        );
+        assert!(
+            !cache.namespace_is_loaded(claude.namespace),
+            "an untouched client's history must stay on disk"
+        );
+    }
+
+    /// #1100: the payload handed to a scan must leave the cache, not be copied
+    /// out of it. Holding both made a run cost the whole cache plus its own
+    /// output at the same time.
+    #[test]
+    #[serial_test::serial]
+    fn take_releases_the_entry_payload_but_keeps_its_metadata() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let source = write_temp_file(b"codex\n");
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, source.path(), "codex-session"));
+        seed.save_if_dirty();
+
+        let cache = SourceMessageCache::load();
+        let taken = cache.take(identity, source.path()).expect("warm entry");
+        assert_eq!(taken.messages.len(), 1);
+        assert_eq!(taken.messages[0].session_id, "codex-session");
+
+        assert!(
+            cache.entry_messages_released(identity, source.path()),
+            "the cache must not keep a second copy of a payload it handed out"
+        );
+        assert_eq!(
+            cache.entry_fingerprint(identity, source.path()),
+            Some(taken.fingerprint.clone()),
+            "the husk still has to answer fingerprint and invalidation lookups"
+        );
+    }
+
+    /// A drained clean entry is still on disk, so a shard rewrite driven by a
+    /// different file must carry it forward untouched. If `save_if_dirty` ever
+    /// starts writing shards from memory alone, this is the test that fails.
+    #[test]
+    #[serial_test::serial]
+    fn saving_after_a_take_keeps_the_drained_entry_on_disk() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let untouched = write_temp_file(b"untouched\n");
+        let rewritten = write_temp_file(b"rewritten\n");
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, untouched.path(), "kept-session"));
+        seed.save_if_dirty();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.take(identity, untouched.path()).is_some());
+        cache.insert(test_entry(identity, rewritten.path(), "new-session"));
+        cache.save_if_dirty();
+
+        let reloaded = SourceMessageCache::load();
+        assert_eq!(
+            reloaded
+                .get(identity, untouched.path())
+                .expect("the drained entry must survive the save")
+                .messages[0]
+                .session_id,
+            "kept-session"
+        );
+        assert_eq!(
+            reloaded
+                .get(identity, rewritten.path())
+                .expect("the newly cached entry must be saved")
+                .messages[0]
+                .session_id,
+            "new-session"
+        );
+    }
+
+    /// A Claude entry holds turns the live transcript no longer contains, and
+    /// the cache is the only copy (#994). Draining one would make a second
+    /// lookup look like a cold source and retire that history for good, so an
+    /// entry that is carrying retained rows is served by clone instead.
+    #[test]
+    #[serial_test::serial]
+    fn take_keeps_the_payload_of_an_entry_carrying_retained_history() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let source = write_temp_file(b"claude\n");
+
+        let live = keyed_message(identity.namespace, "claude-session", "live:req_live");
+        let retained = keyed_message(identity.namespace, "claude-session", "old:req_old");
+        let mut seed = SourceMessageCache::default();
+        seed.insert(CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            vec![live, retained],
+            &HashSet::from(["old:req_old".to_string()]),
+        ));
+        seed.save_if_dirty();
+
+        let cache = SourceMessageCache::load();
+        let first = cache.take(identity, source.path()).expect("warm entry");
+        assert_eq!(first.messages.len(), 2);
+        assert_eq!(
+            cache
+                .take(identity, source.path())
+                .expect("a retained-history entry must survive being read")
+                .messages
+                .len(),
+            2,
+            "the only copy of a compacted turn must not leave the cache"
+        );
+    }
+
+    /// The same namespace, but nothing was retained: the live file reproduces
+    /// every row, so the entry drains like any other and Claude-heavy machines
+    /// still get the memory back.
+    #[test]
+    #[serial_test::serial]
+    fn take_drains_a_claude_entry_with_no_retained_history() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let source = write_temp_file(b"claude\n");
+
+        let live = keyed_message(identity.namespace, "claude-session", "live:req_live");
+        let mut seed = SourceMessageCache::default();
+        seed.insert(CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            vec![live],
+            &HashSet::new(),
+        ));
+        seed.save_if_dirty();
+
+        let cache = SourceMessageCache::load();
+        assert_eq!(
+            cache
+                .take(identity, source.path())
+                .expect("warm entry")
+                .messages
+                .len(),
+            1
+        );
+        assert!(
+            cache.entry_messages_released(identity, source.path()),
+            "an entry with an empty retained set is reproducible from the live \
+             file, so it must not keep a second copy"
+        );
+    }
+
+    /// An entry written before retention provenance existed cannot say which of
+    /// its rows the live file already dropped, so it has to be treated as
+    /// carrying history even though its retained set reads as empty.
+    #[test]
+    #[serial_test::serial]
+    fn take_keeps_the_payload_of_a_pre_provenance_claude_entry() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let source = write_temp_file(b"claude\n");
+
+        let mut seed = SourceMessageCache::default();
+        // `test_entry` builds the legacy shape: messages, no provenance marker.
+        let legacy = test_entry(identity, source.path(), "claude-session");
+        assert!(legacy.needs_retention_provenance_migration());
+        seed.insert(legacy);
+        seed.save_if_dirty();
+
+        let cache = SourceMessageCache::load();
+        assert!(cache.take(identity, source.path()).is_some());
+        assert!(
+            !cache.entry_messages_released(identity, source.path()),
+            "a legacy entry may be hiding retained rows it cannot identify"
+        );
+    }
+
+    /// Invalidating a source the current process never read still has to
+    /// record the fingerprint it replaces, so the stale shard row is dropped.
+    #[test]
+    #[serial_test::serial]
+    fn remove_loads_the_namespace_it_invalidates() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let source = write_temp_file(b"codex\n");
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, source.path(), "codex-session"));
+        seed.save_if_dirty();
+
+        let mut cache = SourceMessageCache::load();
+        cache.remove(identity, source.path());
+        cache.save_if_dirty();
+
+        assert!(SourceMessageCache::load()
+            .get(identity, source.path())
+            .is_none());
+    }
+
+    /// A source that vanished is dropped as its namespace loads, which is the
+    /// only pruning pass left now that nothing reads the whole cache.
+    #[test]
+    #[serial_test::serial]
+    fn loading_a_namespace_prunes_entries_whose_source_is_gone() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let source = write_temp_file(b"codex\n");
+        let path = source.path().to_path_buf();
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, &path, "codex-session"));
+        seed.save_if_dirty();
+        drop(source);
+        assert!(!path.exists());
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.take(identity, &path).is_none());
+        cache.save_if_dirty();
+
+        assert!(SourceMessageCache::load().get(identity, &path).is_none());
+    }
+
+    /// The shard on disk is older than what this scan produced, so loading the
+    /// namespace afterwards must not resurrect the stale row.
+    #[test]
+    #[serial_test::serial]
+    fn a_lazy_namespace_load_does_not_overwrite_this_scan_s_entries() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let source = write_temp_file(b"codex\n");
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, source.path(), "stale-session"));
+        seed.save_if_dirty();
+
+        let mut cache = SourceMessageCache::load();
+        cache.insert(test_entry(identity, source.path(), "fresh-session"));
+        assert_eq!(
+            cache
+                .get(identity, source.path())
+                .expect("the freshly inserted entry")
+                .messages[0]
+                .session_id,
+            "fresh-session",
+            "a later shard read must not clobber what this scan just produced"
+        );
     }
 
     #[test]
@@ -3721,7 +4404,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         cache.prune_missing_files();
 
-        assert!(cache.entries.is_empty());
+        assert!(cache.all_entries().is_empty());
     }
 
     #[test]
@@ -3748,16 +4431,16 @@ mod tests {
         let _cache_env = sandbox_cache_env(temp_home.path());
 
         let mut cache = SourceMessageCache::default();
-        assert!(!cache.dirty);
+        assert!(!cache.is_dirty());
 
         {
             let file = write_temp_file(b"{}\n");
             let identity = CacheIdentity::for_client(ClientId::Claude);
             cache.insert(test_entry(identity, file.path(), "session-1"));
-            assert!(cache.dirty);
+            assert!(cache.is_dirty());
 
             cache.save_if_dirty();
-            assert!(!cache.dirty);
+            assert!(!cache.is_dirty());
         }
     }
 
@@ -3865,6 +4548,63 @@ mod tests {
         message.model_id = " <SYNTHETIC> ".to_string();
         message.provider_id = "unknown".to_string();
         message
+    }
+
+    /// "Nothing was retained" and "this entry predates retention provenance"
+    /// both leave the index vector without any real index, and they need
+    /// opposite handling: the first is a warm hit, the second has to be
+    /// rebuilt from the live transcript. Only the marker separates them.
+    #[test]
+    fn test_claude_entry_reports_retention_provenance_only_once_recorded() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let live = keyed_message(ClientId::Claude.as_str(), "session", "msg_live:req_live");
+        let retained = keyed_message(ClientId::Claude.as_str(), "session", "msg_old:req_old");
+
+        let legacy = entry_with_messages(identity, &path, vec![live.clone(), retained.clone()]);
+        assert!(
+            legacy.needs_retention_provenance_migration(),
+            "an entry written before the marker existed has to be rebuilt"
+        );
+        assert!(legacy.retained_message_keys().is_empty());
+
+        let nothing_retained = CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            &path,
+            SourceFingerprint::from_path(&path).unwrap(),
+            vec![live.clone()],
+            &HashSet::new(),
+        );
+        assert!(
+            !nothing_retained.needs_retention_provenance_migration(),
+            "an entry that retained nothing is current, not legacy — rebuilding \
+             it on every scan would make the upgrade cost permanent"
+        );
+        assert!(nothing_retained.retained_message_keys().is_empty());
+
+        let with_retained = CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            &path,
+            SourceFingerprint::from_path(&path).unwrap(),
+            vec![live, retained],
+            &HashSet::from(["msg_old:req_old".to_string()]),
+        );
+        assert!(!with_retained.needs_retention_provenance_migration());
+        assert_eq!(
+            with_retained.retained_message_keys(),
+            HashSet::from(["msg_old:req_old".to_string()])
+        );
+
+        // A Codex entry uses the same vector for real fallback-timestamp
+        // indices and must never be mistaken for a Claude rebuild candidate.
+        let codex = entry_with_messages(
+            CacheIdentity::for_client(ClientId::Codex),
+            &path,
+            vec![keyed_message(ClientId::Codex.as_str(), "session", "key")],
+        );
+        assert!(!codex.needs_retention_provenance_migration());
     }
 
     #[test]
@@ -3992,7 +4732,12 @@ mod tests {
 
             // Both processes carry the turn the file still has. Only the first
             // ever observed the one a compaction later removed.
-            let shared = keyed_message(namespace, "session", "msg_shared:req_shared");
+            let mut shared_complete = keyed_message(namespace, "session", "msg_shared:req_shared");
+            shared_complete.tokens.input = 2_000;
+            shared_complete.tokens.output = 999;
+            let mut shared_partial = shared_complete.clone();
+            shared_partial.tokens.input = 200;
+            shared_partial.tokens.output = 60;
             let observed_only_by_first =
                 keyed_message(namespace, "session", "msg_dropped:req_dropped");
 
@@ -4000,12 +4745,12 @@ mod tests {
             observer.insert(entry_with_messages(
                 identity,
                 &path,
-                vec![shared.clone(), observed_only_by_first],
+                vec![shared_complete, observed_only_by_first],
             ));
             observer.save_if_dirty();
 
             let mut latecomer = SourceMessageCache::load();
-            latecomer.insert(entry_with_messages(identity, &path, vec![shared]));
+            latecomer.insert(entry_with_messages(identity, &path, vec![shared_partial]));
             latecomer.save_if_dirty();
 
             let loaded = SourceMessageCache::load();
@@ -4023,6 +4768,18 @@ mod tests {
                 entry.messages.len(),
                 2,
                 "and must not duplicate the shared turn"
+            );
+            let shared = entry
+                .messages
+                .iter()
+                .find(|message| message.dedup_key.as_deref() == Some("msg_shared:req_shared"))
+                .expect("the shared turn should survive");
+            assert_eq!(shared.tokens.input, 2_000);
+            assert_eq!(shared.tokens.output, 999);
+            assert_eq!(
+                entry.retained_message_keys(),
+                HashSet::from(["msg_dropped:req_dropped".to_string()]),
+                "only the row absent from the current source is retained"
             );
         }
     }

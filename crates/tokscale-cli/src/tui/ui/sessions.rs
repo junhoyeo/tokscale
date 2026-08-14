@@ -6,8 +6,8 @@ use ratatui::widgets::{
 
 use super::widgets::{
     display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, prefix_to_width, total_tokens_cell, truncate_text, truncate_to_width,
-    viewport_scrollbar_state,
+    get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
+    truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -300,7 +300,7 @@ impl SessionColumn {
                     .fg(app.theme.muted)
                     .add_modifier(Modifier::BOLD),
             ),
-            Self::Client => Cell::from(self.fit(get_client_display_name(&s.client), ctx))
+            Self::Client => Cell::from(self.fit(get_compact_client_display_name(&s.client), ctx))
                 .style(Style::default().fg(app.theme.muted)),
             Self::Model => build_model_cell(&s.models, layout.model_width as usize, app),
             Self::Turn => Cell::from(self.fit(
@@ -653,7 +653,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )];
                 cells.push(
-                    Cell::from(get_client_display_name(&session.client))
+                    Cell::from(get_compact_client_display_name(&session.client))
                         .style(Style::default().fg(theme_muted)),
                 );
                 if has_turn_data {
@@ -1499,7 +1499,7 @@ mod tests {
     fn client_column_fits_every_registered_client() {
         let budget = SessionColumn::Client.natural(&wide_ctx(true)) as usize;
         for client in ClientId::iter() {
-            let name = get_client_display_name(client.as_str());
+            let name = get_compact_client_display_name(client.as_str());
             assert!(
                 display_width(&name) <= budget,
                 "{client:?} renders {name:?} ({} cells) in a {budget}-cell Client column",
@@ -1508,11 +1508,9 @@ mod tests {
         }
     }
 
-    /// The concrete failure the budget above prevents: at 12 cells these two
-    /// rows were byte-identical at every width, which is a misattribution and
-    /// not a cosmetic clip. `🦞 OpenClaw` is here because its emoji is one char
-    /// and two cells, so a code-point budget gets it wrong in the other
-    /// direction.
+    /// The concrete failure the budget above prevents: at 12 cells these rows
+    /// could become byte-identical at every width, which is a misattribution
+    /// and not a cosmetic clip.
     #[test]
     fn clients_sharing_a_prefix_render_distinguishably() {
         let width = 200;

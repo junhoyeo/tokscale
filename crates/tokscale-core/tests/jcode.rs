@@ -1,9 +1,11 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 
 use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
 use tokscale_core::scanner::ScannerSettings;
-use tokscale_core::{parse_local_unified_messages_with_pricing, LocalParseOptions};
+use tokscale_core::{parse_local_unified_messages_with_pricing_uncached, LocalParseOptions};
 
 fn make_pricing_service() -> PricingService {
     let mut litellm_data = HashMap::new();
@@ -30,7 +32,7 @@ fn write_jcode_session(home: &std::path::Path, name: &str, body: &str) -> std::p
 
 #[tokio::test]
 async fn test_jcode_end_to_end_parsing_and_pricing() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     write_jcode_session(
@@ -49,7 +51,7 @@ async fn test_jcode_end_to_end_parsing_and_pricing() {
     );
 
     let pricing = make_pricing_service();
-    let messages = parse_local_unified_messages_with_pricing(
+    let messages = parse_local_unified_messages_with_pricing_uncached(
         LocalParseOptions {
             home_dir: Some(home.to_str().unwrap().to_string()),
             use_env_roots: false,
@@ -85,7 +87,7 @@ async fn test_jcode_end_to_end_parsing_and_pricing() {
 
 #[tokio::test]
 async fn test_jcode_deduplicates_replayed_message_ids() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     let session_body = r#"{
@@ -99,7 +101,7 @@ async fn test_jcode_deduplicates_replayed_message_ids() {
 }"#;
     write_jcode_session(home, "session_a.json", session_body);
 
-    let messages = parse_local_unified_messages_with_pricing(
+    let messages = parse_local_unified_messages_with_pricing_uncached(
         LocalParseOptions {
             home_dir: Some(home.to_str().unwrap().to_string()),
             use_env_roots: false,
@@ -126,7 +128,7 @@ async fn test_jcode_deduplicates_replayed_message_ids() {
 /// snapshot token_usage instead of the corrected journal value.
 #[tokio::test]
 async fn test_jcode_journal_corrects_replayed_snapshot_duplicate() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     // Snapshot replays the same message id twice (stale token_usage = 100).
@@ -151,7 +153,7 @@ async fn test_jcode_journal_corrects_replayed_snapshot_duplicate() {
     )
     .unwrap();
 
-    let messages = parse_local_unified_messages_with_pricing(
+    let messages = parse_local_unified_messages_with_pricing_uncached(
         LocalParseOptions {
             home_dir: Some(home.to_str().unwrap().to_string()),
             use_env_roots: false,

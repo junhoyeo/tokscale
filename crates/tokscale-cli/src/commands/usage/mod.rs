@@ -280,16 +280,29 @@ impl UsageOutput {
 
 // ── Cache ──
 
-fn cache_path() -> Option<std::path::PathBuf> {
-    let dir = crate::paths::get_cache_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+const SUBSCRIPTION_CACHE_FILE: &str = "subscription-usage-cache.json";
+
+fn cache_path_in(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if std::fs::create_dir_all(dir).is_err() {
         return None;
     }
-    Some(dir.join("subscription-usage-cache.json"))
+    Some(dir.join(SUBSCRIPTION_CACHE_FILE))
 }
 
-pub fn save_cache(data: &[UsageOutput]) {
-    let Some(path) = cache_path() else { return };
+#[cfg(not(test))]
+fn cache_path() -> Option<std::path::PathBuf> {
+    cache_path_in(&crate::paths::get_cache_dir())
+}
+
+// Unit-test callers must use the explicit-path helpers below. Making the
+// production resolver unavailable prevents an unrelated parallel test from
+// reading, writing, or deleting the developer's real subscription cache.
+#[cfg(test)]
+fn cache_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn save_cache_at(path: &std::path::Path, data: &[UsageOutput]) {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -298,19 +311,27 @@ pub fn save_cache(data: &[UsageOutput]) {
         "timestamp": timestamp,
         "data": data,
     });
-    let _ = std::fs::write(&path, serde_json::to_string(&json).unwrap_or_default());
+    let _ = std::fs::write(path, serde_json::to_string(&json).unwrap_or_default());
+}
+
+pub fn save_cache(data: &[UsageOutput]) {
+    if let Some(path) = cache_path() {
+        save_cache_at(&path, data);
+    }
+}
+
+fn clear_cache_at(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 pub fn clear_cache() {
     if let Some(path) = cache_path() {
-        let _ = std::fs::remove_file(&path);
+        clear_cache_at(&path);
     }
 }
 
-#[cfg_attr(test, allow(dead_code))]
-pub fn load_cache() -> Option<Vec<UsageOutput>> {
-    let path = cache_path()?;
-    let content = std::fs::read_to_string(&path).ok()?;
+fn load_cache_at(path: &std::path::Path) -> Option<Vec<UsageOutput>> {
+    let content = std::fs::read_to_string(path).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
     let timestamp = doc.get("timestamp")?.as_u64()?;
     let age = std::time::SystemTime::now()
@@ -323,6 +344,11 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
         return None;
     }
     serde_json::from_value(doc.get("data")?.clone()).ok()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub fn load_cache() -> Option<Vec<UsageOutput>> {
+    load_cache_at(&cache_path()?)
 }
 
 // ── Public API ──
@@ -545,6 +571,32 @@ pub fn run(json: bool, _light: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn subscription_cache_public_helpers_are_noop_in_tests() {
+        assert!(cache_path().is_none());
+        save_cache(&[sample_output("Codex")]);
+        assert!(load_cache().is_none());
+        clear_cache();
+    }
+
+    #[test]
+    fn subscription_cache_helpers_use_explicit_path() {
+        let temp = TempDir::new().unwrap();
+        let expected = cache_path_in(&temp.path().join("cache")).unwrap();
+        let data = vec![sample_output("Codex")];
+
+        assert_eq!(
+            expected,
+            temp.path().join("cache/subscription-usage-cache.json")
+        );
+        save_cache_at(&expected, &data);
+        assert_eq!(load_cache_at(&expected).unwrap().len(), 1);
+        assert!(expected.exists());
+        clear_cache_at(&expected);
+        assert!(!expected.exists());
+    }
 
     #[test]
     fn usage_output_display_name_includes_account_label() {

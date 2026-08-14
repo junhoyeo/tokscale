@@ -910,6 +910,15 @@ rather than on "a census" generally. Do not build them against the active-time
 numbers above; those are an incidence signal on an unrepresentative slice, not a
 magnitude estimate.
 
+The admin-only `GET /api/admin/reconciliation/census` endpoint exposes the gate
+inputs without changing any served value. It counts a user as measured only when
+every month/client/origin cell visible in their guarded daily rows has a matching
+device high-water row and no durable census work remains. It also compares only
+explicitly observed Phase 4a cells; omission is never interpreted as zero. The
+endpoint reports coverage, divergence bands, client/origin/version segments and
+a bounded outlier sample. It intentionally does not choose a Phase 2 rollout
+threshold or perform a repair.
+
 **Do not size the work from the worst ratios.** The 2300x device is a
 partial-scan artifact. Four devices are cleanly artifact, eleven ambiguous.
 

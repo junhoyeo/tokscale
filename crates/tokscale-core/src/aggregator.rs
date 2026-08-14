@@ -255,13 +255,7 @@ impl Default for DayAccumulator {
 
 impl DayAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
@@ -270,23 +264,7 @@ impl DayAccumulator {
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        self.token_breakdown += &msg.tokens;
 
         // Update client contribution
         // Canonical (alias-free) id: this contribution is serialized into the
@@ -318,20 +296,7 @@ impl DayAccumulator {
             client_entry.provider_id = format!("{}, {}", client_entry.provider_id, msg.provider_id);
         }
 
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        client_entry.tokens += &msg.tokens;
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -349,26 +314,7 @@ impl DayAccumulator {
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
-        self.token_breakdown.input = self
-            .token_breakdown
-            .input
-            .saturating_add(other.token_breakdown.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(other.token_breakdown.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(other.token_breakdown.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(other.token_breakdown.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(other.token_breakdown.reasoning);
+        self.token_breakdown += &other.token_breakdown;
 
         for (key, client_contrib) in other.clients {
             let entry = self
@@ -390,26 +336,7 @@ impl DayAccumulator {
                 }
             }
 
-            entry.tokens.input = entry
-                .tokens
-                .input
-                .saturating_add(client_contrib.tokens.input);
-            entry.tokens.output = entry
-                .tokens
-                .output
-                .saturating_add(client_contrib.tokens.output);
-            entry.tokens.cache_read = entry
-                .tokens
-                .cache_read
-                .saturating_add(client_contrib.tokens.cache_read);
-            entry.tokens.cache_write = entry
-                .tokens
-                .cache_write
-                .saturating_add(client_contrib.tokens.cache_write);
-            entry.tokens.reasoning = entry
-                .tokens
-                .reasoning
-                .saturating_add(client_contrib.tokens.reasoning);
+            entry.tokens += &client_contrib.tokens;
             entry.cost += client_contrib.cost;
             entry.messages = entry.messages.saturating_add(client_contrib.messages);
         }
@@ -493,13 +420,7 @@ impl Default for SessionAccumulator {
 
 impl SessionAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
@@ -508,23 +429,7 @@ impl SessionAccumulator {
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        self.token_breakdown += &msg.tokens;
 
         // Track tightest (client, provider, model) by cost contribution.
         // Canonical (alias-free) id — this feeds the submitted/exported payload,
@@ -542,20 +447,7 @@ impl SessionAccumulator {
                 cost: 0.0,
                 messages: 0,
             });
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        client_entry.tokens += &msg.tokens;
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -588,26 +480,7 @@ impl SessionAccumulator {
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
-        self.token_breakdown.input = self
-            .token_breakdown
-            .input
-            .saturating_add(other.token_breakdown.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(other.token_breakdown.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(other.token_breakdown.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(other.token_breakdown.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(other.token_breakdown.reasoning);
+        self.token_breakdown += &other.token_breakdown;
 
         for (key, contrib) in other.clients {
             let entry = self
@@ -621,20 +494,7 @@ impl SessionAccumulator {
                     cost: 0.0,
                     messages: 0,
                 });
-            entry.tokens.input = entry.tokens.input.saturating_add(contrib.tokens.input);
-            entry.tokens.output = entry.tokens.output.saturating_add(contrib.tokens.output);
-            entry.tokens.cache_read = entry
-                .tokens
-                .cache_read
-                .saturating_add(contrib.tokens.cache_read);
-            entry.tokens.cache_write = entry
-                .tokens
-                .cache_write
-                .saturating_add(contrib.tokens.cache_write);
-            entry.tokens.reasoning = entry
-                .tokens
-                .reasoning
-                .saturating_add(contrib.tokens.reasoning);
+            entry.tokens += &contrib.tokens;
             entry.cost += contrib.cost;
             entry.messages = entry.messages.saturating_add(contrib.messages);
 

@@ -4,7 +4,7 @@
 //! - Devin CLI SQLite database (`~/.local/share/devin/cli/sessions.db`)
 //! - Devin Desktop NDJSON event streams (`~/Library/Application Support/Devin/User/acp-events/*.ndjson`)
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -109,7 +109,7 @@ pub fn load_devin_desktop_session_lookup(
     let mut lookup = DevinDesktopSessionLookup::default();
 
     for db_path in db_paths {
-        let Some(conn) = open_readonly_sqlite(db_path) else {
+        let Some(conn) = open_readonly_sqlite_opt(db_path) else {
             continue;
         };
         let mut stmt = match conn.prepare(
@@ -153,7 +153,7 @@ pub fn load_devin_desktop_session_lookup(
 
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 

@@ -5,8 +5,26 @@ import {
 } from "./helpers";
 import { createSafeRecord, ownValue } from "../safeRecord";
 
+/**
+ * Clients whose submissions are bounded by a device/client lifetime
+ * high-water instead of being merged day by day, mapped to the parser
+ * generation the server accepts.
+ *
+ * A client belongs here when its parser can re-attribute usage it has already
+ * submitted. The per-day merge guard refuses a decrease per (day, client), so
+ * a re-attribution that moves tokens between days pins the days that fall and
+ * writes the days that rise, inflating the stored total by exactly what moved.
+ *
+ * Copilot is pinned at generation 2 because generation 1 counted differently
+ * and must not advance the high-water. Droid is registered at generation 1,
+ * the generation every CLI already declares: its shapes differ in *where*
+ * tokens land, never in the lifetime total, so no generation needs freezing —
+ * bounding every Droid submission by the lifetime high-water is what makes a
+ * re-attribution contribute nothing.
+ */
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
+  droid: 1,
 };
 
 const TOKEN_FIELDS = [

@@ -74,6 +74,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   kimchi: "Kimchi",
   reasonix: "Reasonix",
   "prime-agent": "Prime Agent",
+  cherrystudio: "Cherry Studio",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -131,6 +132,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   kimchi: "https://github.com/getkimchi.png",
   reasonix: `${GITHUB_CDN_BASE}/client-synthetic.png`,
   "prime-agent": "https://github.com/PrimeIntellect-ai.png",
+  cherrystudio: `${GITHUB_CDN_BASE}/client-cherrystudio.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -181,6 +183,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   kimchi: "#14B8A6",
   reasonix: "#6366F1",
   "prime-agent": "#6C63FF",
+  cherrystudio: "#FA7298",
 };
 
 // Derived values

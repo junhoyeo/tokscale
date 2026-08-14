@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use super::sessions::utils::open_readonly_sqlite;
+use super::sessions::utils::open_readonly_sqlite_opt;
 
 const MAX_CONTENT_CHARS: usize = 1000;
 
@@ -14,7 +14,7 @@ pub struct SessionContent {
 }
 
 pub fn extract_opencode_content(db_path: &Path, session_id: &str) -> Option<SessionContent> {
-    let conn = open_readonly_sqlite(db_path)?;
+    let conn = open_readonly_sqlite_opt(db_path)?;
 
     let sql = r#"
         SELECT json_extract(data, '$.parts') as parts

@@ -8,9 +8,9 @@
 //! `session_info.name` carries a human session title rather than Pi's
 //! `subagent-<name>-<id>` marker.
 //!
-//! OmO task children are senpi sessions too, but `SENPI_CODING_AGENT_SESSION_DIR`
-//! redirects them to `<project>/.omo/senpi-task/children/<taskId>/sessions/`, so
-//! they need an explicit `scanner.extraScanPaths.senpi` entry to be counted.
+//! OmO task children are senpi sessions too. The scanner honors
+//! `SENPI_CODING_AGENT_SESSION_DIR` and discovers the current project's
+//! `.omo/senpi-task/children` tree so their redirected sessions are counted.
 
 use super::pi::parse_pi_format_file;
 use super::UnifiedMessage;

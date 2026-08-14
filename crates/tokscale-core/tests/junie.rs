@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,7 +8,8 @@ use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
 use tokscale_core::scanner::ScannerSettings;
 use tokscale_core::sessions::junie::parse_junie_file;
 use tokscale_core::{
-    parse_local_clients, parse_local_unified_messages_with_pricing, ClientId, LocalParseOptions,
+    parse_local_clients, parse_local_unified_messages_with_pricing_uncached, ClientId,
+    LocalParseOptions,
 };
 
 fn write_junie_session(home: &Path, session_id: &str, events: &str) -> PathBuf {
@@ -46,7 +49,7 @@ fn make_pricing_service() -> PricingService {
 
 #[test]
 fn test_junie_parser_reads_model_usage_cost_tokens_and_turn_start() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
     let session_id = "session-260618-191750-jnus";
 
@@ -82,7 +85,7 @@ fn test_junie_parser_reads_model_usage_cost_tokens_and_turn_start() {
 
 #[test]
 fn test_junie_parser_infers_provider_from_model() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     let events_path = write_junie_session(
@@ -102,7 +105,7 @@ fn test_junie_parser_infers_provider_from_model() {
 
 #[test]
 fn test_junie_parser_uses_session_id_timestamp_when_event_has_no_timestamp() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     let events_path = write_junie_session(
@@ -123,7 +126,7 @@ fn test_junie_parser_uses_session_id_timestamp_when_event_has_no_timestamp() {
 
 #[tokio::test]
 async fn test_junie_end_to_end_preserves_embedded_cost_and_prices_missing_cost() {
-    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_dir = common::temp_home();
     let home = home_dir.path();
 
     write_junie_session(
@@ -138,9 +141,10 @@ async fn test_junie_end_to_end_preserves_embedded_cost_and_prices_missing_cost()
     );
 
     let pricing = make_pricing_service();
-    let messages = parse_local_unified_messages_with_pricing(junie_options(home), Some(&pricing))
-        .await
-        .unwrap();
+    let messages =
+        parse_local_unified_messages_with_pricing_uncached(junie_options(home), Some(&pricing))
+            .await
+            .unwrap();
 
     assert_eq!(messages.len(), 2);
     let embedded = messages

@@ -21,6 +21,11 @@ pub struct CustomPricing {
 pub struct CustomLookupResult<'a> {
     pub matched_key: &'a str,
     pub pricing: &'a ModelPricing,
+    /// Whether `matched_key` was reached through synthetic-model
+    /// normalization rather than the requested id. Provenance reports this,
+    /// so a `hf:zai-org/GLM-4.7` usage row priced by a `glm-4.7` custom entry
+    /// says which key actually matched.
+    pub normalized: bool,
 }
 
 #[derive(Deserialize)]
@@ -255,6 +260,7 @@ impl CustomPricing {
             return Some(CustomLookupResult {
                 matched_key: pricing.0,
                 pricing: pricing.1,
+                normalized: false,
             });
         }
 
@@ -264,6 +270,7 @@ impl CustomPricing {
                 return Some(CustomLookupResult {
                     matched_key: pricing.0,
                     pricing: pricing.1,
+                    normalized: true,
                 });
             }
         }

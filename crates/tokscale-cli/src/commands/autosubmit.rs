@@ -1,7 +1,7 @@
 use crate::tui::settings::{
     AutosubmitSettings, MAX_AUTOSUBMIT_INTERVAL_MINUTES, MIN_AUTOSUBMIT_INTERVAL_MINUTES,
 };
-use crate::{ClientFlags, DateRangeFlags};
+use crate::{build_date_filter_for_date, normalize_year_filter, ClientFlags, DateRangeFlags};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use fs2::FileExt;
@@ -485,11 +485,7 @@ pub fn submit_filters(
         year: settings.year.clone(),
     };
     let (since, until) = build_date_filter_for_date(&date, current_bucket_date());
-    let year = if date.today || date.yesterday || date.week || date.month {
-        None
-    } else {
-        date.year
-    };
+    let year = normalize_year_filter(&date);
     (clients, since, until, year)
 }
 
@@ -1627,39 +1623,6 @@ fn systemd_escape_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "\\\\")
         .replace(' ', "\\x20")
-}
-
-fn build_date_filter_for_date(
-    date: &DateRangeFlags,
-    current_date: chrono::NaiveDate,
-) -> (Option<String>, Option<String>) {
-    use chrono::{Datelike, Duration};
-
-    if date.today {
-        let day = current_date.format("%Y-%m-%d").to_string();
-        return (Some(day.clone()), Some(day));
-    }
-    if date.yesterday {
-        let day = (current_date - Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
-        return (Some(day.clone()), Some(day));
-    }
-    if date.week {
-        let start = current_date - Duration::days(6);
-        return (
-            Some(start.format("%Y-%m-%d").to_string()),
-            Some(current_date.format("%Y-%m-%d").to_string()),
-        );
-    }
-    if date.month {
-        let start = current_date.with_day(1).unwrap_or(current_date);
-        return (
-            Some(start.format("%Y-%m-%d").to_string()),
-            Some(current_date.format("%Y-%m-%d").to_string()),
-        );
-    }
-    (date.since.clone(), date.until.clone())
 }
 
 #[cfg(test)]

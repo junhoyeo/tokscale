@@ -1,201 +1,69 @@
 use tokscale_core::ClientId;
 
 pub struct ClientUi {
-    pub display_name: &'static str,
     pub hotkey: char,
 }
 
 pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
-    ClientUi {
-        display_name: "OpenCode",
-        hotkey: '1',
-    },
-    ClientUi {
-        display_name: "Claude",
-        hotkey: '2',
-    },
-    ClientUi {
-        display_name: "Codex",
-        hotkey: '3',
-    },
-    ClientUi {
-        display_name: "Cursor",
-        hotkey: '4',
-    },
-    ClientUi {
-        display_name: "Gemini",
-        hotkey: '5',
-    },
-    ClientUi {
-        display_name: "Amp",
-        hotkey: '6',
-    },
-    ClientUi {
-        display_name: "Droid",
-        hotkey: '7',
-    },
-    ClientUi {
-        display_name: "OpenClaw",
-        hotkey: '8',
-    },
-    ClientUi {
-        display_name: "Pi",
-        hotkey: '9',
-    },
-    ClientUi {
-        display_name: "Kimi",
-        hotkey: '0',
-    },
-    ClientUi {
-        display_name: "Qwen",
-        hotkey: 'w',
-    },
-    ClientUi {
-        display_name: "Roo Code",
-        hotkey: 'r',
-    },
-    ClientUi {
-        display_name: "KiloCode",
-        hotkey: 'k',
-    },
-    ClientUi {
-        display_name: "Mux",
-        hotkey: 'x',
-    },
-    ClientUi {
-        display_name: "Kilo CLI",
-        hotkey: 'l',
-    },
-    ClientUi {
-        display_name: "Crush",
-        hotkey: 'h',
-    },
-    ClientUi {
-        display_name: "Hermes Agent",
-        hotkey: 'e',
-    },
-    ClientUi {
-        display_name: "Copilot",
-        hotkey: 'c',
-    },
-    ClientUi {
-        display_name: "Goose",
-        hotkey: 'o',
-    },
-    ClientUi {
-        display_name: "Codebuff",
-        hotkey: 'b',
-    },
-    ClientUi {
-        display_name: "Antigravity",
-        hotkey: 'a',
-    },
-    ClientUi {
-        display_name: "Zed Agent",
-        hotkey: 'z',
-    },
-    ClientUi {
-        display_name: "Kiro",
-        hotkey: 'i',
-    },
-    ClientUi {
-        display_name: "Trae",
-        hotkey: 'y',
-    },
-    ClientUi {
-        display_name: "Warp",
-        hotkey: 'v',
-    },
-    ClientUi {
-        display_name: "Cline",
-        hotkey: 'n',
-    },
-    ClientUi {
-        display_name: "Gajae-Code",
-        hotkey: 'g',
-    },
-    ClientUi {
-        display_name: "Grok Build",
-        hotkey: 'u',
-    },
-    ClientUi {
-        display_name: "Jcode",
-        hotkey: 'j',
-    },
-    ClientUi {
-        display_name: "Command Code",
-        hotkey: 'd',
-    },
-    ClientUi {
-        display_name: "MiMo Code",
-        hotkey: 'm',
-    },
-    ClientUi {
-        display_name: "Antigravity CLI",
-        hotkey: 'f',
-    },
-    ClientUi {
-        display_name: "Junie",
-        hotkey: 'p',
-    },
-    ClientUi {
-        display_name: "ZCode",
-        hotkey: 'q',
-    },
-    ClientUi {
-        display_name: "OpenCodeReview",
-        hotkey: 'O',
-    },
-    ClientUi {
-        display_name: "CodeBuddy",
-        hotkey: 'C',
-    },
-    ClientUi {
-        display_name: "WorkBuddy",
-        hotkey: 'B',
-    },
-    ClientUi {
-        display_name: "Devin CLI",
-        hotkey: 'D',
-    },
-    ClientUi {
-        display_name: "Devin Desktop",
-        hotkey: 'E',
-    },
-    // Short form on purpose: these names feed the sessions view's Client column
-    // through `get_client_display_name`, and the full "Senpi (OmO Native)" used
-    // in the README, the frontend, and `capitalize_client` is 18 cells against a
-    // 15-cell budget. See `client_column_fits_every_registered_client`.
-    ClientUi {
-        display_name: "Senpi",
-        hotkey: 'S',
-    },
-    // Short form: full "Augment Code" fits the client column, but keep parity
-    // with other product-branded names used in capitalize_client.
-    ClientUi {
-        display_name: "Augment",
-        hotkey: 'A',
-    },
-    ClientUi {
-        display_name: "Kimchi",
-        hotkey: 'K',
-    },
-    ClientUi {
-        display_name: "Reasonix",
-        hotkey: 'R',
-    },
-    ClientUi {
-        display_name: "Prime Agent",
-        hotkey: 'P',
-    },
-    ClientUi {
-        display_name: "Freebuff",
-        hotkey: 'F',
-    },
+    ClientUi { hotkey: '1' },
+    ClientUi { hotkey: '2' },
+    ClientUi { hotkey: '3' },
+    ClientUi { hotkey: '4' },
+    ClientUi { hotkey: '5' },
+    ClientUi { hotkey: '6' },
+    ClientUi { hotkey: '7' },
+    ClientUi { hotkey: '8' },
+    ClientUi { hotkey: '9' },
+    ClientUi { hotkey: '0' },
+    ClientUi { hotkey: 'w' },
+    ClientUi { hotkey: 'r' },
+    ClientUi { hotkey: 'k' },
+    ClientUi { hotkey: 'x' },
+    ClientUi { hotkey: 'l' },
+    ClientUi { hotkey: 'h' },
+    ClientUi { hotkey: 'e' },
+    ClientUi { hotkey: 'c' },
+    ClientUi { hotkey: 'o' },
+    ClientUi { hotkey: 'b' },
+    ClientUi { hotkey: 'a' },
+    ClientUi { hotkey: 'z' },
+    ClientUi { hotkey: 'i' },
+    ClientUi { hotkey: 'y' },
+    ClientUi { hotkey: 'v' },
+    ClientUi { hotkey: 'n' },
+    ClientUi { hotkey: 'g' },
+    ClientUi { hotkey: 'u' },
+    ClientUi { hotkey: 'j' },
+    ClientUi { hotkey: 'd' },
+    ClientUi { hotkey: 'm' },
+    ClientUi { hotkey: 'f' },
+    ClientUi { hotkey: 'p' },
+    ClientUi { hotkey: 'q' },
+    ClientUi { hotkey: 'O' },
+    ClientUi { hotkey: 'C' },
+    ClientUi { hotkey: 'B' },
+    ClientUi { hotkey: 'D' },
+    ClientUi { hotkey: 'E' },
+    ClientUi { hotkey: 'S' },
+    ClientUi { hotkey: 'A' },
+    ClientUi { hotkey: 'K' },
+    ClientUi { hotkey: 'R' },
+    ClientUi { hotkey: 'P' },
+    ClientUi { hotkey: 'F' },
+    ClientUi { hotkey: 'G' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
-    CLIENT_UI[client as usize].display_name
+    client.display_name()
+}
+
+/// Compact label for constrained TUI columns. Product-facing surfaces should
+/// use [`display_name`] so the canonical registry label is preserved.
+pub fn compact_display_name(client: ClientId) -> &'static str {
+    match client {
+        ClientId::Senpi => "Senpi",
+        _ => display_name(client),
+    }
 }
 
 pub fn hotkey(client: ClientId) -> char {

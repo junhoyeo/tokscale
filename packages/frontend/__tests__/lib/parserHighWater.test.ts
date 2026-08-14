@@ -3,9 +3,14 @@ import {
   addClientBreakdownIncrement,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
+  SUPPORTED_VERSIONED_PARSERS,
   type ParserClientHighWaterState,
 } from "../../src/lib/db/parserHighWater";
-import { recalculateDayTotals, type ClientBreakdownData } from "../../src/lib/db/helpers";
+import {
+  mergeClientBreakdownsWithRegressionGuard,
+  recalculateDayTotals,
+  type ClientBreakdownData,
+} from "../../src/lib/db/helpers";
 
 function contribution(
   date: string,
@@ -964,5 +969,140 @@ describe("non-destructive parser generation high-water", () => {
 
     expect(plan.mode).toBe("baseline-new");
     expect(plan.nextState?.aggregate.tokens).toBe(100);
+  });
+});
+
+describe("droid parser high-water", () => {
+  function droidContribution(date: string, tokens: number, modelId = "kimi-k3-0") {
+    return {
+      date,
+      clients: [
+        {
+          client: "droid",
+          modelId,
+          tokens: {
+            input: tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          cost: 0,
+          messages: 1,
+        },
+      ],
+    };
+  }
+
+  function droidSnapshot(...rows: ReturnType<typeof droidContribution>[]) {
+    return foldParserClientSnapshot(rows, "droid");
+  }
+
+  function droidPlan(
+    existingLegacyDays: Record<string, ClientBreakdownData>,
+    incomingDays: Record<string, ClientBreakdownData>,
+    state?: ParserClientHighWaterState
+  ) {
+    return planParserHighWaterSubmission({
+      client: "droid",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.droid,
+      fullHistory: true,
+      existingLegacyDays,
+      incomingDays,
+      state,
+    });
+  }
+
+  // One 321,000-token session that ran across three days. The old parser put
+  // the whole session on one day; the transcript-weighted parser splits it
+  // across the days it actually ran. The lifetime total is identical.
+  const wholeSessionOnOneDay = droidSnapshot(droidContribution("2026-08-07", 321_000));
+  const sessionSplitAcrossDays = droidSnapshot(
+    droidContribution("2026-08-07", 21_000),
+    droidContribution("2026-08-08", 152_000),
+    droidContribution("2026-08-09", 148_000)
+  );
+
+  it("is registered at the generation every CLI already declares", () => {
+    // The two Droid shapes disagree about which day a token lands on, never
+    // about the lifetime total, so no generation has to be frozen out. A
+    // registered version above 1 would instead freeze every installed CLI.
+    expect(SUPPORTED_VERSIONED_PARSERS.droid).toBe(1);
+  });
+
+  it("shows why the day-by-day merge alone inflates a re-attributed session", () => {
+    // Without the high-water this is what the submit route stores: the merge
+    // guard refuses the decrease on 2026-08-07 and accepts the two days that
+    // rose, so the device's stored total gains everything that moved.
+    let stored = 0;
+    for (const date of Object.keys(sessionSplitAcrossDays)) {
+      const merged = mergeClientBreakdownsWithRegressionGuard(
+        wholeSessionOnOneDay[date] ? { droid: wholeSessionOnOneDay[date] } : {},
+        { droid: sessionSplitAcrossDays[date] },
+        new Set(["droid"]),
+        undefined,
+        true
+      );
+      stored += merged.merged.droid?.tokens ?? 0;
+    }
+
+    expect(stored).toBe(621_000);
+  });
+
+  it("credits nothing for a pure re-attribution of the same lifetime total", () => {
+    const plan = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays);
+
+    expect(plan.mode).toBe("baseline-legacy");
+    const credited = Object.values(plan.increments).reduce(
+      (sum, day) => sum + day.tokens,
+      0
+    );
+    expect(credited).toBe(0);
+
+    // The stored rows are preserved untouched, so the device's total is the
+    // 321,000 it always was rather than the 621,000 the merge alone stores.
+    const stored = Object.keys(sessionSplitAcrossDays).reduce((sum, date) => {
+      const existing = wholeSessionOnOneDay[date];
+      const increment = plan.increments[date];
+      const merged = increment
+        ? addClientBreakdownIncrement(existing, increment)
+        : existing;
+      return sum + (merged?.tokens ?? 0);
+    }, 0);
+    expect(stored).toBe(321_000);
+  });
+
+  it("still credits real usage that arrives after the re-attribution", () => {
+    const state = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays).nextState!;
+    const grown = droidSnapshot(
+      droidContribution("2026-08-07", 21_000),
+      droidContribution("2026-08-08", 152_000),
+      droidContribution("2026-08-09", 148_000),
+      droidContribution("2026-08-10", 79_000)
+    );
+
+    const plan = droidPlan({}, grown, state);
+
+    expect(plan.mode).toBe("incremental");
+    expect(plan.increments["2026-08-10"]?.tokens).toBe(79_000);
+    expect(
+      Object.values(plan.increments).reduce((sum, day) => sum + day.tokens, 0)
+    ).toBe(79_000);
+  });
+
+  it("does not let a date-filtered rescan advance the high-water", () => {
+    const state = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays).nextState!;
+
+    const plan = planParserHighWaterSubmission({
+      client: "droid",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.droid,
+      fullHistory: false,
+      existingLegacyDays: {},
+      incomingDays: droidSnapshot(droidContribution("2026-08-10", 500_000)),
+      state,
+    });
+
+    expect(plan.mode).toBe("freeze");
+    expect(plan.increments).toEqual({});
   });
 });

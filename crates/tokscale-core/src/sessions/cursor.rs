@@ -13,6 +13,82 @@ use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+static PARSE_CURSOR_FILE_CALLS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
+
+/// Keeps a path-scoped parser counter registered for the lifetime of a test.
+///
+/// The guard removes only its own root on drop, preventing stale registrations
+/// from accumulating or a later test from accidentally observing old counts.
+#[cfg(test)]
+pub(crate) struct ParseCursorFileCounterGuard {
+    root: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ParseCursorFileCounterGuard {
+    fn drop(&mut self) {
+        let Ok(mut counters) = PARSE_CURSOR_FILE_CALLS.lock() else {
+            return;
+        };
+        if let Some(counters) = counters.as_mut() {
+            counters.remove(&self.root);
+        }
+        if matches!(counters.as_ref(), Some(counters) if counters.is_empty()) {
+            *counters = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_parse_cursor_file_counter(root: &Path) -> ParseCursorFileCounterGuard {
+    let root = root.to_path_buf();
+    let inserted = {
+        let mut counters = PARSE_CURSOR_FILE_CALLS.lock().unwrap();
+        let counters = counters.get_or_insert_with(HashMap::new);
+        if counters.contains_key(&root) {
+            false
+        } else {
+            counters.insert(root.clone(), 0);
+            true
+        }
+    };
+    assert!(
+        inserted,
+        "a Cursor parser counter is already registered for this root"
+    );
+    ParseCursorFileCounterGuard { root }
+}
+
+#[cfg(test)]
+pub(crate) fn parse_cursor_file_call_count(root: &Path) -> usize {
+    PARSE_CURSOR_FILE_CALLS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|counters| counters.get(root).copied())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn record_parse_cursor_file_call(path: &Path) {
+    let mut counters = PARSE_CURSOR_FILE_CALLS.lock().unwrap();
+    if let Some(counters) = counters.as_mut() {
+        for (root, count) in counters {
+            if path.starts_with(root) {
+                *count += 1;
+            }
+        }
+    }
+}
+
 fn account_id_from_cursor_cache_path(path: &Path) -> String {
     let file_name = path
         .file_name()
@@ -75,6 +151,9 @@ fn parse_cost(cost_str: &str) -> f64 {
 /// - New: Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 /// - Old: Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you
 pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
+    #[cfg(test)]
+    record_parse_cursor_file_call(path);
+
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return vec![],
@@ -259,6 +338,23 @@ fn parse_date_to_timestamp(date_str: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_duplicate_parse_counter_registration_does_not_poison_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let _root_counter = register_parse_cursor_file_counter(root.path());
+
+        let duplicate = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _duplicate_counter = register_parse_cursor_file_counter(root.path());
+        }));
+        assert!(duplicate.is_err());
+        assert_eq!(parse_cursor_file_call_count(root.path()), 0);
+
+        let _sibling_counter = register_parse_cursor_file_counter(sibling.path());
+        record_parse_cursor_file_call(&sibling.path().join("usage.csv"));
+        assert_eq!(parse_cursor_file_call_count(sibling.path()), 1);
+    }
 
     #[test]
     fn test_infer_provider() {

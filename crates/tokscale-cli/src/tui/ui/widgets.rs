@@ -498,19 +498,32 @@ pub fn get_client_color(client: &str) -> Color {
     }
 }
 
+fn registered_client_display_name(client: &str) -> Option<&'static str> {
+    ClientId::from_str(&client.to_lowercase()).map(|client_id| client_id.display_name())
+}
+
+fn registered_compact_client_display_name(client: &str) -> Option<&'static str> {
+    ClientId::from_str(&client.to_lowercase()).map(client_ui::compact_display_name)
+}
+
 pub fn get_client_display_name(client: &str) -> String {
     let config = TokscaleConfig::load();
     if let Some(name) = config.get_client_display_name(client) {
         return name.to_string();
     }
-    let client_lower = client.to_lowercase();
-    if client_lower == ClientId::OpenClaw.as_str() {
-        return "🦞 OpenClaw".to_string();
+    registered_client_display_name(client)
+        .unwrap_or(client)
+        .to_string()
+}
+
+pub fn get_compact_client_display_name(client: &str) -> String {
+    let config = TokscaleConfig::load();
+    if let Some(name) = config.get_client_display_name(client) {
+        return name.to_string();
     }
-    if let Some(client_id) = ClientId::from_str(&client_lower) {
-        return client_ui::display_name(client_id).to_string();
-    }
-    client.to_string()
+    registered_compact_client_display_name(client)
+        .unwrap_or(client)
+        .to_string()
 }
 
 pub fn get_provider_display_name(provider: &str) -> String {
@@ -616,6 +629,22 @@ fn capitalize_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_client_display_names_cover_the_core_registry() {
+        for client in ClientId::iter() {
+            assert_eq!(
+                registered_client_display_name(client.as_str()),
+                Some(client.display_name())
+            );
+            assert_eq!(
+                registered_compact_client_display_name(client.as_str()),
+                Some(client_ui::compact_display_name(client))
+            );
+        }
+        assert_eq!(ClientId::Senpi.display_name(), "Senpi (OmO Native)");
+        assert_eq!(client_ui::compact_display_name(ClientId::Senpi), "Senpi");
+    }
 
     #[test]
     fn truncate_to_width_never_exceeds_its_budget() {

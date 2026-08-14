@@ -135,23 +135,45 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     None
 }
 
-pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+/// Modification time in epoch milliseconds, or `None` when the filesystem does
+/// not report one.
+///
+/// `SystemTime::modified` is the one timestamp every tier-1 target supports
+/// (unlike `created`, which is absent on many Linux filesystems), so callers
+/// that need a portable "when was this last written" anchor use this.
+///
+/// Returns `None` rather than substituting a value so a caller with its own
+/// fallback can reach for it instead of silently anchoring on the wrong
+/// instant. Pre-epoch mtimes also collapse to `None`: `duration_since` fails
+/// for them, and a negative anchor would bucket the record before 1970.
+pub(crate) fn file_modified_timestamp_ms_opt(path: &Path) -> Option<i64> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+}
+
+pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+    file_modified_timestamp_ms_opt(path).unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
 }
 
 /// Open a SQLite file for read-only access with no mutex (single-threaded parser use).
-/// Returns `None` if the file cannot be opened — the caller treats that as "no sessions".
-pub(crate) fn open_readonly_sqlite(path: &Path) -> Option<Connection> {
+///
+/// The `NO_MUTEX` flag is safe here because each parser uses its connection on
+/// one thread. Returning the original `rusqlite::Error` lets callers preserve
+/// useful open-failure context in their logs.
+pub(crate) fn open_readonly_sqlite(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .ok()
+}
+
+/// Open a SQLite file for read-only access, discarding open errors.
+/// Returns `None` if the file cannot be opened — the caller treats that as "no sessions".
+pub(crate) fn open_readonly_sqlite_opt(path: &Path) -> Option<Connection> {
+    open_readonly_sqlite(path).ok()
 }
 
 /// Read a file into bytes, returning `None` on any I/O error instead of propagating.
@@ -183,6 +205,7 @@ pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::ErrorCode;
 
     #[test]
     fn lossy_lines_survives_undecodable_bytes_and_strips_a_bom() {
@@ -243,6 +266,49 @@ mod tests {
         assert_eq!(
             parse_timestamp_str("2026-06-16T12:00:00Z"),
             Some(1_781_611_200_000)
+        );
+    }
+
+    #[test]
+    fn open_readonly_sqlite_rejects_writes_but_reads_existing_data() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("state.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE sessions (id TEXT)", []).unwrap();
+        drop(conn);
+
+        let conn = open_readonly_sqlite(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let error = conn
+            .execute("INSERT INTO sessions (id) VALUES ('session')", [])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(sqlite_error, _)
+                    if sqlite_error.code == ErrorCode::ReadOnly
+            ),
+            "expected SQLITE_READONLY, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn open_readonly_sqlite_preserves_cannot_open_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("missing.db");
+        let error = open_readonly_sqlite(&db_path).unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(sqlite_error, _)
+                    if sqlite_error.code == ErrorCode::CannotOpen
+            ),
+            "expected SQLITE_CANTOPEN, got {error:?}"
         );
     }
 }

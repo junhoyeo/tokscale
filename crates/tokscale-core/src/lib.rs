@@ -38,6 +38,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+/// Counts Claude cache entries rebuilt because they predate retention
+/// provenance. Tests assert the rebuild is a one-time upgrade cost: the count
+/// must stop growing once every entry carries the marker.
+#[cfg(test)]
+static RETENTION_PROVENANCE_REBUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
 ///
 /// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
@@ -248,6 +255,18 @@ pub struct TokenBreakdown {
 }
 
 impl TokenBreakdown {
+    /// Add every token bucket from `other`, saturating each field independently.
+    ///
+    /// Use this for whole-breakdown aggregation so adding a new bucket cannot
+    /// silently leave one hand-written accumulation site incomplete.
+    pub fn add_assign_saturating(&mut self, other: &Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+    }
+
     pub fn total(&self) -> i64 {
         // saturating so clamped (i64::MAX) buckets from a corrupt source can't
         // overflow the sum.
@@ -256,6 +275,12 @@ impl TokenBreakdown {
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
             .saturating_add(self.reasoning)
+    }
+}
+
+impl std::ops::AddAssign<&TokenBreakdown> for TokenBreakdown {
+    fn add_assign(&mut self, other: &TokenBreakdown) {
+        self.add_assign_saturating(other);
     }
 }
 
@@ -544,6 +569,11 @@ pub struct ModelUsage {
     pub performance: ModelPerformance,
 }
 
+/// Original monthly usage shape returned by [`get_monthly_report`].
+///
+/// This type intentionally remains unchanged so downstream struct literals stay
+/// source-compatible. Use [`MonthlyUsageV2`] and [`get_monthly_report_v2`] when
+/// reasoning tokens are required.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyUsage {
     pub month: String,
@@ -552,6 +582,24 @@ pub struct MonthlyUsage {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    pub message_count: i32,
+    pub cost: f64,
+}
+
+/// Complete monthly usage including reasoning tokens.
+///
+/// This versioned type keeps downstream [`MonthlyUsage`] struct literals
+/// source-compatible while allowing CLI and API consumers to opt into the
+/// complete token breakdown.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonthlyUsageV2 {
+    pub month: String,
+    pub models: Vec<String>,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub reasoning: i64,
     pub message_count: i32,
     pub cost: f64,
 }
@@ -576,6 +624,53 @@ pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
+}
+
+/// Complete monthly report whose entries retain reasoning tokens.
+///
+/// Use [`get_monthly_report_v2`] to generate this shape. The original
+/// [`MonthlyReport`] and [`get_monthly_report`] remain available for source
+/// compatibility.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonthlyReportV2 {
+    pub entries: Vec<MonthlyUsageV2>,
+    pub total_cost: f64,
+    pub processing_time_ms: u32,
+}
+
+impl MonthlyUsageV2 {
+    /// Convert to the original public shape, intentionally discarding the
+    /// `reasoning` bucket that [`MonthlyUsage`] predates.
+    pub fn into_legacy(self) -> MonthlyUsage {
+        MonthlyUsage {
+            month: self.month,
+            models: self.models,
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            message_count: self.message_count,
+            cost: self.cost,
+        }
+    }
+}
+
+impl MonthlyReportV2 {
+    /// Convert to the original public report shape.
+    ///
+    /// Each entry's `reasoning` bucket is intentionally discarded because
+    /// [`MonthlyUsage`] predates that field.
+    pub fn into_legacy(self) -> MonthlyReport {
+        MonthlyReport {
+            entries: self
+                .entries
+                .into_iter()
+                .map(MonthlyUsageV2::into_legacy)
+                .collect(),
+            total_cost: self.total_cost,
+            processing_time_ms: self.processing_time_ms,
+        }
+    }
 }
 
 /// Hourly usage entry for a single hour slot (e.g. "2026-03-23 14:00")
@@ -641,6 +736,12 @@ fn parse_all_messages_with_pricing(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceCachePolicy {
+    Persistent,
+    InMemory,
+}
+
 fn parse_all_messages_with_pricing_with_env_strategy(
     home_dir: &str,
     clients: &[String],
@@ -648,9 +749,28 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_pricing_with_cache_policy(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        SourceCachePolicy::Persistent,
+    )
+}
+
+fn parse_all_messages_with_pricing_with_cache_policy(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    cache_policy: SourceCachePolicy,
+) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
+        retained_message_keys: HashSet<String>,
         cache_entry: Option<message_cache::CachedSourceEntry>,
         invalidate_cache: bool,
     }
@@ -665,11 +785,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    /// Takes the entry's messages by value: the cache handed this entry to
+    /// its one consumer (see `SourceMessageCache::take`), so cloning here
+    /// would put a second copy of the transcript alongside the first for no
+    /// reason.
     fn cached_messages(
-        cached: &message_cache::CachedSourceEntry,
+        cached: message_cache::CachedSourceEntry,
         pricing: Option<&pricing::PricingService>,
     ) -> Vec<UnifiedMessage> {
-        let mut messages = cached.messages.clone();
+        let mut messages = cached.messages;
         apply_pricing_to_messages(&mut messages, pricing);
         messages
     }
@@ -695,6 +819,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if !parsed.parse_succeeded {
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -703,6 +828,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if parsed.unresolved_model_events {
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -718,6 +844,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         CachedParseOutcome {
             messages,
+            retained_message_keys: HashSet::new(),
             cache_entry,
             invalidate_cache: false,
         }
@@ -799,9 +926,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     /// still contains: a key present on both sides keeps the freshly parsed
     /// message, so a corrected re-parse still wins and nothing is frozen at a
     /// stale value. Only keys the file no longer carries are carried forward.
-    /// (Across entries the Claude lane is first-wins on lexical path order, so
-    /// a retained copy in an earlier-sorting file still beats a live copy of
-    /// the same key in a later one.)
+    /// Across entries the Claude lane separately carries the returned key set,
+    /// so cross-file dedup can merge a retained partial with a completed live
+    /// replay instead of depending on lexical path order.
     ///
     /// Messages without a dedup key are never retained. The key is what lets a
     /// later scan recognise the message as already-seen; re-emitting an
@@ -812,12 +939,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parsed: &mut Vec<UnifiedMessage>,
         cached: &[UnifiedMessage],
         key_is_globally_stable: fn(&str) -> bool,
-    ) {
+    ) -> HashSet<String> {
         let mut seen: HashSet<String> = parsed
             .iter()
             .filter_map(|message| message.dedup_key.clone())
             .collect();
 
+        let mut retained = HashSet::new();
         for message in cached {
             let Some(key) = message.dedup_key.as_ref() else {
                 continue;
@@ -827,8 +955,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             }
             if seen.insert(key.clone()) {
                 parsed.push(message.clone());
+                retained.insert(key.clone());
             }
         }
+        retained
     }
 
     fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
@@ -847,14 +977,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             Option<&message_cache::SourceFingerprint>,
         ) -> Option<message_cache::FingerprintStatus>,
     {
-        let cached = source_cache.get(identity, path);
+        let mut cached = source_cache.take(identity, path);
+        // An entry written before retention provenance existed cannot say
+        // which of its rows the live transcript already dropped, so serving it
+        // warm presents a retained copy of a response as a live one — and the
+        // live copy of that same response in a forked transcript then loses
+        // the merge, freezing the stale model attribution and the cost priced
+        // from it. Rebuild those entries by taking the ordinary re-parse path
+        // once: it re-derives the retained set from the live bytes and writes
+        // the entry back with the provenance marker, so the next scan is a
+        // plain warm hit.
+        let rebuild_retention_provenance = cached
+            .as_ref()
+            .is_some_and(message_cache::CachedSourceEntry::needs_retention_provenance_migration);
+        #[cfg(test)]
+        if rebuild_retention_provenance {
+            RETENTION_PROVENANCE_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let Some(fingerprint_status) =
-            fingerprint_from_path(path, cached.map(|entry| &entry.fingerprint))
+            fingerprint_from_path(path, cached.as_ref().map(|entry| &entry.fingerprint))
         else {
             let (mut messages, _) = parse(path, None);
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -862,29 +1009,39 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         let fingerprint = match fingerprint_status {
             message_cache::FingerprintStatus::Unchanged => {
-                let Some(cached) = cached else {
+                let Some(entry) = cached.take() else {
                     unreachable!("an uncached source always builds a complete fingerprint")
                 };
-                if !cached.messages.is_empty() {
+                if !rebuild_retention_provenance && !entry.messages.is_empty() {
+                    let retained_message_keys = entry.retained_message_keys();
                     return CachedParseOutcome {
-                        messages: cached_messages(cached, pricing),
+                        messages: cached_messages(entry, pricing),
+                        retained_message_keys,
                         cache_entry: None,
                         invalidate_cache: false,
                     };
                 }
-                cached.fingerprint.clone()
+                let fingerprint = entry.fingerprint.clone();
+                cached = Some(entry);
+                fingerprint
             }
             message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
         };
 
-        if let Some(cached) = cached {
-            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
+        if let Some(entry) = cached.take() {
+            if !rebuild_retention_provenance
+                && entry.fingerprint == fingerprint
+                && !entry.messages.is_empty()
+            {
+                let retained_message_keys = entry.retained_message_keys();
                 return CachedParseOutcome {
-                    messages: cached_messages(cached, pricing),
+                    messages: cached_messages(entry, pricing),
+                    retained_message_keys,
                     cache_entry: None,
                     invalidate_cache: false,
                 };
             }
+            cached = Some(entry);
         }
 
         let (mut messages, cacheable) = parse(path, Some(&fingerprint));
@@ -895,13 +1052,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         // would retire them from history (#994). Only merge when the parse is
         // cacheable: an untrustworthy parse must not be used to synthesise an
         // entry, and the caller invalidates on that path anyway.
+        let mut retained_message_keys = HashSet::new();
         if let HistoryRetention::RetainObserved {
             key_is_globally_stable,
         } = history
         {
             if cacheable {
-                if let Some(cached) = cached {
-                    retain_observed_messages(
+                if let Some(cached) = cached.as_ref() {
+                    retained_message_keys = retain_observed_messages(
                         &mut messages,
                         &cached.messages,
                         key_is_globally_stable,
@@ -912,19 +1070,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let cache_entry = if messages.is_empty() || !cacheable {
             None
         } else {
-            Some(message_cache::CachedSourceEntry::new(
-                identity,
-                path,
-                fingerprint,
-                messages.clone(),
-                Vec::new(),
-                None,
-            ))
+            Some(match history {
+                HistoryRetention::LiveFileOnly => message_cache::CachedSourceEntry::new(
+                    identity,
+                    path,
+                    fingerprint,
+                    messages.clone(),
+                    Vec::new(),
+                    None,
+                ),
+                HistoryRetention::RetainObserved { .. } => {
+                    message_cache::CachedSourceEntry::new_with_retained_message_keys(
+                        identity,
+                        path,
+                        fingerprint,
+                        messages.clone(),
+                        &retained_message_keys,
+                    )
+                }
+            })
         };
         apply_pricing_to_messages(&mut messages, pricing);
 
         CachedParseOutcome {
             messages,
+            retained_message_keys,
             cache_entry,
             invalidate_cache: !cacheable,
         }
@@ -1042,6 +1212,40 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         )
     }
 
+    /// Parse one direct cached lane and merge it before the next lane starts.
+    ///
+    /// Outcomes are collected in parallel before either destination is mutated;
+    /// this preserves the existing per-lane collection and post-collection cache
+    /// insertion lifecycle. Callers invoke this helper in source order, so the
+    /// call order also preserves the sequential lane order of the parser.
+    ///
+    /// The scan key and cache identity are intentionally derived from the same
+    /// `ClientId`, making a same-client mapping impossible to mismatch. An
+    /// asymmetric lane should use a separately named helper with its own contract.
+    fn parse_cached_lane<F>(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        scan_client: ClientId,
+        parse: F,
+    ) where
+        F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+    {
+        let cache_identity = message_cache::CacheIdentity::for_client(scan_client);
+        let outcomes: Vec<CachedParseOutcome> = scan_result
+            .get(scan_client)
+            .par_iter()
+            .map(|path| load_or_parse_source(cache_identity, path, source_cache, pricing, &parse))
+            .collect();
+        for outcome in outcomes {
+            all_messages.extend(outcome.messages);
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+    }
+
     fn uncached_prime_outcome(
         mut messages: Vec<UnifiedMessage>,
         accounting: sessions::prime_agent::PrimeFileAccounting,
@@ -1054,6 +1258,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         (
             CachedParseOutcome {
                 messages,
+                retained_message_keys: HashSet::new(),
                 cache_entry: None,
                 invalidate_cache: false,
             },
@@ -1101,6 +1306,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 return (
                     CachedParseOutcome {
                         messages,
+                        retained_message_keys: HashSet::new(),
                         cache_entry,
                         invalidate_cache: false,
                     },
@@ -1128,10 +1334,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         sessions::prime_agent::PrimeFileAccounting,
     ) {
         let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
-        let cached = source_cache.get(identity, path);
+        let cached = source_cache.take(identity, path);
         let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
             path,
-            cached.map(|entry| &entry.fingerprint),
+            cached.as_ref().map(|entry| &entry.fingerprint),
         ) else {
             let (messages, accounting) =
                 sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
@@ -1140,6 +1346,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         let mut fingerprint = match fingerprint_status {
             message_cache::FingerprintStatus::Unchanged => cached
+                .as_ref()
                 .expect("an uncached source always builds a complete fingerprint")
                 .fingerprint
                 .clone(),
@@ -1148,7 +1355,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         if let Some(cached) = cached {
             if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
-                if let Some(accounting) = cached.prime_accounting.as_ref() {
+                if let Some(accounting) = cached.prime_accounting.clone() {
                     // Prime's accounting is byte-coupled to its messages. Warm
                     // v5 scans therefore hash the complete transcript before a
                     // hit, while still avoiding JSON decode and accounting walk.
@@ -1157,10 +1364,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             return (
                                 CachedParseOutcome {
                                     messages: cached_messages(cached, pricing),
+                                    retained_message_keys: HashSet::new(),
                                     cache_entry: None,
                                     invalidate_cache: false,
                                 },
-                                accounting.clone(),
+                                accounting,
                             );
                         }
                         Some(refreshed) => fingerprint = refreshed,
@@ -1185,12 +1393,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                     );
                     match message_cache::SourceFingerprint::from_path(path) {
                         Some(refreshed) if refreshed == fingerprint => {
+                            let cache_entry =
+                                cached.clone().with_prime_accounting(accounting.clone());
                             return (
                                 CachedParseOutcome {
                                     messages: cached_messages(cached, pricing),
-                                    cache_entry: Some(
-                                        cached.clone().with_prime_accounting(accounting.clone()),
-                                    ),
+                                    retained_message_keys: HashSet::new(),
+                                    cache_entry: Some(cache_entry),
                                     invalidate_cache: false,
                                 },
                                 accounting,
@@ -1238,7 +1447,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     ) -> CachedParseOutcome {
         let identity = message_cache::CacheIdentity::for_client(ClientId::Codex);
         let is_headless = is_headless_path(path, headless_roots);
-        let cached = source_cache.get(identity, path);
+        let cached = source_cache.take(identity, path);
         if cached.is_none() {
             // The post-parse cache build computes the authoritative fingerprint
             // after reading the file. Avoid hashing an uncached source here
@@ -1247,12 +1456,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
         let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
             path,
-            cached.map(|entry| &entry.fingerprint),
+            cached.as_ref().map(|entry| &entry.fingerprint),
         ) else {
             return parse_full_log_source(path, pricing, is_headless);
         };
         let fingerprint = match fingerprint_status {
             message_cache::FingerprintStatus::Unchanged => cached
+                .as_ref()
                 .expect("an uncached source always builds a complete fingerprint")
                 .fingerprint
                 .clone(),
@@ -1268,15 +1478,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             };
 
             if cached.fingerprint == fingerprint {
-                if message_cache::codex_cache_entry_matches_fingerprint(cached, &fingerprint) {
+                if message_cache::codex_cache_entry_matches_fingerprint(&cached, &fingerprint) {
                     return CachedParseOutcome {
                         messages: finalize_codex_messages(
-                            cached.messages.clone(),
+                            cached.messages,
                             pricing,
                             is_headless,
                             &cached.fallback_timestamp_indices,
                             fallback_timestamp,
                         ),
+                        retained_message_keys: HashSet::new(),
                         cache_entry: None,
                         invalidate_cache: false,
                     };
@@ -1305,7 +1516,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                                 .iter()
                                 .map(|index| existing_len + index),
                         );
-                        raw_messages.extend(parsed.messages.clone());
+                        raw_messages.extend(parsed.messages);
                         let cache_entry = build_codex_cache_entry(
                             path,
                             raw_messages.clone(),
@@ -1324,6 +1535,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
                             return CachedParseOutcome {
                                 messages,
+                                retained_message_keys: HashSet::new(),
                                 cache_entry: Some(cache_entry),
                                 invalidate_cache: false,
                             };
@@ -1345,8 +1557,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         scanner_settings,
     );
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
-    let mut source_cache = message_cache::SourceMessageCache::load();
-    source_cache.prune_missing_files();
+    // `load` reads no shard: each namespace is deserialized the first time a
+    // lane asks for one of its sources, and entries whose file is gone are
+    // pruned as that namespace loads. A scan therefore pays for the clients it
+    // actually reads instead of for every client the machine has ever cached.
+    let mut source_cache = match cache_policy {
+        SourceCachePolicy::Persistent => message_cache::SourceMessageCache::load(),
+        SourceCachePolicy::InMemory => message_cache::SourceMessageCache::default(),
+    };
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
@@ -1499,24 +1717,35 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut claude_messages_raw: Vec<(String, UnifiedMessage)> = Vec::new();
+    let mut claude_messages: Vec<(bool, UnifiedMessage)> = Vec::new();
+    let mut claude_keyed_indices: HashMap<String, usize> = HashMap::new();
     for outcome in claude_outcomes {
-        claude_messages_raw.extend(outcome.messages.into_iter().map(|msg| {
-            let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-            (dedup_key, msg)
-        }));
+        for message in outcome.messages {
+            let Some(key) = message.dedup_key.clone().filter(|key| !key.is_empty()) else {
+                claude_messages.push((false, message));
+                continue;
+            };
+            let is_retained = outcome.retained_message_keys.contains(&key);
+            let Some(index) = claude_keyed_indices.get(&key).copied() else {
+                claude_keyed_indices.insert(key, claude_messages.len());
+                claude_messages.push((is_retained, message));
+                continue;
+            };
+
+            let (existing_is_retained, existing) = &mut claude_messages[index];
+            merge_claude_cross_file_duplicate(
+                existing,
+                existing_is_retained,
+                message,
+                is_retained,
+                pricing,
+            );
+        }
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
-
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_messages: Vec<UnifiedMessage> = claude_messages_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
-    all_messages.extend(claude_messages);
+    all_messages.extend(claude_messages.into_iter().map(|(_, message)| message));
 
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
@@ -1546,25 +1775,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let copilot_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Copilot)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Copilot),
-                path,
-                &source_cache,
-                pricing,
-                sessions::copilot::parse_copilot_file,
-            )
-        })
-        .collect();
-    for outcome in copilot_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Copilot,
+        sessions::copilot::parse_copilot_file,
+    );
     if let Some(db_path) = &scan_result.copilot_desktop_db {
         let otel_sessions: HashSet<String> = all_messages
             .iter()
@@ -1647,45 +1865,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let cursor_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Cursor)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Cursor),
-                path,
-                &source_cache,
-                pricing,
-                sessions::cursor::parse_cursor_file,
-            )
-        })
-        .collect();
-    for outcome in cursor_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Cursor,
+        sessions::cursor::parse_cursor_file,
+    );
 
-    let warp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Warp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Warp),
-                path,
-                &source_cache,
-                pricing,
-                sessions::warp::parse_warp_file,
-            )
-        })
-        .collect();
-    for outcome in warp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Warp,
+        sessions::warp::parse_warp_file,
+    );
 
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Grok)
@@ -1742,25 +1938,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let amp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Amp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Amp),
-                path,
-                &source_cache,
-                pricing,
-                sessions::amp::parse_amp_file,
-            )
-        })
-        .collect();
-    for outcome in amp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Amp,
+        sessions::amp::parse_amp_file,
+    );
 
     let codebuff_outcomes: Vec<CachedParseOutcome> = if include_codebuff {
         scan_result
@@ -1836,45 +2021,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let openclaw_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::OpenClaw)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::OpenClaw),
-                path,
-                &source_cache,
-                pricing,
-                sessions::openclaw::parse_openclaw_transcript,
-            )
-        })
-        .collect();
-    for outcome in openclaw_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::OpenClaw,
+        sessions::openclaw::parse_openclaw_transcript,
+    );
 
-    let pi_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Pi)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Pi),
-                path,
-                &source_cache,
-                pricing,
-                sessions::pi::parse_pi_file,
-            )
-        })
-        .collect();
-    for outcome in pi_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Pi,
+        sessions::pi::parse_pi_file,
+    );
 
     let prime_agent_outcomes: Vec<(
         CachedParseOutcome,
@@ -1947,25 +2110,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let senpi_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Senpi)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Senpi),
-                path,
-                &source_cache,
-                pricing,
-                sessions::senpi::parse_senpi_file,
-            )
-        })
-        .collect();
-    for outcome in senpi_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Senpi,
+        sessions::senpi::parse_senpi_file,
+    );
 
     let augment_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Augment)
@@ -2089,6 +2241,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // Cherry Studio (Electron desktop) writes standard Claude Code transcripts
+    // under its app-data `.claude/projects`; parse them with the shared
+    // claudecode logic re-tagged as `cherrystudio`.
+    let cherrystudio_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::CherryStudio)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::CherryStudio),
+                path,
+                &source_cache,
+                pricing,
+                sessions::cherrystudio::parse_cherrystudio_file,
+            )
+        })
+        .collect();
+    for outcome in cherrystudio_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result
@@ -2112,25 +2287,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // above, there is no authoritative embedded cost for cached_messages()'s
     // unconditional reprice to overwrite. The parser also dedups within a file
     // on its own, so no cross-file `should_keep_deduped_message` pass is needed.
-    let opencodereview_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::OpenCodeReview)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::OpenCodeReview),
-                path,
-                &source_cache,
-                pricing,
-                sessions::opencodereview::parse_opencodereview_file,
-            )
-        })
-        .collect();
-    for outcome in opencodereview_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::OpenCodeReview,
+        sessions::opencodereview::parse_opencodereview_file,
+    );
 
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
@@ -2160,25 +2324,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     // Parse Qwen files
-    let qwen_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Qwen)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Qwen),
-                path,
-                &source_cache,
-                pricing,
-                sessions::qwen::parse_qwen_file,
-            )
-        })
-        .collect();
-    for outcome in qwen_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Qwen,
+        sessions::qwen::parse_qwen_file,
+    );
 
     let roocode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::RooCode)
@@ -2249,25 +2402,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let mux_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Mux)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::Mux),
-                path,
-                &source_cache,
-                pricing,
-                sessions::mux::parse_mux_file,
-            )
-        })
-        .collect();
-    for outcome in mux_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
-    }
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Mux,
+        sessions::mux::parse_mux_file,
+    );
 
     // Kilo CLI: SQLite database
     if let Some(db_path) = &scan_result.kilo_db {
@@ -2620,7 +2762,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    source_cache.save_if_dirty();
+    if cache_policy == SourceCachePolicy::Persistent {
+        source_cache.save_if_dirty();
+    }
 
     rebucket_days(&mut all_messages, scanner_settings);
 
@@ -2966,11 +3110,61 @@ struct MonthAggregator {
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    reasoning: i64,
     message_count: i32,
     cost: f64,
 }
 
-pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
+fn aggregate_monthly_usage_v2_entries(
+    messages: impl IntoIterator<Item = UnifiedMessage>,
+) -> Vec<MonthlyUsageV2> {
+    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
+
+    for msg in messages {
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&msg.date, "%Y-%m-%d") else {
+            continue;
+        };
+        let month = date.format("%Y-%m").to_string();
+
+        let entry = month_map.entry(month).or_default();
+
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
+        // Saturating arithmetic matches the model/hourly aggregators: parser
+        // clamps can legitimately produce i64::MAX, and a corrupt source must
+        // not make report generation overflow.
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
+        entry.message_count = entry.message_count.saturating_add(msg.message_count.max(0));
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<MonthlyUsageV2> = month_map
+        .into_iter()
+        .map(|(month, agg)| MonthlyUsageV2 {
+            month,
+            models: agg.models.into_iter().collect(),
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            reasoning: agg.reasoning,
+            message_count: agg.message_count,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.month.cmp(&b.month));
+    entries
+}
+
+pub async fn get_monthly_report_v2(options: ReportOptions) -> Result<MonthlyReportV2, String> {
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -2994,59 +3188,25 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let month = if msg.date.len() >= 7 {
-            msg.date[..7].to_string()
-        } else {
-            continue;
-        };
-
-        let entry = month_map.entry(month).or_default();
-
-        entry.models.insert(model_name_for_grouping(
-            &msg.client,
-            &msg.provider_id,
-            &msg.model_id,
-        ));
-        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
-        // can't overflow the fold.
-        entry.input = entry.input.saturating_add(msg.tokens.input);
-        entry.output = entry.output.saturating_add(msg.tokens.output);
-        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
-        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
-    }
-
-    let mut entries: Vec<MonthlyUsage> = month_map
-        .into_iter()
-        .map(|(month, agg)| MonthlyUsage {
-            month,
-            models: agg.models.into_iter().collect(),
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.month.cmp(&b.month));
+    let entries = aggregate_monthly_usage_v2_entries(filtered);
 
     // f64's Sum identity is -0.0, so an empty report would serialize as
     // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
     // any non-zero total.
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
-    Ok(MonthlyReport {
+    Ok(MonthlyReportV2 {
         entries,
         total_cost,
         processing_time_ms: start.elapsed().as_millis() as u32,
     })
+}
+
+/// Generate the original monthly report shape.
+///
+/// New callers that need reasoning tokens should use [`get_monthly_report_v2`].
+pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
+    Ok(get_monthly_report_v2(options).await?.into_legacy())
 }
 
 #[derive(Default)]
@@ -3061,6 +3221,69 @@ struct HourAggregator {
     message_count: i32,
     turn_count: i32,
     cost: f64,
+}
+
+fn aggregate_hourly_usage_entries(
+    messages: impl IntoIterator<Item = UnifiedMessage>,
+    bucket_timezone: bucket_tz::BucketTimezone,
+) -> Vec<HourlyUsage> {
+    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
+
+    for msg in messages {
+        let hour_key = if msg.timestamp > 0 {
+            bucket_timezone
+                .hour_key(msg.timestamp)
+                .unwrap_or_else(|| format!("{} 00:00", msg.date))
+        } else {
+            format!("{} 00:00", msg.date)
+        };
+
+        let entry = hour_map.entry(hour_key).or_default();
+        entry.clients.insert(msg.client.clone());
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
+        entry.message_count += msg.message_count.max(0);
+        if msg.is_turn_start {
+            entry.turn_count += 1;
+        }
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<HourlyUsage> = hour_map
+        .into_iter()
+        .map(|(hour, agg)| HourlyUsage {
+            hour,
+            clients: {
+                let mut clients: Vec<String> = agg.clients.into_iter().collect();
+                clients.sort();
+                clients
+            },
+            models: {
+                let mut models: Vec<String> = agg.models.into_iter().collect();
+                models.sort();
+                models
+            },
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            message_count: agg.message_count,
+            turn_count: agg.turn_count,
+            reasoning: agg.reasoning,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+    entries
 }
 
 /// Generate hourly usage report, keyed by "YYYY-MM-DD HH:00".
@@ -3092,72 +3315,13 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
-    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
-
-    // The hour key embeds a date, and the timestamp-less fallback below builds
-    // one out of `msg.date` — which the rebucket pass has already moved to the
-    // pinned zone. Deriving the primary key from the host instead would let a
-    // single report disagree with itself about which day an hour belongs to.
+    // The hour key embeds a date, and the timestamp-less fallback builds one
+    // out of `msg.date`, which the rebucket pass already moved to the pinned
+    // zone. Deriving it from the host would let one report disagree with
+    // itself about which day an hour belongs to.
     let bucket_timezone =
         bucket_tz::BucketTimezone::from_scanner_settings(&options.scanner_settings);
-
-    for msg in filtered {
-        let hour_key = if msg.timestamp > 0 {
-            bucket_timezone
-                .hour_key(msg.timestamp)
-                .unwrap_or_else(|| format!("{} 00:00", msg.date))
-        } else {
-            format!("{} 00:00", msg.date)
-        };
-
-        let entry = hour_map.entry(hour_key).or_default();
-
-        entry.clients.insert(msg.client.clone());
-        entry.models.insert(model_name_for_grouping(
-            &msg.client,
-            &msg.provider_id,
-            &msg.model_id,
-        ));
-        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
-        // can't overflow the fold.
-        entry.input = entry.input.saturating_add(msg.tokens.input);
-        entry.output = entry.output.saturating_add(msg.tokens.output);
-        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
-        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
-        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
-    }
-
-    let mut entries: Vec<HourlyUsage> = hour_map
-        .into_iter()
-        .map(|(hour, agg)| HourlyUsage {
-            hour,
-            clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
-                v.sort();
-                v
-            },
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            turn_count: agg.turn_count,
-            reasoning: agg.reasoning,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+    let entries = aggregate_hourly_usage_entries(filtered, bucket_timezone);
 
     // f64's Sum identity is -0.0, so an empty report would serialize as
     // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
@@ -3262,6 +3426,12 @@ const ROUTING_LABEL_UNPRICED_REASON: &str =
     "generic routing label has no authoritative model-to-price mapping";
 const MISSING_MODEL_PRICING_REASON: &str = "no authoritative model-to-price mapping";
 const INCOMPLETE_MODEL_PRICING_REASON: &str = "pricing does not cover every populated token bucket";
+const AMBIGUOUS_MODEL_PRICING_REASON: &str =
+    "model price lookup is ambiguous across non-equivalent candidates";
+const UNVERIFIED_MODEL_IDENTITY_REASON: &str =
+    "model price match does not exactly name the requested model";
+const UNVERIFIED_PROVIDER_IDENTITY_REASON: &str =
+    "model price match does not establish the requested provider";
 
 /// Routing labels name the router that served the request, never the model
 /// that answered it, so they have no authoritative model-to-price mapping.
@@ -3290,6 +3460,8 @@ fn exclude_unpriced_submission_messages(
     messages: Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
 ) -> (Vec<UnifiedMessage>, Vec<UnpricedSubmissionExclusion>) {
+    use pricing::lookup::SubmissionSafetyGap;
+
     let Some(pricing) = pricing else {
         return (messages, Vec::new());
     };
@@ -3319,14 +3491,30 @@ fn exclude_unpriced_submission_messages(
             // Nothing regresses for unpriced labels: the resolver refuses
             // routing labels outright, so with no custom entry this returns
             // None and the routing-label reason still applies.
-            let reason = if pricing
-                .lookup_with_source_and_provider(
-                    &message.model_id,
-                    None,
-                    Some(&message.provider_id),
-                )
-                .is_some()
-            {
+            let resolution = pricing.resolve_for_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            );
+            // The gap is read from the resolution that made the row
+            // unpublishable rather than restated here: a lookup with a single
+            // candidate is excluded for not naming the model, and reporting it
+            // as ambiguous across candidates would describe a disagreement
+            // that never happened.
+            let safety_gap = resolution
+                .as_ref()
+                .and_then(|result| result.evidence.submission_safety_gap());
+            let reason = if let Some(gap) = safety_gap {
+                match gap {
+                    SubmissionSafetyGap::PriceDisagreement => AMBIGUOUS_MODEL_PRICING_REASON,
+                    SubmissionSafetyGap::UnverifiedModelIdentity => {
+                        UNVERIFIED_MODEL_IDENTITY_REASON
+                    }
+                    SubmissionSafetyGap::UnverifiedProviderIdentity => {
+                        UNVERIFIED_PROVIDER_IDENTITY_REASON
+                    }
+                }
+            } else if resolution.is_some() {
                 INCOMPLETE_MODEL_PRICING_REASON
             } else if is_generic_routing_label(&message.provider_id, &message.model_id) {
                 ROUTING_LABEL_UNPRICED_REASON
@@ -3597,6 +3785,30 @@ fn apply_pricing_if_available(
     }
 }
 
+/// Merge two cross-file Claude observations without letting retained
+/// provenance replace live metadata. Completeness is monotonic for usage
+/// fields, while model/provider/session/workspace stay sourced from the live
+/// observation. Estimated cost is then derived from that authoritative metadata
+/// and the merged tokens; provider-reported cost remains immune to repricing
+/// through `apply_pricing_if_available`'s authority guard.
+fn merge_claude_cross_file_duplicate(
+    existing: &mut UnifiedMessage,
+    existing_is_retained: &mut bool,
+    mut candidate: UnifiedMessage,
+    candidate_is_retained: bool,
+    pricing: Option<&pricing::PricingService>,
+) {
+    if *existing_is_retained && !candidate_is_retained {
+        sessions::claudecode::merge_message_completeness(&mut candidate, existing);
+        *existing = candidate;
+    } else {
+        sessions::claudecode::merge_message_completeness(existing, &candidate);
+    }
+    *existing_is_retained &= candidate_is_retained;
+    existing.refresh_derived_fields();
+    apply_pricing_if_available(existing, pricing);
+}
+
 fn parse_hermes_sqlite_with_pricing(
     db_path: &Path,
     pricing: Option<&pricing::PricingService>,
@@ -3659,13 +3871,15 @@ fn parse_local_unified_messages_resolved(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
+    cache_policy: SourceCachePolicy,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing_with_env_strategy(
+    let messages = parse_all_messages_with_pricing_with_cache_policy(
         home_dir,
         clients,
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
+        cache_policy,
     );
     Ok(filter_unified_messages(messages, &options))
 }
@@ -4131,6 +4345,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Zcode, zcode_count);
     messages.extend(zcode_msgs);
 
+    // Cherry Studio agent-session transcripts (Claude Code format).
+    let cherrystudio_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::CherryStudio)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cherrystudio::parse_cherrystudio_file(path)
+                .into_iter()
+                .map(|message| unified_to_parsed(&message))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
+    counts.set(ClientId::CherryStudio, cherrystudio_count);
+    messages.extend(cherrystudio_msgs);
+
     let opencodereview_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::OpenCodeReview)
         .par_iter()
@@ -4593,7 +4822,33 @@ pub async fn parse_local_unified_messages_with_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing)
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing,
+        SourceCachePolicy::Persistent,
+    )
+}
+
+/// Parse local messages without reading or writing the persistent source cache.
+///
+/// A fresh in-memory cache is still shared by every source parsed during this
+/// call, preserving normal within-call reuse and deduplication. This entry point
+/// is intended for isolated callers such as integration tests.
+#[doc(hidden)]
+pub async fn parse_local_unified_messages_with_pricing_uncached(
+    options: LocalParseOptions,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<Vec<UnifiedMessage>, String> {
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing,
+        SourceCachePolicy::InMemory,
+    )
 }
 
 pub async fn parse_local_unified_messages(
@@ -4601,7 +4856,13 @@ pub async fn parse_local_unified_messages(
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
+    parse_local_unified_messages_resolved(
+        options,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        SourceCachePolicy::Persistent,
+    )
 }
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
@@ -4692,20 +4953,286 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_model_usage_entries, apply_pricing_if_available, build_graph_from_messages,
+        aggregate_hourly_usage_entries, aggregate_model_usage_entries,
+        aggregate_monthly_usage_v2_entries, apply_pricing_if_available, build_graph_from_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
-        message_cache, normalize_model_for_grouping,
+        merge_claude_cross_file_duplicate, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
         paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
         sessions, unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement,
-        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
-        UnpricedSubmissionExclusion, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
-        ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
+        GroupBy, LocalParseOptions, MonthlyReportV2, MonthlyUsage, MonthlyUsageV2, ReportOptions,
+        SourceCachePolicy, TokenBreakdown, UnifiedMessage, UnpricedSubmissionExclusion,
+        AMBIGUOUS_MODEL_PRICING_REASON, INCOMPLETE_MODEL_PRICING_REASON,
+        MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
+        UNVERIFIED_MODEL_IDENTITY_REASON, UNVERIFIED_PROVIDER_IDENTITY_REASON,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
+
+    #[test]
+    fn token_breakdown_add_assign_includes_every_field() {
+        let mut total = TokenBreakdown {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
+        total += &TokenBreakdown {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            reasoning: 50,
+        };
+
+        assert_eq!(
+            total,
+            TokenBreakdown {
+                input: 11,
+                output: 22,
+                cache_read: 33,
+                cache_write: 44,
+                reasoning: 55,
+            }
+        );
+    }
+
+    #[test]
+    fn token_breakdown_add_assign_saturates_each_field() {
+        let mut total = TokenBreakdown {
+            input: i64::MAX,
+            output: i64::MIN,
+            cache_read: i64::MAX - 1,
+            cache_write: i64::MIN + 1,
+            reasoning: 100,
+        };
+        total += &TokenBreakdown {
+            input: 1,
+            output: -1,
+            cache_read: 10,
+            cache_write: -10,
+            reasoning: 23,
+        };
+
+        assert_eq!(total.input, i64::MAX);
+        assert_eq!(total.output, i64::MIN);
+        assert_eq!(total.cache_read, i64::MAX);
+        assert_eq!(total.cache_write, i64::MIN);
+        assert_eq!(total.reasoning, 123);
+    }
+
+    #[test]
+    fn legacy_monthly_usage_struct_literal_remains_source_compatible() {
+        let usage = MonthlyUsage {
+            month: "2026-01".to_string(),
+            models: vec!["model".to_string()],
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            message_count: 5,
+            cost: 0.5,
+        };
+
+        let serialized = serde_json::to_value(usage).unwrap();
+        assert!(serialized.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn monthly_usage_v2_serializes_reasoning_additively() {
+        let usage = MonthlyUsageV2 {
+            month: "2026-01".to_string(),
+            models: vec!["model".to_string()],
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 6,
+            message_count: 5,
+            cost: 0.5,
+        };
+
+        let serialized = serde_json::to_value(&usage).unwrap();
+        assert_eq!(serialized["reasoning"], 6);
+
+        let legacy = usage.into_legacy();
+        assert_eq!(legacy.month, "2026-01");
+        assert_eq!(legacy.models, ["model"]);
+        assert_eq!(legacy.input, 1);
+        assert_eq!(legacy.output, 2);
+        assert_eq!(legacy.cache_read, 3);
+        assert_eq!(legacy.cache_write, 4);
+        assert_eq!(legacy.message_count, 5);
+        assert_eq!(legacy.cost, 0.5);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("reasoning")
+            .is_none());
+    }
+
+    #[test]
+    fn monthly_report_v2_legacy_conversion_preserves_report_metadata() {
+        let report = MonthlyReportV2 {
+            entries: vec![MonthlyUsageV2 {
+                month: "2026-02".to_string(),
+                models: vec![],
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                reasoning: 5,
+                message_count: 6,
+                cost: 0.75,
+            }],
+            total_cost: 0.75,
+            processing_time_ms: 42,
+        };
+
+        let legacy = report.into_legacy();
+        assert_eq!(legacy.entries.len(), 1);
+        assert_eq!(legacy.entries[0].month, "2026-02");
+        assert_eq!(legacy.entries[0].input, 1);
+        assert_eq!(legacy.entries[0].output, 2);
+        assert_eq!(legacy.entries[0].cache_read, 3);
+        assert_eq!(legacy.entries[0].cache_write, 4);
+        assert_eq!(legacy.entries[0].message_count, 6);
+        assert_eq!(legacy.entries[0].cost, 0.75);
+        assert_eq!(legacy.total_cost, 0.75);
+        assert_eq!(legacy.processing_time_ms, 42);
+    }
+
+    #[test]
+    fn monthly_reasoning_matches_model_and_hourly_aggregation() {
+        let messages = vec![
+            UnifiedMessage::new(
+                "opencode",
+                "reasoning-model",
+                "openai",
+                "session-a",
+                1_767_225_600_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 2,
+                    cache_write: 1,
+                    reasoning: 7,
+                },
+                0.1,
+            ),
+            UnifiedMessage::new(
+                "codex",
+                "reasoning-model",
+                "openai",
+                "session-b",
+                1_767_229_200_000,
+                TokenBreakdown {
+                    input: 20,
+                    output: 8,
+                    cache_read: 3,
+                    cache_write: 2,
+                    reasoning: 11,
+                },
+                0.2,
+            ),
+        ];
+
+        let monthly = aggregate_monthly_usage_v2_entries(messages.clone());
+        let models = aggregate_model_usage_entries(messages.clone(), &GroupBy::Model);
+        let hourly = aggregate_hourly_usage_entries(
+            messages,
+            super::bucket_tz::BucketTimezone::from_pinned_name(Some("UTC")),
+        );
+
+        assert_eq!(monthly.len(), 1);
+        let monthly_reasoning = monthly[0].reasoning;
+        let model_reasoning = models
+            .iter()
+            .fold(0_i64, |total, entry| total.saturating_add(entry.reasoning));
+        let hourly_reasoning = hourly
+            .iter()
+            .fold(0_i64, |total, entry| total.saturating_add(entry.reasoning));
+        assert_eq!(monthly_reasoning, 18);
+        assert_eq!(monthly_reasoning, model_reasoning);
+        assert_eq!(monthly_reasoning, hourly_reasoning);
+    }
+
+    #[test]
+    fn monthly_aggregation_rejects_malformed_calendar_dates() {
+        let message_with_date = |date: &str, input: i64| {
+            let mut message = UnifiedMessage::new(
+                "codex",
+                "model",
+                "openai",
+                format!("session-{input}"),
+                1_767_225_600_000,
+                TokenBreakdown {
+                    input,
+                    ..TokenBreakdown::default()
+                },
+                0.0,
+            );
+            message.date = date.to_string();
+            message
+        };
+
+        let monthly = aggregate_monthly_usage_v2_entries([
+            message_with_date("2024-02-29", 1),
+            message_with_date("2023-02-29", 2),
+            message_with_date("2026-00-01", 4),
+            message_with_date("2026-13-01", 8),
+            message_with_date("2026-04-31", 16),
+            message_with_date("2026-💥", 32),
+            message_with_date("2026-01-31", 64),
+        ]);
+
+        assert_eq!(monthly.len(), 2);
+        assert_eq!(
+            monthly
+                .iter()
+                .find(|entry| entry.month == "2024-02")
+                .unwrap()
+                .input,
+            1
+        );
+        assert_eq!(
+            monthly
+                .iter()
+                .find(|entry| entry.month == "2026-01")
+                .unwrap()
+                .input,
+            64
+        );
+    }
+
+    #[test]
+    fn monthly_message_count_saturates() {
+        let mut first = UnifiedMessage::new(
+            "codex",
+            "model",
+            "openai",
+            "session-a",
+            1_767_225_600_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        first.message_count = i32::MAX;
+        let second = UnifiedMessage::new(
+            "codex",
+            "model",
+            "openai",
+            "session-b",
+            1_767_225_601_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+
+        let monthly = aggregate_monthly_usage_v2_entries([first, second]);
+        assert_eq!(monthly[0].message_count, i32::MAX);
+    }
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -5944,7 +6471,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_cursor_parse_path_reprices_zero_cost_composer_1_5_rows() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
         std::fs::create_dir_all(&cursor_cache_dir).unwrap();
@@ -5964,6 +6494,71 @@ mod tests {
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "Composer 1.5");
         assert!(messages[0].cost > 0.0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_cursor_cached_lane_matches_cold_parse_on_warm_hit() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let cursor_cache_dir = source_home.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        let usage_path = cursor_cache_dir.join("usage.csv");
+
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#;
+        std::fs::write(&usage_path, csv).unwrap();
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "composer-1.5".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0001),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let _parse_counter =
+            sessions::cursor::register_parse_cursor_file_counter(source_home.path());
+
+        let cold = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            Some(&pricing),
+        );
+        assert_eq!(cold.len(), 1);
+        assert!(cold[0].cost > 0.0);
+        assert_eq!(
+            sessions::cursor::parse_cursor_file_call_count(source_home.path()),
+            1,
+            "cold parse should invoke the Cursor parser once"
+        );
+
+        let persisted = message_cache::SourceMessageCache::load();
+        let cached = persisted
+            .get(
+                message_cache::CacheIdentity::for_client(ClientId::Cursor),
+                &usage_path,
+            )
+            .expect("cold parse should persist the Cursor source entry");
+        assert_eq!(cached.messages.len(), 1);
+
+        let warm = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            Some(&pricing),
+        );
+        assert_eq!(warm.len(), 1);
+        assert!(warm[0].cost > 0.0);
+        assert_eq!(warm, cold);
+        assert_eq!(
+            sessions::cursor::parse_cursor_file_call_count(source_home.path()),
+            1,
+            "warm cache hit must not invoke the Cursor parser again"
+        );
     }
 
     /// MiMo Code records carry an authoritative per-message cost. The micode
@@ -6203,72 +6798,402 @@ mod tests {
         }
     }
 
-    /// Retention is only sound because a retained message still collapses
-    /// against a live copy of itself somewhere else. Claude Code forks a
-    /// session into a new transcript that replays earlier turns, so the same
-    /// `messageId:requestId` legitimately appears in two files at once.
-    ///
-    /// The transcripts are named so the retaining file sorts first: the lane
-    /// walks paths in lexical order and keeps the first copy of a key, so this
-    /// is the ordering where a retained copy wins over the live one. Both
-    /// copies come from the same API response, so either winner reports the
-    /// same tokens — what must not happen is both being counted.
     #[test]
-    #[serial_test::serial]
-    fn test_claude_retained_message_collapses_against_a_forked_transcript() {
+    fn test_claude_cross_file_merge_preserves_provider_reported_cost() {
+        let mut retained = UnifiedMessage::new_with_dedup(
+            "claude",
+            "claude-3-5-haiku",
+            "bedrock",
+            "retained-session",
+            1_733_050_000_000,
+            TokenBreakdown {
+                input: 500,
+                output: 60,
+                ..Default::default()
+            },
+            9.0,
+            Some("msg_shared:req_shared".to_string()),
+        );
+        retained.mark_provider_reported_cost();
+        let live = UnifiedMessage::new_with_dedup(
+            "claude",
+            "claude-3-5-sonnet",
+            "anthropic",
+            "live-session",
+            1_733_050_001_000,
+            TokenBreakdown {
+                input: 200,
+                output: 999,
+                ..Default::default()
+            },
+            0.0,
+            Some("msg_shared:req_shared".to_string()),
+        );
+        let mut retained_flag = true;
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-3-5-sonnet".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        merge_claude_cross_file_duplicate(
+            &mut retained,
+            &mut retained_flag,
+            live,
+            false,
+            Some(&pricing),
+        );
+
+        assert!(!retained_flag);
+        assert_eq!(retained.model_id, "claude-3-5-sonnet");
+        assert_eq!(retained.provider_id, "anthropic");
+        assert_eq!(retained.session_id, "live-session");
+        assert_eq!(retained.tokens.input, 500);
+        assert_eq!(retained.tokens.output, 999);
+        assert_eq!(retained.cost, 9.0);
+        assert_eq!(retained.cost_source, sessions::CostSource::ProviderReported);
+    }
+
+    /// Drive a retained/live collision through cold parse, compaction,
+    /// cross-file replay, and a warm cache hit.
+    ///
+    /// The retained copy is seeded into cache from a transcript that is then
+    /// rewritten empty; the live copy arrives in a second transcript named by
+    /// the caller, so file order cannot quietly become the tiebreaker. Both
+    /// copies describe the same response, one observed mid-stream and one
+    /// completed, and they lead on different token fields — so any resolution
+    /// that keeps one whole message under-reports the other field.
+    ///
+    /// Every direction reconciles to the same row: input 500, output 999,
+    /// attributed to the live observation's Sonnet metadata and repriced from
+    /// the merged tokens. That is what makes the two directions comparable —
+    /// which side happened to be retained must not change the result.
+    fn assert_claude_retained_live_merge(
+        retained_record: &str,
+        live_record: &str,
+        live_file_name: &str,
+    ) {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
 
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let retained_path = claude_dir.join("mmm-retained.jsonl");
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-3-5-sonnet".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-3-5-haiku".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.0001),
+                output_cost_per_token: Some(0.0002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        std::fs::write(&retained_path, format!("{retained_record}\n")).unwrap();
+        let seeded = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(seeded.len(), 1, "cold scan must seed retained history");
+
+        // Claude rewrites the first transcript, and the same response shows up
+        // in a fork/resume transcript that is still on disk.
+        std::fs::write(&retained_path, "").unwrap();
+        std::fs::write(claude_dir.join(live_file_name), format!("{live_record}\n")).unwrap();
+
+        let assert_merged = |messages: &[UnifiedMessage]| {
+            assert_eq!(
+                messages.len(),
+                1,
+                "the shared response must be counted once"
+            );
+            let merged = &messages[0];
+            assert_eq!(merged.tokens.input, 500, "take the larger input");
+            assert_eq!(merged.tokens.output, 999, "take the completed output");
+            assert_eq!(merged.model_id, "claude-3-5-sonnet");
+            assert_eq!(merged.provider_id, "anthropic");
+            assert_eq!(merged.session_id, live_file_name.trim_end_matches(".jsonl"));
+            assert_eq!(merged.workspace_key.as_deref(), Some("myproject"));
+            assert_eq!(merged.workspace_label.as_deref(), Some("myproject"));
+            assert_eq!(merged.cost_source, sessions::CostSource::Estimated);
+            assert!(
+                (merged.cost - 2.498).abs() < 1e-9,
+                "Sonnet price must be recomputed from merged tokens; got {}",
+                merged.cost
+            );
+        };
+
+        let merged = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_merged(&merged);
+
+        let warm = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_merged(&warm);
+    }
+
+    /// A partial observed before the transcript recorded the model the turn
+    /// billed against. Used as the retained copy, its stale Haiku attribution
+    /// must not outlive the live observation.
+    const CLAUDE_MERGE_PARTIAL_STALE_MODEL: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_shared","provider":"bedrock","message":{"id":"msg_shared","model":"claude-3-5-haiku","provider":"bedrock","usage":{"input_tokens":500,"output_tokens":60}}}"#;
+    /// The same partial, already carrying the model the completed copy names.
+    /// Used as the live copy, where model attribution is not what is under
+    /// test and a divergence would only restate the pair above.
+    const CLAUDE_MERGE_PARTIAL: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_shared","provider":"anthropic","message":{"id":"msg_shared","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input_tokens":500,"output_tokens":60}}}"#;
+    /// The completed observation of that same response.
+    const CLAUDE_MERGE_COMPLETED: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:01.000Z","requestId":"req_shared","provider":"anthropic","message":{"id":"msg_shared","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input_tokens":200,"output_tokens":999}}}"#;
+
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_partial_merges_completed_live_that_sorts_later() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_PARTIAL_STALE_MODEL,
+            CLAUDE_MERGE_COMPLETED,
+            "zzz-live.jsonl",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_partial_merges_completed_live_that_sorts_earlier() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_PARTIAL_STALE_MODEL,
+            CLAUDE_MERGE_COMPLETED,
+            "aaa-live.jsonl",
+        );
+    }
+
+    /// The mirror direction: the *retained* copy is the completed observation
+    /// and the live transcript carries only the partial. Completeness has to
+    /// be monotonic here too — a merge that keeps whichever copy is live, or
+    /// whichever file sorts first, discards the completed output that only the
+    /// retained copy still holds.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_merges_live_partial_that_sorts_later() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_COMPLETED,
+            CLAUDE_MERGE_PARTIAL,
+            "zzz-live.jsonl",
+        );
+    }
+
+    /// Mirror direction, opposite file order.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_merges_live_partial_that_sorts_earlier() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_COMPLETED,
+            CLAUDE_MERGE_PARTIAL,
+            "aaa-live.jsonl",
+        );
+    }
+
+    /// A cache entry written before retention provenance existed carries the
+    /// retained turns but no record of *which* rows they are. Reading such an
+    /// entry as if every row were live lets the stale, path-first copy of a
+    /// response outrank the completed live replay of the same response — and
+    /// the model attribution rides along with it, so the priced cost goes
+    /// stale too. Every existing user upgrades with a populated cache, so the
+    /// first warm scan after the upgrade has to rebuild that provenance.
+    ///
+    /// The strongest statement of "not stale" is that the warm scan agrees
+    /// with a cold scan of the same bytes, cost included.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_legacy_cache_entry_rebuilds_retention_provenance() {
+        use crate::RETENTION_PROVENANCE_REBUILDS;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let cold_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut env = redirect_cache_home(cache_home.path());
+
         {
-            let claude_dir = source_home.path().join(".claude/projects/myproject");
+            let claude_dir =
+                client_scan_root(source_home.path(), ClientId::Claude).join("myproject");
             std::fs::create_dir_all(&claude_dir).unwrap();
             let original = claude_dir.join("aaa-original.jsonl");
 
             let turn_one = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
-            let turn_two = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":60}}}"#;
-            let turn_three = r#"{"type":"assistant","timestamp":"2024-12-01T10:10:00.000Z","requestId":"req_003","message":{"id":"msg_003","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":70}}}"#;
+            // The partial was observed mid-stream, before the transcript
+            // recorded the model the turn actually billed against.
+            let turn_two_partial = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-haiku","usage":{"input_tokens":200,"output_tokens":60}}}"#;
+            let turn_two_complete = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":2000,"output_tokens":999}}}"#;
 
-            std::fs::write(&original, format!("{turn_one}\n{turn_two}\n{turn_three}\n")).unwrap();
-            let before = parse_all_messages_with_pricing_with_env_strategy(
-                source_home.path().to_str().unwrap(),
-                &["claude".to_string()],
-                None,
-                false,
-                &scanner::ScannerSettings::default(),
+            let mut litellm = HashMap::new();
+            litellm.insert(
+                "claude-3-5-sonnet".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.000_003),
+                    output_cost_per_token: Some(0.000_015),
+                    ..Default::default()
+                },
             );
-            assert_eq!(before.len(), 3);
+            litellm.insert(
+                "claude-3-5-haiku".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.000_000_8),
+                    output_cost_per_token: Some(0.000_004),
+                    ..Default::default()
+                },
+            );
+            let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
-            // The compaction keeps turn one. Turn two is replayed into the
-            // fork, so it exists both retained and live. Turn three exists
-            // only as a retained copy — it is what makes the count here
-            // differ from a run with no retention at all.
+            let scan = |pricing: &pricing::PricingService| {
+                let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["claude".to_string()],
+                    Some(pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                );
+                messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+                messages
+            };
+            let summary = |messages: &[UnifiedMessage]| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        (
+                            message.dedup_key.clone(),
+                            message.model_id.clone(),
+                            message.tokens.input,
+                            message.tokens.output,
+                            format!("{:.10}", message.cost),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            std::fs::write(&original, format!("{turn_one}\n{turn_two_partial}\n")).unwrap();
+            assert_eq!(scan(&pricing).len(), 2, "seed scan");
+
+            // The session forks: the original transcript keeps only turn one,
+            // and the fork replays turn two with the completed response.
             std::fs::write(&original, format!("{turn_one}\n")).unwrap();
-            std::fs::write(claude_dir.join("zzz-fork.jsonl"), format!("{turn_two}\n")).unwrap();
+            std::fs::write(
+                claude_dir.join("zzz-fork.jsonl"),
+                format!("{turn_two_complete}\n"),
+            )
+            .unwrap();
+            assert_eq!(scan(&pricing).len(), 2, "fork scan");
 
-            let after = parse_all_messages_with_pricing_with_env_strategy(
-                source_home.path().to_str().unwrap(),
-                &["claude".to_string()],
-                None,
-                false,
-                &scanner::ScannerSettings::default(),
-            );
-            assert_eq!(
-                after.len(),
-                3,
-                "retention must keep turn three and must not double count turn two"
-            );
-            let keys: HashSet<String> = after
-                .iter()
-                .filter_map(|message| message.dedup_key.clone())
+            // Rewrite every Claude entry in the pre-provenance shape a release
+            // before this one would have left on disk.
+            let mut cache = message_cache::SourceMessageCache::load();
+            let legacy: Vec<message_cache::CachedSourceEntry> = cache
+                .all_entries()
+                .into_iter()
+                .filter(message_cache::CachedSourceEntry::is_claude_namespace)
                 .collect();
-            assert_eq!(keys.len(), 3, "every surviving message must be distinct");
-            assert_eq!(
-                after.iter().map(|m| m.tokens.output).sum::<i64>(),
-                180,
-                "turn two contributes its 60 once, not twice"
+            assert_eq!(legacy.len(), 2, "both transcripts must be cached");
+            assert!(
+                legacy
+                    .iter()
+                    .any(|entry| !entry.fallback_timestamp_indices.is_empty()),
+                "the retaining entry must have recorded provenance before it is stripped"
             );
-            assert_eq!(after.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
+            for mut entry in legacy {
+                entry.fallback_timestamp_indices.clear();
+                cache.insert(entry);
+            }
+            cache.save_if_dirty();
+            drop(cache);
+
+            let rebuilds_before = RETENTION_PROVENANCE_REBUILDS.load(Relaxed);
+            let warm = scan(&pricing);
+            let rebuilds_after_first = RETENTION_PROVENANCE_REBUILDS.load(Relaxed);
+
+            point_cache_home(&mut env, cold_cache_home.path());
+            let cold = scan(&pricing);
+            point_cache_home(&mut env, cache_home.path());
+
+            assert_eq!(cold.len(), 2, "cold scan sees turn one and the replay");
+            assert_eq!(
+                summary(&warm),
+                summary(&cold),
+                "the first warm scan over a pre-provenance cache must agree with a cold parse"
+            );
+            let warm_two = warm
+                .iter()
+                .find(|message| message.dedup_key.as_deref() == Some("msg_002:req_002"))
+                .expect("the replayed turn must survive");
+            assert_eq!(warm_two.model_id, "claude-3-5-sonnet");
+            assert!(warm_two.cost > 0.0, "the replayed turn must be priced");
+
+            // The rebuild is an upgrade cost, not a per-scan one. Both entries
+            // are rebuilt on the first warm scan and none on the second.
+            assert_eq!(
+                rebuilds_after_first - rebuilds_before,
+                2,
+                "both pre-provenance entries are rebuilt on the first warm scan"
+            );
+            let warm_again = scan(&pricing);
+            assert_eq!(
+                RETENTION_PROVENANCE_REBUILDS.load(Relaxed),
+                rebuilds_after_first,
+                "a second warm scan must not re-parse the transcripts again"
+            );
+            assert_eq!(
+                summary(&warm_again),
+                summary(&cold),
+                "and it must keep reporting the rebuilt result"
+            );
+
+            let migrated = message_cache::SourceMessageCache::load();
+            let claude_entries: Vec<message_cache::CachedSourceEntry> = migrated
+                .all_entries()
+                .into_iter()
+                .filter(message_cache::CachedSourceEntry::is_claude_namespace)
+                .collect();
+            assert_eq!(claude_entries.len(), 2);
+            assert!(
+                claude_entries
+                    .iter()
+                    .all(|entry| !entry.needs_retention_provenance_migration()),
+                "the rebuild has to be persisted, or every scan pays for it again"
+            );
+            let retained: HashSet<String> = claude_entries
+                .iter()
+                .flat_map(|entry| entry.retained_message_keys())
+                .collect();
+            assert_eq!(
+                retained,
+                HashSet::from(["msg_002:req_002".to_string()]),
+                "only the turn the original transcript no longer carries is retained"
+            );
         }
     }
 
@@ -6605,8 +7530,7 @@ mod tests {
     fn test_parse_all_messages_keeps_conflicted_grok_scoped_model_change_unpriced_cold_and_warm() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let mut env = paths::test_env::EnvGuard::capture(&["HOME"]);
-        env.set("HOME", cache_home.path());
+        let _cache_env = redirect_cache_home(cache_home.path());
 
         {
             let logs_dir = source_home.path().join(".grok/logs");
@@ -7022,14 +7946,20 @@ mod tests {
                 Some("claude:tool_result:session:tool_result:toolu_1".to_string()),
             );
             let mut cache = message_cache::SourceMessageCache::default();
-            cache.insert(message_cache::CachedSourceEntry::new(
-                identity,
-                &transcript,
-                fingerprint,
-                vec![retained, poisoned],
-                Vec::new(),
-                None,
-            ));
+            // Seeded the way a scan writes it: `old:req_old` is history the
+            // live transcript no longer carries, and the entry records that.
+            // An entry without the provenance is a pre-upgrade one and gets
+            // rebuilt from the live bytes instead of served warm, which is a
+            // different path than this test is about.
+            cache.insert(
+                message_cache::CachedSourceEntry::new_with_retained_message_keys(
+                    identity,
+                    &transcript,
+                    fingerprint,
+                    vec![retained, poisoned],
+                    &HashSet::from(["old:req_old".to_string()]),
+                ),
+            );
             cache.save_if_dirty();
 
             let messages = parse_all_messages_with_pricing(
@@ -7990,7 +8920,7 @@ mod tests {
                     message_cache::CacheIdentity::for_client(ClientId::Codex),
                     &path,
                 )
-                .and_then(|entry| entry.codex_incremental.as_ref())
+                .and_then(|entry| entry.codex_incremental)
                 .is_some());
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -9054,6 +9984,363 @@ mod tests {
         );
     }
 
+    /// An unscoped model-part fallback proves only the model spelling, not
+    /// which provider served it. The estimate remains available locally, while
+    /// submission excludes it with the provider-specific evidence gap.
+    #[test]
+    fn submission_excludes_cross_provider_model_part_estimate() {
+        let openrouter = HashMap::from([(
+            "vendor/atlas-chat".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        )]);
+        let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "unknown",
+            "cross-provider-model-part",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let estimate = pricing
+            .lookup_with_source("atlas-chat", None)
+            .expect("the model-part estimate remains available for reporting");
+        assert_eq!(estimate.matched_key, "vendor/atlas-chat");
+        assert_eq!(
+            estimate.evidence.kind,
+            pricing::lookup::ResolutionKind::ModelPart
+        );
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("the unsafe estimate must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            UNVERIFIED_PROVIDER_IDENTITY_REASON
+        );
+    }
+
+    /// Prefix probing and provider-tag aliases are useful lookup fallbacks,
+    /// not proof that the recorded provider used the candidate's billing
+    /// endpoint. Both stay estimate-only at the submission boundary.
+    #[test]
+    fn submission_excludes_provider_prefix_and_cross_endpoint_alias_estimates() {
+        let litellm = HashMap::from([
+            (
+                "anthropic/atlas-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vertex_ai/vertex-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(6e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vertex_ai/accounts/anthropic/models/vertex-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(6e-6),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            ..Default::default()
+        };
+        let messages = vec![
+            UnifiedMessage::new(
+                "synthetic",
+                "atlas-chat",
+                "synthetic",
+                "provider-prefix",
+                1_736_510_400_000,
+                usage.clone(),
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "synthetic",
+                "vertex-chat",
+                "anthropic",
+                "cross-endpoint-alias",
+                1_736_510_400_001,
+                usage.clone(),
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "synthetic",
+                "accounts/anthropic/models/vertex-chat",
+                "anthropic",
+                "scoped-cross-endpoint-alias",
+                1_736_510_400_002,
+                usage,
+                0.0,
+            ),
+        ];
+
+        let graph = build_graph_from_messages(
+            messages,
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("unsafe estimates must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 3);
+        for exclusion in graph.unpriced_submission_exclusions {
+            assert_eq!(exclusion.reason, UNVERIFIED_PROVIDER_IDENTITY_REASON);
+        }
+
+        // Source-constrained OpenRouter uses a separate scoped wrapper. Keep a
+        // graph-level guard with only that source loaded so it cannot regress
+        // independently from the auto/LiteLLM path above.
+        let openrouter_pricing = pricing::PricingService::new(
+            HashMap::new(),
+            HashMap::from([(
+                "vertex_ai/accounts/anthropic/models/vertex-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(6e-6),
+                    ..Default::default()
+                },
+            )]),
+        );
+        let openrouter_graph = build_graph_from_messages(
+            vec![UnifiedMessage::new(
+                "synthetic",
+                "accounts/anthropic/models/vertex-chat",
+                "anthropic",
+                "openrouter-scoped-cross-endpoint-alias",
+                1_736_510_400_003,
+                TokenBreakdown {
+                    input: 100,
+                    output: 50,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            Some(&openrouter_pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("the OpenRouter alias estimate must be excluded");
+        assert!(openrouter_graph.contributions.is_empty());
+        assert_eq!(
+            openrouter_graph.unpriced_submission_exclusions[0].reason,
+            UNVERIFIED_PROVIDER_IDENTITY_REASON
+        );
+    }
+
+    /// A fuzzy lookup with one candidate is excluded because nothing proves
+    /// the priced key names the model that was used — not because candidates
+    /// disagreed. There is only one candidate, so it cannot disagree with
+    /// anything, and reporting a disagreement would send audit and submission
+    /// diagnostics after a conflict that does not exist.
+    #[test]
+    fn submission_excludes_single_candidate_fuzzy_price_for_unverified_identity() {
+        let litellm = HashMap::from([(
+            "vendor-a/atlas-chat-preview".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        )]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "unknown",
+            "single-candidate",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let resolution = pricing
+            .lookup_with_source_and_provider("atlas-chat", None, Some("unknown"))
+            .expect("the estimate still resolves for reporting");
+        assert_eq!(resolution.evidence.candidate_count, 1);
+        assert!(
+            resolution.evidence.price_consensus,
+            "a lone candidate agrees with itself"
+        );
+        assert!(!resolution.evidence.exact_model_identity);
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("an unverified estimate must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            UNVERIFIED_MODEL_IDENTITY_REASON
+        );
+    }
+
+    #[test]
+    fn submission_excludes_ambiguous_fuzzy_price_with_specific_reason() {
+        let litellm = HashMap::from([
+            (
+                "vendor-a/atlas-chat-preview".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-b/atlas-chat-beta".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(6e-6),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "unknown",
+            "ambiguous",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("an ambiguous estimate must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            AMBIGUOUS_MODEL_PRICING_REASON
+        );
+    }
+
+    #[test]
+    fn submission_reports_ambiguous_evidence_from_a_borrowed_bucket_rate() {
+        let disputed_cache_row = |cache_read: f64| pricing::ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            cache_read_input_token_cost: Some(cache_read),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            (
+                "azure_ai/atlas-chat".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-a/atlas-chat-preview".to_string(),
+                disputed_cache_row(5e-7),
+            ),
+            (
+                "vendor-b/atlas-chat-beta".to_string(),
+                disputed_cache_row(9e-7),
+            ),
+        ]);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let message = UnifiedMessage::new(
+            "synthetic",
+            "atlas-chat",
+            "azure",
+            "borrowed-ambiguous-cache-rate",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                cache_read: 20,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let resolution = pricing
+            .resolve_for_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            )
+            .expect("the estimate should remain visible");
+        assert_eq!(
+            resolution.evidence.submission_safety_gap(),
+            Some(pricing::lookup::SubmissionSafetyGap::PriceDisagreement)
+        );
+
+        let graph = build_graph_from_messages(
+            vec![message],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("ambiguous borrowed pricing must be excluded, not abort the graph");
+
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0].reason,
+            AMBIGUOUS_MODEL_PRICING_REASON
+        );
+    }
+
     #[test]
     fn submission_excludes_usage_with_an_unpriced_cache_write_bucket() {
         let mut litellm = HashMap::new();
@@ -10067,10 +11354,13 @@ mod tests {
         .unwrap();
 
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let messages = parse_all_messages_with_pricing(
+        let messages = parse_all_messages_with_pricing_with_cache_policy(
             temp_dir.path().to_str().unwrap(),
             &["synthetic".to_string()],
             Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
         );
 
         assert_eq!(messages.len(), 1);
@@ -10127,10 +11417,13 @@ mod tests {
         .unwrap();
 
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let messages = parse_all_messages_with_pricing(
+        let messages = parse_all_messages_with_pricing_with_cache_policy(
             temp_dir.path().to_str().unwrap(),
             &["synthetic".to_string()],
             Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
         );
 
         assert_eq!(
@@ -10207,12 +11500,13 @@ mod tests {
             },
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
-        let messages = parse_all_messages_with_pricing_with_env_strategy(
+        let messages = parse_all_messages_with_pricing_with_cache_policy(
             temp_dir.path().to_str().unwrap(),
             &["opencode".to_string()],
             Some(&pricing),
             false,
             &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
         );
 
         let embedded = messages
@@ -10255,12 +11549,13 @@ mod tests {
             },
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
-        let messages = parse_all_messages_with_pricing_with_env_strategy(
+        let messages = parse_all_messages_with_pricing_with_cache_policy(
             temp_dir.path().to_str().unwrap(),
             &["gjc".to_string()],
             Some(&pricing),
             false,
             &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
         );
 
         let explicit_zero = messages
@@ -10302,12 +11597,13 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_all_messages_with_pricing_with_env_strategy(
+        let messages = parse_all_messages_with_pricing_with_cache_policy(
             temp_dir.path().to_str().unwrap(),
             &["gjc".to_string()],
             None,
             false,
             &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
         );
 
         assert_eq!(messages.len(), 1);

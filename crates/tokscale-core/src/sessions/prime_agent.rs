@@ -305,12 +305,12 @@ fn usage_breakdown(usage: &PiUsage) -> TokenBreakdown {
 }
 
 fn add_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
-    total.input = total.input.saturating_add(usage.input);
-    total.output = total.output.saturating_add(usage.output);
-    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
-    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+    *total += usage;
 }
 
+// Prime accounting snapshots currently expose only these four cumulative
+// fields. This is an intentional field-wise max, not additive aggregation;
+// reasoning remains zero until the transcript schema provides it.
 fn maximize_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
     total.input = total.input.max(usage.input);
     total.output = total.output.max(usage.output);
@@ -318,6 +318,8 @@ fn maximize_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
     total.cache_write = total.cache_write.max(usage.cache_write);
 }
 
+// Residual accounting subtracts the same four cumulative snapshot fields.
+// This is deliberately not whole-breakdown addition.
 fn subtract_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
     total.input = total.input.saturating_sub(usage.input).max(0);
     total.output = total.output.saturating_sub(usage.output).max(0);

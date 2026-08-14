@@ -4,6 +4,13 @@ pub enum PathRoot {
     ReasonixHome,
     XdgData,
     Config,
+    /// The per-user application data directory, resolved via the `dirs` crate:
+    /// `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and
+    /// the XDG config home on Linux. When an explicit home is supplied — or,
+    /// on Windows, when the resolved home is not the Win32 profile — this root
+    /// is derived from that home using the matching platform convention; see
+    /// [`app_data_follows_home`].
+    AppData,
     EnvVar {
         var: &'static str,
         fallback_relative: &'static str,
@@ -19,6 +26,72 @@ fn join_home(home_dir: &str, relative: &str) -> String {
         path.push(component.as_os_str());
     }
     path.to_string_lossy().into_owned()
+}
+
+/// Whether an [`PathRoot::AppData`] scan must be derived from `home_dir`
+/// rather than from the platform's own app-data lookup, even under env roots.
+///
+/// Only Windows can disagree with `home_dir`. `dirs::config_dir()` is
+/// `SHGetKnownFolderPath(FOLDERID_RoamingAppData)` there — a Win32 known
+/// folder that no environment variable can redirect, not even `%APPDATA%`.
+/// macOS and Linux resolve it from `$HOME` / `$XDG_CONFIG_HOME`, so they
+/// already follow whatever home `paths::home_dir()` handed this call.
+///
+/// That asymmetry is the one `paths::home_dir` was written to close for
+/// `dirs::home_dir()` in #997: every home-rooted scan target obeys a
+/// redirected `HOME`, so an AppData-rooted client must not be the single
+/// target that keeps reading the machine's real profile. Cherry Studio is
+/// currently that client, and on Windows its transcripts were discovered
+/// under the live profile no matter where the caller pointed the home.
+///
+/// The known-folder answer still wins when `home_dir` *is* the Win32 profile,
+/// because folder redirection and roaming profiles can legitimately place
+/// `%APPDATA%` outside the profile directory; only a home that actually names
+/// somewhere else overrides it. A non-absolute `home_dir` (a POSIX-shaped
+/// `HOME` from Git Bash, a drive-relative `C:temp`) is never treated as a
+/// redirect, matching `paths::home_dir`, which rejects those same shapes
+/// because `Path` resolves them against ambient state.
+fn app_data_follows_home(home_dir: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let home = std::path::Path::new(home_dir);
+        if !home.is_absolute() {
+            return false;
+        }
+        match dirs::home_dir() {
+            Some(profile) => !same_windows_dir(home, &profile),
+            None => true,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = home_dir;
+        false
+    }
+}
+
+/// Whether two absolute Windows paths name the same directory.
+///
+/// A lexical comparison is not enough here, and getting it wrong is not
+/// symmetric: a home that merely *spells* the profile differently would be
+/// misread as a redirect, and on a machine whose `FOLDERID_RoamingAppData` is
+/// itself redirected that would move the scan to `<profile>\AppData\Roaming`
+/// and lose the user's transcripts. Windows offers at least three such
+/// spellings — different casing (`c:\users\me`), the 8.3 alias
+/// (`C:\Users\RUNNER~1`), and a junction or symlink pointing at the profile —
+/// and `Path`'s component comparison treats all three as different paths.
+///
+/// `canonicalize` resolves every one of them to the same `\\?\`-verbatim
+/// path. It touches the filesystem and fails on a path that does not exist, so
+/// fall back to the lexical comparison when either side cannot be
+/// canonicalized: a home that is not on disk cannot be the live profile under
+/// another spelling, and the fallback then correctly reports a redirect.
+#[cfg(target_os = "windows")]
+fn same_windows_dir(home: &std::path::Path, profile: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(home), std::fs::canonicalize(profile)) {
+        (Ok(home_real), Ok(profile_real)) => home_real == profile_real,
+        _ => home == profile,
+    }
 }
 
 impl PathRoot {
@@ -43,12 +116,12 @@ impl PathRoot {
                             return config_dir.join("reasonix").to_string_lossy().into_owned();
                         }
                     }
-                    return std::path::Path::new(home_dir)
+                    std::path::Path::new(home_dir)
                         .join("AppData")
                         .join("Roaming")
                         .join("reasonix")
                         .to_string_lossy()
-                        .into_owned();
+                        .into_owned()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -93,6 +166,29 @@ impl PathRoot {
                 }
 
                 join_home(home_dir, ".config/tokscale")
+            }
+            PathRoot::AppData => {
+                if use_env_roots && !app_data_follows_home(home_dir) {
+                    if let Some(dir) = dirs::config_dir() {
+                        return dir.to_string_lossy().into_owned();
+                    }
+                }
+                // Without env roots (tests, explicit `--home`) the other roots
+                // resolve under the given home; follow the same convention so
+                // an AppData-rooted client cannot leak the machine's real
+                // per-user data into a hermetic scan.
+                #[cfg(target_os = "windows")]
+                {
+                    join_home(home_dir, "AppData/Roaming")
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    join_home(home_dir, "Library/Application Support")
+                }
+                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+                {
+                    join_home(home_dir, ".config")
+                }
             }
             PathRoot::EnvVar {
                 var,
@@ -222,7 +318,7 @@ impl ClientDef {
 }
 
 macro_rules! define_clients {
-    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
+    ( $( $variant:ident = $index:expr => { id: $id:expr, display: $display:expr, logo: $logo:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(usize)]
         pub enum ClientId {
@@ -239,6 +335,14 @@ macro_rules! define_clients {
 
             pub fn as_str(&self) -> &'static str {
                 self.data().id
+            }
+
+            pub fn display_name(&self) -> &'static str {
+                CLIENT_DISPLAY_NAMES[*self as usize]
+            }
+
+            pub fn logo_url(&self) -> Option<&'static str> {
+                CLIENT_LOGO_URLS[*self as usize]
             }
 
             pub fn file_pattern(&self) -> &'static str {
@@ -279,6 +383,12 @@ macro_rules! define_clients {
             } ),+
         ];
 
+        // Display metadata is generated from the same exhaustive registry but
+        // kept out of public ClientDef so downstream struct literals remain
+        // source-compatible.
+        const CLIENT_DISPLAY_NAMES: [&str; ClientId::COUNT] = [ $( $display ),+ ];
+        const CLIENT_LOGO_URLS: [Option<&str>; ClientId::COUNT] = [ $( $logo ),+ ];
+
         const _: () = {
             let mut i = 0;
             $(
@@ -293,7 +403,8 @@ macro_rules! define_clients {
 define_clients!(
     OpenCode = 0 => {
         id: "opencode",
-        root: PathRoot::XdgData,
+        display: "OpenCode",
+        logo: Some("https://tokscale.ai/assets/logos/opencode.png"),root: PathRoot::XdgData,
         relative: "opencode/storage/message",
         pattern: "*.json",
         headless: false,
@@ -302,8 +413,12 @@ define_clients!(
     },
     Claude = 1 => {
         id: "claude",
-        root: PathRoot::Home,
-        relative: ".claude/projects",
+        display: "Claude Code",
+        logo: Some("https://tokscale.ai/assets/logos/claude.jpg"),root: PathRoot::EnvVar {
+            var: "CLAUDE_CONFIG_DIR",
+            fallback_relative: ".claude",
+        },
+        relative: "projects",
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
@@ -311,7 +426,8 @@ define_clients!(
     },
     Codex = 2 => {
         id: "codex",
-        root: PathRoot::EnvVar {
+        display: "Codex CLI",
+        logo: Some("https://tokscale.ai/assets/logos/openai.jpg"),root: PathRoot::EnvVar {
             var: "CODEX_HOME",
             fallback_relative: ".codex",
         },
@@ -323,7 +439,8 @@ define_clients!(
     },
     Cursor = 3 => {
         id: "cursor",
-        root: PathRoot::Home,
+        display: "Cursor IDE",
+        logo: Some("https://tokscale.ai/assets/logos/cursor.jpg"),root: PathRoot::Home,
         relative: ".config/tokscale/cursor-cache",
         pattern: "usage*.csv",
         headless: false,
@@ -332,7 +449,8 @@ define_clients!(
     },
     Gemini = 4 => {
         id: "gemini",
-        root: PathRoot::EnvVar {
+        display: "Gemini CLI",
+        logo: Some("https://tokscale.ai/assets/logos/gemini.png"),root: PathRoot::EnvVar {
             var: "GEMINI_CLI_HOME",
             fallback_relative: ".gemini",
         },
@@ -344,7 +462,8 @@ define_clients!(
     },
     Amp = 5 => {
         id: "amp",
-        root: PathRoot::XdgData,
+        display: "Amp",
+        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::XdgData,
         relative: "amp/threads",
         pattern: "T-*.json",
         headless: false,
@@ -353,7 +472,8 @@ define_clients!(
     },
     Droid = 6 => {
         id: "droid",
-        root: PathRoot::Home,
+        display: "Droid",
+        logo: Some("https://tokscale.ai/assets/logos/droid.png"),root: PathRoot::Home,
         relative: ".factory/sessions",
         pattern: "*.settings.json",
         headless: false,
@@ -362,7 +482,8 @@ define_clients!(
     },
     OpenClaw = 7 => {
         id: "openclaw",
-        root: PathRoot::Home,
+        display: "OpenClaw",
+        logo: Some("https://tokscale.ai/assets/logos/openclaw.png"),root: PathRoot::Home,
         relative: ".openclaw/agents",
         pattern: "*.jsonl*",
         headless: false,
@@ -371,7 +492,8 @@ define_clients!(
     },
     Pi = 8 => {
         id: "pi",
-        root: PathRoot::Home,
+        display: "Pi",
+        logo: Some("https://tokscale.ai/assets/logos/pi.png"),root: PathRoot::Home,
         relative: ".pi/agent/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -380,7 +502,8 @@ define_clients!(
     },
     Kimi = 9 => {
         id: "kimi",
-        root: PathRoot::Home,
+        display: "Kimi CLI",
+        logo: Some("https://tokscale.ai/assets/logos/kimi.png"),root: PathRoot::Home,
         relative: ".kimi/sessions",
         pattern: "wire.jsonl",
         headless: false,
@@ -389,7 +512,8 @@ define_clients!(
     },
     Qwen = 10 => {
         id: "qwen",
-        root: PathRoot::Home,
+        display: "Qwen CLI",
+        logo: Some("https://tokscale.ai/assets/logos/qwen.png"),root: PathRoot::Home,
         relative: ".qwen/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -398,7 +522,8 @@ define_clients!(
     },
     RooCode = 11 => {
         id: "roocode",
-        root: PathRoot::Home,
+        display: "Roo Code",
+        logo: Some("https://tokscale.ai/assets/logos/roocode.png"),root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -407,7 +532,8 @@ define_clients!(
     },
     KiloCode = 12 => {
         id: "kilocode",
-        root: PathRoot::Home,
+        display: "Kilo Code",
+        logo: Some("https://tokscale.ai/assets/logos/kilocode.png"),root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -416,7 +542,8 @@ define_clients!(
     },
     Mux = 13 => {
         id: "mux",
-        root: PathRoot::Home,
+        display: "Mux",
+        logo: Some("https://tokscale.ai/assets/logos/mux.png"),root: PathRoot::Home,
         relative: ".mux/sessions",
         pattern: "session-usage.json",
         headless: false,
@@ -425,7 +552,8 @@ define_clients!(
     },
     Kilo = 14 => {
         id: "kilo",
-        root: PathRoot::XdgData,
+        display: "Kilo CLI",
+        logo: Some("https://tokscale.ai/assets/logos/kilocode.png"),root: PathRoot::XdgData,
         relative: "kilo/kilo.db",
         pattern: "kilo.db",
         headless: false,
@@ -434,7 +562,8 @@ define_clients!(
     },
     Crush = 15 => {
         id: "crush",
-        root: PathRoot::XdgData,
+        display: "Crush",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"),root: PathRoot::XdgData,
         relative: "crush/projects.json",
         pattern: "projects.json",
         headless: false,
@@ -443,7 +572,8 @@ define_clients!(
     },
     Hermes = 16 => {
         id: "hermes",
-        root: PathRoot::EnvVar {
+        display: "Hermes Agent",
+        logo: Some("https://tokscale.ai/assets/logos/hermes.png"),root: PathRoot::EnvVar {
             var: "HERMES_HOME",
             fallback_relative: ".hermes",
         },
@@ -455,7 +585,8 @@ define_clients!(
     },
     Copilot = 17 => {
         id: "copilot",
-        root: PathRoot::Home,
+        display: "Copilot CLI",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg"),root: PathRoot::Home,
         relative: ".copilot/otel",
         pattern: "*.jsonl",
         headless: false,
@@ -464,7 +595,8 @@ define_clients!(
     },
     Goose = 18 => {
         id: "goose",
-        root: PathRoot::XdgData,
+        display: "Goose",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png"),root: PathRoot::XdgData,
         relative: "goose/sessions/sessions.db",
         pattern: "sessions.db",
         headless: false,
@@ -473,7 +605,8 @@ define_clients!(
     },
     Codebuff = 19 => {
         id: "codebuff",
-        root: PathRoot::EnvVar {
+        display: "Codebuff",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png"),root: PathRoot::EnvVar {
             var: "CODEBUFF_DATA_DIR",
             fallback_relative: ".config/manicode",
         },
@@ -485,7 +618,8 @@ define_clients!(
     },
     Antigravity = 20 => {
         id: "antigravity",
-        root: PathRoot::Config,
+        display: "Antigravity",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"),root: PathRoot::Config,
         relative: "antigravity-cache/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -494,7 +628,8 @@ define_clients!(
     },
     Zed = 21 => {
         id: "zed",
-        root: PathRoot::XdgData,
+        display: "Zed Agent",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"),root: PathRoot::XdgData,
         relative: "zed/threads/threads.db",
         pattern: "threads.db",
         headless: false,
@@ -503,7 +638,8 @@ define_clients!(
     },
     Kiro = 22 => {
         id: "kiro",
-        root: PathRoot::Home,
+        display: "Kiro",
+        logo: None,root: PathRoot::Home,
         relative: ".kiro/sessions/cli",
         pattern: "*.json",
         headless: false,
@@ -512,7 +648,8 @@ define_clients!(
     },
     Trae = 23 => {
         id: "trae",
-        root: PathRoot::Config,
+        display: "Trae",
+        logo: None,root: PathRoot::Config,
         relative: "trae-cache/sessions",
         pattern: "*.json",
         headless: false,
@@ -521,7 +658,8 @@ define_clients!(
     },
     Warp = 24 => {
         id: "warp",
-        root: PathRoot::Config,
+        display: "Warp",
+        logo: None,root: PathRoot::Config,
         relative: "warp-cache",
         pattern: "usage*.json",
         headless: false,
@@ -530,7 +668,8 @@ define_clients!(
     },
     Cline = 25 => {
         id: "cline",
-        root: PathRoot::Home,
+        display: "Cline",
+        logo: None,root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
         pattern: "ui_messages.json",
         headless: false,
@@ -539,7 +678,8 @@ define_clients!(
     },
     Gjc = 26 => {
         id: "gjc",
-        root: PathRoot::EnvVar {
+        display: "Gajae-Code",
+        logo: None,root: PathRoot::EnvVar {
             var: "GJC_CODING_AGENT_DIR",
             fallback_relative: ".gjc/agent",
         },
@@ -551,7 +691,8 @@ define_clients!(
     },
     Grok = 27 => {
         id: "grok",
-        root: PathRoot::EnvVar {
+        display: "Grok Build",
+        logo: None,root: PathRoot::EnvVar {
             var: "GROK_HOME",
             fallback_relative: ".grok",
         },
@@ -563,7 +704,8 @@ define_clients!(
     },
     Jcode = 28 => {
         id: "jcode",
-        root: PathRoot::EnvVar {
+        display: "Jcode",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),root: PathRoot::EnvVar {
             var: "JCODE_HOME",
             fallback_relative: ".jcode",
         },
@@ -575,7 +717,8 @@ define_clients!(
     },
     CommandCode = 29 => {
         id: "commandcode",
-        root: PathRoot::Home,
+        display: "Command Code",
+        logo: None,root: PathRoot::Home,
         relative: ".commandcode/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -584,7 +727,8 @@ define_clients!(
     },
     MiMoCode = 30 => {
         id: "micode",
-        root: PathRoot::XdgData,
+        display: "MiMo Code",
+        logo: None,root: PathRoot::XdgData,
         relative: "mimocode",
         pattern: "*.db",
         headless: false,
@@ -599,7 +743,8 @@ define_clients!(
     // `GEMINI_CLI_HOME` so a relocated Gemini home is picked up.
     AntigravityCli = 31 => {
         id: "antigravity-cli",
-        root: PathRoot::EnvVar {
+        display: "Antigravity CLI",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"),root: PathRoot::EnvVar {
             var: "GEMINI_CLI_HOME",
             fallback_relative: ".gemini",
         },
@@ -611,7 +756,8 @@ define_clients!(
     },
     Junie = 32 => {
         id: "junie",
-        root: PathRoot::Home,
+        display: "Junie",
+        logo: Some("https://github.com/JetBrains.png"),root: PathRoot::Home,
         relative: ".junie/sessions",
         pattern: "events.jsonl",
         headless: false,
@@ -620,7 +766,8 @@ define_clients!(
     },
     Zcode = 33 => {
         id: "zcode",
-        root: PathRoot::Home,
+        display: "ZCode",
+        logo: None,root: PathRoot::Home,
         relative: ".zcode/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -629,7 +776,8 @@ define_clients!(
     },
     OpenCodeReview = 34 => {
         id: "opencodereview",
-        root: PathRoot::Home,
+        display: "OpenCodeReview",
+        logo: None,root: PathRoot::Home,
         relative: ".opencodereview/sessions",
         pattern: "*.jsonl",
         headless: false,
@@ -638,7 +786,8 @@ define_clients!(
     },
     CodeBuddy = 35 => {
         id: "codebuddy",
-        root: PathRoot::Home,
+        display: "CodeBuddy",
+        logo: None,root: PathRoot::Home,
         relative: ".codebuddy/projects",
         pattern: "*.jsonl",
         headless: false,
@@ -647,7 +796,8 @@ define_clients!(
     },
     WorkBuddy = 36 => {
         id: "workbuddy",
-        root: PathRoot::Home,
+        display: "WorkBuddy",
+        logo: None,root: PathRoot::Home,
         relative: ".workbuddy",
         pattern: "workbuddy.db",
         headless: false,
@@ -656,7 +806,8 @@ define_clients!(
     },
     DevinCli = 37 => {
         id: "devin-cli",
-        root: PathRoot::XdgData,
+        display: "Devin CLI",
+        logo: None,root: PathRoot::XdgData,
         relative: "devin/cli/sessions.db",
         pattern: "sessions.db",
         headless: false,
@@ -665,7 +816,8 @@ define_clients!(
     },
     DevinDesktop = 38 => {
         id: "devin-desktop",
-        root: PathRoot::Home,
+        display: "Devin Desktop",
+        logo: None,root: PathRoot::Home,
         relative: "Library/Application Support/Devin/User/acp-events",
         pattern: "*.ndjson",
         headless: false,
@@ -678,7 +830,8 @@ define_clients!(
     // mirroring the `gjc` layout.
     Senpi = 39 => {
         id: "senpi",
-        root: PathRoot::EnvVar {
+        display: "Senpi (OmO Native)",
+        logo: None,root: PathRoot::EnvVar {
             var: "SENPI_CODING_AGENT_DIR",
             fallback_relative: ".senpi/agent",
         },
@@ -693,7 +846,8 @@ define_clients!(
     // exchange.response_nodes.
     Augment = 40 => {
         id: "augment",
-        root: PathRoot::Home,
+        display: "Augment Code",
+        logo: Some("https://github.com/augmentcode.png"),root: PathRoot::Home,
         relative: ".augment/sessions",
         pattern: "*.json",
         headless: false,
@@ -704,7 +858,8 @@ define_clients!(
     // The launcher exposes KIMCHI_CODING_AGENT_DIR for relocated installs.
     Kimchi = 41 => {
         id: "kimchi",
-        root: PathRoot::EnvVar {
+        display: "Kimchi",
+        logo: Some("https://github.com/getkimchi.png"),root: PathRoot::EnvVar {
             var: "KIMCHI_CODING_AGENT_DIR",
             fallback_relative: ".config/kimchi/harness",
         },
@@ -719,7 +874,8 @@ define_clients!(
     // excluded: it lacks exact token counters and overlaps these records.
     Reasonix = 42 => {
         id: "reasonix",
-        root: PathRoot::ReasonixHome,
+        display: "Reasonix",
+        logo: None,root: PathRoot::ReasonixHome,
         relative: "stats",
         pattern: "*.jsonl",
         headless: false,
@@ -731,7 +887,8 @@ define_clients!(
     // the sibling `session-artifacts` tree by the scanner.
     PrimeAgent = 43 => {
         id: "prime-agent",
-        root: PathRoot::EnvVar {
+        display: "Prime Agent",
+        logo: Some("https://github.com/PrimeIntellect-ai.png"),root: PathRoot::EnvVar {
             var: "PRIME_AGENT_CODING_AGENT_DIR",
             fallback_relative: ".prime/agent",
         },
@@ -748,12 +905,30 @@ define_clients!(
     // location (see `sessions::freebuff`).
     Freebuff = 44 => {
         id: "freebuff",
-        root: PathRoot::EnvVar {
+        display: "Freebuff",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-freebuff.png"),root: PathRoot::EnvVar {
             var: "FREEBUFF_DATA_DIR",
             fallback_relative: ".config/manicode",
         },
         relative: "projects",
         pattern: "chat-messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    // Cherry Studio (Electron desktop client) writes standard Claude Code
+    // transcripts under its per-user app-data directory. V2 uses
+    // `%APPDATA%\CherryStudio\Data\Agents\.claude\projects` on Windows;
+    // V1 uses the root below. The transcript format is identical to Claude
+    // Code's, but parsing uses the dedicated `sessions::cherrystudio` parser,
+    // which dedupes replayed records by stable request/message IDs.
+    CherryStudio = 45 => {
+        id: "cherrystudio",
+        display: "Cherry Studio",
+        logo: None,
+        root: PathRoot::AppData,
+        relative: "CherryStudio/.claude/projects",
+        pattern: "*.jsonl",
         headless: false,
         parse_local: true,
         submit_default: true
@@ -839,8 +1014,40 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_client_has_human_readable_display_metadata() {
+        for client in ClientId::iter() {
+            let display_name = client.display_name();
+            assert!(
+                !display_name.trim().is_empty(),
+                "{} has no display name",
+                client.as_str()
+            );
+            assert_ne!(
+                display_name,
+                client.as_str(),
+                "{} falls back to its raw lowercase id",
+                client.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_client_brand_labels_and_logos_are_registered() {
+        assert_eq!(ClientId::Claude.display_name(), "Claude Code");
+        assert_eq!(ClientId::Codex.display_name(), "Codex CLI");
+        assert_eq!(ClientId::Cursor.display_name(), "Cursor IDE");
+        assert_eq!(ClientId::KiloCode.display_name(), "Kilo Code");
+        assert_eq!(ClientId::Kilo.display_name(), "Kilo CLI");
+        assert_eq!(ClientId::Senpi.display_name(), "Senpi (OmO Native)");
+        assert_eq!(
+            ClientId::OpenCode.logo_url(),
+            Some("https://tokscale.ai/assets/logos/opencode.png")
+        );
+    }
+
+    #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 45);
+        assert_eq!(ClientId::COUNT, 46);
     }
 
     #[test]
@@ -899,6 +1106,144 @@ mod tests {
         assert!(
             !joined.contains('/'),
             "mixed separators in resolved path: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn test_explicit_home_app_data_root_uses_platform_layout() {
+        let home = absolute_test_path("explicit-home");
+        let expected = {
+            #[cfg(target_os = "windows")]
+            {
+                home.join("AppData").join("Roaming")
+            }
+            #[cfg(target_os = "macos")]
+            {
+                home.join("Library").join("Application Support")
+            }
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            {
+                home.join(".config")
+            }
+        };
+
+        assert_eq!(
+            PathRoot::AppData.resolve_with_env_strategy(home.to_str().unwrap(), false),
+            expected.to_string_lossy()
+        );
+    }
+
+    /// Under env roots the AppData root must still land under the home it was
+    /// handed once that home is not the machine profile.
+    ///
+    /// `dirs::config_dir()` on Windows is the `FOLDERID_RoamingAppData` known
+    /// folder, which ignores every environment variable, so this root was the
+    /// one scan target that kept reading the live profile after
+    /// `paths::home_dir()` had been redirected. Cherry Studio — the only
+    /// AppData-rooted client — was therefore never discovered under a
+    /// redirected home on Windows, while macOS and Linux resolved it correctly
+    /// because their `dirs::config_dir()` is `$HOME`/`$XDG_CONFIG_HOME`-derived
+    /// and so already follows the redirect.
+    ///
+    /// The assertions read the known-folder API but no environment variable, so
+    /// this test does not need to serialize against the `EnvGuard` tests above.
+    #[test]
+    fn test_env_roots_app_data_follows_a_redirected_home() {
+        let home = absolute_test_path("redirected-home");
+
+        assert_eq!(
+            app_data_follows_home(home.to_str().unwrap()),
+            cfg!(target_os = "windows"),
+            "only Windows has an app-data lookup that a redirected home cannot reach"
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            PathRoot::AppData.resolve_with_env_strategy(home.to_str().unwrap(), true),
+            native_join(&home, "AppData/Roaming"),
+            "a redirected Windows home must win over the roaming-app-data known folder"
+        );
+    }
+
+    /// The known-folder answer stays authoritative when the home *is* the real
+    /// profile: folder redirection and roaming profiles can legitimately place
+    /// `%APPDATA%` outside the profile directory, and deriving it from the home
+    /// would silently relocate those users' scans.
+    #[test]
+    fn test_env_roots_app_data_keeps_the_platform_lookup_for_the_real_profile() {
+        let Some(profile) = dirs::home_dir() else {
+            return;
+        };
+
+        assert!(
+            !app_data_follows_home(&profile.to_string_lossy()),
+            "the machine profile is not a redirect and must not override the platform lookup"
+        );
+    }
+
+    /// A home that only *spells* the profile differently is not a redirect.
+    ///
+    /// Windows reaches the same directory through different casing, through the
+    /// 8.3 alias (`C:\Users\RUNNER~1`), and through junctions, and `Path`
+    /// compares all of those as distinct. Reading one as a redirect would pull
+    /// the app-data root off the known folder, and on a machine whose
+    /// `FOLDERID_RoamingAppData` is itself redirected that loses the user's
+    /// transcripts. Both assertions are skipped rather than inverted if
+    /// `canonicalize` cannot resolve the spelling, since a case-sensitive
+    /// volume would legitimately make them different directories.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_env_roots_app_data_sees_through_windows_spellings_of_the_profile() {
+        let Some(profile) = dirs::home_dir() else {
+            return;
+        };
+        let Ok(canonical_profile) = std::fs::canonicalize(&profile) else {
+            return;
+        };
+
+        assert!(
+            !app_data_follows_home(&canonical_profile.to_string_lossy()),
+            "the verbatim spelling of the profile is the profile, not a redirect"
+        );
+
+        let shouted = profile.to_string_lossy().to_uppercase();
+        if std::fs::canonicalize(&shouted).is_ok_and(|resolved| resolved == canonical_profile) {
+            assert!(
+                !app_data_follows_home(&shouted),
+                "a case variant of the profile must not read as a redirect"
+            );
+        }
+    }
+
+    /// A POSIX-shaped `HOME` (Git Bash, MSYS2, Cygwin) is not a redirect.
+    /// `paths::home_dir` rejects those because `Path` reads the leading `/` as
+    /// "root of the current drive"; the AppData root must agree rather than
+    /// relocating every Unix-shell user's scan to `C:\home\user\AppData`. The
+    /// same holds for a drive-relative `C:temp`, which Windows resolves against
+    /// the per-drive current directory.
+    #[test]
+    fn test_env_roots_app_data_ignores_non_absolute_windows_homes() {
+        for home in ["/home/user", "C:temp", ""] {
+            assert!(
+                !app_data_follows_home(home),
+                "{home:?} is not a usable native home and must not override the platform lookup"
+            );
+        }
+    }
+
+    /// The end-to-end claim the Windows CLI regression turns on: Cherry Studio
+    /// is the only AppData-rooted client, and under env roots its transcript
+    /// root must sit under a redirected home.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_cherrystudio_transcript_root_follows_a_redirected_home_under_env_roots() {
+        let home = absolute_test_path("cherry-home");
+
+        assert_eq!(
+            ClientId::CherryStudio
+                .data()
+                .resolve_path_with_env_strategy(home.to_str().unwrap(), true),
+            native_join(&home, "AppData/Roaming/CherryStudio/.claude/projects")
         );
     }
 
@@ -1507,6 +1852,41 @@ mod tests {
                 var: "CODEX_HOME",
                 fallback_relative: ".codex",
             }
+        );
+    }
+
+    #[test]
+    fn test_claude_root_uses_claude_config_dir_env_var() {
+        assert_eq!(
+            ClientId::Claude.data().root,
+            PathRoot::EnvVar {
+                var: "CLAUDE_CONFIG_DIR",
+                fallback_relative: ".claude",
+            }
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_defaults_to_home_dot_claude_without_env_override() {
+        let mut env = EnvGuard::capture(&["CLAUDE_CONFIG_DIR"]);
+        env.remove("CLAUDE_CONFIG_DIR");
+
+        assert_eq!(
+            ClientId::Claude.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".claude/projects")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_honors_claude_config_dir_env_override() {
+        let mut env = EnvGuard::capture(&["CLAUDE_CONFIG_DIR"]);
+        env.set("CLAUDE_CONFIG_DIR", "/custom/claude");
+
+        assert_eq!(
+            ClientId::Claude.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/custom/claude"), "projects")
         );
     }
 

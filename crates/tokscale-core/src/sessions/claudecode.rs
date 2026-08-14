@@ -1,6 +1,8 @@
 //! Claude Code session parser
 //!
-//! Parses JSONL files from ~/.claude/projects/
+//! Parses JSONL files from `<claude_config_dir>/projects/`, where
+//! `claude_config_dir` defaults to `~/.claude` but honors `CLAUDE_CONFIG_DIR`
+//! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
@@ -911,6 +913,54 @@ fn merge_claude_duplicate(
                 existing.duration_ms = Some(existing.duration_ms.unwrap_or(0).max(new_duration));
             }
         }
+    }
+}
+
+/// Merge two cached/live copies of the same globally-stable Claude response.
+///
+/// A scan can observe one transcript mid-stream and later find the completed
+/// replay in a fork. The parser already applies per-field maxima to streaming
+/// duplicates inside one file; cross-file/cache dedup must preserve the same
+/// monotonic completeness contract instead of keeping whichever path sorted
+/// first.
+pub(crate) fn merge_message_completeness(
+    existing: &mut UnifiedMessage,
+    candidate: &UnifiedMessage,
+) {
+    existing.tokens.input = existing.tokens.input.max(candidate.tokens.input);
+    existing.tokens.output = existing.tokens.output.max(candidate.tokens.output);
+    existing.tokens.cache_read = existing.tokens.cache_read.max(candidate.tokens.cache_read);
+    existing.tokens.cache_write = existing
+        .tokens
+        .cache_write
+        .max(candidate.tokens.cache_write);
+    existing.tokens.reasoning = existing.tokens.reasoning.max(candidate.tokens.reasoning);
+    existing.duration_ms = match (existing.duration_ms, candidate.duration_ms) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (None, right) => right,
+        (left, None) => left,
+    };
+    existing.message_count = existing.message_count.max(candidate.message_count);
+    existing.is_turn_start |= candidate.is_turn_start;
+    existing.model_attribution_conflicted |= candidate.model_attribution_conflicted;
+
+    if existing.workspace_key.is_none() {
+        existing.workspace_key.clone_from(&candidate.workspace_key);
+    }
+    if existing.workspace_label.is_none() {
+        existing
+            .workspace_label
+            .clone_from(&candidate.workspace_label);
+    }
+    if existing.session_title.is_none() {
+        existing.session_title.clone_from(&candidate.session_title);
+    }
+    if existing.agent.is_none() {
+        existing.agent.clone_from(&candidate.agent);
+    }
+    if candidate.has_authoritative_cost() && !existing.has_authoritative_cost() {
+        existing.cost = candidate.cost;
+        existing.mark_provider_reported_cost();
     }
 }
 
