@@ -1617,6 +1617,8 @@ mod tests {
         assert_eq!(clients[42], ClientId::Reasonix);
         assert_eq!(clients[43], ClientId::PrimeAgent);
         assert_eq!(clients[44], ClientId::Freebuff);
+        assert_eq!(clients[45], ClientId::CherryStudio);
+        assert_eq!(clients[46], ClientId::Dsh);
     }
 
     #[test]
@@ -1668,6 +1670,7 @@ mod tests {
             "Prime Agent",
             "Freebuff",
             "Cherry Studio",
+            "DeepSeek Harness",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);

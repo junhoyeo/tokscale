@@ -500,6 +500,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                             .unwrap_or(false)
                 }
                 "sessions.json" => file_name == "sessions.json",
+                // DeepSeek Harness: one zstd-compressed JSONL transcript per
+                // session, always named `session.jsonl.zstd` at any depth under
+                // `~/.dsh/sessions/`.
+                "session.jsonl.zstd" => file_name == "session.jsonl.zstd",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "unified.jsonl" => file_name == "unified.jsonl",
@@ -2582,6 +2586,33 @@ mod tests {
                 .unwrap_or_default()
                 == "ui_messages.json"
         }));
+    }
+
+    #[test]
+    fn test_scan_directory_dsh_session_jsonl_zstd() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        // DeepSeek Harness layout: sessions/<encoded-cwd>/<session-id>/session.jsonl.zstd
+        let session_dir = path
+            .join("sessions")
+            .join("--E-Code-proj--")
+            .join("session-abc-123");
+        fs::create_dir_all(&session_dir).unwrap();
+        File::create(session_dir.join("session.jsonl.zstd")).unwrap();
+
+        // Non-matching siblings must be excluded: other zstd files, plain
+        // jsonl transcripts, and any file outside a session dir.
+        File::create(path.join("sessions").join("other.jsonl.zstd")).unwrap();
+        File::create(session_dir.join("session.jsonl")).unwrap();
+        File::create(path.join("sessions").join("unrelated.txt")).unwrap();
+
+        let files = scan_directory(path.to_str().unwrap(), "session.jsonl.zstd");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|n| n.to_str()),
+            Some("session.jsonl.zstd")
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'P' },
     ClientUi { hotkey: 'F' },
     ClientUi { hotkey: 'G' },
+    ClientUi { hotkey: 't' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
@@ -62,6 +63,8 @@ pub fn display_name(client: ClientId) -> &'static str {
 pub fn compact_display_name(client: ClientId) -> &'static str {
     match client {
         ClientId::Senpi => "Senpi",
+        // "DeepSeek Harness" (16 cells) overflows the 15-cell Client column.
+        ClientId::Dsh => "DeepSeek",
         _ => display_name(client),
     }
 }

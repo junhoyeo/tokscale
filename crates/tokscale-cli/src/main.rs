@@ -1067,6 +1067,7 @@ pub enum ClientFilter {
     PrimeAgent,
     Freebuff,
     CherryStudio,
+    Dsh,
     Synthetic,
 }
 
@@ -1123,6 +1124,7 @@ impl ClientFilter {
             Self::PrimeAgent => "prime-agent",
             Self::Freebuff => "freebuff",
             Self::CherryStudio => "cherrystudio",
+            Self::Dsh => "dsh",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1182,6 +1184,7 @@ impl ClientFilter {
             Self::PrimeAgent => Some(ClientId::PrimeAgent),
             Self::Freebuff => Some(ClientId::Freebuff),
             Self::CherryStudio => Some(ClientId::CherryStudio),
+            Self::Dsh => Some(ClientId::Dsh),
             Self::Synthetic => None,
         }
     }
@@ -1237,6 +1240,7 @@ impl ClientFilter {
             ClientId::PrimeAgent => Self::PrimeAgent,
             ClientId::Freebuff => Self::Freebuff,
             ClientId::CherryStudio => Self::CherryStudio,
+            ClientId::Dsh => Self::Dsh,
         }
     }
 

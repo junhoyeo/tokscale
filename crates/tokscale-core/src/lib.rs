@@ -2264,6 +2264,19 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         }
     }
 
+    // DeepSeek Harness (DSH) zstd JSONL transcripts. Every `assistant/message`
+    // carries authoritative usage but never a cost, so pricing is the only cost
+    // source — the generic source cache (which reprices unconditionally) is
+    // safe here, same as opencodereview.
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Dsh,
+        sessions::dsh::parse_dsh_file,
+    );
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result
@@ -4359,6 +4372,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
+
+    // DeepSeek Harness zstd JSONL transcripts.
+    let dsh_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Dsh)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::dsh::parse_dsh_file(path)
+                .into_iter()
+                .map(|message| unified_to_parsed(&message))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let dsh_count = summed_parsed_message_count(&dsh_msgs);
+    counts.set(ClientId::Dsh, dsh_count);
+    messages.extend(dsh_msgs);
 
     let opencodereview_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::OpenCodeReview)

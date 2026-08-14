@@ -864,6 +864,26 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // DeepSeek Harness (DSH) writes one zstd-compressed JSONL transcript per
+    // session under `<DSH_HOME>/sessions/<encoded-cwd>/<session-id>/session.jsonl.zstd`
+    // (`DSH_HOME` defaults to `~/.dsh`). Each `assistant/message` event carries
+    // authoritative per-call usage (`inputTokens`/`outputTokens`/`cacheReadTokens`)
+    // plus the model/provider it was served by; the `session` event supplies the
+    // workspace (`cwd`) and session id. See `sessions::dsh`.
+    Dsh = 46 => {
+        id: "dsh",
+        display: "DeepSeek Harness",
+        logo: None,
+        root: PathRoot::EnvVar {
+            var: "DSH_HOME",
+            fallback_relative: ".dsh",
+        },
+        relative: "sessions",
+        pattern: "session.jsonl.zstd",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -979,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 46);
+        assert_eq!(ClientId::COUNT, 47);
     }
 
     #[test]
