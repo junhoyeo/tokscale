@@ -13,6 +13,21 @@
 //! even though a competing dashboard may still hold the aggregates. This
 //! importer recovers that history into tokscale's format.
 //!
+//! ccusage shapes, and what the importer assumes about each:
+//!
+//! - plain `ccusage daily --json` — `date`, no `metadata`, no reasoning. Every
+//!   model is attributed by family, since nothing names the agents.
+//! - the unified/agent-aware report — `period`, `agent: "all"`, and
+//!   `metadata.agents` naming the participants. Reasoning, when present, is
+//!   nested under `metadata`, not beside the other token fields.
+//! - `ccusage-codex` — spells cost `costUSD` and puts `reasoningOutputTokens`
+//!   beside the token fields (see ccusage#831).
+//!
+//! Across all three, `totalTokens` is `input + output + cacheCreation +
+//! cacheRead`; reasoning is never a term of its own in it. See
+//! [`ccusage_token_breakdown`] for why that matters when mapping into
+//! tokscale's additive buckets.
+//!
 //! IMPORTANT — upload boundary: importing only *normalizes* data to a file. It
 //! does not submit anything to the leaderboard. Backfilled aggregates are not
 //! independently verifiable the way locally-scanned sessions are, so uploading
@@ -142,7 +157,12 @@ struct ClawdboardModelBreakdown {
 fn normalize_client_id(source: &str) -> String {
     match source.trim().to_lowercase().as_str() {
         "claude-code" | "claude_code" | "claudecode" => "claude".to_string(),
-        "codex-cli" => "codex".to_string(),
+        "codex-cli" | "codex_cli" | "ccusage-codex" => "codex".to_string(),
+        // `model_family` answers in canonical client ids, and `resolve_client`
+        // matches an agent to a model by comparing the two as strings. A CLI
+        // suffix that survives normalization therefore never matches its own
+        // models and drops the whole agent's usage into `unknown`.
+        "gemini-cli" | "gemini_cli" => "gemini".to_string(),
         other => other.to_string(),
     }
 }
@@ -354,10 +374,20 @@ struct CcusageDaily {
     cache_read_tokens: i64,
     #[serde(default)]
     reasoning_output_tokens: i64,
+    /// `input + output + cacheCreation + cacheRead`, as ccusage computes it.
+    /// Reasoning is never a term in this sum — see [`ccusage_token_breakdown`].
+    /// Used only as a cross-check; the buckets remain the source of truth.
+    #[serde(default)]
+    total_tokens: Option<i64>,
     /// Numeric in ccusage, but dashboards that re-serialize cc.json sometimes
     /// stringify it. [`CostValue`] accepts both.
     #[serde(default)]
     total_cost: Option<CostValue>,
+    /// `ccusage-codex` spells the same field `costUSD` (see ccusage#831).
+    /// Spelled out explicitly: `rename_all = "camelCase"` would derive
+    /// `costUsd`, which matches nothing.
+    #[serde(default, rename = "costUSD", alias = "costUsd")]
+    cost_usd: Option<CostValue>,
     #[serde(default)]
     models_used: Vec<String>,
     #[serde(default)]
@@ -366,10 +396,51 @@ struct CcusageDaily {
     metadata: Option<CcusageMetadata>,
 }
 
+impl CcusageDaily {
+    /// `totalCost`, or `ccusage-codex`'s `costUSD` spelling of it.
+    fn declared_cost(&self) -> Option<&CostValue> {
+        self.total_cost.as_ref().or(self.cost_usd.as_ref())
+    }
+
+    /// Reasoning tokens for the row as a whole.
+    ///
+    /// The unified report nests this under `metadata`; `ccusage-codex` puts it
+    /// beside the other token fields. Accept both — reading only the flat
+    /// spelling silently scores every real unified export as zero-reasoning.
+    fn row_reasoning_tokens(&self) -> i64 {
+        let nested = self
+            .metadata
+            .as_ref()
+            .map(|m| m.reasoning_output_tokens)
+            .unwrap_or(0);
+        self.reasoning_output_tokens.max(nested)
+    }
+
+    /// Whether the row carries no usage at all. ccusage emits a row for every
+    /// day in the range, including days with nothing on them.
+    fn is_empty_day(&self) -> bool {
+        self.model_breakdowns.is_empty()
+            && self.models_used.is_empty()
+            && self.input_tokens <= 0
+            && self.output_tokens <= 0
+            && self.cache_creation_tokens <= 0
+            && self.cache_read_tokens <= 0
+            && self.row_reasoning_tokens() <= 0
+            && self
+                .declared_cost()
+                .map(|c| !c.is_positive())
+                .unwrap_or(true)
+    }
+}
+
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CcusageMetadata {
     #[serde(default)]
     agents: Vec<String>,
+    /// Where the unified report actually records reasoning output.
+    #[serde(default)]
+    reasoning_output_tokens: i64,
 }
 
 #[derive(serde::Deserialize)]
@@ -405,6 +476,44 @@ impl CostValue {
             CostValue::Text(s) => parse_cost_string(Some(s), unparseable_count),
         }
     }
+
+    /// Whether this cost is a real charge, for emptiness checks only. Parse
+    /// failures are deliberately not counted here — a row rejected as empty is
+    /// never reported on, so counting it would inflate the warning.
+    fn is_positive(&self) -> bool {
+        let mut ignored = 0usize;
+        self.resolve(&mut ignored) > 0.0
+    }
+}
+
+/// Build a tokscale [`TokenBreakdown`] from one ccusage row or model breakdown.
+///
+/// ccusage's own `totalTokens` is `input + output + cacheCreation + cacheRead`;
+/// reasoning is never a term in it (verified against real exports and against
+/// ccusage's documented examples). tokscale's buckets are additive and
+/// `TokenBreakdown::total()` sums `reasoning` as a fifth term, so mapping
+/// `reasoningOutputTokens` straight through reports a day *larger* than the
+/// file it came from. Reasoning is an OpenAI output-detail subset, so the
+/// additive `output` bucket keeps only the non-reasoning remainder — the same
+/// correction `dsh.rs`, `grok.rs`, `senpi.rs`, `zcode.rs` and `reasonix.rs`
+/// apply to this shape.
+fn ccusage_token_breakdown(
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    clamped: &mut usize,
+) -> TokenBreakdown {
+    let output = clamp_i64(output, clamped);
+    let reasoning = clamp_i64(reasoning, clamped);
+    TokenBreakdown {
+        input: clamp_i64(input, clamped),
+        output: output.saturating_sub(reasoning),
+        cache_read: clamp_i64(cache_read, clamped),
+        cache_write: clamp_i64(cache_write, clamped),
+        reasoning,
+    }
 }
 
 /// Pick the client a model's usage belongs to.
@@ -415,6 +524,14 @@ impl CostValue {
 /// decides. A model that matches no listed agent is left unattributed rather
 /// than silently folded into the first one — misattributed usage is worse than
 /// usage the caller is told about.
+///
+/// Known limit: this splits by *family*, not by which client actually made the
+/// call, and a family can belong to more than one listed agent. On a day with
+/// `["claude", "opencode"]`, Claude models all land on `claude` even though
+/// OpenCode routinely drives them — the unified row does not record enough to
+/// tell them apart. Splitting exactly needs ccusage's `--by-agent` output,
+/// where each agent carries its own `modelBreakdowns`; supporting that shape
+/// would remove the guess entirely and is the right follow-up here.
 fn resolve_client(model: &str, agents: &[String]) -> Option<String> {
     if agents.len() == 1 {
         return Some(normalize_client_id(&agents[0]));
@@ -490,6 +607,16 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
             })?
             .to_string();
         let parsed_date = parse_calendar_date(&date)?;
+
+        // ccusage emits a row for every day in the range, so a real export
+        // routinely carries days with no usage at all. Attributing one would
+        // mint a phantom `unknown` client from the empty model list and warn
+        // that the import would be rejected — for a day that contributes
+        // nothing. Drop it before it can reach attribution.
+        if row.is_empty_day() {
+            continue;
+        }
+
         if parsed_date > today {
             future_dated_rows += 1;
         }
@@ -514,19 +641,19 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
             }
             let client = attribute(&model, &agents, &mut unknown);
             let raw_cost = row
-                .total_cost
-                .as_ref()
+                .declared_cost()
                 .map(|c| c.resolve(&mut unparseable_cost_rows))
                 .unwrap_or(0.0);
             let raw_cost = sanitize_cost(raw_cost, &mut non_finite_cost_rows);
             let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
-            let tokens = TokenBreakdown {
-                input: clamp_i64(row.input_tokens, &mut negative_values_clamped),
-                output: clamp_i64(row.output_tokens, &mut negative_values_clamped),
-                cache_read: clamp_i64(row.cache_read_tokens, &mut negative_values_clamped),
-                cache_write: clamp_i64(row.cache_creation_tokens, &mut negative_values_clamped),
-                reasoning: clamp_i64(row.reasoning_output_tokens, &mut negative_values_clamped),
-            };
+            let tokens = ccusage_token_breakdown(
+                row.input_tokens,
+                row.output_tokens,
+                row.cache_read_tokens,
+                row.cache_creation_tokens,
+                row.row_reasoning_tokens(),
+                &mut negative_values_clamped,
+            );
             if cost > 0.0 && tokens.total() == 0 && !is_cursor_legacy_tokenless(&client, &model) {
                 suspect_cost_rows += 1;
             }
@@ -534,21 +661,19 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
             continue;
         }
 
-        let mut mb_input = 0i64;
-        let mut mb_output = 0i64;
-        let mut mb_cache_read = 0i64;
-        let mut mb_cache_write = 0i64;
+        let mut mb_total = 0i64;
         let mut mb_cost = 0.0f64;
 
         for mb in &row.model_breakdowns {
             let client = attribute(&mb.model_name, &agents, &mut unknown);
-            let tokens = TokenBreakdown {
-                input: clamp_i64(mb.input_tokens, &mut negative_values_clamped),
-                output: clamp_i64(mb.output_tokens, &mut negative_values_clamped),
-                cache_read: clamp_i64(mb.cache_read_tokens, &mut negative_values_clamped),
-                cache_write: clamp_i64(mb.cache_creation_tokens, &mut negative_values_clamped),
-                reasoning: clamp_i64(mb.reasoning_output_tokens, &mut negative_values_clamped),
-            };
+            let tokens = ccusage_token_breakdown(
+                mb.input_tokens,
+                mb.output_tokens,
+                mb.cache_read_tokens,
+                mb.cache_creation_tokens,
+                mb.reasoning_output_tokens,
+                &mut negative_values_clamped,
+            );
             let raw_cost = sanitize_cost(mb.cost, &mut non_finite_cost_rows);
             let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
             if cost > 0.0
@@ -558,10 +683,10 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
                 suspect_cost_rows += 1;
             }
 
-            mb_input = mb_input.saturating_add(tokens.input);
-            mb_output = mb_output.saturating_add(tokens.output);
-            mb_cache_read = mb_cache_read.saturating_add(tokens.cache_read);
-            mb_cache_write = mb_cache_write.saturating_add(tokens.cache_write);
+            // `total()` re-adds the reasoning that `ccusage_token_breakdown`
+            // moved out of `output`, so this sum is back in ccusage's own
+            // vocabulary and is directly comparable to the row's scalars.
+            mb_total = mb_total.saturating_add(tokens.total());
             mb_cost += cost;
 
             add_row(day, &client, &mb.model_name, tokens, cost);
@@ -576,16 +701,22 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
             .saturating_add(row.output_tokens.max(0))
             .saturating_add(row.cache_read_tokens.max(0))
             .saturating_add(row.cache_creation_tokens.max(0));
-        let mb_total = mb_input
-            .saturating_add(mb_output)
-            .saturating_add(mb_cache_read)
-            .saturating_add(mb_cache_write);
         if agg_total != 0 && tokens_diverge(mb_total, agg_total) {
             breakdown_reconciliation_warnings.push(format!(
                 "{date}: modelBreakdowns sum to {mb_total} token(s) but aggregate totals report {agg_total}"
             ));
         }
-        if let Some(raw) = row.total_cost.as_ref() {
+        // The row's own `totalTokens` is the one number the file states about
+        // itself, and it is the cross-check that catches a token bucket being
+        // mapped through twice. Compare it against what tokscale will report.
+        if let Some(declared) = row.total_tokens.filter(|t| *t > 0) {
+            if tokens_diverge(mb_total, declared) {
+                breakdown_reconciliation_warnings.push(format!(
+                    "{date}: imported {mb_total} token(s) but the export's own totalTokens reports {declared}"
+                ));
+            }
+        }
+        if let Some(raw) = row.declared_cost() {
             let agg_cost = sanitize_cost(
                 raw.resolve(&mut unparseable_cost_rows),
                 &mut non_finite_cost_rows,
@@ -1250,6 +1381,103 @@ mod tests {
         let out = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
         assert_eq!(out.graph.contributions[0].token_breakdown.reasoning, 700);
         assert_eq!(out.graph.contributions[0].clients[1].tokens.reasoning, 700);
+    }
+
+    #[test]
+    fn ccusage_day_total_matches_the_export_declared_total() {
+        // The anti-double-count guard. ccusage's `totalTokens` is
+        // input+output+cacheCreation+cacheRead and never counts reasoning as a
+        // term of its own, while tokscale's buckets are additive. Mapping
+        // `reasoningOutputTokens` through without taking it out of `output`
+        // reported 8700 for this row -- 700 more than the file says it is.
+        let out = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
+        let day = &out.graph.contributions[0];
+        assert_eq!(day.totals.tokens, 8000, "must match the row's totalTokens");
+        // The reasoning is still tracked, just not counted twice.
+        assert_eq!(day.token_breakdown.reasoning, 700);
+        assert_eq!(day.token_breakdown.output, 2200 - 700);
+        assert!(
+            out.breakdown_reconciliation_warnings.is_empty(),
+            "a self-consistent export must not warn: {:?}",
+            out.breakdown_reconciliation_warnings
+        );
+    }
+
+    #[test]
+    fn ccusage_reads_reasoning_nested_under_metadata() {
+        // The unified report records reasoning under `metadata`, not beside
+        // the other token fields. Reading only the flat spelling scores every
+        // real unified export as zero-reasoning.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":1.0,
+            "inputTokens":10,"outputTokens":100,"totalTokens":110,
+            "metadata":{"agents":["codex"],"reasoningOutputTokens":40},
+            "modelsUsed":["gpt-5.6-sol"]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        let day = &out.graph.contributions[0];
+        assert_eq!(day.token_breakdown.reasoning, 40);
+        assert_eq!(
+            day.token_breakdown.output, 60,
+            "100 output less 40 reasoning"
+        );
+        assert_eq!(day.totals.tokens, 110, "still the declared total");
+    }
+
+    #[test]
+    fn ccusage_empty_day_row_is_skipped() {
+        // ccusage emits a row per day in the range, so real exports carry
+        // days with nothing on them. Attributing one mints a phantom
+        // `unknown` client and warns that the import would be rejected.
+        let json = r#"{"daily":[
+            {"date":"2025-11-21","inputTokens":0,"outputTokens":0,
+             "cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":0,
+             "totalCost":0,"modelsUsed":[],"modelBreakdowns":[]},
+            {"date":"2025-11-22","totalCost":1.0,"modelsUsed":["claude-opus-5"],
+             "modelBreakdowns":[{"modelName":"claude-opus-5","cost":1.0,
+             "inputTokens":10,"outputTokens":20}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert!(
+            out.unknown_clients.is_empty(),
+            "an empty day must not mint a client: {:?}",
+            out.unknown_clients
+        );
+        let dates: Vec<&str> = out
+            .graph
+            .contributions
+            .iter()
+            .map(|c| c.date.as_str())
+            .collect();
+        assert_eq!(dates, vec!["2025-11-22"]);
+    }
+
+    #[test]
+    fn ccusage_gemini_cli_agent_resolves_to_its_own_models() {
+        // `model_family` answers "gemini"; an agent spelled `gemini-cli` has
+        // to normalize to the same id or its usage lands in `unknown`.
+        let json = r#"{"daily":[{"period":"2026-08-14","totalCost":2.0,
+            "metadata":{"agents":["claude-code","gemini-cli"]},
+            "modelBreakdowns":[
+              {"modelName":"gemini-3-pro","cost":1.0,"inputTokens":10,"outputTokens":20},
+              {"modelName":"claude-opus-5","cost":1.0,"inputTokens":10,"outputTokens":20}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(
+            client_rows(&out, 0),
+            vec![
+                ("claude".to_string(), "claude-opus-5".to_string()),
+                ("gemini".to_string(), "gemini-3-pro".to_string()),
+            ]
+        );
+        assert!(out.unknown_clients.is_empty());
+    }
+
+    #[test]
+    fn ccusage_accepts_the_codex_cost_usd_spelling() {
+        // `ccusage-codex` emits `costUSD` where `ccusage` emits `totalCost`
+        // (ccusage#831). Reading only one spelling imports the day at $0.
+        let json = r#"{"daily":[{"period":"2026-08-14","costUSD":3.5,
+            "inputTokens":10,"outputTokens":20,
+            "metadata":{"agents":["codex"]},"modelsUsed":["gpt-5.6-sol"]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert!((out.graph.contributions[0].totals.cost - 3.5).abs() < 1e-9);
     }
 
     #[test]
