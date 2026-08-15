@@ -1921,6 +1921,13 @@ fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
 fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            // The DesktopAgent advertises h2 over ALPN but freezes when reqwest
+            // actually multiplexes over it, so `antigravity sync` hangs until the
+            // timeout below fires. Observed on Windows; pinned for every target
+            // because this client only ever issues the single unary Connect POST
+            // in `rpc_request`, which HTTP/1.1 serves identically — there
+            // is no stream to multiplex and no h2 win to give up on a loopback
+            // socket. Keep it pinned unless that call site grows streaming.
             .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
