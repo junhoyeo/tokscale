@@ -9,7 +9,7 @@ use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Seek};
+use std::io::{BufReader, Seek};
 use std::path::{Path, PathBuf};
 
 /// Droid settings.json structure
@@ -115,9 +115,12 @@ fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
     let reader = BufReader::new(file);
 
     // Scan more lines for parity with TypeScript which reads entire file
-    // Cap at 500 lines to avoid performance issues with very large files
-    for line in reader.lines().take(500) {
-        let line = line.ok()?;
+    // Cap at 500 lines to avoid performance issues with very large files.
+    //
+    // `lossy_lines` rather than `lines()`: the latter ends the iteration on the
+    // first line that is not valid UTF-8, and `line.ok()?` abandoned model
+    // extraction for the whole file at that point.
+    for line in lossy_lines(reader).take(500) {
         // Look for Model: pattern in system-reminder
         if let Some(pos) = line.find("Model:") {
             let after_model = &line[pos + 6..];
