@@ -264,6 +264,69 @@ pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
         .unwrap_or(end)
 }
 
+/// Fallback token estimate for records that carry no usage metadata: one token
+/// per four characters, rounded up.
+pub(crate) fn estimate_tokens(chars: usize) -> i64 {
+    chars.div_ceil(4) as i64
+}
+
+/// Session id taken from a transcript file's stem, e.g.
+/// `.../ses_abc123.jsonl` -> `ses_abc123`.
+///
+/// Clients whose session id is not the file stem — or that treat a blank stem
+/// differently — keep their own resolver rather than calling this.
+pub(crate) fn session_id_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Workspace key taken from the directory that contains a transcript file.
+pub(crate) fn workspace_key_from_path(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(super::normalize_workspace_key)
+}
+
+/// Normalize an epoch timestamp to milliseconds.
+///
+/// A recent epoch is ~1.7e12 in milliseconds versus ~1.7e9 in seconds, so a
+/// value at or under the `1e12` threshold is read as seconds and scaled up.
+/// Scaling happens in `f64` to keep sub-second precision; the cast then clamps
+/// into `i64` range so a garbage or huge timestamp saturates rather than
+/// wrapping, and a `NaN` becomes `0`.
+pub(crate) fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
+    if timestamp > 1e12 {
+        timestamp as i64
+    } else {
+        let millis = timestamp * 1000.0;
+        if millis.is_nan() {
+            0
+        } else {
+            millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+        }
+    }
+}
+
+/// Resolve a provider from the record's own provider name, falling back to
+/// inference from the model id and finally to `fallback` (normally the client
+/// id itself).
+pub(crate) fn resolved_provider(
+    provider: Option<String>,
+    model_id: &str,
+    fallback: &str,
+) -> String {
+    provider
+        .filter(|provider| !provider.trim().is_empty())
+        .and_then(|provider| crate::provider_identity::canonical_provider(provider.trim()))
+        .or_else(|| {
+            crate::provider_identity::inferred_provider_from_model(model_id).map(str::to_string)
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -36,8 +36,10 @@
 //! is not stored per message, so it is read from `~/.commandcode/config.json`
 //! (the configured agent model), falling back to "unknown".
 
-use super::utils::file_modified_timestamp_ms;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::utils::{
+    estimate_tokens, file_modified_timestamp_ms, session_id_from_path, workspace_key_from_path,
+};
+use super::{workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -93,6 +95,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
         .map(|model| canonicalize_model(&model))
         .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
     let session_id_from_path = session_id_from_path(path);
+    // Command Code names project directories after a slugified working
+    // directory (e.g. `users-alice-development-repo`). The original path is not
+    // recoverable (lowercased, separators collapsed), so the slug itself is
+    // used as the workspace key.
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -214,10 +220,6 @@ fn content_chars(content: &serde_json::Value) -> usize {
     }
 }
 
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
-}
-
 /// Canonicalize the configured model id for pricing. Command Code reports
 /// gateway ids such as `MiniMaxAI/MiniMax-M3-Free`; the `-Free` suffix is a
 /// temporary promo and the org prefix is not a key tokscale's pricing resolver
@@ -272,24 +274,6 @@ fn model_from_config(session_path: &Path) -> Option<String> {
     let bytes = std::fs::read(config_path).ok()?;
     let config: CommandCodeConfig = serde_json::from_slice(&bytes).ok()?;
     config.model.filter(|model| !model.trim().is_empty())
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-/// Command Code names project directories after a slugified working directory
-/// (e.g. `users-alice-development-repo`). The original path is not recoverable
-/// (lowercased, separators collapsed), so the slug itself is used as the
-/// workspace key.
-fn workspace_key_from_path(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|dir| dir.file_name())
-        .and_then(|name| name.to_str())
-        .and_then(normalize_workspace_key)
 }
 
 #[cfg(test)]

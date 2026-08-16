@@ -13,7 +13,10 @@
 //! counts are used. When absent, tokens are estimated at ~4 chars/token,
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt};
+use super::utils::{
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, open_readonly_sqlite_opt,
+    session_id_from_path, workspace_key_from_path,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -600,28 +603,10 @@ fn content_chars(content: &serde_json::Value) -> usize {
     }
 }
 
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
-}
-
 fn parse_rfc3339_ms(timestamp: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-fn workspace_key_from_path(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|dir| dir.file_name())
-        .and_then(|name| name.to_str())
-        .and_then(normalize_workspace_key)
 }
 
 #[cfg(test)]

@@ -6,9 +6,9 @@
 //! - Legacy Block/goose: `~/.local/share/Block/goose/sessions/sessions.db`
 //! - Custom: `$GOOSE_PATH_ROOT/data/sessions/sessions.db`
 
-use super::utils::open_readonly_sqlite;
+use super::utils::{open_readonly_sqlite, resolved_provider, timestamp_secs_to_ms};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::path::Path;
 use tracing::warn;
@@ -27,30 +27,6 @@ fn parse_model_config(json: &str) -> Option<String> {
     } else {
         Some(name)
     }
-}
-
-fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
-    if timestamp > 1e12 {
-        timestamp as i64
-    } else {
-        // Seconds -> milliseconds. Scale in f64 to keep sub-second precision,
-        // then clamp into i64 range so a garbage/huge timestamp saturates
-        // rather than producing an undefined cast during the conversion.
-        let millis = timestamp * 1000.0;
-        if millis.is_nan() {
-            0
-        } else {
-            millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
-        }
-    }
-}
-
-fn resolved_provider(provider_name: Option<String>, model_id: &str) -> String {
-    provider_name
-        .filter(|p| !p.trim().is_empty())
-        .and_then(|p| provider_identity::canonical_provider(p.trim()))
-        .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
-        .unwrap_or_else(|| "goose".to_string())
 }
 
 fn parse_created_at(s: &str) -> f64 {
@@ -183,7 +159,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 return None;
             }
 
-            let provider = resolved_provider(provider_name, &model_id);
+            let provider = resolved_provider(provider_name, &model_id, "goose");
             let mut msg = UnifiedMessage::new(
                 "goose",
                 model_id,

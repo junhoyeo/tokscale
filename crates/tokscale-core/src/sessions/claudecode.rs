@@ -5,8 +5,8 @@
 //! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-    read_file_or_none,
+    estimate_tokens, extract_i64, extract_string, file_modified_timestamp_ms,
+    parse_timestamp_value, read_file_or_none,
 };
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
@@ -1210,7 +1210,7 @@ fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bo
             return None;
         }
         let chars = tool_result_output_char_count(tool_result);
-        (chars > 0).then(|| estimate_tokens_from_chars(chars))
+        (chars > 0).then(|| estimate_tokens(chars))
     })
 }
 
@@ -1290,12 +1290,6 @@ fn tool_result_content_output_chars(content: &Value) -> usize {
                 .sum()
         })
         .unwrap_or(0)
-}
-
-fn estimate_tokens_from_chars(chars: usize) -> i64 {
-    // Claude Code tool outputs may not include token metadata. Match the
-    // existing Kiro fallback of one token per four characters, rounded up.
-    chars.div_ceil(4) as i64
 }
 
 fn is_claude_synthetic_placeholder_model(model: &str) -> bool {

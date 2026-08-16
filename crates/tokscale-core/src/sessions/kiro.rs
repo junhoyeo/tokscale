@@ -13,7 +13,10 @@
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, open_readonly_sqlite,
+    session_id_from_path,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -308,10 +311,6 @@ fn text_char_count(content: Option<&[KiroContentPart]>) -> usize {
         .sum()
 }
 
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
-}
-
 fn seconds_to_millis(seconds: f64) -> i64 {
     // Scale fractional seconds to milliseconds (preserving sub-second
     // precision), then clamp into i64 range. The `f64 as i64` cast saturates
@@ -345,13 +344,6 @@ fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
             .or_else(|| timestamp.parse::<f64>().ok().map(seconds_to_millis)),
         _ => None,
     }
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 fn is_kiro_global_storage_path(path: &Path) -> bool {
