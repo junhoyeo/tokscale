@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::io::BufRead;
 use std::path::Path;
 use std::time::SystemTime;
+use tracing::warn;
 
 /// Iterate a reader line by line without letting one undecodable byte discard
 /// the rest of the stream.
@@ -236,6 +237,153 @@ pub(crate) fn open_readonly_sqlite(path: &Path) -> rusqlite::Result<Connection> 
 /// Returns `None` if the file cannot be opened — the caller treats that as "no sessions".
 pub(crate) fn open_readonly_sqlite_opt(path: &Path) -> Option<Connection> {
     open_readonly_sqlite(path).ok()
+}
+
+/// Which stage of a [`sqlite_for_each_row`] scan the driver reached.
+///
+/// A bare `bool` is not enough: parsers that keep an older query around as a
+/// fallback need "this database does not have that schema" (`prepare` failed,
+/// so try the next query) to be distinguishable from "the query ran", while
+/// parsers that degrade to a coarser data source need "rows were actually
+/// iterated".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteScan {
+    /// The statement prepared and its rows were iterated — possibly zero rows.
+    Ran,
+    /// The database could not be opened.
+    NotOpened,
+    /// `prepare` rejected the statement, normally a missing table or column.
+    NotPrepared,
+    /// The statement prepared but the query could not execute.
+    NotExecuted,
+}
+
+impl SqliteScan {
+    /// True only when rows were iterated.
+    pub(crate) fn ran(self) -> bool {
+        matches!(self, SqliteScan::Ran)
+    }
+
+    /// True unless `prepare` rejected the statement. Callers that fall back to
+    /// an older schema use this to stop at the first query the database
+    /// understands, even when executing it then failed — an execute failure
+    /// means the schema matched and something else went wrong, so retrying an
+    /// older query would silently read the wrong columns.
+    pub(crate) fn prepared(self) -> bool {
+        !matches!(self, SqliteScan::NotPrepared | SqliteScan::NotOpened)
+    }
+}
+
+/// Run `sql` on an already-open connection and hand every row to `sink`.
+///
+/// `what` labels the data being read (`"Goose session"`) in the warnings for
+/// prepare, execute and row-decode failures. `None` scans silently, which is
+/// what parsers probing an optional table want: a missing table there is the
+/// expected case, not a fault worth logging on every run.
+///
+/// A row that `sink` rejects is skipped and the scan continues, matching
+/// `query_map`'s behaviour where a per-row decode error does not end
+/// iteration. An error stepping the statement does end it, because SQLite
+/// closes the cursor at that point.
+///
+/// `sink` is `&mut dyn FnMut` and not a generic `impl FnMut` on purpose: a type
+/// parameter would monomorphize this driver once per calling parser and grow
+/// the binary, which is what sharing it exists to avoid.
+pub(crate) fn sqlite_for_each_row_on(
+    conn: &Connection,
+    db_path: &Path,
+    sql: &str,
+    what: Option<&str>,
+    sink: &mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>,
+) -> SqliteScan {
+    let mut stmt = match conn.prepare(sql) {
+        Ok(stmt) => stmt,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to prepare session query"
+                );
+            }
+            return SqliteScan::NotPrepared;
+        }
+    };
+
+    let mut rows = match stmt.query([]) {
+        Ok(rows) => rows,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to execute session query"
+                );
+            }
+            return SqliteScan::NotExecuted;
+        }
+    };
+
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => {
+                if let Err(err) = sink(row) {
+                    if let Some(what) = what {
+                        warn!(
+                            db_path = %db_path.display(),
+                            what,
+                            error = %err,
+                            "Failed to decode session row"
+                        );
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                if let Some(what) = what {
+                    warn!(
+                        db_path = %db_path.display(),
+                        what,
+                        error = %err,
+                        "Failed to decode session row"
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    SqliteScan::Ran
+}
+
+/// Open `db_path` read-only, run `sql`, and hand every row to `sink`.
+///
+/// The connection-owning half of [`sqlite_for_each_row_on`], for the common
+/// case of one query per database. Parsers that run several queries against
+/// one database should open once and call [`sqlite_for_each_row_on`].
+pub(crate) fn sqlite_for_each_row(
+    db_path: &Path,
+    sql: &str,
+    what: Option<&str>,
+    sink: &mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>,
+) -> SqliteScan {
+    let conn = match open_readonly_sqlite(db_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to open session database"
+                );
+            }
+            return SqliteScan::NotOpened;
+        }
+    };
+    sqlite_for_each_row_on(&conn, db_path, sql, what, sink)
 }
 
 /// Read a file into bytes, returning `None` on any I/O error instead of propagating.

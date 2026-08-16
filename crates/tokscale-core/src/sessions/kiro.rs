@@ -14,8 +14,8 @@
 //! response_size / 4 (output).
 
 use super::utils::{
-    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, open_readonly_sqlite,
-    session_id_from_path,
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, session_id_from_path,
+    sqlite_for_each_row,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
@@ -24,7 +24,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
@@ -1260,56 +1259,16 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
 }
 
 pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match open_readonly_sqlite(db_path) {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Kiro CLI database"
-            );
-            return Vec::new();
-        }
-    };
-
     let query = "SELECT key, conversation_id, value FROM conversations_v2";
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
-
     let mut messages = Vec::new();
 
-    for row in rows.flatten() {
-        let (cwd, conversation_id, json_str) = row;
+    sqlite_for_each_row(db_path, query, Some("Kiro conversation"), &mut |row| {
+        let cwd: String = row.get(0)?;
+        let conversation_id: String = row.get(1)?;
+        let json_str: String = row.get(2)?;
         let parsed = match serde_json::from_str::<KiroDbConversation>(&json_str) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(_) => return Ok(()),
         };
 
         let context_window = parsed
@@ -1383,7 +1342,8 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             messages.push(message);
         }
-    }
+        Ok(())
+    });
 
     messages
 }

@@ -15,7 +15,7 @@
 
 use super::utils::{
     back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, open_readonly_sqlite_opt,
-    session_id_from_path, workspace_key_from_path,
+    session_id_from_path, sqlite_for_each_row_on, workspace_key_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
@@ -364,38 +364,38 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         .prepare("SELECT computed_total_tokens FROM model_usage LIMIT 1")
         .is_err();
 
-    let mut stmt = match conn.prepare(modern_query) {
-        Ok(stmt) => stmt,
-        Err(_) => match conn.prepare(legacy_query) {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        },
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok(ZcodeUsageRow {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            turn_id: row.get(2)?,
-            model_id: row.get(3)?,
-            started_at: row.get(4)?,
-            completed_at: row.get(5)?,
-            duration_ms: row.get(6)?,
-            input_tokens: row.get(7)?,
-            output_tokens: row.get(8)?,
-            reasoning_tokens: row.get(9)?,
-            cache_read_input_tokens: row.get(10)?,
-            cache_creation_input_tokens: row.get(11)?,
-            computed_total_tokens: row.get(12)?,
-            agent: row.get(13)?,
-            mode: row.get(14)?,
-            session_directory: row.get(15)?,
-            session_path: row.get(16)?,
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
+    // Quiet: a database that understands neither query is not a ZCode usage
+    // store, which is an expected outcome of probing candidate paths.
+    let mut rows: Vec<ZcodeUsageRow> = Vec::new();
+    for query in [modern_query, legacy_query] {
+        let scan = sqlite_for_each_row_on(&conn, db_path, query, None, &mut |row| {
+            rows.push(ZcodeUsageRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                turn_id: row.get(2)?,
+                model_id: row.get(3)?,
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+                duration_ms: row.get(6)?,
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                reasoning_tokens: row.get(9)?,
+                cache_read_input_tokens: row.get(10)?,
+                cache_creation_input_tokens: row.get(11)?,
+                computed_total_tokens: row.get(12)?,
+                agent: row.get(13)?,
+                mode: row.get(14)?,
+                session_directory: row.get(15)?,
+                session_path: row.get(16)?,
+            });
+            Ok(())
+        });
+        // A query that prepared is the one this schema supports; only a
+        // prepare failure means "try the older spelling".
+        if scan.prepared() {
+            break;
+        }
+    }
 
     let mut messages = Vec::new();
     // Parallel to `messages`: each row's turn_id (if any), so is_turn_start
@@ -403,12 +403,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // timestamp is known (see below).
     let mut turn_ids: Vec<Option<String>> = Vec::new();
 
-    for row_result in rows {
-        let row = match row_result {
-            Ok(row) => row,
-            Err(_) => continue,
-        };
-
+    for row in rows {
         let session_id = row.session_id.unwrap_or_else(|| "unknown".to_string());
         let model_id = row
             .model_id

@@ -16,7 +16,7 @@
 //! generics would monomorphize per client and *grow* the binary, which is the
 //! opposite of the point.
 
-use super::utils::open_readonly_sqlite_opt;
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
 use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
@@ -797,31 +797,23 @@ impl SchemaAccumulator {
 /// generic callback would monomorphize this function once per client and grow
 /// the binary, which is what consolidating these parsers exists to avoid.
 fn collect_rows(
+    db_path: &Path,
     conn: &rusqlite::Connection,
     query: &str,
     on_row: &mut dyn FnMut(OpenCodeSchemaRow),
 ) -> bool {
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(_) => return false,
-    };
-
-    let rows = match stmt.query_map([], |row| {
+    // Quiet: these queries are schema probes — the caller tries each spelling
+    // in turn, so a query the database does not understand is expected.
+    let scan = sqlite_for_each_row_on(conn, db_path, query, None, &mut |row| {
         let id: String = row.get(0)?;
         let session_id: String = row.get(1)?;
         let data_json: String = row.get(2)?;
         let workspace_root: Option<String> = row.get(3)?;
         let session_title: Option<String> = row.get(4)?;
-        Ok((id, session_id, data_json, workspace_root, session_title))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return true,
-    };
-
-    for row in rows.flatten() {
-        on_row(row);
-    }
-    true
+        on_row((id, session_id, data_json, workspace_root, session_title));
+        Ok(())
+    });
+    scan.prepared()
 }
 
 /// Parse assistant turns out of a SQLite database that uses the OpenCode
@@ -846,7 +838,7 @@ pub(crate) fn parse_opencode_schema_sqlite(
     let mut acc = SchemaAccumulator::default();
     for group in cfg.query_groups {
         for query in *group {
-            if collect_rows(&conn, query, &mut |row| {
+            if collect_rows(db_path, &conn, query, &mut |row| {
                 acc.ingest(row, &cfg, &db_namespace)
             }) {
                 break;

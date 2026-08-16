@@ -4,7 +4,9 @@
 //! - `~/.hermes/state.db`
 //! - `$HERMES_HOME/state.db`
 
-use super::utils::{open_readonly_sqlite, resolved_provider, timestamp_secs_to_ms};
+use super::utils::{
+    open_readonly_sqlite, resolved_provider, sqlite_for_each_row_on, timestamp_secs_to_ms,
+};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use rusqlite::Connection;
@@ -124,44 +126,12 @@ fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HermesUsageRow>
 /// all (prepare or execute failure) so the caller can fall back, and `Some` —
 /// possibly empty — when it ran and simply matched nothing.
 fn query_usage_rows(db_path: &Path, conn: &Connection, query: &str) -> Option<Vec<HermesUsageRow>> {
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Hermes session query"
-            );
-            return None;
-        }
-    };
-
-    let rows = match stmt.query_map([], decode_usage_row) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Hermes session query"
-            );
-            return None;
-        }
-    };
-
-    Some(
-        rows.filter_map(|row| match row {
-            Ok(row) => Some(row),
-            Err(err) => {
-                warn!(
-                    db_path = %db_path.display(),
-                    error = %err,
-                    "Failed to decode Hermes session row"
-                );
-                None
-            }
-        })
-        .collect(),
-    )
+    let mut rows = Vec::new();
+    let scan = sqlite_for_each_row_on(conn, db_path, query, Some("Hermes session"), &mut |row| {
+        rows.push(decode_usage_row(row)?);
+        Ok(())
+    });
+    scan.ran().then_some(rows)
 }
 
 fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {

@@ -4,7 +4,10 @@
 //! - Devin CLI SQLite database (`~/.local/share/devin/cli/sessions.db`)
 //! - Devin Desktop NDJSON event streams (`~/Library/Application Support/Devin/User/acp-events/*.ndjson`)
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt};
+use super::utils::{
+    back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt,
+    sqlite_for_each_row_on,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -112,40 +115,35 @@ pub fn load_devin_desktop_session_lookup(
         let Some(conn) = open_readonly_sqlite_opt(db_path) else {
             continue;
         };
-        let mut stmt = match conn.prepare(
+        // Quiet: a Devin Desktop database without a `sessions` table is one of
+        // the candidate paths this scan probes, not a fault.
+        sqlite_for_each_row_on(
+            &conn,
+            db_path,
             "SELECT id, title, model, working_directory FROM sessions \
              WHERE title IS NOT NULL AND TRIM(title) != ''",
-        ) {
-            Ok(stmt) => stmt,
-            Err(_) => continue,
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        }) {
-            Ok(rows) => rows,
-            Err(_) => continue,
-        };
+            None,
+            &mut |row| {
+                let session_id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let model_id: Option<String> = row.get(2)?;
+                let workspace: Option<String> = row.get(3)?;
 
-        for row in rows.flatten() {
-            let (session_id, title, model_id, workspace) = row;
-            let title = title.trim();
-            if title.is_empty() {
-                continue;
-            }
-            lookup.insert(
-                title.to_string(),
-                DevinDesktopSession {
-                    session_id,
-                    model_id: model_id.filter(|model| !model.is_empty()),
-                    workspace,
-                },
-            );
-        }
+                let title = title.trim();
+                if title.is_empty() {
+                    return Ok(());
+                }
+                lookup.insert(
+                    title.to_string(),
+                    DevinDesktopSession {
+                        session_id,
+                        model_id: model_id.filter(|model| !model.is_empty()),
+                        workspace,
+                    },
+                );
+                Ok(())
+            },
+        );
     }
 
     lookup
@@ -177,42 +175,26 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         ORDER BY m.row_id
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-
     let mut messages = Vec::new();
 
-    for row_result in rows {
-        let (row_id, session_id, chat_json, created_at_ms, session_model, workspace) =
-            match row_result {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+    // Quiet: a Devin CLI database that predates `message_nodes` simply has no
+    // rows to offer, which is not a fault worth logging.
+    sqlite_for_each_row_on(&conn, db_path, query, None, &mut |row| {
+        let row_id: i64 = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let chat_json: String = row.get(2)?;
+        let created_at_ms: Option<i64> = row.get(3)?;
+        let session_model: Option<String> = row.get(4)?;
+        let workspace: Option<String> = row.get(5)?;
 
         // Confirm role == assistant (the SQL filter should already guarantee this,
         // but parsing lets us skip corrupt rows cleanly).
         let chat_msg: DevinChatMessage = match serde_json::from_str(&chat_json) {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(_) => return Ok(()),
         };
         if chat_msg.role != "assistant" {
-            continue;
+            return Ok(());
         }
 
         let metadata = chat_msg.metadata;
@@ -229,7 +211,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .unwrap_or_default()
             .to_string();
         if model_id.is_empty() {
-            continue;
+            return Ok(());
         }
 
         let provider = provider_identity::inferred_provider_from_model(&model_id)
@@ -265,7 +247,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         // precedence markers for a matching Desktop ACP session. Otherwise a
         // zero-metric CLI row could suppress the only real usage record.
         if tokens.total() == 0 {
-            continue;
+            return Ok(());
         }
 
         let recorded_timestamp = created_at_ms.unwrap_or(fallback_timestamp);
@@ -311,7 +293,8 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         }
 
         messages.push(unified);
-    }
+        Ok(())
+    });
 
     messages
 }

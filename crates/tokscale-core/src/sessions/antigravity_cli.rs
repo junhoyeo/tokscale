@@ -41,7 +41,7 @@
 //! server-supplied name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash
 //! (High)`) and could be localized.
 
-use super::utils::open_readonly_sqlite_opt;
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -61,20 +61,23 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let (timestamp, workspace_key, workspace_label) = read_trajectory_meta(&conn, path);
 
-    let mut stmt = match conn.prepare("SELECT data FROM gen_metadata ORDER BY idx") {
-        Ok(stmt) => stmt,
-        // Not an Antigravity CLI database (table missing) — nothing to count.
-        Err(_) => return Vec::new(),
-    };
-    let rows = match stmt.query_map([], |row| row.get::<_, Vec<u8>>(0)) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
-
     // Buffered rather than streamed so a row missing its own `#19` can borrow
     // attribution from anywhere in the conversation, not just from rows that
     // happen to precede it.
-    let blobs: Vec<Vec<u8>> = rows.flatten().collect();
+    //
+    // Quiet: a database without `gen_metadata` is not an Antigravity CLI
+    // database at all, so there is nothing to warn about.
+    let mut blobs: Vec<Vec<u8>> = Vec::new();
+    sqlite_for_each_row_on(
+        &conn,
+        path,
+        "SELECT data FROM gen_metadata ORDER BY idx",
+        None,
+        &mut |row| {
+            blobs.push(row.get::<_, Vec<u8>>(0)?);
+            Ok(())
+        },
+    );
     let session_models = SessionModels::from_blobs(&blobs);
 
     let mut messages = Vec::new();
