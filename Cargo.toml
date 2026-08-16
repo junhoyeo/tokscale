@@ -55,7 +55,14 @@ anyhow = "1.0"
 libc = "0.2"
 
 # HTTP client (async)
-reqwest = { version = "0.12", features = ["json", "native-tls-vendored"], default-features = false }
+# rustls rather than native-tls. `native-tls-vendored` statically links a full
+# OpenSSL into every Linux artifact (macOS uses Security.framework and Windows
+# schannel, so neither ever paid for it) — the published linux-x64-gnu package
+# is 25.8 MB against darwin-arm64's 17.0 MB. `rustls-tls-native-roots`, not
+# plain `rustls-tls`: the latter trusts only the baked-in webpki root set, which
+# would silently break anyone behind a corporate MITM proxy or using a private
+# CA. Reading the OS trust store keeps today's behaviour.
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 # For disk caching (XDG paths)
