@@ -54,8 +54,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # part of that default this crate wants.
 imageproc = { version = "0.25", default-features = false, features = ["rayon"] }
 ab_glyph = "0.2"
-resvg = "0.43"
-usvg = "0.43"
+# The only SVG the CLI ever renders is `TOKSCALE_LOGO_SVG_URL`, which is three
+# `<path>` elements - no `<text>`, no `<image>`, no `font-family`. resvg's
+# default features assume otherwise and cost a second copy of half the image
+# stack: `raster-images` links its own `gif`, `image-webp` and `zune-jpeg` at
+# versions that do not unify with the ones `image` already provides, and `text`
+# pulls `fontdb`, `rustybuzz`, `unicode-bidi`, `unicode-script` and
+# `unicode-vo`. Wrapped's own text is drawn with `ab_glyph`, not usvg.
+resvg = { version = "0.43", default-features = false }
+usvg = { version = "0.43", default-features = false }
 hostname = "0.4"
 # `login --qr` renders through `qrcode::render::unicode`, which is in the core.
 # The default feature set adds the `image`, `svg` and `pic` renderers instead.
