@@ -480,6 +480,71 @@ fn damaged_session_placeholder(path: &Path) -> String {
     format!("unknown:path:{:x}", hasher.finalize())
 }
 
+/// One record, one decision: does this entry become a [`UnifiedMessage`]?
+///
+/// Two walks read the same transcript. [`parse_pi_format_file_inner`] streams it
+/// and builds messages; Prime Agent's accounting walk replays already-parsed
+/// messages positionally against the same records
+/// (`sessions::prime_agent::analyze_prime_agent_accounting`). A record that only
+/// one of them counts shifts every later index in the other, which silently
+/// re-targets Prime's usage reconciliation. Both therefore ask this function
+/// rather than restating the rules, so neither can drift from the other.
+struct PiEmittedRecord<'a> {
+    message: &'a PiMessage,
+    usage: &'a PiUsage,
+    recorded_model: &'a str,
+}
+
+fn pi_emitted_record<'a>(
+    entry: &'a PiSessionEntry,
+    options: PiParseOptions,
+    is_rlm_subagent: bool,
+) -> Option<PiEmittedRecord<'a>> {
+    if entry.entry_type != "message" {
+        return None;
+    }
+
+    let message = entry.message.as_ref()?;
+    if message.role.as_deref() != Some("assistant") {
+        return None;
+    }
+
+    // An RLM child's completion timestamp participates in matching its
+    // usage back to the parent attribution. Recovering a replacement-
+    // damaged value as "missing" would make that match impossible while
+    // still emitting the child, so the parent's aggregate and child would
+    // both be counted. Other Pi messages do not use this timestamp as a
+    // reconciliation join and remain recoverable.
+    if options.lossy_line_reader
+        && is_rlm_subagent
+        && (entry.has_damaged_timestamp()
+            || entry
+                .timestamp
+                .as_deref()
+                .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_err()))
+    {
+        return None;
+    }
+
+    let usage = message.usage.as_ref()?;
+    if options.lossy_line_reader && usage.has_damaged_key() {
+        return None;
+    }
+
+    let recorded_model = message.model.as_deref()?;
+    Some(PiEmittedRecord {
+        message,
+        usage,
+        recorded_model,
+    })
+}
+
+/// [`pi_emitted_record`] under the preset RLM transcripts are parsed with, as a
+/// yes/no answer for a walk that already holds the emitted messages.
+pub(crate) fn rlm_entry_emits_message(entry: &PiSessionEntry, is_rlm_subagent: bool) -> bool {
+    pi_emitted_record(entry, PiParseOptions::prime_agent(), is_rlm_subagent).is_some()
+}
+
 fn parse_pi_format_file_inner(
     path: &Path,
     client: &str,
@@ -596,50 +661,16 @@ fn parse_pi_format_file_inner(
             continue;
         }
 
-        if entry.entry_type != "message" {
-            observer.observe_entry(&entry, None);
-            continue;
-        }
-
-        let Some(message) = entry.message.as_ref() else {
-            observer.observe_entry(&entry, None);
-            continue;
-        };
-
-        if message.role.as_deref() != Some("assistant") {
-            observer.observe_entry(&entry, None);
-            continue;
-        }
-
-        // An RLM child's completion timestamp participates in matching its
-        // usage back to the parent attribution. Recovering a replacement-
-        // damaged value as "missing" would make that match impossible while
-        // still emitting the child, so the parent's aggregate and child would
-        // both be counted. Other Pi messages do not use this timestamp as a
-        // reconciliation join and remain recoverable.
-        if options.lossy_line_reader
-            && is_rlm_subagent
-            && (entry.has_damaged_timestamp()
-                || entry.timestamp.as_deref().is_some_and(|timestamp| {
-                    chrono::DateTime::parse_from_rfc3339(timestamp).is_err()
-                }))
-        {
-            observer.observe_entry(&entry, None);
-            continue;
-        }
-
-        let Some(usage) = message.usage.as_ref() else {
+        let Some(PiEmittedRecord {
+            message,
+            usage,
+            recorded_model,
+        }) = pi_emitted_record(&entry, options, is_rlm_subagent)
+        else {
             observer.observe_entry(&entry, None);
             continue;
         };
-        if options.lossy_line_reader && usage.has_damaged_key() {
-            continue;
-        }
 
-        let Some(recorded_model) = message.model.as_deref() else {
-            observer.observe_entry(&entry, None);
-            continue;
-        };
         let model = if !accepts_replacement_field(recorded_model, options.lossy_line_reader) {
             "unknown"
         } else {

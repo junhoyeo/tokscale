@@ -10,8 +10,8 @@
 
 use super::pi::{
     has_replacement_character, parse_pi_format_rlm_file_with_observer,
-    pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, PiFormatObserver,
-    PiSessionEntry, PiSessionHeader, PiUsage, PRE_SESSION_METADATA_TYPES,
+    pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, rlm_entry_emits_message,
+    PiFormatObserver, PiSessionEntry, PiSessionHeader, PiUsage, PRE_SESSION_METADATA_TYPES,
 };
 use super::utils::{lossy_lines_with_bytes, parse_timestamp_str};
 use super::UnifiedMessage;
@@ -499,23 +499,16 @@ pub(crate) fn analyze_prime_agent_accounting(
         let Some(entry) = parse_pi_json_line::<PiSessionEntry>(trimmed, &mut buffer) else {
             continue;
         };
-        let emitted = entry
-            .message
-            .as_ref()
-            .filter(|message| {
-                entry.entry_type == "message"
-                    && message.role.as_deref() == Some("assistant")
-                    && message
-                        .usage
-                        .as_ref()
-                        .is_some_and(|usage| !usage.has_damaged_key())
-                    && message.model.is_some()
-            })
-            .and_then(|_| {
+        // Which records became messages is the parser's decision, not a rule
+        // restated here: a record counted on only one side shifts every later
+        // index of `messages` and re-targets the reconciliation below.
+        let emitted = rlm_entry_emits_message(&entry, accounting.is_rlm_child)
+            .then(|| {
                 let parsed = messages.get(message_index);
                 message_index += 1;
                 parsed
-            });
+            })
+            .flatten();
         accounting.observe_entry(&entry, emitted);
     }
 
@@ -1535,6 +1528,62 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 10);
+    }
+
+    #[test]
+    fn unparseable_child_timestamp_does_not_shift_accounting_alignment() {
+        // The streaming parser drops an RLM child's message when its timestamp
+        // cannot be matched back to a parent attribution. The accounting-only
+        // walk replays cached messages positionally, so it has to drop the same
+        // record or every later index refers to the wrong message.
+        let file = session_file(
+            r#"{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","parentSession":"/tmp/parent.jsonl","rlmDepth":1}
+{"type":"message","id":"assistant-unparseable","parentId":null,"timestamp":"2026-08-08 00:00:01","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-unparseable","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}
+{"type":"message","id":"assistant-valid","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-valid","usage":{"input":20,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":28}}}
+{"type":"child_usage_attributed","id":"usage-valid","parentId":"assistant-valid","timestamp":"2026-08-08T00:00:03.000Z","targetId":"assistant-valid","childUsage":{"input":3,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":5},"aggregateUsage":{"input":20,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":28},"origin":"spawn_task"}"#,
+        );
+
+        let (messages, streamed) = parse_prime_agent_file_with_accounting(file.path());
+        let replayed = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("prime-agent:response:response-valid")
+        );
+
+        let adjustment_keys = |accounting: &PrimeFileAccounting| {
+            accounting
+                .adjustments
+                .iter()
+                .map(|adjustment| adjustment.dedup_key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            adjustment_keys(&replayed),
+            vec!["prime-agent:response:response-valid".to_string()]
+        );
+        assert_eq!(adjustment_keys(&replayed), adjustment_keys(&streamed));
+
+        let child_joins = |accounting: &PrimeFileAccounting| {
+            accounting
+                .child_message_usages
+                .iter()
+                .map(|usage| (usage.timestamp, usage.usage.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(child_joins(&replayed), child_joins(&streamed));
+        assert_eq!(
+            child_joins(&replayed),
+            vec![(
+                parse_timestamp_str("2026-08-08T00:00:02.000Z"),
+                TokenBreakdown {
+                    input: 20,
+                    output: 8,
+                    ..TokenBreakdown::default()
+                }
+            )]
+        );
     }
 
     #[test]
