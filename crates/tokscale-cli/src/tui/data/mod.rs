@@ -1647,6 +1647,7 @@ mod tests {
         assert_eq!(clients[44], ClientId::Freebuff);
         assert_eq!(clients[45], ClientId::CherryStudio);
         assert_eq!(clients[46], ClientId::Dsh);
+        assert_eq!(clients[47], ClientId::Mcode);
     }
 
     #[test]
@@ -1699,6 +1700,7 @@ mod tests {
             "Freebuff",
             "Cherry Studio",
             "DeepSeek Harness",
+            "MiniMax Code",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -1743,6 +1745,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Augment), 'A');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimchi), 'K');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::PrimeAgent), 'P');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mcode), 'M');
     }
 
     #[test]

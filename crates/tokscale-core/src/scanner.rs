@@ -1424,6 +1424,7 @@ fn scan_all_clients_with_env_strategy_inner(
             client_id,
             ClientId::OpenCode
                 | ClientId::Codex
+                | ClientId::Mcode
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
@@ -1711,6 +1712,18 @@ fn scan_all_clients_with_env_strategy_inner(
                 &mut seen_scan_roots,
                 ClientId::Codex,
                 root.join("codex"),
+            );
+        }
+    }
+
+    if enabled.contains(&ClientId::Mcode) {
+        // MiniMax Code headless streams: <headless_root>/mcode/*.jsonl
+        for root in &headless_roots {
+            push_unique_scan_task(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Mcode,
+                root.join("mcode"),
             );
         }
     }
@@ -5266,6 +5279,8 @@ mod tests {
 
         fs::create_dir_all(mac_root.join("codex")).unwrap();
         File::create(mac_root.join("codex").join("codex.jsonl")).unwrap();
+        fs::create_dir_all(mac_root.join("mcode")).unwrap();
+        File::create(mac_root.join("mcode").join("mcode.jsonl")).unwrap();
 
         let result = scan_all_clients(
             home.to_str().unwrap(),
@@ -5273,12 +5288,14 @@ mod tests {
                 "claude".to_string(),
                 "codex".to_string(),
                 "gemini".to_string(),
+                "mcode".to_string(),
             ],
         );
 
         assert!(result.get(ClientId::Claude).is_empty());
         assert_eq!(result.get(ClientId::Codex).len(), 1);
         assert!(result.get(ClientId::Gemini).is_empty());
+        assert_eq!(result.get(ClientId::Mcode).len(), 1);
     }
 
     #[test]

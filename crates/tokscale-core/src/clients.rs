@@ -954,6 +954,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // MiniMax Code exposes authoritative per-call usage through
+    // `mcode exec --output-format stream-json`. Tokscale captures those
+    // streams under its own headless root instead of scanning MiniMax Code's
+    // shared Desktop/Runtime session store, where the originating surface is
+    // not distinguishable.
+    Mcode = 47 => {
+        id: "mcode",
+        display: "MiniMax Code",
+        logo: Some("https://github.com/MiniMax-AI.png"),
+        root: PathRoot::Config,
+        relative: "headless/mcode",
+        pattern: "*.jsonl",
+        headless: true,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1069,7 +1085,17 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 47);
+        assert_eq!(ClientId::COUNT, 48);
+    }
+
+    #[test]
+    fn test_mcode_registered_as_headless_local_source() {
+        let client = ClientId::from_str("mcode").expect("mcode client should be registered");
+        assert_eq!(client.data().relative_path, "headless/mcode");
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().headless);
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
     }
 
     #[test]

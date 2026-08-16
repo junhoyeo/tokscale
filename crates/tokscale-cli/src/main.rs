@@ -286,7 +286,7 @@ enum Commands {
     },
     #[command(about = "Capture subprocess output for token usage tracking")]
     Headless {
-        #[arg(help = "Source CLI (currently only 'codex' supported)")]
+        #[arg(help = "Source CLI ('codex' or 'mcode')")]
         source: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1092,6 +1092,7 @@ pub enum ClientFilter {
     Freebuff,
     CherryStudio,
     Dsh,
+    Mcode,
     Synthetic,
 }
 
@@ -1149,6 +1150,7 @@ impl ClientFilter {
             Self::Freebuff => "freebuff",
             Self::CherryStudio => "cherrystudio",
             Self::Dsh => "dsh",
+            Self::Mcode => "mcode",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1209,6 +1211,7 @@ impl ClientFilter {
             Self::Freebuff => Some(ClientId::Freebuff),
             Self::CherryStudio => Some(ClientId::CherryStudio),
             Self::Dsh => Some(ClientId::Dsh),
+            Self::Mcode => Some(ClientId::Mcode),
             Self::Synthetic => None,
         }
     }
@@ -1265,6 +1268,7 @@ impl ClientFilter {
             ClientId::Freebuff => Self::Freebuff,
             ClientId::CherryStudio => Self::CherryStudio,
             ClientId::Dsh => Self::Dsh,
+            ClientId::Mcode => Self::Mcode,
         }
     }
 
@@ -4097,12 +4101,6 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 
     let headless_roots =
         tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir_str, use_env_roots);
-    let headless_codex_count = parsed
-        .messages
-        .iter()
-        .filter(|m| m.agent.as_deref() == Some("headless") && m.client == "codex")
-        .count() as i32;
-
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ClientRow {
@@ -4250,7 +4248,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     vec![]
                 };
                 let (headless_supported, headless_paths, headless_message_count) =
-                    if client == ClientId::Codex {
+                    if client.supports_headless() {
                         (
                             true,
                             headless_roots
@@ -4263,7 +4261,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                                     }
                                 })
                                 .collect(),
-                            headless_codex_count,
+                            parsed
+                                .messages
+                                .iter()
+                                .filter(|message| {
+                                    message.agent.as_deref() == Some("headless")
+                                        && message.client == client.as_str()
+                                })
+                                .count() as i32,
                         )
                     } else {
                         (false, vec![], 0)
@@ -4339,7 +4344,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
             clients,
-            note: "Headless capture is supported for Codex CLI only.".to_string(),
+            note: "Headless capture is supported for Codex CLI and MiniMax Code.".to_string(),
         };
 
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -4470,7 +4475,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 
         println!(
             "  {}",
-            "Note: Headless capture is supported for Codex CLI only.".bright_black()
+            "Note: Headless capture is supported for Codex CLI and MiniMax Code.".bright_black()
         );
         println!();
     }
@@ -6488,9 +6493,9 @@ fn run_headless_command(
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
-    if source_lower != "codex" {
+    if source_lower != "codex" && source_lower != "mcode" {
         eprintln!("\n  Error: Unknown headless source '{}'.", source);
-        eprintln!("  Currently only 'codex' is supported.\n");
+        eprintln!("  Supported sources are 'codex' and 'mcode'.\n");
         std::process::exit(1);
     }
 
@@ -6503,10 +6508,12 @@ fn run_headless_command(
         None => "jsonl".to_string(),
     };
 
-    let mut final_args = args.clone();
-    if !no_auto_flags && source_lower == "codex" && !final_args.contains(&"--json".to_string()) {
-        final_args.push("--json".to_string());
+    if source_lower == "mcode" && resolved_format != "jsonl" {
+        eprintln!("\n  Error: MiniMax Code headless capture requires jsonl output.\n");
+        std::process::exit(1);
     }
+
+    let final_args = prepare_headless_args(&source_lower, args, no_auto_flags)?;
 
     let home_dir = crate::paths::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -6581,6 +6588,40 @@ fn run_headless_command(
     Ok(())
 }
 
+fn prepare_headless_args(
+    source: &str,
+    mut args: Vec<String>,
+    no_auto_flags: bool,
+) -> Result<Vec<String>> {
+    if no_auto_flags {
+        return Ok(args);
+    }
+
+    if source == "codex" {
+        if !args.iter().any(|arg| arg == "--json") {
+            args.push("--json".to_string());
+        }
+        return Ok(args);
+    }
+
+    let exec_index = args.iter().position(|arg| arg == "exec").ok_or_else(|| {
+        anyhow::anyhow!("MiniMax Code headless capture requires the `exec` subcommand")
+    })?;
+    let has_output_format = args.iter().any(|arg| {
+        arg == "--output-format"
+            || arg.starts_with("--output-format=")
+            || arg == "--format"
+            || arg.starts_with("--format=")
+    });
+    if !has_output_format {
+        args.splice(
+            exec_index + 1..exec_index + 1,
+            ["--output-format".to_string(), "stream-json".to_string()],
+        );
+    }
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6590,6 +6631,37 @@ mod tests {
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown,
     };
+
+    #[test]
+    fn mcode_headless_args_inject_stream_json_immediately_after_exec() {
+        assert_eq!(
+            prepare_headless_args(
+                "mcode",
+                vec!["exec".to_string(), "review this".to_string()],
+                false,
+            )
+            .unwrap(),
+            vec!["exec", "--output-format", "stream-json", "review this"]
+        );
+    }
+
+    #[test]
+    fn mcode_headless_args_preserve_explicit_format_and_no_auto_mode() {
+        let explicit = vec![
+            "exec".to_string(),
+            "--output-format=json".to_string(),
+            "review this".to_string(),
+        ];
+        assert_eq!(
+            prepare_headless_args("mcode", explicit.clone(), false).unwrap(),
+            explicit
+        );
+        assert_eq!(
+            prepare_headless_args("mcode", vec!["version".to_string()], true).unwrap(),
+            vec!["version"]
+        );
+        assert!(prepare_headless_args("mcode", vec!["version".to_string()], false).is_err());
+    }
 
     #[test]
     fn test_parse_variant_arg_accepts_known_values() {

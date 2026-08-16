@@ -225,6 +225,18 @@ fn create_fake_codex_bin() -> TempDir {
     tmp
 }
 
+fn create_fake_mcode_bin() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create fake mcode dir");
+    let mcode_path = tmp
+        .path()
+        .join(if cfg!(windows) { "mcode.exe" } else { "mcode" });
+
+    fs::copy(Path::new(env!("CARGO_BIN_EXE_fake_codex")), &mcode_path)
+        .expect("failed to install the fake mcode onto PATH");
+
+    tmp
+}
+
 /// Build the `tokscale headless codex` invocation for one `headless_capture_*`
 /// test.
 ///
@@ -260,6 +272,38 @@ fn headless_capture_command(
         ]);
 
     cmd
+}
+
+#[test]
+fn headless_capture_mcode_injects_stream_json_after_exec() {
+    let fake_bin = create_fake_mcode_bin();
+    let output_dir = TempDir::new().expect("failed to create output dir");
+    let output_path = output_dir.path().join("mcode.jsonl");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(fake_bin.path().to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("tokscale")
+        .env("HOME", fake_bin.path())
+        .env("TOKSCALE_FAKE_CODEX_MODE", "args")
+        .env("PATH", joined_path)
+        .args([
+            "headless",
+            "--output",
+            output_path.to_str().unwrap(),
+            "mcode",
+            "exec",
+            "review this change",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "exec\n--output-format\nstream-json\nreview this change"
+    );
 }
 
 /// The parent deadline the two `fast` tests give `tokscale`, and the elapsed
@@ -2108,6 +2152,55 @@ fn test_models_with_client_filter_jcode() {
     assert_eq!(entry["cacheWrite"].as_i64().unwrap(), 50);
     assert_eq!(entry["output"].as_i64().unwrap(), 250);
     assert_eq!(entry["reasoning"].as_i64().unwrap(), 25);
+}
+
+#[test]
+fn test_mcode_headless_stream_counts_identically_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    let stream_dir = tmp.path().join(".config/tokscale/headless/mcode");
+    fs::create_dir_all(&stream_dir).unwrap();
+    fs::write(
+        stream_dir.join("run.jsonl"),
+        concat!(
+            r#"{"type":"message","message":{"turnId":"turn-1","role":"assistant","timestamp":1786800000000,"usage":{"inputTokens":1000,"outputTokens":250,"cacheReadTokens":400,"cacheWriteTokens":50}}}"#,
+            "\n",
+            r#"{"schemaVersion":1,"type":"exec.result","sessionId":"session-1","turnId":"turn-1","status":"succeeded","model":{"providerId":"minimax","modelId":"MiniMax-M2.5","variant":"fast"},"durationMs":10}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "mcode", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{pass} cache pass");
+        let entry = &entries[0];
+        assert_eq!(entry["client"].as_str(), Some("mcode"), "{pass} cache pass");
+        assert_eq!(
+            entry["provider"].as_str(),
+            Some("minimax"),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            entry["model"].as_str(),
+            Some("minimax-m2.5"),
+            "{pass} cache pass"
+        );
+        assert_eq!(entry["input"].as_i64(), Some(1000), "{pass} cache pass");
+        assert_eq!(entry["output"].as_i64(), Some(250), "{pass} cache pass");
+        assert_eq!(entry["cacheRead"].as_i64(), Some(400), "{pass} cache pass");
+        assert_eq!(entry["cacheWrite"].as_i64(), Some(50), "{pass} cache pass");
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+    }
 }
 
 /// The Windows regression guard for the two tests below.

@@ -34,6 +34,7 @@ pub mod kilocode;
 pub mod kimchi;
 pub mod kimi;
 pub mod kiro;
+pub mod mcode;
 pub mod micode;
 pub mod mux;
 pub mod openclaw;

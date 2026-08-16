@@ -1930,6 +1930,15 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         &mut source_cache,
         pricing,
         &mut all_messages,
+        ClientId::Mcode,
+        sessions::mcode::parse_mcode_file,
+    );
+
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
         ClientId::Warp,
         sessions::warp::parse_warp_file,
     );
@@ -4768,6 +4777,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let dsh_count = summed_parsed_message_count(&dsh_msgs);
     counts.set(ClientId::Dsh, dsh_count);
     messages.extend(dsh_msgs);
+
+    let mcode_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Mcode)
+        .par_iter()
+        .flat_map(|path| sessions::mcode::parse_mcode_file(path))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let mcode_count = summed_parsed_message_count(&mcode_msgs);
+    counts.set(ClientId::Mcode, mcode_count);
+    messages.extend(mcode_msgs);
 
     let opencodereview_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::OpenCodeReview)

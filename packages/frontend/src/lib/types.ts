@@ -2,6 +2,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "opencode",
   "claude",
   "codex",
+  "mcode",
   "copilot",
   "gemini",
   "cursor",
