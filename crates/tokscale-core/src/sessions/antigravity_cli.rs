@@ -146,6 +146,15 @@ impl SessionModels {
                 unresolved_labels.extend(label);
                 continue;
             };
+            if is_antigravity_routing_label(model) {
+                // A routing label names the router that served the request, never
+                // the model that answered it, so it is no evidence of a concrete
+                // model for this display label. Treat it like a row with no #19:
+                // it must not occupy the by_display slot, which would trip the
+                // ambiguity check against a real sibling id and drop the mapping.
+                unresolved_labels.extend(label);
+                continue;
+            }
             distinct.insert(model);
             if let Some(label) = label {
                 by_display
@@ -214,6 +223,31 @@ impl SessionModels {
     }
 }
 
+/// Antigravity CLI's generic routing label. It names which router served the
+/// request, never which model did, so a row carrying it carries no model
+/// identity of its own. Kept in sync with `is_generic_routing_label` in lib.rs,
+/// which excludes the label from submission when no concrete model is recovered
+/// here.
+fn is_antigravity_routing_label(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("gemini-default")
+}
+
+/// Map an Antigravity `#21` display label to a concrete model id.
+///
+/// Display labels are server-supplied names (the app's `_getModelLabel` switch
+/// emits them from `MODEL_PLACEHOLDER_*` ids) and could be renamed or localized,
+/// so only labels verified against real user databases are mapped here; anything
+/// else returns `None` and the routing label is preserved for the submission-time
+/// exclusion rather than guessed at.
+fn display_label_to_model_id(label: &str) -> Option<&'static str> {
+    match label.trim() {
+        "Gemini 3.5 Flash (Low)" => Some("gemini-3.5-flash"),
+        "Gemini 3.5 Flash (Medium)" => Some("gemini-3.5-flash-medium"),
+        "Gemini 3.5 Flash (High)" => Some("gemini-3.5-flash-high"),
+        _ => None,
+    }
+}
+
 fn parse_gen_metadata(
     blob: &[u8],
     session_id: &str,
@@ -262,8 +296,18 @@ fn parse_gen_metadata(
         }
     }
 
-    let model_raw = non_empty_string_field(chat_model, 19)
+    let response_model = non_empty_string_field(chat_model, 19);
+    let model_raw = response_model
+        .filter(|m| !is_antigravity_routing_label(m))
         .or_else(|| session_models.recover(chat_model))
+        .or_else(|| {
+            // Routing labels carry no model identity of their own, but the
+            // sibling `#21` display label names the tier. Recover the concrete
+            // id from it; if the label is unknown, keep the routing label so
+            // the submission-time exclusion still applies.
+            non_empty_string_field(chat_model, 21).and_then(display_label_to_model_id)
+        })
+        .or(response_model)
         .unwrap_or("unknown");
     let model_id = pricing::aliases::resolve_alias(model_raw)
         .unwrap_or(model_raw)
@@ -1206,5 +1250,139 @@ mod tests {
         );
         // Anything without the scheme prefix is rejected.
         assert_eq!(file_uri_to_path("not-a-file-uri"), None);
+    }
+
+    // A `gemini-default` routing-label row in a conversation whose other rows
+    // carry the concrete `#19` for the same display label is resolved from that
+    // sibling evidence, exactly like a row with no `#19` at all.
+    #[test]
+    fn routing_label_row_is_resolved_from_sibling_display_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing-sibling.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3.5-flash-high"),
+                    Some("Gemini 3.5 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-default"),
+                    Some("Gemini 3.5 Flash (High)"),
+                    "resp-1",
+                ),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].model_id, "gemini-3.5-flash-high");
+        assert_eq!(messages[1].provider_id, "google");
+    }
+
+    // A routing-label row must not occupy the by_display slot for its label:
+    // otherwise a sibling concrete id would read as ambiguous and the whole
+    // mapping would be dropped.
+    #[test]
+    fn routing_label_does_not_poison_by_display_ambiguity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing-no-poison.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-3.6-flash"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-default"),
+                    Some("Gemini 3.6 Flash (High)"),
+                    "resp-1",
+                ),
+                build_row(None, Some("Gemini 3.6 Flash (High)"), "resp-2"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].model_id, "gemini-3.6-flash");
+        assert_eq!(messages[2].model_id, "gemini-3.6-flash");
+    }
+
+    // When a routing-label row has no sibling evidence, the `#21` display label
+    // itself names the tier. This is the case observed in real data: entire
+    // Antigravity CLI conversations carry `gemini-default` with "Gemini 3.5
+    // Flash (Low)" / "(Medium)" labels and no other `#19` at all (#1116).
+    #[test]
+    fn routing_label_resolved_from_display_label_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing-display.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-default"),
+                    Some("Gemini 3.5 Flash (Low)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-default"),
+                    Some("Gemini 3.5 Flash (Medium)"),
+                    "resp-1",
+                ),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "gemini-3.5-flash");
+        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[1].model_id, "gemini-3.5-flash-medium");
+        assert_eq!(messages[1].provider_id, "google");
+    }
+
+    // A routing-label row whose display label is not in the verified map, and
+    // whose file offers no sibling evidence, keeps the routing label verbatim so
+    // the submission-time exclusion still applies rather than guessing.
+    #[test]
+    fn routing_label_without_any_evidence_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing-unresolved.db");
+        write_conversation(
+            &path,
+            &[build_row(
+                Some("gemini-default"),
+                Some("Gemini 9.9 Flash (Mystery)"),
+                "resp-0",
+            )],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-default");
+        assert_eq!(messages[0].provider_id, "google");
+    }
+
+    // A recovered value from the display label is a concrete model id, so it
+    // still flows through the alias table like any directly-read `#19`.
+    #[test]
+    fn routing_label_recover_still_resolves_through_the_alias_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing-alias.db");
+        write_conversation(
+            &path,
+            &[build_row(
+                Some("gemini-default"),
+                Some("Gemini 3.5 Flash (High)"),
+                "resp-0",
+            )],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3.5-flash-high");
+        assert_eq!(messages[0].provider_id, "google");
     }
 }
