@@ -11,6 +11,11 @@ use super::utils::{
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
+
+/// The Anthropic `usage` block, kept reachable under its historical name so
+/// `sessions::claudecode::ClaudeUsage` still resolves to the same four fields
+/// after the type moved into `sessions::utils`.
+pub use super::utils::AnthropicUsage as ClaudeUsage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,11 +26,8 @@ use std::path::{Path, PathBuf};
 type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
 
 /// Claude Code entry structure (from JSONL files)
-///
-/// `pub(crate)` because the shared usage block it embeds is crate-internal;
-/// nothing outside this module ever named these types.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ClaudeEntry {
+pub struct ClaudeEntry {
     #[serde(rename = "type")]
     pub entry_type: String,
     pub timestamp: Option<String>,
@@ -68,7 +70,7 @@ impl CcMirrorVariantMetadata {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ClaudeMessage {
+pub struct ClaudeMessage {
     pub model: Option<String>,
     pub usage: Option<AnthropicUsage>,
     /// Message ID for deduplication (used with requestId)

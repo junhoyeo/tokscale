@@ -543,18 +543,20 @@ pub(crate) fn resolved_provider(
 /// their own struct on purpose. Widening this one with aliases would make the
 /// clients above start counting fields they deliberately ignore today, and
 /// change reported totals.
+/// Public because `claudecode` re-exports it as its historical `ClaudeUsage`;
+/// `sessions::utils` itself is crate-private.
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicUsage {
-    pub(crate) input_tokens: Option<i64>,
-    pub(crate) output_tokens: Option<i64>,
-    pub(crate) cache_read_input_tokens: Option<i64>,
-    pub(crate) cache_creation_input_tokens: Option<i64>,
+pub struct AnthropicUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
 }
 
 impl AnthropicUsage {
     /// Token breakdown with every field clamped at zero. This block carries no
     /// reasoning bucket, so `reasoning` is always 0.
-    pub(crate) fn to_breakdown(&self) -> TokenBreakdown {
+    pub fn to_breakdown(&self) -> TokenBreakdown {
         TokenBreakdown {
             input: self.input_tokens.unwrap_or(0).max(0),
             output: self.output_tokens.unwrap_or(0).max(0),
