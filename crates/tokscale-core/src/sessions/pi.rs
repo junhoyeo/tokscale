@@ -416,7 +416,10 @@ impl PiParseOptions {
 }
 
 enum PiLines {
-    Standard(std::io::Lines<BufReader<std::fs::File>>),
+    Standard {
+        lines: std::io::Lines<BufReader<std::fs::File>>,
+        at_start: bool,
+    },
     Lossy(super::utils::LossyLinesWithBytes<BufReader<std::fs::File>>),
 }
 
@@ -447,12 +450,31 @@ impl Iterator for PiLines {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self {
-                Self::Standard(lines) => match lines.next() {
-                    Some(Ok(line)) => return Some(PiLine::Standard(line)),
+                Self::Standard { lines, at_start } => match lines.next() {
+                    Some(Ok(mut line)) => {
+                        // A UTF-8 BOM decodes cleanly, so it survives as U+FEFF
+                        // glued to the front of the first record, where
+                        // `str::trim` leaves it (U+FEFF is not White_Space) and
+                        // the header then fails to parse. A header that fails to
+                        // parse discards the whole transcript rather than one
+                        // record, so strip the marker here exactly as the lossy
+                        // reader already does for Prime Agent.
+                        if std::mem::take(at_start) {
+                            if let Some(stripped) = line.strip_prefix('\u{feff}') {
+                                line = stripped.to_string();
+                            }
+                        }
+                        return Some(PiLine::Standard(line));
+                    }
                     // `reader.lines()` historically skipped all unreadable
                     // records and continued. In particular, an invalid-UTF-8
                     // line must not truncate valid records that follow it.
-                    Some(Err(_)) => continue,
+                    Some(Err(_)) => {
+                        // The marker can only precede the first record, and that
+                        // record was just consumed.
+                        *at_start = false;
+                        continue;
+                    }
                     None => return None,
                 },
                 Self::Lossy(lines) => return lines.next().map(PiLine::Lossy),
@@ -564,7 +586,10 @@ fn parse_pi_format_file_inner(
     let lines = if options.lossy_line_reader {
         PiLines::Lossy(lossy_lines_with_bytes(reader))
     } else {
-        PiLines::Standard(reader.lines())
+        PiLines::Standard {
+            lines: reader.lines(),
+            at_start: true,
+        }
     };
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
@@ -854,6 +879,54 @@ mod tests {
 
         let messages = parse_pi_file(file.path());
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 28);
+    }
+
+    #[test]
+    fn utf8_bom_before_the_header_keeps_the_transcript() {
+        // A BOM decodes cleanly, so `str::trim` leaves U+FEFF glued to the
+        // front of the header (it is not White_Space) and the header fails to
+        // parse. That failure drops the entire transcript, not one record, so
+        // every Pi-format client has to strip it the way the lossy reader
+        // already does for Prime Agent.
+        let file = create_test_file(concat!(
+            "\u{feff}",
+            r#"{"type":"session","id":"session-with-bom","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project"}"#,
+            "\n",
+            r#"{"type":"message","id":"assistant-1","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":20,"output":8}}}"#,
+            "\n",
+        ));
+
+        for messages in [
+            parse_pi_file(file.path()),
+            crate::sessions::senpi::parse_senpi_file(file.path()),
+            crate::sessions::kimchi::parse_kimchi_file(file.path()),
+            parse_prime_test_file(file.path()),
+        ] {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, "session-with-bom");
+            assert_eq!(messages[0].tokens.total(), 28);
+        }
+    }
+
+    #[test]
+    fn a_marker_after_the_first_record_still_costs_only_its_own_record() {
+        // The strip is scoped to the file's first line, where a byte-order mark
+        // can actually appear. A U+FEFF anywhere else stays an ordinary
+        // malformed record, which the reader already loses alone.
+        let file = create_test_file(concat!(
+            r#"{"type":"session","id":"session-clean","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project"}"#,
+            "\n\u{feff}",
+            r#"{"type":"message","id":"assistant-1","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":1,"output":1}}}"#,
+            "\n",
+            r#"{"type":"message","id":"assistant-2","timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":20,"output":8}}}"#,
+            "\n",
+        ));
+
+        let messages = parse_pi_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "session-clean");
         assert_eq!(messages[0].tokens.total(), 28);
     }
 
