@@ -20,7 +20,7 @@
 //! session, timestamp, model and token breakdown keeps structurally identical
 //! replays (depth-1 vs depth-2 files) collapsed to one message.
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, CamelUsage};
 use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
@@ -53,30 +53,12 @@ struct GjcMessage {
     source: Option<String>,
     /// Unix-ms timestamp (preferred for ordering/date).
     timestamp: Option<i64>,
-    usage: Option<GjcUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GjcUsage {
-    input: Option<i64>,
-    output: Option<i64>,
-    cache_read: Option<i64>,
-    cache_write: Option<i64>,
-    #[allow(dead_code)]
-    total_tokens: Option<i64>,
-    cost: Option<GjcCost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GjcCost {
-    /// Authoritative total cost in USD.
-    total: Option<f64>,
+    usage: Option<CamelUsage>,
 }
 
 /// Reuse the embedded `usage.cost.total` (USD) only when present, finite, and
 /// non-negative. Otherwise return `0.0` so the dispatch pricing guard reprices.
-fn embedded_cost(usage: &GjcUsage) -> (f64, CostSource) {
+fn embedded_cost(usage: &CamelUsage) -> (f64, CostSource) {
     match usage.cost.as_ref().and_then(|c| c.total) {
         Some(total) if total.is_finite() && total >= 0.0 => (total, CostSource::ProviderReported),
         _ => (0.0, CostSource::Unknown),
@@ -201,13 +183,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
                 .unwrap_or(fallback_timestamp)
         });
 
-        let tokens = TokenBreakdown {
-            input: usage.input.unwrap_or(0).max(0),
-            output: usage.output.unwrap_or(0).max(0),
-            cache_read: usage.cache_read.unwrap_or(0).max(0),
-            cache_write: usage.cache_write.unwrap_or(0).max(0),
-            reasoning: 0,
-        };
+        let tokens = usage.to_breakdown();
 
         let (cost, cost_source) = embedded_cost(&usage);
 

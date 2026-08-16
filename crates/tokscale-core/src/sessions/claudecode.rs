@@ -6,7 +6,7 @@
 
 use super::utils::{
     estimate_tokens, extract_i64, extract_string, file_modified_timestamp_ms,
-    parse_timestamp_value, read_file_or_none,
+    parse_timestamp_value, read_file_or_none, AnthropicUsage,
 };
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
@@ -21,8 +21,11 @@ use std::path::{Path, PathBuf};
 type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
 
 /// Claude Code entry structure (from JSONL files)
+///
+/// `pub(crate)` because the shared usage block it embeds is crate-internal;
+/// nothing outside this module ever named these types.
 #[derive(Debug, Deserialize)]
-pub struct ClaudeEntry {
+pub(crate) struct ClaudeEntry {
     #[serde(rename = "type")]
     pub entry_type: String,
     pub timestamp: Option<String>,
@@ -65,22 +68,14 @@ impl CcMirrorVariantMetadata {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ClaudeMessage {
+pub(crate) struct ClaudeMessage {
     pub model: Option<String>,
-    pub usage: Option<ClaudeUsage>,
+    pub usage: Option<AnthropicUsage>,
     /// Message ID for deduplication (used with requestId)
     pub id: Option<String>,
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClaudeUsage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
 }
 
 /// Resolve the subagent display name for a sidechain transcript file.
@@ -888,7 +883,7 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
 
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
-    usage: &ClaudeUsage,
+    usage: &AnthropicUsage,
     parsed_timestamp: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.

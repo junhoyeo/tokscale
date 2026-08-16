@@ -1,6 +1,8 @@
 //! Shared parsing helpers for session logs.
 
+use crate::TokenBreakdown;
 use rusqlite::{Connection, OpenFlags};
+use serde::Deserialize;
 use serde_json::Value;
 use std::io::BufRead;
 use std::path::Path;
@@ -473,6 +475,81 @@ pub(crate) fn resolved_provider(
             crate::provider_identity::inferred_provider_from_model(model_id).map(str::to_string)
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+/// The Anthropic Messages API `usage` block in its snake_case wire spelling.
+///
+/// Shared by the clients that persist Anthropic responses verbatim
+/// (`claudecode`, `augment`), which declared byte-identical copies of it.
+///
+/// Clients whose payload adds fields on top of this shape — a
+/// `reasoning_output_tokens`, a `cached_input_tokens`, a `total_tokens` — keep
+/// their own struct on purpose. Widening this one with aliases would make the
+/// clients above start counting fields they deliberately ignore today, and
+/// change reported totals.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AnthropicUsage {
+    pub(crate) input_tokens: Option<i64>,
+    pub(crate) output_tokens: Option<i64>,
+    pub(crate) cache_read_input_tokens: Option<i64>,
+    pub(crate) cache_creation_input_tokens: Option<i64>,
+}
+
+impl AnthropicUsage {
+    /// Token breakdown with every field clamped at zero. This block carries no
+    /// reasoning bucket, so `reasoning` is always 0.
+    pub(crate) fn to_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input_tokens.unwrap_or(0).max(0),
+            output: self.output_tokens.unwrap_or(0).max(0),
+            cache_read: self.cache_read_input_tokens.unwrap_or(0).max(0),
+            cache_write: self.cache_creation_input_tokens.unwrap_or(0).max(0),
+            reasoning: 0,
+        }
+    }
+}
+
+/// The camelCase `{input, output, cacheRead, cacheWrite, totalTokens}` usage
+/// block with an authoritative `cost.total` in USD, as written by `gjc` and
+/// `openclaw`. They declared the same struct twice, one spelling the rename
+/// with `rename_all` and the other with per-field `rename`, so the JSON both
+/// accept is identical.
+///
+/// `pi.rs` models the same wire shape with its own `PiUsage` (a flattened
+/// extras map it needs and this type does not) and is left alone.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CamelUsage {
+    pub(crate) input: Option<i64>,
+    pub(crate) output: Option<i64>,
+    pub(crate) cache_read: Option<i64>,
+    pub(crate) cache_write: Option<i64>,
+    /// Reported but unused: the breakdown is summed from the fields above, so
+    /// a disagreeing total must not silently override them.
+    #[allow(dead_code)]
+    pub(crate) total_tokens: Option<i64>,
+    pub(crate) cost: Option<CamelCost>,
+}
+
+impl CamelUsage {
+    /// Token breakdown with every field clamped at zero. This block carries no
+    /// reasoning bucket, so `reasoning` is always 0.
+    pub(crate) fn to_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input.unwrap_or(0).max(0),
+            output: self.output.unwrap_or(0).max(0),
+            cache_read: self.cache_read.unwrap_or(0).max(0),
+            cache_write: self.cache_write.unwrap_or(0).max(0),
+            reasoning: 0,
+        }
+    }
+}
+
+/// The `cost` sibling of [`CamelUsage`].
+#[derive(Debug, Deserialize)]
+pub(crate) struct CamelCost {
+    /// Authoritative total cost in USD.
+    pub(crate) total: Option<f64>,
 }
 
 #[cfg(test)]
