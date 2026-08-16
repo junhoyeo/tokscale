@@ -41,7 +41,11 @@ export function QuickstartSection() {
       <SeparatorBar />
 
       {/* Quickstart Label */}
-      <QuickstartLabel>
+      <QuickstartLabel
+        href="https://github.com/junhoyeo/tokscale#installation"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
         <QuickstartText>Quickstart</QuickstartText>
       </QuickstartLabel>
 
@@ -135,7 +139,7 @@ const SeparatorBar = styled.div`
 `;
 
 /* ── Quickstart Label ── */
-const QuickstartLabel = styled.div`
+const QuickstartLabel = styled.a`
   width: 100%;
   display: flex;
   align-items: center;
@@ -144,6 +148,7 @@ const QuickstartLabel = styled.div`
   background: #0073ff;
   border-left: 1px solid #10233e;
   border-right: 1px solid #10233e;
+  text-decoration: none;
 `;
 
 const QuickstartText = styled.span`
