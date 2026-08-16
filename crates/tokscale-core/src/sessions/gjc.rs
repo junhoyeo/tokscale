@@ -20,12 +20,11 @@
 //! session, timestamp, model and token breakdown keeps structurally identical
 //! replays (depth-1 vs depth-2 files) collapsed to one message.
 
-use super::utils::{file_modified_timestamp_ms, CamelUsage};
+use super::utils::{file_modified_timestamp_ms, for_each_json_line, CamelUsage};
 use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// A single JSONL entry. The `session` header reuses `id`/`timestamp`/`cwd`;
@@ -95,14 +94,8 @@ fn derive_dedup_key(
 /// Per-line parse: malformed/partial/legacy lines are skipped, never aborting
 /// the file. The `session` header and `service_tier_change` lines emit nothing.
 pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
-    let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
 
@@ -110,22 +103,12 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry = match simd_json::from_slice::<GjcEntry>(&mut buffer) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         match entry.entry_type.as_str() {
@@ -137,30 +120,30 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
                     workspace_label = workspace_label_from_key(&key);
                     workspace_key = Some(key);
                 }
-                continue;
+                return;
             }
             "message" => {}
             // service_tier_change and any other entry types: skip.
-            _ => continue,
+            _ => return,
         }
 
         let message = match entry.message {
             Some(m) => m,
-            None => continue,
+            None => return,
         };
 
         if message.role.as_deref() != Some("assistant") {
-            continue;
+            return;
         }
 
         let usage = match message.usage {
             Some(u) => u,
-            None => continue,
+            None => return,
         };
 
         let model = match message.model {
             Some(m) => m,
-            None => continue,
+            None => return,
         };
 
         // A missing provider field is recoverable: infer it from the model name
@@ -228,7 +211,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
-    }
+    });
 
     messages
 }

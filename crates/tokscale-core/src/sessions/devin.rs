@@ -5,14 +5,13 @@
 //! - Devin Desktop NDJSON event streams (`~/Library/Application Support/Devin/User/acp-events/*.ndjson`)
 
 use super::utils::{
-    back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt,
-    sqlite_for_each_row_on,
+    back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line,
+    open_readonly_sqlite_opt, sqlite_for_each_row_on,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -408,25 +407,15 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
     path: &Path,
     lookup: &DevinDesktopSessionLookup,
 ) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let file_session_id = session_id_from_ndjson_path(path);
     let mut legacy_messages = Vec::new();
     let mut acp_usage: Option<DevinDesktopAcpUsage> = None;
     let mut title: Option<String> = None;
 
-    for (line_index, line) in BufReader::new(file).lines().enumerate() {
-        let Ok(line) = line else { continue };
-        if line.is_empty() {
-            continue;
-        }
-
-        let Ok(event) = serde_json::from_str::<DevinDesktopEvent>(&line) else {
-            continue;
+    for_each_json_line(path, &mut |line_index, line| {
+        let Ok(event) = serde_json::from_str::<DevinDesktopEvent>(line) else {
+            return;
         };
 
         // The Desktop app streams ACP events. Usage is not reliably present in
@@ -435,7 +424,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
         // yield no messages. This keeps the parser future-proof and avoids
         // double-counting the CLI DB data.
         let Some(notification) = event.notification else {
-            continue;
+            return;
         };
 
         if notification
@@ -452,7 +441,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
             {
                 title = Some(updated_title);
             }
-            continue;
+            return;
         }
 
         if notification
@@ -497,7 +486,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
                 if let Some(timestamp) = notification_timestamp(&notification) {
                     usage.timestamp = Some(timestamp);
                 }
-                continue;
+                return;
             }
         }
 
@@ -511,7 +500,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
             .or_else(|| notification.pointer("/metadata"));
 
         let Some(usage) = usage else {
-            continue;
+            return;
         };
 
         let input = usage
@@ -536,7 +525,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
             .max(0);
 
         if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
-            continue;
+            return;
         }
 
         let model_hint = notification_model(&notification);
@@ -558,7 +547,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
             },
             line_index,
         ));
-    }
+    });
 
     if let Some(usage) = acp_usage {
         let tokens = TokenBreakdown {

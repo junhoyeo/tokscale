@@ -54,11 +54,15 @@ pub(crate) struct LossyLines<R> {
     at_start: bool,
 }
 
-fn read_lossy_line<R: BufRead>(
+/// Read one line into `buf`, stripping the line terminator and a leading BOM.
+///
+/// Returns the offset in `buf` at which the line's payload starts, so callers
+/// can borrow it without allocating, or `None` at end of input.
+fn read_line_payload<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     at_start: &mut bool,
-) -> Option<String> {
+) -> Option<usize> {
     buf.clear();
     match reader.read_until(b'\n', buf) {
         Ok(0) => None,
@@ -70,13 +74,65 @@ fn read_lossy_line<R: BufRead>(
                 }
             }
 
-            let mut bytes = buf.as_slice();
-            if std::mem::take(at_start) {
-                bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
+            let bom = "\u{feff}".as_bytes();
+            if std::mem::take(at_start) && buf.starts_with(bom) {
+                Some(bom.len())
+            } else {
+                Some(0)
             }
-            Some(String::from_utf8_lossy(bytes).into_owned())
         }
+        // A hard I/O error (vanished mount, EIO) does not consume input, so
+        // retrying would spin on the same failing read forever. Stop instead.
         Err(_) => None,
+    }
+}
+
+fn read_lossy_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    at_start: &mut bool,
+) -> Option<String> {
+    let start = read_line_payload(reader, buf, at_start)?;
+    Some(String::from_utf8_lossy(&buf[start..]).into_owned())
+}
+
+/// Read `path` as line-delimited JSON, handing every non-blank, trimmed line to
+/// `sink` together with its zero-based physical line index.
+///
+/// A missing or unreadable file yields nothing, which is what every JSONL
+/// parser already did by hand.
+///
+/// This also fixes a silent-truncation bug wherever it replaces
+/// `BufReader::lines()`. That iterator ends on the first line that is not valid
+/// UTF-8, so a single stray byte discarded the entire rest of a transcript —
+/// #1031 measured ~2% of an 83 MB Grok `updates.jsonl` surviving. Decoding
+/// lossily per line keeps the damage to the line carrying the bad byte, and
+/// the index stays aligned with the physical file so callers that report line
+/// positions still agree with it.
+///
+/// The line is borrowed out of a reused buffer rather than allocated per line,
+/// so callers that need an owned value must clone it themselves.
+///
+/// `sink` is `&mut dyn FnMut` and not a generic `impl FnMut` on purpose: a type
+/// parameter would monomorphize this driver once per calling parser and grow
+/// the binary, which is what sharing it exists to avoid.
+pub(crate) fn for_each_json_line(path: &Path, sink: &mut dyn FnMut(usize, &str)) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut at_start = true;
+    let mut index = 0usize;
+
+    while let Some(start) = read_line_payload(&mut reader, &mut buf, &mut at_start) {
+        let text = String::from_utf8_lossy(&buf[start..]);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            sink(index, trimmed);
+        }
+        index += 1;
     }
 }
 

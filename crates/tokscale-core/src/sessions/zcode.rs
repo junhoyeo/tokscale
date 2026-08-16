@@ -14,14 +14,14 @@
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
 use super::utils::{
-    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, open_readonly_sqlite_opt,
-    session_id_from_path, sqlite_for_each_row_on, workspace_key_from_path,
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, for_each_json_line,
+    open_readonly_sqlite_opt, session_id_from_path, sqlite_for_each_row_on,
+    workspace_key_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "zcode";
@@ -104,11 +104,6 @@ impl ZcodeUsage {
 }
 
 pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let session_id_from_path = session_id_from_path(path);
     let workspace_key = workspace_key_from_path(path);
@@ -122,20 +117,10 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let entry = match serde_json::from_str::<ZcodeEntry>(trimmed) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if session_id.is_none() {
@@ -177,7 +162,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         // emitted, so the next real assistant message in this
                         // turn must keep its is_turn_start marker.
                         context_chars += chars;
-                        continue;
+                        return;
                     }
                     TokenBreakdown {
                         input,
@@ -224,7 +209,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 context_chars += chars;
             }
         }
-    }
+    });
 
     messages
 }

@@ -3,20 +3,16 @@
 //! OpenCodeReview stores sessions as JSONL files under
 //! `~/.opencodereview/sessions/<encoded-repo-path>/<session-id>.jsonl`.
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, parse_timestamp_value};
+use super::utils::{
+    back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line, parse_timestamp_value,
+};
 use super::UnifiedMessage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let session_id = session_id_from_path(path);
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
@@ -24,15 +20,13 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut messages = Vec::new();
     let mut seen = HashSet::new();
 
-    for (line_index, line) in BufReader::new(file).lines().enumerate() {
-        let Ok(line) = line else { continue };
-
+    for_each_json_line(path, &mut |line_index, line| {
         if !line.contains("llm_response") && !line.contains("session_start") {
-            continue;
+            return;
         }
 
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
         };
 
         let record_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -41,21 +35,21 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
             if workspace.is_none() {
                 workspace = value.get("cwd").and_then(Value::as_str).map(str::to_string);
             }
-            continue;
+            return;
         }
 
         if record_type != "llm_response" {
-            continue;
+            return;
         }
 
         let usage = match value.get("usage") {
             Some(u) => u,
-            None => continue,
+            None => return,
         };
 
         let tokens = tokens_from_usage(usage);
         if tokens.total() == 0 {
-            continue;
+            return;
         }
 
         // `explicit_timestamp` is this record's own recorded `timestamp`
@@ -120,7 +114,7 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
             tokens.input, tokens.output, tokens.cache_read, tokens.cache_write,
         );
         if !seen.insert(dedup_key.clone()) {
-            continue;
+            return;
         }
 
         let mut msg = UnifiedMessage::new(
@@ -143,7 +137,7 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         messages.push(msg);
-    }
+    });
 
     messages
 }

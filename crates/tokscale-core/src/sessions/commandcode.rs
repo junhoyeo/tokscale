@@ -37,12 +37,12 @@
 //! (the configured agent model), falling back to "unknown".
 
 use super::utils::{
-    estimate_tokens, file_modified_timestamp_ms, session_id_from_path, workspace_key_from_path,
+    estimate_tokens, file_modified_timestamp_ms, for_each_json_line, session_id_from_path,
+    workspace_key_from_path,
 };
 use super::{workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "commandcode";
@@ -74,11 +74,6 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     {
         return Vec::new();
     }
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let raw_model = model_from_config(path);
@@ -115,20 +110,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let entry = match serde_json::from_str::<CommandCodeEntry>(trimmed) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if session_id.is_none() {
@@ -150,7 +135,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
                 if input + output == 0 {
                     pending_turn_start = false;
-                    continue;
+                    return;
                 }
 
                 let resolved_session = session_id
@@ -196,7 +181,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 turn_input_chars += chars;
             }
         }
-    }
+    });
 
     messages
 }
