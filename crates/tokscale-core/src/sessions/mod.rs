@@ -38,6 +38,7 @@ pub mod micode;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;
+pub mod opencode_schema;
 pub mod opencodereview;
 pub mod pi;
 pub mod prime_agent;
