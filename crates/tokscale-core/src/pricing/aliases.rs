@@ -131,6 +131,18 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3-flash-a", "gemini-3.5-flash-high");
     m.insert("grok-composer-2.5", "composer-2.5");
     m.insert("grok-composer-2.5-fast", "composer-2.5-fast");
+    // OpenAI documents the API spelling below as a moving alias for
+    // `gpt-5.6-sol`; Codex records the same alias with its `gpt-` prefix.
+    // Keep the API, Codex, and provider-qualified spellings pinned to the
+    // currently documented target so the upstream GPT-5.6 Sol row supplies
+    // all token-bucket rates. The qualified form must be explicit because
+    // provider-prefix stripping does not run alias resolution a second time.
+    // Sources (accessed 2026-08-17):
+    // https://developers.openai.com/api/docs/guides/safety-checks/cybersecurity
+    // https://developers.openai.com/api/docs/pricing
+    m.insert("daybreak-blue-latest", "gpt-5.6-sol");
+    m.insert("gpt-daybreak-blue-latest", "gpt-5.6-sol");
+    m.insert("openai/gpt-daybreak-blue-latest", "gpt-5.6-sol");
 
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
@@ -207,6 +219,65 @@ mod tests {
             resolve_alias("GROK-COMPOSER-2.5-FAST"),
             Some("composer-2.5-fast")
         );
+    }
+
+    #[test]
+    fn resolves_openai_daybreak_blue_aliases_to_gpt_5_6_sol() {
+        assert_eq!(resolve_alias("daybreak-blue-latest"), Some("gpt-5.6-sol"));
+        assert_eq!(
+            resolve_alias("gpt-daybreak-blue-latest"),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            resolve_alias("GPT-DAYBREAK-BLUE-LATEST"),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            resolve_alias("openai/gpt-daybreak-blue-latest"),
+            Some("gpt-5.6-sol")
+        );
+    }
+
+    #[test]
+    fn codex_daybreak_blue_usage_uses_the_underlying_openai_price() {
+        let pricing = super::super::litellm::ModelPricing {
+            input_cost_per_token: Some(5e-6),
+            output_cost_per_token: Some(30e-6),
+            cache_read_input_token_cost: Some(0.5e-6),
+            cache_creation_input_token_cost: Some(6.25e-6),
+            ..Default::default()
+        };
+        let service = super::super::PricingService::new(
+            HashMap::from([("gpt-5.6-sol".to_string(), pricing)]),
+            HashMap::new(),
+        );
+        let usage = crate::TokenBreakdown {
+            input: 1_000,
+            output: 100,
+            cache_read: 500,
+            cache_write: 200,
+            reasoning: 0,
+        };
+
+        let expected = 1_000.0 * 5e-6 + 100.0 * 30e-6 + 500.0 * 0.5e-6 + 200.0 * 6.25e-6;
+        for model_id in [
+            "gpt-daybreak-blue-latest",
+            "openai/gpt-daybreak-blue-latest",
+        ] {
+            let result = service
+                .lookup_with_source_and_provider(model_id, None, Some("openai"))
+                .expect("the Codex alias must resolve to the GPT-5.6 Sol row");
+            assert_eq!(result.source, "LiteLLM");
+            assert_eq!(result.matched_key, "gpt-5.6-sol");
+            assert!(result.evidence.alias_applied);
+            assert!(service.covers_usage_with_provider(model_id, Some("openai"), &usage));
+
+            let cost = service.calculate_cost_with_provider(model_id, Some("openai"), &usage);
+            assert!(
+                (cost - expected).abs() < 1e-12,
+                "unexpected cost for {model_id}: {cost}"
+            );
+        }
     }
 
     #[test]
