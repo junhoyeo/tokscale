@@ -7947,6 +7947,123 @@ mod tests {
     /// stale too. Every existing user upgrades with a populated cache, so the
     /// first warm scan after the upgrade has to rebuild that provenance.
     ///
+    /// #1011: a pre-#1037 cache entry carries a `ceil(chars/4)` estimate that
+    /// the API-reported `input_tokens` of the next turn already counted. The
+    /// parser stopped minting those in #1037, but that alone does not clean an
+    /// entry already on disk — the reporter measured an upgrade changing
+    /// nothing, and asked for a migration.
+    ///
+    /// No migration is needed, and this pins why. Every such entry predates
+    /// retention provenance (#1037 merged 2026-08-06, #1085 on 2026-08-11), so
+    /// it is markerless, and `needs_retention_provenance_migration` already
+    /// routes markerless Claude entries through a full re-parse. The estimate
+    /// is re-derived away as a side effect of a mechanism built for something
+    /// else.
+    ///
+    /// The fixture is arranged so a fix that merely *kept* the cached rows
+    /// would fail: the seeded estimate is a row the current parser cannot
+    /// produce, so if the warm scan still reports it, the entry was served
+    /// rather than rebuilt.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_legacy_char_estimate_is_dropped_by_the_provenance_rebuild() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let transcript = claude_dir.join("estimate-session.jsonl");
+
+        // One assistant turn, and a tool_result with content but no token
+        // metadata — the shape Claude Code always writes, which is what made
+        // the old fallback fire on every one of them.
+        let assistant = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let tool_result = r#"{"type":"user","timestamp":"2024-12-01T10:00:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":"0123456789012345678901234567890123456789"}]}}"#;
+        std::fs::write(&transcript, format!("{assistant}\n{tool_result}\n")).unwrap();
+
+        let scan = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let total_input =
+            |messages: &[UnifiedMessage]| messages.iter().map(|m| m.tokens.input).sum::<i64>();
+
+        let clean = scan();
+        assert_eq!(
+            total_input(&clean),
+            100,
+            "current parser must report only the API number"
+        );
+
+        // Rewrite the entry the way a pre-#1037 release left it: the estimate
+        // as its own path-scoped row, and no provenance marker.
+        // Exactly what `estimate_tokens_from_chars` would have produced for the
+        // 40-character tool_result above.
+        let estimate = 40_usize.div_ceil(4) as i64;
+        {
+            let mut cache = message_cache::SourceMessageCache::load();
+            let mut entries: Vec<message_cache::CachedSourceEntry> = cache
+                .all_entries()
+                .into_iter()
+                .filter(message_cache::CachedSourceEntry::is_claude_namespace)
+                .collect();
+            assert_eq!(entries.len(), 1, "the transcript must be cached");
+            let entry = &mut entries[0];
+            entry.messages.push(UnifiedMessage::new_with_dedup(
+                "claude",
+                "claude-3-5-sonnet",
+                "anthropic",
+                "estimate-session",
+                1_733_047_205_000,
+                TokenBreakdown {
+                    input: estimate,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+                Some("claude:tool_result:estimate-session:tool_result:toolu_001".to_string()),
+            ));
+            entry.fallback_timestamp_indices.clear();
+            cache.insert(entries.pop().unwrap());
+            cache.save_if_dirty();
+        }
+
+        let poisoned = message_cache::SourceMessageCache::load()
+            .all_entries()
+            .into_iter()
+            .filter(message_cache::CachedSourceEntry::is_claude_namespace)
+            .flat_map(|entry| entry.messages)
+            .map(|message| message.tokens.input)
+            .sum::<i64>();
+        assert_eq!(
+            poisoned,
+            100 + estimate,
+            "the seeded cache must actually be inflated, or this test proves nothing"
+        );
+
+        let warm = scan();
+        assert_eq!(
+            total_input(&warm),
+            100,
+            "a markerless entry must be rebuilt, dropping the stale char estimate"
+        );
+        assert!(
+            !warm.iter().any(|m| m
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.contains(":tool_result:"))),
+            "the phantom tool_result row must not survive the rebuild"
+        );
+    }
+
     /// The strongest statement of "not stale" is that the warm scan agrees
     /// with a cold scan of the same bytes, cost included.
     #[test]
