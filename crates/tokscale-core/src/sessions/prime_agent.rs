@@ -11,7 +11,7 @@
 use super::pi::{
     has_replacement_character, parse_pi_format_rlm_file_with_observer,
     pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, rlm_entry_emits_message,
-    PiFormatObserver, PiSessionEntry, PiSessionHeader, PiUsage, PRE_SESSION_METADATA_TYPES,
+    PiFormatObserver, PiSessionEntry, PiSessionHeader, PRE_SESSION_METADATA_TYPES,
 };
 use super::utils::{lossy_lines_with_bytes, parse_timestamp_str};
 use super::UnifiedMessage;
@@ -249,8 +249,8 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
                     .push(PrimeAttribution {
                         id: id.clone(),
                         timestamp: entry_timestamp,
-                        child_usage: usage_breakdown(child_usage),
-                        aggregate_usage: usage_breakdown(aggregate_usage),
+                        child_usage: child_usage.to_breakdown(),
+                        aggregate_usage: aggregate_usage.to_breakdown(),
                     });
             }
             return;
@@ -303,16 +303,6 @@ pub(crate) fn transcript_decode_call_counts() -> (usize, usize) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     (counter.messages, counter.accounting)
-}
-
-fn usage_breakdown(usage: &PiUsage) -> TokenBreakdown {
-    TokenBreakdown {
-        input: usage.input.unwrap_or(0).max(0),
-        output: usage.output.unwrap_or(0).max(0),
-        cache_read: usage.cache_read.unwrap_or(0).max(0),
-        cache_write: usage.cache_write.unwrap_or(0).max(0),
-        reasoning: 0,
-    }
 }
 
 fn add_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {

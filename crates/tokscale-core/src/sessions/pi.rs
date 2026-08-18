@@ -235,8 +235,8 @@ pub struct PiUsage {
     pub cache_write: Option<i64>,
     #[allow(dead_code)]
     pub total_tokens: Option<i64>,
-    /// Parsed so the omission below is a real decision rather than an accident
-    /// of the schema, but never summed: see the note at the emit site.
+    /// Parsed so the omission in [`PiUsage::to_breakdown`] is a real decision
+    /// rather than an accident of the schema, but never summed.
     #[allow(dead_code)]
     pub reasoning: Option<i64>,
     #[serde(flatten)]
@@ -244,6 +244,24 @@ pub struct PiUsage {
 }
 
 impl PiUsage {
+    /// Token breakdown with every field clamped at zero, in the spelling
+    /// `utils::CamelUsage` uses for the same wire shape.
+    ///
+    /// `reasoning` is read but deliberately not mapped onto
+    /// `TokenBreakdown::reasoning`. In the Pi format reasoning tokens are a
+    /// subset of `output` (Pi's own `totalTokens` excludes them), whereas
+    /// tokscale totals `reasoning` as its own additive bucket. Mapping it
+    /// through would double count.
+    pub(crate) fn to_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input.unwrap_or(0).max(0),
+            output: self.output.unwrap_or(0).max(0),
+            cache_read: self.cache_read.unwrap_or(0).max(0),
+            cache_write: self.cache_write.unwrap_or(0).max(0),
+            reasoning: 0,
+        }
+    }
+
     pub(crate) fn has_damaged_key(&self) -> bool {
         const TOKEN_COUNTER_KEYS: &[&str] = &[
             "input",
@@ -726,24 +744,13 @@ fn parse_pi_format_file_inner(
             .map(|timestamp| timestamp.timestamp_millis());
         let timestamp = recorded_timestamp.unwrap_or(fallback_timestamp);
 
-        // `usage.reasoning` is read but deliberately not mapped onto
-        // `TokenBreakdown::reasoning`. In the Pi format reasoning tokens are a
-        // subset of `output` (Pi's own `totalTokens` excludes them), whereas
-        // tokscale totals `reasoning` as its own additive bucket. Mapping it
-        // through would double count.
         let mut unified = UnifiedMessage::new_with_agent(
             client,
             model,
             provider.as_str(),
             session_id.clone().unwrap_or_else(|| "unknown".to_string()),
             timestamp,
-            TokenBreakdown {
-                input: usage.input.unwrap_or(0).max(0),
-                output: usage.output.unwrap_or(0).max(0),
-                cache_read: usage.cache_read.unwrap_or(0).max(0),
-                cache_write: usage.cache_write.unwrap_or(0).max(0),
-                reasoning: 0,
-            },
+            usage.to_breakdown(),
             0.0,
             agent.clone(),
         );
