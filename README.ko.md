@@ -182,7 +182,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
 - **웹 시각화** - 2D 및 3D 뷰의 인터랙티브 기여 그래프
 - **유연한 필터링** - 플랫폼, 날짜 범위 또는 연도별 필터링
-- **작업 기반 리포트** - LLM 기반 세션 요약 및 작업 그룹화, 여러 백엔드 지원 (Apple FM, Claude, Codex, Gemini, Kiro)
+- **작업 기반 리포트** - LLM 기반 세션 요약 및 작업 그룹화, 여러 백엔드 지원 (Apple FM, Claude, Codex, Gemini, Kiro, MiniMax)
 - **JSON 내보내기** - 외부 시각화 도구/자동화용 데이터 생성
 - **소셜 플랫폼** - 사용량 공유, 리더보드 경쟁, 공개 프로필 조회
 
@@ -760,6 +760,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Codex CLI가 설치되어 인증되어 있어야 함. |
 | `gemini` | `gemini -p` | Gemini CLI가 설치되어 인증되어 있어야 함. |
 | `kiro` | `kiro --non-interactive` | Kiro CLI가 설치되어 인증되어 있어야 함. |
+| `minimax` | (HTTP API) | OpenAI 호환 chat-completions API를 사용하므로 CLI가 필요하지 않음. `MINIMAX_API_KEY` 또는 `MINIMAX_API_TOKEN` 설정. 기본값은 글로벌 엔드포인트(`https://api.minimax.io/v1`)의 `MiniMax-M3`이며, `MINIMAX_API_REGION=cn`을 설정하면 `https://api.minimaxi.com/v1`을 사용하고 `MINIMAX_MODEL`로 다른 모델(예: `MiniMax-M2.7`)을 선택할 수 있음. |
 
 **동작 방식:**
 

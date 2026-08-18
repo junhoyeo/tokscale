@@ -184,7 +184,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
 - **Web可視化** - 2Dと3Dビューのインタラクティブ貢献グラフ
 - **柔軟なフィルタリング** - プラットフォーム、日付範囲、年別フィルタリング
-- **タスク別レポート** - マルチバックエンド対応（Apple FM、Claude、Codex、Gemini、Kiro）の LLM によるセッション要約とタスクグルーピング
+- **タスク別レポート** - マルチバックエンド対応（Apple FM、Claude、Codex、Gemini、Kiro、MiniMax）の LLM によるセッション要約とタスクグルーピング
 - **JSONエクスポート** - 外部可視化ツール用のデータ生成
 - **ソーシャルプラットフォーム** - 使用量の共有、リーダーボード競争、公開プロフィール閲覧
 
@@ -765,6 +765,7 @@ LLM 要約は**デフォルトで有効**になっています（`--no-summarize
 | `codex` | `codex --quiet` | Codex CLI がインストールされ認証済みである必要があります。 |
 | `gemini` | `gemini -p` | Gemini CLI がインストールされ認証済みである必要があります。 |
 | `kiro` | `kiro --non-interactive` | Kiro CLI がインストールされ認証済みである必要があります。 |
+| `minimax` | （HTTP API） | OpenAI 互換の chat-completions API を使用するため、CLI は不要です。`MINIMAX_API_KEY` または `MINIMAX_API_TOKEN` を設定してください。既定ではグローバルエンドポイント（`https://api.minimax.io/v1`）で `MiniMax-M3` を使用します。`MINIMAX_API_REGION=cn` を設定すると `https://api.minimaxi.com/v1` を使用し、`MINIMAX_MODEL` で別のモデル（例: `MiniMax-M2.7`）を選択できます。 |
 
 **仕組み:**
 

@@ -182,7 +182,7 @@
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
 - **Web 可视化** - 带 2D 和 3D 视图的交互式贡献图
 - **灵活筛选** - 按平台、日期范围或年份筛选
-- **任务归因报告** - 由 LLM 驱动的会话摘要与任务分组，支持多种后端（Apple FM、Claude、Codex、Gemini、Kiro）
+- **任务归因报告** - 由 LLM 驱动的会话摘要与任务分组，支持多种后端（Apple FM、Claude、Codex、Gemini、Kiro、MiniMax）
 - **导出为 JSON** - 为外部可视化工具生成数据
 - **社交平台** - 分享使用情况、排行榜竞争、查看公开个人资料
 
@@ -764,6 +764,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
 | `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
 | `kiro` | `kiro --non-interactive` | 需要已安装并已认证的 Kiro CLI。 |
+| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M2.7`）。 |
 
 **工作原理：**
 

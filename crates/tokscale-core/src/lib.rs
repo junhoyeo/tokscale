@@ -12082,12 +12082,16 @@ mod tests {
         // zeros still counts as "priced" downstream. The alias must pin the
         // canonical first-party `minimax/MiniMax-M3` key instead.
         let mut litellm = HashMap::new();
-        // Real first-party rates.
+        // Real first-party rates: $0.60 input / $2.40 output / $0.12 cache read
+        // per million tokens. The cache-read rate is part of the published
+        // first-party row, so the fixture carries it too — otherwise the guard
+        // below would pass while cached input silently priced at $0.
         litellm.insert(
             "minimax/MiniMax-M3".into(),
             pricing::ModelPricing {
-                input_cost_per_token: Some(3e-7),
-                output_cost_per_token: Some(1.2e-6),
+                input_cost_per_token: Some(6e-7),
+                output_cost_per_token: Some(2.4e-6),
+                cache_read_input_token_cost: Some(1.2e-7),
                 ..Default::default()
             },
         );
@@ -12149,7 +12153,7 @@ mod tests {
             TokenBreakdown {
                 input: 1_000_000,
                 output: 100_000,
-                cache_read: 0,
+                cache_read: 500_000,
                 cache_write: 0,
                 reasoning: 0,
             },
@@ -12158,9 +12162,10 @@ mod tests {
 
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
-        // First-party: 1_000_000 * 3e-7 + 100_000 * 1.2e-6 = 0.42.
-        // The zero-cost row would give 0.0; the fireworks row would give 42.0.
-        let expected = 1_000_000.0 * 3e-7 + 100_000.0 * 1.2e-6;
+        // First-party: 1_000_000 * 6e-7 + 100_000 * 2.4e-6 + 500_000 * 1.2e-7
+        // = 0.9. The zero-cost row would give 0.0; the fireworks row, which
+        // publishes no cache-read rate, would give 42.0.
+        let expected = 1_000_000.0 * 6e-7 + 100_000.0 * 2.4e-6 + 500_000.0 * 1.2e-7;
         assert!(
             (msg.cost - expected).abs() < 1e-12,
             "expected first-party minimax/MiniMax-M3 cost {expected}, got {}",

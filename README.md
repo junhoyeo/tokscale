@@ -181,7 +181,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
 - **Web visualization** - Interactive contribution graph with 2D and 3D views
 - **Flexible filtering** - Filter by platform, date range, or year
-- **Task-attributed reports** - LLM-powered session summarization and task grouping with multi-backend support (Apple FM, Claude, Codex, Gemini, Kiro)
+- **Task-attributed reports** - LLM-powered session summarization and task grouping with multi-backend support (Apple FM, Claude, Codex, Gemini, Kiro, MiniMax)
 - **Export to JSON** - Generate data for external visualization tools
 - **Social Platform** - Share your usage, compete on leaderboards, and view public profiles
 
@@ -766,6 +766,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Requires Codex CLI installed and authenticated. |
 | `gemini` | `gemini -p` | Requires Gemini CLI installed and authenticated. |
 | `kiro` | `kiro --non-interactive` | Requires Kiro CLI installed and authenticated. |
+| `minimax` | (HTTP API) | OpenAI-compatible chat-completions API, so no CLI is needed. Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN`. Defaults to `MiniMax-M3` on the global endpoint (`https://api.minimax.io/v1`); set `MINIMAX_API_REGION=cn` to use `https://api.minimaxi.com/v1`, and `MINIMAX_MODEL` to select another model (for example `MiniMax-M2.7`). |
 
 **How it works:**
 
