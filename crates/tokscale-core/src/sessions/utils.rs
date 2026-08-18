@@ -5,7 +5,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::io::BufRead;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::SystemTime;
 use tracing::warn;
@@ -28,25 +30,6 @@ pub(crate) fn lossy_lines<R: BufRead>(reader: R) -> LossyLines<R> {
         buf: Vec::new(),
         at_start: true,
     }
-}
-
-/// Iterate lossy-decoded lines while retaining their exact source bytes.
-///
-/// Most parsers need only [`lossy_lines`]. Prime Agent additionally derives a
-/// stable fallback deduplication key from corrupted records, where hashing the
-/// decoded string would collapse distinct invalid UTF-8 sequences to the same
-/// replacement character.
-pub(crate) fn lossy_lines_with_bytes<R: BufRead>(reader: R) -> LossyLinesWithBytes<R> {
-    LossyLinesWithBytes {
-        reader,
-        buf: Vec::new(),
-        at_start: true,
-    }
-}
-
-pub(crate) struct LossyLine {
-    pub text: String,
-    pub bytes: Vec<u8>,
 }
 
 pub(crate) struct LossyLines<R> {
@@ -137,55 +120,71 @@ pub(crate) fn for_each_json_line(path: &Path, sink: &mut dyn FnMut(usize, &str))
     }
 }
 
+/// One line of a JSONL transcript, borrowed out of the driver's reusable
+/// buffer.
+pub(crate) struct JsonLineBytes<'a> {
+    /// The line's exact source bytes, with the line terminator and a leading
+    /// BOM removed and nothing else trimmed.
+    pub(crate) bytes: &'a [u8],
+    /// `bytes` decoded lossily, then trimmed.
+    pub(crate) trimmed: &'a str,
+    /// False when `bytes` was not valid UTF-8, so `trimmed` carries a
+    /// replacement character the source does not contain.
+    pub(crate) valid_utf8: bool,
+}
+
+/// Read `path` as line-delimited JSON like [`for_each_json_line`], additionally
+/// handing the sink each line's source bytes and whether they decoded
+/// losslessly.
+///
+/// The Pi-format family needs both halves. Prime Agent hashes the exact bytes
+/// of a damaged record into its fallback deduplication key, where the decoded
+/// text would collapse distinct invalid sequences onto the same U+FFFD, and it
+/// inspects those bytes for a lineage key mangled by invalid UTF-8, which is
+/// undetectable once the line is decoded. Pi, Senpi and Kimchi in turn still
+/// drop a record whose bytes are not valid UTF-8 rather than reading it
+/// through its replacement characters, which is what `valid_utf8` preserves.
+///
+/// The sink returns [`ControlFlow::Break`] to end the scan, for the header
+/// checks that discard a whole transcript rather than one record.
+///
+/// `sink` is `&mut dyn FnMut` for the same reason as [`for_each_json_line`]: a
+/// type parameter would monomorphize the driver once per calling parser.
+pub(crate) fn for_each_json_line_with_bytes(
+    path: &Path,
+    sink: &mut dyn FnMut(JsonLineBytes<'_>) -> ControlFlow<()>,
+) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut at_start = true;
+
+    while let Some(start) = read_line_payload(&mut reader, &mut buf, &mut at_start) {
+        let bytes = &buf[start..];
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line = JsonLineBytes {
+            bytes,
+            trimmed,
+            valid_utf8: matches!(text, Cow::Borrowed(_)),
+        };
+        if sink(line).is_break() {
+            break;
+        }
+    }
+}
+
 impl<R: BufRead> Iterator for LossyLines<R> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
         read_lossy_line(&mut self.reader, &mut self.buf, &mut self.at_start)
-    }
-}
-
-pub(crate) struct LossyLinesWithBytes<R> {
-    reader: R,
-    buf: Vec<u8>,
-    at_start: bool,
-}
-
-impl<R: BufRead> Iterator for LossyLinesWithBytes<R> {
-    type Item = LossyLine;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.buf.clear();
-        match self.reader.read_until(b'\n', &mut self.buf) {
-            Ok(0) => None,
-            Ok(_) => {
-                if self.buf.last() == Some(&b'\n') {
-                    self.buf.pop();
-                    if self.buf.last() == Some(&b'\r') {
-                        self.buf.pop();
-                    }
-                }
-
-                let mut bytes = self.buf.as_slice();
-                if std::mem::take(&mut self.at_start) {
-                    // A UTF-8 BOM decodes cleanly but leaves U+FEFF glued to the
-                    // front of the first record, where it makes an otherwise
-                    // valid JSON line fail to parse and be skipped in silence.
-                    bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
-                }
-
-                Some(LossyLine {
-                    text: String::from_utf8_lossy(bytes).into_owned(),
-                    bytes: bytes.to_vec(),
-                })
-            }
-            // Decode failures cannot reach this arm — lossy decoding never
-            // fails — so an error here is a hard I/O failure (vanished network
-            // mount, EIO). `read_until` does not consume input when it fails
-            // that way, so skipping and retrying would spin on the same failing
-            // read forever. Stop instead, and keep the lines read so far.
-            Err(_) => None,
-        }
     }
 }
 
@@ -643,12 +642,57 @@ mod tests {
     }
 
     #[test]
-    fn lossy_lines_with_bytes_preserves_distinct_invalid_sequences() {
-        let raw: &[u8] = b"a\xff\na\xfe\n";
-        let lines: Vec<LossyLine> = lossy_lines_with_bytes(raw).collect();
-        assert_eq!(lines[0].text, lines[1].text);
-        assert_eq!(lines[0].bytes, b"a\xff");
-        assert_eq!(lines[1].bytes, b"a\xfe");
+    fn for_each_json_line_with_bytes_preserves_distinct_invalid_sequences() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            b"\xef\xbb\xbf {\"clean\":1} \r\n\n  \na\xff\na\xfe\n",
+        )
+        .unwrap();
+
+        let mut lines = Vec::new();
+        for_each_json_line_with_bytes(&path, &mut |line| {
+            lines.push((
+                line.bytes.to_vec(),
+                line.trimmed.to_string(),
+                line.valid_utf8,
+            ));
+            ControlFlow::Continue(())
+        });
+
+        // The BOM is stripped, the terminator is not part of the line, blank
+        // lines are skipped, and `bytes` keeps the untrimmed payload.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].0, b" {\"clean\":1} ");
+        assert_eq!(lines[0].1, r#"{"clean":1}"#);
+        assert!(lines[0].2);
+        // Distinct invalid sequences decode to the same replacement character
+        // but keep distinct source bytes, which is what the Prime Agent
+        // fallback deduplication key hashes.
+        assert_eq!(lines[1].1, lines[2].1);
+        assert_eq!(lines[1].0, b"a\xff");
+        assert_eq!(lines[2].0, b"a\xfe");
+        assert!(!lines[1].2);
+        assert!(!lines[2].2);
+    }
+
+    #[test]
+    fn for_each_json_line_with_bytes_stops_on_break() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(&path, b"first\nsecond\nthird\n").unwrap();
+
+        let mut seen = Vec::new();
+        for_each_json_line_with_bytes(&path, &mut |line| {
+            seen.push(line.trimmed.to_string());
+            if line.trimmed == "second" {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+
+        assert_eq!(seen, vec!["first", "second"]);
     }
 
     #[test]
