@@ -947,7 +947,12 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        ClientId::Codex => 6,
+        // v6->v7: `reasoning_output_tokens` is a subset of `output_tokens`, so
+        // it is now subtracted out of the output bucket instead of being
+        // carried in both. Without this bump an existing cache keeps replaying
+        // pre-split rows, and those sessions stay double-priced while looking
+        // fixed.
+        ClientId::Codex => 7,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -2945,7 +2950,10 @@ mod tests {
 
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Codex), 6);
+        // v6->v7 splits `reasoning_output_tokens` out of the Codex output
+        // bucket. The bump is what stops an existing cache from replaying
+        // pre-split rows, so it has to be asserted rather than assumed.
+        assert_eq!(parser_version(ClientId::Codex), 7);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
