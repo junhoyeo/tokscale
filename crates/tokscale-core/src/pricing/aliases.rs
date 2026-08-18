@@ -143,6 +143,7 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("daybreak-blue-latest", "gpt-5.6-sol");
     m.insert("gpt-daybreak-blue-latest", "gpt-5.6-sol");
     m.insert("openai/gpt-daybreak-blue-latest", "gpt-5.6-sol");
+    m.insert("openai/daybreak-blue-latest", "gpt-5.6-sol");
 
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
@@ -232,6 +233,13 @@ mod tests {
             resolve_alias("GPT-DAYBREAK-BLUE-LATEST"),
             Some("gpt-5.6-sol")
         );
+        // Both qualified spellings, for the same reason the comment on the
+        // table gives: prefix stripping does not re-run alias resolution, so
+        // neither can fall back to its bare form.
+        assert_eq!(
+            resolve_alias("openai/daybreak-blue-latest"),
+            Some("gpt-5.6-sol")
+        );
         assert_eq!(
             resolve_alias("openai/gpt-daybreak-blue-latest"),
             Some("gpt-5.6-sol")
@@ -261,7 +269,9 @@ mod tests {
 
         let expected = 1_000.0 * 5e-6 + 100.0 * 30e-6 + 500.0 * 0.5e-6 + 200.0 * 6.25e-6;
         for model_id in [
+            "daybreak-blue-latest",
             "gpt-daybreak-blue-latest",
+            "openai/daybreak-blue-latest",
             "openai/gpt-daybreak-blue-latest",
         ] {
             let result = service
