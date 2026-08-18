@@ -241,7 +241,7 @@ fn is_antigravity_routing_label(model: &str) -> bool {
 /// exclusion rather than guessed at.
 fn display_label_to_model_id(label: &str) -> Option<&'static str> {
     match label.trim() {
-        "Gemini 3.5 Flash (Low)" => Some("gemini-3.5-flash"),
+        "Gemini 3.5 Flash (Low)" => Some("gemini-3.5-flash-extra-low"),
         "Gemini 3.5 Flash (Medium)" => Some("gemini-3.5-flash-medium"),
         "Gemini 3.5 Flash (High)" => Some("gemini-3.5-flash-high"),
         _ => None,
@@ -1337,7 +1337,7 @@ mod tests {
 
         let messages = parse_antigravity_cli_file(&path);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].model_id, "gemini-3.5-flash");
+        assert_eq!(messages[0].model_id, "gemini-3.5-flash-extra-low");
         assert_eq!(messages[0].provider_id, "google");
         assert_eq!(messages[1].model_id, "gemini-3.5-flash-medium");
         assert_eq!(messages[1].provider_id, "google");
