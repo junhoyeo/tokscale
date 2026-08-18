@@ -7,12 +7,12 @@
 //! arrives so Tokscale never guesses a model from display text or local
 //! configuration.
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, lossy_lines};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -34,7 +34,14 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut pending_by_turn: HashMap<String, Vec<PendingUsage>> = HashMap::new();
     let mut messages = Vec::new();
 
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    // `lines().map_while(Result::ok)` ends the iteration at the first line that
+    // is not valid UTF-8 rather than skipping it (#1031). That is worse here
+    // than in most parsers: usage is buffered in `pending_by_turn` and only
+    // flushed when the trailing `exec.result` is seen, so one stray byte
+    // anywhere before it drops the whole capture to zero messages instead of
+    // truncating a tail. `lossy_lines` keeps a bad byte local to its own line
+    // and strips a leading BOM.
+    for line in lossy_lines(BufReader::new(file)) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -172,6 +179,38 @@ fn normalize_timestamp(timestamp: i64) -> i64 {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn an_undecodable_byte_does_not_discard_the_rest_of_the_capture() {
+        // `lines().map_while(Result::ok)` would end the iteration here, and
+        // because usage is only flushed when `exec.result` is reached, the
+        // whole capture would come back empty rather than merely truncated.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"message","message":{"turnId":"turn-1","role":"assistant","timestamp":1786800000000,"usage":{"inputTokens":11,"outputTokens":3}}}"#,
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        // A projected event carrying a raw non-UTF-8 byte, before the result.
+        file.write_all(br#"{"type":"message","message":{"note":""#)
+            .unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.write_all(br#""}}"#).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(
+            br#"{"schemaVersion":1,"type":"exec.result","sessionId":"session-1","turnId":"turn-1","status":"succeeded","model":{"providerId":"minimax","modelId":"MiniMax-M2.5"},"durationMs":10}"#,
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_mcode_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "MiniMax-M2.5");
+        assert_eq!(messages[0].tokens.input, 11);
+        assert_eq!(messages[0].tokens.output, 3);
+    }
 
     #[test]
     fn pairs_authoritative_usage_with_the_final_model_identity() {
