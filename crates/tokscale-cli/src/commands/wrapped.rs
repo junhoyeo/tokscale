@@ -2530,7 +2530,7 @@ mod tests {
     fn test_client_logo_url_openclaw() {
         assert_eq!(
             client_logo_url("OpenClaw"),
-            Some("https://tokscale.ai/assets/logos/openclaw.png")
+            Some("https://github.com/openclaw.png")
         );
     }
 
