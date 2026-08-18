@@ -13,10 +13,10 @@ use super::pi::{
     pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, rlm_entry_emits_message,
     PiFormatObserver, PiSessionEntry, PiSessionHeader, PRE_SESSION_METADATA_TYPES,
 };
-use super::utils::{lossy_lines_with_bytes, parse_timestamp_str};
+use super::utils::{lossy_lines_with_bytes, parse_json_line, parse_timestamp_str};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -426,12 +426,6 @@ fn referenced_lineage_path(source_file: &Path, referenced: &Path) -> PathBuf {
     }
 }
 
-fn parse_pi_json_line<T: DeserializeOwned>(line: &str, buffer: &mut Vec<u8>) -> Option<T> {
-    buffer.clear();
-    buffer.extend_from_slice(line.as_bytes());
-    simd_json::from_slice(buffer).ok()
-}
-
 /// Read Prime-only accounting records that are intentionally absent from the
 /// shared Pi message representation. `messages` may come from the source cache;
 /// their stable order is used to associate target entry ids with emitted rows.
@@ -456,7 +450,7 @@ pub(crate) fn analyze_prime_agent_accounting(
             continue;
         }
         if !found_header {
-            if let Some(header) = parse_pi_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
+            if let Some(header) = parse_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
                 if header.entry_type == "session" {
                     let has_raw_damaged_lineage_key =
                         raw_json_has_damaged_lineage_header_key(&line.bytes);
@@ -468,8 +462,8 @@ pub(crate) fn analyze_prime_agent_accounting(
                     continue;
                 }
             }
-            let parsed_type = parse_pi_json_line::<serde_json::Value>(trimmed, &mut buffer)
-                .and_then(|value| {
+            let parsed_type =
+                parse_json_line::<serde_json::Value>(trimmed, &mut buffer).and_then(|value| {
                     value
                         .get("type")
                         .and_then(|kind| kind.as_str())
@@ -486,7 +480,7 @@ pub(crate) fn analyze_prime_agent_accounting(
             return PrimeFileAccounting::default();
         }
 
-        let Some(entry) = parse_pi_json_line::<PiSessionEntry>(trimmed, &mut buffer) else {
+        let Some(entry) = parse_json_line::<PiSessionEntry>(trimmed, &mut buffer) else {
             continue;
         };
         // Which records became messages is the parser's decision, not a rule

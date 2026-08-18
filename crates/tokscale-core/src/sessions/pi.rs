@@ -8,7 +8,9 @@
 //! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
 //! is shared: see `sessions::senpi` for Senpi (OmO Native).
 
-use super::utils::{file_modified_timestamp_ms, lossy_lines_with_bytes, LossyLine};
+use super::utils::{
+    file_modified_timestamp_ms, lossy_lines_with_bytes, parse_json_line, LossyLine,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
@@ -624,16 +626,14 @@ fn parse_pi_format_file_inner(
         }
 
         if session_id.is_none() {
-            buffer.clear();
-            buffer.extend_from_slice(trimmed.as_bytes());
-            let entry_type = match simd_json::from_slice::<PiEntryTypeProbe>(&mut buffer) {
-                Ok(probe) => probe.entry_type,
-                Err(_)
-                    if options.lossy_line_reader && pre_header_line_is_skippable(trimmed, None) =>
+            let entry_type = match parse_json_line::<PiEntryTypeProbe>(trimmed, &mut buffer) {
+                Some(probe) => probe.entry_type,
+                None if options.lossy_line_reader
+                    && pre_header_line_is_skippable(trimmed, None) =>
                 {
                     continue;
                 }
-                Err(_) => return Vec::new(),
+                None => return Vec::new(),
             };
 
             if entry_type != "session" {
@@ -643,11 +643,8 @@ fn parse_pi_format_file_inner(
                 return Vec::new();
             }
 
-            buffer.clear();
-            buffer.extend_from_slice(trimmed.as_bytes());
-            let header = match simd_json::from_slice::<PiSessionHeader>(&mut buffer) {
-                Ok(h) => h,
-                Err(_) => return Vec::new(),
+            let Some(header) = parse_json_line::<PiSessionHeader>(trimmed, &mut buffer) else {
+                return Vec::new();
             };
             let has_raw_damaged_lineage_key = line
                 .raw_bytes()
@@ -676,11 +673,8 @@ fn parse_pi_format_file_inner(
             continue;
         }
 
-        buffer.clear();
-        buffer.extend_from_slice(trimmed.as_bytes());
-        let entry = match simd_json::from_slice::<PiSessionEntry>(&mut buffer) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Some(entry) = parse_json_line::<PiSessionEntry>(trimmed, &mut buffer) else {
+            continue;
         };
 
         if entry.entry_type == "session_info" {

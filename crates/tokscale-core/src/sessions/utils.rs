@@ -2,6 +2,7 @@
 
 use crate::TokenBreakdown;
 use rusqlite::{Connection, OpenFlags};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::BufRead;
@@ -442,6 +443,18 @@ pub(crate) fn sqlite_for_each_row(
         }
     };
     sqlite_for_each_row_on(&conn, db_path, sql, what, sink)
+}
+
+/// Decode one JSONL line into `T`, using `buffer` as simd-json's scratch space.
+///
+/// simd-json parses in place and so has to own the bytes it reads; a caller
+/// that keeps one buffer for the whole scan pays that copy without allocating
+/// a fresh one per line. A line that does not decode yields `None`, which is
+/// what every JSONL parser does with a record it cannot read.
+pub(crate) fn parse_json_line<T: DeserializeOwned>(line: &str, buffer: &mut Vec<u8>) -> Option<T> {
+    buffer.clear();
+    buffer.extend_from_slice(line.as_bytes());
+    simd_json::from_slice(buffer).ok()
 }
 
 /// Read a file into bytes, returning `None` on any I/O error instead of propagating.
