@@ -12,9 +12,21 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("k2-p6", "kimi-k2.6");
     m.insert("kimi-k2p6", "kimi-k2.6");
     m.insert("kimi-k2.5-thinking", "kimi-k2-thinking");
-    m.insert("kimi-for-coding", "kimi-k2.5");
+    // Kimi CLI reports `kimi-for-coding` for Kimi K2.7 Code (its config sets
+    // `display_name = "K2.7 Coding"`). It was previously aliased to k2.5, which
+    // priced it about a third under the real rate.
+    m.insert("kimi-for-coding", "kimi-k2.7-code");
     m.insert("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed");
     m.insert("k3", "kimi-k3");
+    // Kimi Work (the Kimi desktop app's agent mode) embeds the same kimi-code
+    // kernel and writes the same wire protocol, but reports its own ids.
+    // Unaliased they fuzzy-match badly: `k2d6-agent` landed on
+    // `xai/grok-4.20-multi-agent-beta-0309`, and the `k3-agent*` ids fell into
+    // the Models.dev `kimi-for-coding/*` subscription namespace, which prices
+    // at $0.00.
+    m.insert("k2d6-agent", "kimi-k2.6");
+    m.insert("k3-agent", "kimi-k3");
+    m.insert("k3-agent-swarm", "kimi-k3");
 
     // MiniMax M3: Ollama Cloud and other routers report the model with the
     // lowercase bare id `minimax-m3` (and mixed-case variants), while the
@@ -152,7 +164,17 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
-    MODEL_ALIASES.get(model_id.to_lowercase().as_str()).copied()
+    let lowered = model_id.to_lowercase();
+    if let Some(target) = MODEL_ALIASES.get(lowered.as_str()) {
+        return Some(target);
+    }
+    // kimi-code reports some rows as `kimi-code/<id>`. The Kimi parser strips
+    // that prefix before pricing, but any other path reaching pricing with the
+    // qualified form would otherwise miss every alias above and fall through to
+    // the Models.dev `kimi-for-coding/*` namespace, which prices at $0.00 — so
+    // the qualified and bare spellings of the same model would disagree.
+    let bare = lowered.strip_prefix("kimi-code/")?;
+    MODEL_ALIASES.get(bare).copied()
 }
 
 #[cfg(test)]
@@ -211,6 +233,45 @@ mod tests {
             Some("kimi-k2.7-code-highspeed")
         );
         assert_eq!(resolve_alias("k3"), Some("kimi-k3"));
+    }
+
+    #[test]
+    fn resolves_kimi_work_agent_ids_to_their_underlying_models() {
+        // Kimi Work reports its own ids. Without these they fuzzy-match badly:
+        // `k2d6-agent` resolved to `xai/grok-4.20-multi-agent-beta-0309`, and
+        // the `k3-agent*` ids landed in the zero-priced `kimi-for-coding/*`
+        // subscription namespace.
+        assert_eq!(resolve_alias("k2d6-agent"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("k3-agent"), Some("kimi-k3"));
+        assert_eq!(resolve_alias("k3-agent-swarm"), Some("kimi-k3"));
+        assert_eq!(resolve_alias("K3-AGENT-SWARM"), Some("kimi-k3"));
+    }
+
+    #[test]
+    fn kimi_for_coding_prices_as_k2p7_code_not_k2p5() {
+        // Kimi CLI's own config names this "K2.7 Coding"; the previous k2.5
+        // target priced it about a third under the real rate.
+        assert_eq!(resolve_alias("kimi-for-coding"), Some("kimi-k2.7-code"));
+        assert_eq!(
+            resolve_alias("kimi-for-coding-highspeed"),
+            Some("kimi-k2.7-code-highspeed")
+        );
+    }
+
+    #[test]
+    fn qualified_kimi_code_ids_resolve_like_their_bare_form() {
+        // A `kimi-code/<id>` row must not price differently from `<id>`.
+        for bare in ["k3", "kimi-for-coding", "k2d6-agent", "k3-agent"] {
+            let qualified = format!("kimi-code/{bare}");
+            assert_eq!(
+                resolve_alias(&qualified),
+                resolve_alias(bare),
+                "qualified id {qualified} must resolve like {bare}"
+            );
+            assert!(resolve_alias(&qualified).is_some());
+        }
+        // An unknown id stays unknown whether or not it carries the prefix.
+        assert_eq!(resolve_alias("kimi-code/not-a-real-model"), None);
     }
 
     #[test]
