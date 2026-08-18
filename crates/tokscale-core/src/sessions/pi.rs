@@ -226,6 +226,10 @@ pub struct PiMessage {
     pub response_id: Option<String>,
 }
 
+/// The camelCase usage block of a Pi record: `utils::CamelUsage`'s
+/// `{input, output, cacheRead, cacheWrite, totalTokens}` plus `reasoning` and
+/// a flattened map of every remaining key. See the note on `CamelUsage` for
+/// why the two shapes are not merged.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiUsage {

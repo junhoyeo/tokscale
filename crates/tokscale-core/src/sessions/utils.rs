@@ -585,8 +585,15 @@ impl AnthropicUsage {
 /// with `rename_all` and the other with per-field `rename`, so the JSON both
 /// accept is identical.
 ///
-/// `pi.rs` models the same wire shape with its own `PiUsage` (a flattened
-/// extras map it needs and this type does not) and is left alone.
+/// `pi::PiUsage` models the same wire shape and still stays separate, because
+/// the keys the two read are not the same set. `PiUsage` reads `reasoning` and
+/// routes every other key into the flattened extras map its damaged-key
+/// detection needs; this type reads `cost` and ignores the rest. A struct
+/// holding the union of those fields rejects documents that each accepts
+/// today: a Pi record whose `cost` is not an object stops deserializing, and
+/// so does a `gjc`/`openclaw` record whose `reasoning` is not a number. Losing
+/// the usage block drops the whole message, and `cost` is present on every Pi
+/// usage block, so that is not a theoretical edge.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CamelUsage {
