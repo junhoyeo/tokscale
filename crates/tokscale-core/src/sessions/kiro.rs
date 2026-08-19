@@ -13,15 +13,16 @@
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, for_each_json_line,
+    session_id_from_path, sqlite_for_each_row,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
@@ -165,57 +166,45 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
     };
     let mut content_by_message_id: HashMap<String, KiroMessageContent> = HashMap::new();
 
-    if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
-        let reader = BufReader::new(jsonl_file);
-        let mut pending_prompt: Option<(usize, Option<i64>)> = None;
+    let mut pending_prompt: Option<(usize, Option<i64>)> = None;
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+    for_each_json_line(&jsonl_path, &mut |_index, trimmed| {
+        let mut bytes = trimmed.as_bytes().to_vec();
+        let entry = match simd_json::from_slice::<KiroJsonlEntry>(&mut bytes) {
+            Ok(entry) => entry,
+            Err(_) => return,
+        };
+
+        let Some(data) = entry.data else {
+            return;
+        };
+        let Some(message_id) = data.message_id else {
+            return;
+        };
+
+        let text_chars = text_char_count(data.content.as_deref());
+
+        match entry.kind.as_str() {
+            "Prompt" => {
+                let timestamp_ms = data
+                    .meta
+                    .and_then(|meta| meta.timestamp)
+                    .map(seconds_to_millis);
+                pending_prompt = Some((text_chars, timestamp_ms));
             }
-
-            let mut bytes = trimmed.as_bytes().to_vec();
-            let entry = match simd_json::from_slice::<KiroJsonlEntry>(&mut bytes) {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-
-            let Some(data) = entry.data else {
-                continue;
-            };
-            let Some(message_id) = data.message_id else {
-                continue;
-            };
-
-            let text_chars = text_char_count(data.content.as_deref());
-
-            match entry.kind.as_str() {
-                "Prompt" => {
-                    let timestamp_ms = data
-                        .meta
-                        .and_then(|meta| meta.timestamp)
-                        .map(seconds_to_millis);
-                    pending_prompt = Some((text_chars, timestamp_ms));
-                }
-                "AssistantMessage" => {
-                    let message = content_by_message_id.entry(message_id).or_default();
-                    if let Some((prompt_chars, prompt_ts)) = pending_prompt.take() {
-                        message.prompt_chars += prompt_chars;
-                        if message.prompt_timestamp_ms.is_none() {
-                            message.prompt_timestamp_ms = prompt_ts;
-                        }
+            "AssistantMessage" => {
+                let message = content_by_message_id.entry(message_id).or_default();
+                if let Some((prompt_chars, prompt_ts)) = pending_prompt.take() {
+                    message.prompt_chars += prompt_chars;
+                    if message.prompt_timestamp_ms.is_none() {
+                        message.prompt_timestamp_ms = prompt_ts;
                     }
-                    message.assistant_chars += text_chars;
                 }
-                _ => {}
+                message.assistant_chars += text_chars;
             }
+            _ => {}
         }
-    }
+    });
 
     turns
         .into_iter()
@@ -308,10 +297,6 @@ fn text_char_count(content: Option<&[KiroContentPart]>) -> usize {
         .sum()
 }
 
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
-}
-
 fn seconds_to_millis(seconds: f64) -> i64 {
     // Scale fractional seconds to milliseconds (preserving sub-second
     // precision), then clamp into i64 range. The `f64 as i64` cast saturates
@@ -345,13 +330,6 @@ fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
             .or_else(|| timestamp.parse::<f64>().ok().map(seconds_to_millis)),
         _ => None,
     }
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 fn is_kiro_global_storage_path(path: &Path) -> bool {
@@ -454,12 +432,6 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         return Vec::new();
     }
 
-    let jsonl_file = match std::fs::File::open(&messages_path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let reader = BufReader::new(jsonl_file);
-
     const DEFAULT_CONTEXT_WINDOW: i64 = 200_000;
 
     #[derive(Default)]
@@ -481,19 +453,10 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut flat_model_id: Option<String> = None;
     let mut flat_assistant_turns: i32 = 0;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(&messages_path, &mut |_index, trimmed| {
         let entry: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         // Structured format: each line has `payload.type`
@@ -574,7 +537,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
                     }
                     _ => {}
                 }
-                continue;
+                return;
             }
         }
 
@@ -587,7 +550,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         if flat_counts.assistant_chars > assistant_before {
             flat_assistant_turns += 1;
         }
-    }
+    });
 
     // Flush any in-flight structured turn
     if let Some(turn) = current_turn.take() {
@@ -1268,56 +1231,16 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
 }
 
 pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match open_readonly_sqlite(db_path) {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Kiro CLI database"
-            );
-            return Vec::new();
-        }
-    };
-
     let query = "SELECT key, conversation_id, value FROM conversations_v2";
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
-
     let mut messages = Vec::new();
 
-    for row in rows.flatten() {
-        let (cwd, conversation_id, json_str) = row;
+    sqlite_for_each_row(db_path, query, Some("Kiro conversation"), &mut |row| {
+        let cwd: String = row.get(0)?;
+        let conversation_id: String = row.get(1)?;
+        let json_str: String = row.get(2)?;
         let parsed = match serde_json::from_str::<KiroDbConversation>(&json_str) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(_) => return Ok(()),
         };
 
         let context_window = parsed
@@ -1391,7 +1314,8 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             messages.push(message);
         }
-    }
+        Ok(())
+    });
 
     messages
 }

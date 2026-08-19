@@ -17,6 +17,7 @@ const MODEL_COLORS: Record<string, string> = {
   "gemini": "#3B82F6",
   "deepseek": "#06B6D4",
   "codex": "#F59E0B",
+  "mcode": "#F04438",
   "kimi": "#A855F7",
   "qwen": "#1A73E8",
 };

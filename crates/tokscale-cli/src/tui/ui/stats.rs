@@ -695,6 +695,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         App::new_with_cached_data(config, None).unwrap()
     }

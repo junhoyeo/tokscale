@@ -6,12 +6,11 @@
 //! - Legacy Block/goose: `~/.local/share/Block/goose/sessions/sessions.db`
 //! - Custom: `$GOOSE_PATH_ROOT/data/sessions/sessions.db`
 
-use super::utils::open_readonly_sqlite;
+use super::utils::{resolved_provider, sqlite_for_each_row, timestamp_secs_to_ms};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::path::Path;
-use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 struct GooseModelConfig {
@@ -27,30 +26,6 @@ fn parse_model_config(json: &str) -> Option<String> {
     } else {
         Some(name)
     }
-}
-
-fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
-    if timestamp > 1e12 {
-        timestamp as i64
-    } else {
-        // Seconds -> milliseconds. Scale in f64 to keep sub-second precision,
-        // then clamp into i64 range so a garbage/huge timestamp saturates
-        // rather than producing an undefined cast during the conversion.
-        let millis = timestamp * 1000.0;
-        if millis.is_nan() {
-            0
-        } else {
-            millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
-        }
-    }
-}
-
-fn resolved_provider(provider_name: Option<String>, model_id: &str) -> String {
-    provider_name
-        .filter(|p| !p.trim().is_empty())
-        .and_then(|p| provider_identity::canonical_provider(p.trim()))
-        .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
-        .unwrap_or_else(|| "goose".to_string())
 }
 
 fn parse_created_at(s: &str) -> f64 {
@@ -71,18 +46,6 @@ fn parse_created_at(s: &str) -> f64 {
 }
 
 pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match open_readonly_sqlite(db_path) {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Goose sessions database"
-            );
-            return Vec::new();
-        }
-    };
-
     let query = r#"
         SELECT
             id,
@@ -100,118 +63,75 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
           AND TRIM(model_config_json) != ''
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Goose session query"
-            );
-            return Vec::new();
+    let mut messages = Vec::new();
+    sqlite_for_each_row(db_path, query, Some("Goose session"), &mut |row| {
+        let session_id: String = row.get(0)?;
+        let model_config_json: Option<String> = row.get(1)?;
+        let provider_name: Option<String> = row.get(2)?;
+        let created_at: String = row.get(3)?;
+        let total_tokens: Option<i64> = row.get(4)?;
+        let input_tokens: Option<i64> = row.get(5)?;
+        let output_tokens: Option<i64> = row.get(6)?;
+        let accumulated_total_tokens: Option<i64> = row.get(7)?;
+        let accumulated_input_tokens: Option<i64> = row.get(8)?;
+        let accumulated_output_tokens: Option<i64> = row.get(9)?;
+
+        let Some(model_config) = model_config_json.as_ref() else {
+            return Ok(());
+        };
+        let Some(model_id) = parse_model_config(model_config) else {
+            return Ok(());
+        };
+
+        let created_at_ts = parse_created_at(&created_at);
+
+        let input = accumulated_input_tokens
+            .or(input_tokens)
+            .unwrap_or(0)
+            .max(0);
+        let output = accumulated_output_tokens
+            .or(output_tokens)
+            .unwrap_or(0)
+            .max(0);
+        let total = accumulated_total_tokens
+            .or(total_tokens)
+            .unwrap_or(0)
+            .max(0);
+
+        if input == 0 && output == 0 && total == 0 {
+            return Ok(());
         }
-    };
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<i64>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-            row.get::<_, Option<i64>>(7)?,
-            row.get::<_, Option<i64>>(8)?,
-            row.get::<_, Option<i64>>(9)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Goose session query"
-            );
-            return Vec::new();
-        }
-    };
-
-    rows.filter_map(|row| match row {
-        Ok(row) => Some(row),
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to decode Goose session row"
-            );
-            None
-        }
-    })
-    .filter_map(
-        |(
-            session_id,
-            model_config_json,
-            provider_name,
-            created_at,
-            total_tokens,
-            input_tokens,
-            output_tokens,
-            accumulated_total_tokens,
-            accumulated_input_tokens,
-            accumulated_output_tokens,
-        )| {
-            let model_config = model_config_json.as_ref()?;
-            let model_id = parse_model_config(model_config)?;
-
-            let created_at_ts = parse_created_at(&created_at);
-
-            let input = accumulated_input_tokens
-                .or(input_tokens)
-                .unwrap_or(0)
-                .max(0);
-            let output = accumulated_output_tokens
-                .or(output_tokens)
-                .unwrap_or(0)
-                .max(0);
-            let total = accumulated_total_tokens
-                .or(total_tokens)
-                .unwrap_or(0)
-                .max(0);
-
-            if input == 0 && output == 0 && total == 0 {
-                return None;
-            }
-
-            let provider = resolved_provider(provider_name, &model_id);
-            let mut msg = UnifiedMessage::new(
-                "goose",
-                model_id,
-                provider,
-                session_id.clone(),
-                timestamp_secs_to_ms(created_at_ts),
-                TokenBreakdown {
-                    input,
-                    output,
-                    cache_read: 0,
-                    cache_write: 0,
-                    // INFERRED, not a real field: Goose's schema has no reasoning
-                    // token column. We heuristically attribute any gap between the
-                    // reported total and (input + output) to reasoning. This is a
-                    // best-effort estimate, not a measured count.
-                    reasoning: if total > input + output {
-                        (total - input - output).max(0)
-                    } else {
-                        0
-                    },
+        let provider = resolved_provider(provider_name, &model_id, "goose");
+        let mut msg = UnifiedMessage::new(
+            "goose",
+            model_id,
+            provider,
+            session_id.clone(),
+            timestamp_secs_to_ms(created_at_ts),
+            TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                // INFERRED, not a real field: Goose's schema has no reasoning
+                // token column. We heuristically attribute any gap between the
+                // reported total and (input + output) to reasoning. This is a
+                // best-effort estimate, not a measured count.
+                reasoning: if total > input + output {
+                    (total - input - output).max(0)
+                } else {
+                    0
                 },
-                0.0,
-            );
-            msg.dedup_key = Some(session_id);
-            Some(msg)
-        },
-    )
-    .collect()
+            },
+            0.0,
+        );
+        msg.dedup_key = Some(session_id);
+        messages.push(msg);
+        Ok(())
+    });
+
+    messages
 }
 
 #[cfg(test)]

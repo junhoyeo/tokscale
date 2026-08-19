@@ -26,12 +26,11 @@
 //! `input_tokens` (cache miss), `cache_read_input_tokens` (cache hit),
 //! `cache_creation_input_tokens` (cache write) and `output_tokens`.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::utils::{file_modified_timestamp_ms, for_each_json_line, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "cherrystudio";
@@ -247,14 +246,9 @@ fn workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 /// Parse a Cherry Studio Claude Code transcript into unified messages, collapsing
 /// only repeated records with a stable per-request, message, or event identity.
 pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let (workspace_key, workspace_label) = workspace_from_path(path);
 
-    let reader = BufReader::new(file);
     let mut records = Vec::new();
     let session_id = path
         .file_stem()
@@ -262,23 +256,18 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
         .unwrap_or("unknown")
         .to_string();
 
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
+    for_each_json_line(path, &mut |_index, line| {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
+            return;
         };
         if record.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
+            return;
         }
         let Some(message) = record.get("message").and_then(Value::as_object) else {
-            continue;
+            return;
         };
         let Some(usage) = message.get("usage").and_then(Value::as_object) else {
-            continue;
+            return;
         };
 
         let input = usage
@@ -299,7 +288,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             .trim()
             .to_string();
         if model.is_empty() || model == "<synthetic>" || model.eq_ignore_ascii_case("unknown") {
-            continue;
+            return;
         }
 
         let cache_read = usage
@@ -317,7 +306,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             .saturating_add(cache_read)
             .saturating_add(cache_creation);
         if total <= 0 {
-            continue;
+            return;
         }
 
         // Hold every valid row until the whole transcript has been read. A
@@ -385,7 +374,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             request_id,
             aliases,
         });
-    }
+    });
     dedupe_usage_records(records)
 }
 

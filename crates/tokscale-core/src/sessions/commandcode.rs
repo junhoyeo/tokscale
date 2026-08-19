@@ -36,11 +36,13 @@
 //! is not stored per message, so it is read from `~/.commandcode/config.json`
 //! (the configured agent model), falling back to "unknown".
 
-use super::utils::file_modified_timestamp_ms;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::utils::{
+    estimate_tokens, file_modified_timestamp_ms, for_each_json_line, session_id_from_path,
+    workspace_key_from_path,
+};
+use super::{workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "commandcode";
@@ -73,11 +75,6 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
         return Vec::new();
     }
 
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let raw_model = model_from_config(path);
     // Recover the real provider from the configured gateway id (e.g.
@@ -93,6 +90,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
         .map(|model| canonicalize_model(&model))
         .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
     let session_id_from_path = session_id_from_path(path);
+    // Command Code names project directories after a slugified working
+    // directory (e.g. `users-alice-development-repo`). The original path is not
+    // recoverable (lowercased, separators collapsed), so the slug itself is
+    // used as the workspace key.
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -109,20 +110,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let entry = match serde_json::from_str::<CommandCodeEntry>(trimmed) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if session_id.is_none() {
@@ -144,7 +135,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
                 if input + output == 0 {
                     pending_turn_start = false;
-                    continue;
+                    return;
                 }
 
                 let resolved_session = session_id
@@ -190,7 +181,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 turn_input_chars += chars;
             }
         }
-    }
+    });
 
     messages
 }
@@ -212,10 +203,6 @@ fn content_chars(content: &serde_json::Value) -> usize {
             .map(|serialized| serialized.chars().count())
             .unwrap_or(0),
     }
-}
-
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
 }
 
 /// Canonicalize the configured model id for pricing. Command Code reports
@@ -272,24 +259,6 @@ fn model_from_config(session_path: &Path) -> Option<String> {
     let bytes = std::fs::read(config_path).ok()?;
     let config: CommandCodeConfig = serde_json::from_slice(&bytes).ok()?;
     config.model.filter(|model| !model.trim().is_empty())
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-/// Command Code names project directories after a slugified working directory
-/// (e.g. `users-alice-development-repo`). The original path is not recoverable
-/// (lowercased, separators collapsed), so the slug itself is used as the
-/// workspace key.
-fn workspace_key_from_path(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|dir| dir.file_name())
-        .and_then(|name| name.to_str())
-        .and_then(normalize_workspace_key)
 }
 
 #[cfg(test)]

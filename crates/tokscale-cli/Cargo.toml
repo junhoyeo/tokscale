@@ -42,13 +42,31 @@ dirs = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
 fs2 = { workspace = true }
-image = "0.25"
-imageproc = "0.25"
+# Only the codecs `wrapped` actually touches: it saves PNG and decodes the
+# PNG/JPEG/WebP logo and avatar assets it downloads. `image`'s default
+# feature set additionally links AVIF, BMP, DDS, EXR, Farbfeld, GIF, HDR,
+# ICO, PNM, QOI, TGA and TIFF decoders that nothing in the tree can reach.
+# `imageproc` already depends on `image` with `default-features = false`,
+# so this crate is the only thing that was turning them on.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# `imageproc`'s default feature is `["rayon", "image/default"]`, so leaving it on
+# re-enables every codec the line above just switched off. `rayon` is the only
+# part of that default this crate wants.
+imageproc = { version = "0.25", default-features = false, features = ["rayon"] }
 ab_glyph = "0.2"
-resvg = "0.43"
-usvg = "0.43"
+# The only SVG the CLI ever renders is `TOKSCALE_LOGO_SVG_URL`, which is three
+# `<path>` elements - no `<text>`, no `<image>`, no `font-family`. resvg's
+# default features assume otherwise and cost a second copy of half the image
+# stack: `raster-images` links its own `gif`, `image-webp` and `zune-jpeg` at
+# versions that do not unify with the ones `image` already provides, and `text`
+# pulls `fontdb`, `rustybuzz`, `unicode-bidi`, `unicode-script` and
+# `unicode-vo`. Wrapped's own text is drawn with `ab_glyph`, not usvg.
+resvg = { version = "0.43", default-features = false }
+usvg = { version = "0.43", default-features = false }
 hostname = "0.4"
-qrcode = "0.14"
+# `login --qr` renders through `qrcode::render::unicode`, which is in the core.
+# The default feature set adds the `image`, `svg` and `pic` renderers instead.
+qrcode = { version = "0.14", default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
 rpassword = "7.0"
 sha2 = "0.10"
@@ -69,7 +87,10 @@ rusqlite = { workspace = true }
 # aarch64-linux-android. The clipboard module in tui/ provides a
 # no-op fallback on Android so the rest of the code stays portable.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = "3"
+# The TUI yank key only ever calls `Clipboard::set_text`. `arboard`'s default
+# `image-data` feature pulls in `image` (with `tiff` on macOS) plus the
+# CoreGraphics / Win32 GDI bitmap paths for clipboard images nothing reads.
+arboard = { version = "3", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }
@@ -79,3 +100,5 @@ assert_cmd = "2.0"
 predicates = "3.0"
 tempfile = "3.0"
 serial_test = "3.0"
+# DSH transcript fixtures are zstd frames; the CLI tests write them directly.
+zstd = { workspace = true }

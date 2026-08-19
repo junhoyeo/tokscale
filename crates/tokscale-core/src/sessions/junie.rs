@@ -2,13 +2,12 @@
 //!
 //! Junie stores local sessions under `~/.junie/sessions/<session-id>/events.jsonl`.
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms};
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line};
 use super::UnifiedMessage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const USAGE_EVENT_KIND: &str = "LlmResponseMetadataEvent";
@@ -20,11 +19,6 @@ const SKIP_EVENT_KINDS: &[&str] = &[
 ];
 
 pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let session_id = session_id_from_path(path);
     let default_timestamp =
         session_timestamp_from_id(&session_id).unwrap_or_else(|| file_modified_timestamp_ms(path));
@@ -32,39 +26,36 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut messages = Vec::new();
     let mut seen = HashSet::new();
 
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+    for_each_json_line(path, &mut |_index, line| {
         // Cheap pre-filter only: Junie state snapshots can be very large and do
         // not carry the usage rows Tokscale needs, so skip lines that mention
         // neither relevant kind before paying for JSON parsing. The authoritative
         // skip decision is made on the parsed event kind below.
         if !line.contains(USAGE_EVENT_KIND) && !line.contains(USER_PROMPT_KIND) {
-            continue;
+            return;
         }
 
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
         };
         // Skip noise events by matching the parsed event kind, not a raw substring
         // search: a legitimate usage/prompt line may merely *mention* a skipped
         // kind in its text and must not be dropped.
         if let Some(kind) = parsed_event_kind(&value) {
             if SKIP_EVENT_KINDS.contains(&kind) {
-                continue;
+                return;
             }
         }
         if event_kind(&value) == Some(USER_PROMPT_KIND) {
             pending_turn_start = true;
-            continue;
+            return;
         }
 
         let Some(agent_event) = value
             .pointer("/event/agentEvent")
             .filter(|event| string_field(event, "kind") == Some(USAGE_EVENT_KIND))
         else {
-            continue;
+            return;
         };
 
         // `explicit_timestamp` is the recorded `timestampMs` for this event, as
@@ -78,7 +69,7 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
         let timestamp = explicit_timestamp.unwrap_or(default_timestamp);
         let agent = agent_name(agent_event);
         let Some(usages) = agent_event.get("modelUsage").and_then(Value::as_array) else {
-            continue;
+            return;
         };
 
         let mut turn_start_assigned = false;
@@ -164,7 +155,7 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
         // produced no counted usage does not leak `is_turn_start` onto a later,
         // unrelated turn's usage event.
         pending_turn_start = false;
-    }
+    });
 
     messages
 }

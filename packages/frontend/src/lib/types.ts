@@ -2,6 +2,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "opencode",
   "claude",
   "codex",
+  "mcode",
   "copilot",
   "gemini",
   "cursor",
@@ -47,6 +48,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "reasonix",
   "prime-agent",
   "cherrystudio",
+  "dsh",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

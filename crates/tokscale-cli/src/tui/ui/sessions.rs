@@ -1040,6 +1040,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
         app.terminal_width = width;

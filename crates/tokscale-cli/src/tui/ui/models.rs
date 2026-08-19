@@ -4,12 +4,97 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
-    viewport_scrollbar_state,
+    fit_workspace_label_to_width, format_cache_hit_rate, format_cost, format_cost_per_million,
+    format_ms_per_1k, format_tokens, get_client_display_name, get_provider_display_name,
+    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
+
+/// Width the Workspace column gets when the row has no spare cells: what every
+/// other grouping's second column gets, so nothing is taken from its neighbors.
+const WORKSPACE_COLUMN_BASE_WIDTH: u16 = 18;
+
+/// Width the Workspace column gets once the row has surplus to spend.
+///
+/// Enough for `repo ⑃ worktree` on a maximized terminal, which is the case the
+/// truncated-label bug was actually reported from.
+const WORKSPACE_COLUMN_WIDE_WIDTH: u16 = 44;
+
+/// Inner width at which the row can actually satisfy the wide Workspace column
+/// without pushing Model below its `Min(20)`.
+///
+/// Below this the layout is zero-sum: widening Workspace can only come out of Cost
+/// (clipping a dollar figure) or Model, which just relocates the
+/// unreadable-truncation bug instead of fixing it. Measured against the solver —
+/// 193 is the first width where Workspace is granted the full 44 cells and Model
+/// still holds 20. Pinned by `workspace_column_request_matches_what_it_is_granted`.
+const WORKSPACE_SURPLUS_MIN_WIDTH: u16 = 193;
+
+/// Cells the Workspace column asks for in a table rendered into `total`.
+///
+/// Deliberately a fixed `Length` at both sizes rather than a `Min`: `Min` outranks
+/// `Length` in ratatui's solver, so a flexible workspace column steals from its
+/// neighbors on any row that cannot satisfy everyone.
+fn workspace_column_width(total: u16) -> u16 {
+    if total >= WORKSPACE_SURPLUS_MIN_WIDTH {
+        WORKSPACE_COLUMN_WIDE_WIDTH
+    } else {
+        WORKSPACE_COLUMN_BASE_WIDTH
+    }
+}
+
+/// Column indices in the workspace layout, for callers that need a cell's budget.
+const WORKSPACE_COL_WORKSPACE: usize = 1;
+const WORKSPACE_COL_MODEL: usize = 2;
+
+/// Cells column `index` is granted out of already-solved `widths`, which is what
+/// text in that cell has to be truncated to.
+///
+/// A `Length` is a request, not a guarantee, and `Min` floats: the solver resizes
+/// both to make the row fit. Truncating to the requested width leaves the overflow
+/// to be clipped by the renderer with no ellipsis — the same silent truncation this
+/// change exists to remove. Reading the solved width closes that gap at every width
+/// for every column, instead of each cell carrying a constant that is right only
+/// for the sizes someone happened to check.
+///
+/// Takes the solved widths rather than an inner width so `render` can solve once
+/// per frame instead of once per cell.
+fn workspace_granted_width(widths: &[u16], index: usize) -> usize {
+    widths
+        .get(index)
+        .copied()
+        .unwrap_or(WORKSPACE_COLUMN_BASE_WIDTH) as usize
+}
+
+/// The workspace layout's column constraints for a row of `total` cells.
+fn workspace_column_constraints(total: u16) -> Vec<Constraint> {
+    vec![
+        Constraint::Length(3),
+        Constraint::Length(workspace_column_width(total)),
+        Constraint::Min(20),
+        Constraint::Length(16),
+        Constraint::Length(14),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ]
+}
+
+/// Widths the solver grants each column of the workspace layout at `total` cells.
+fn workspace_table_widths(total: u16) -> Vec<u16> {
+    Layout::horizontal(workspace_column_constraints(total))
+        .spacing(1)
+        .split(Rect::new(0, 0, total, 1))
+        .iter()
+        .map(|area| area.width)
+        .collect()
+}
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
     model
@@ -147,6 +232,16 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Solve the workspace layout once per render, not once per cell: the widths
+    // depend only on `inner.width`, so running the solver inside the row loop
+    // repeated the same work (and its allocation) twice for every visible row.
+    let workspace_widths = if group_by == GroupBy::WorkspaceModel {
+        workspace_table_widths(inner.width)
+    } else {
+        Vec::new()
+    };
+    let granted = |index: usize| workspace_granted_width(&workspace_widths, index);
+
     let rows: Vec<Row> = models[start..end]
         .iter()
         .enumerate()
@@ -177,12 +272,30 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             ) {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate_text(workspace_label(model), 18)).style(
+                    // Not a plain head cut, unlike every other cell: a workspace
+                    // label is identified by the ends of each of its segments,
+                    // and cutting the tail leaves the prefix every row shares —
+                    // which rendered distinct worktrees as identical rows at the
+                    // 18 cells this column gets on an ordinary terminal.
+                    Cell::from(fit_workspace_label_to_width(
+                        workspace_label(model),
+                        granted(WORKSPACE_COL_WORKSPACE),
+                    ))
+                    .style(
                         Style::default()
                             .fg(theme_accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(truncate_text(&model.model, 24)).style(
+                    // Cells, not code points, and the granted width rather than a
+                    // constant: Model holds the flexible slot here, so the solver
+                    // hands it 20 cells on a narrow row and far more on a wide one.
+                    // A fixed 24 over-truncated at 97 widths and under-truncated at
+                    // the rest.
+                    Cell::from(truncate_to_width(
+                        &model.model,
+                        granted(WORKSPACE_COL_MODEL),
+                    ))
+                    .style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),

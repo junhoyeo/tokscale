@@ -4,9 +4,11 @@
 //! - `~/.hermes/state.db`
 //! - `$HERMES_HOME/state.db`
 
-use super::utils::open_readonly_sqlite;
+use super::utils::{
+    open_readonly_sqlite, resolved_provider, sqlite_for_each_row_on, timestamp_secs_to_ms,
+};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::TokenBreakdown;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,22 +19,6 @@ const HERMES_AGENT_NAME: &str = "Hermes Agent";
 /// Stands in for a NULL `billing_provider` inside a per-model dedup key. Angle
 /// brackets keep it out of the slug space real provider ids live in.
 const NULL_PROVIDER_KEY: &str = "<null>";
-
-fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
-    if timestamp > 1e12 {
-        timestamp as i64
-    } else {
-        (timestamp * 1000.0) as i64
-    }
-}
-
-fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String {
-    billing_provider
-        .filter(|provider| !provider.trim().is_empty())
-        .and_then(|provider| provider_identity::canonical_provider(provider.trim()))
-        .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
-        .unwrap_or_else(|| "hermes".to_string())
-}
 
 /// Per-model breakdown, available once Hermes started recording
 /// `session_model_usage`.
@@ -140,48 +126,16 @@ fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HermesUsageRow>
 /// all (prepare or execute failure) so the caller can fall back, and `Some` —
 /// possibly empty — when it ran and simply matched nothing.
 fn query_usage_rows(db_path: &Path, conn: &Connection, query: &str) -> Option<Vec<HermesUsageRow>> {
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Hermes session query"
-            );
-            return None;
-        }
-    };
-
-    let rows = match stmt.query_map([], decode_usage_row) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Hermes session query"
-            );
-            return None;
-        }
-    };
-
-    Some(
-        rows.filter_map(|row| match row {
-            Ok(row) => Some(row),
-            Err(err) => {
-                warn!(
-                    db_path = %db_path.display(),
-                    error = %err,
-                    "Failed to decode Hermes session row"
-                );
-                None
-            }
-        })
-        .collect(),
-    )
+    let mut rows = Vec::new();
+    let scan = sqlite_for_each_row_on(conn, db_path, query, Some("Hermes session"), &mut |row| {
+        rows.push(decode_usage_row(row)?);
+        Ok(())
+    });
+    scan.ran().then_some(rows)
 }
 
 fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
-    let provider = resolved_provider(row.billing_provider, &row.model_id);
+    let provider = resolved_provider(row.billing_provider, &row.model_id, "hermes");
     let mut msg = UnifiedMessage::new_with_agent(
         "hermes",
         row.model_id,

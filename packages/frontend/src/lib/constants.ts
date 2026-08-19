@@ -30,6 +30,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   opencode: "OpenCode",
   claude: "Claude Code",
   codex: "Codex CLI",
+  mcode: "MiniMax Code",
   copilot: "Copilot",
   gemini: "Gemini CLI",
   cursor: "Cursor",
@@ -75,6 +76,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   reasonix: "Reasonix",
   "prime-agent": "Prime Agent",
   cherrystudio: "Cherry Studio",
+  dsh: "DeepSeek Harness",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -83,6 +85,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
+  mcode: "https://github.com/MiniMax-AI.png",
   copilot: `${GITHUB_CDN_BASE}/client-copilot.jpg`,
   gemini: `${GITHUB_CDN_BASE}/client-gemini.png`,
   cursor: `${GITHUB_CDN_BASE}/client-cursor.jpg`,
@@ -133,12 +136,14 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   reasonix: `${GITHUB_CDN_BASE}/client-synthetic.png`,
   "prime-agent": "https://github.com/PrimeIntellect-ai.png",
   cherrystudio: `${GITHUB_CDN_BASE}/client-cherrystudio.png`,
+  dsh: "https://github.com/deepseek-ai.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
   opencode: "#00A8E8",
   claude: "#f97316",
   codex: "#10B981",
+  mcode: "#F04438",
   copilot: "#24292F",
   gemini: "#8b5cf6",
   cursor: "#22c55e",
@@ -184,6 +189,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   reasonix: "#6366F1",
   "prime-agent": "#6C63FF",
   cherrystudio: "#FA7298",
+  dsh: "#4D6BFE",
 };
 
 // Derived values

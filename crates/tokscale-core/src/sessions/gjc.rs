@@ -20,12 +20,11 @@
 //! session, timestamp, model and token breakdown keeps structurally identical
 //! replays (depth-1 vs depth-2 files) collapsed to one message.
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, for_each_json_line, CamelUsage};
 use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// A single JSONL entry. The `session` header reuses `id`/`timestamp`/`cwd`;
@@ -53,30 +52,12 @@ struct GjcMessage {
     source: Option<String>,
     /// Unix-ms timestamp (preferred for ordering/date).
     timestamp: Option<i64>,
-    usage: Option<GjcUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GjcUsage {
-    input: Option<i64>,
-    output: Option<i64>,
-    cache_read: Option<i64>,
-    cache_write: Option<i64>,
-    #[allow(dead_code)]
-    total_tokens: Option<i64>,
-    cost: Option<GjcCost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GjcCost {
-    /// Authoritative total cost in USD.
-    total: Option<f64>,
+    usage: Option<CamelUsage>,
 }
 
 /// Reuse the embedded `usage.cost.total` (USD) only when present, finite, and
 /// non-negative. Otherwise return `0.0` so the dispatch pricing guard reprices.
-fn embedded_cost(usage: &GjcUsage) -> (f64, CostSource) {
+fn embedded_cost(usage: &CamelUsage) -> (f64, CostSource) {
     match usage.cost.as_ref().and_then(|c| c.total) {
         Some(total) if total.is_finite() && total >= 0.0 => (total, CostSource::ProviderReported),
         _ => (0.0, CostSource::Unknown),
@@ -113,14 +94,8 @@ fn derive_dedup_key(
 /// Per-line parse: malformed/partial/legacy lines are skipped, never aborting
 /// the file. The `session` header and `service_tier_change` lines emit nothing.
 pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
-    let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
 
@@ -128,22 +103,12 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry = match simd_json::from_slice::<GjcEntry>(&mut buffer) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         match entry.entry_type.as_str() {
@@ -155,30 +120,30 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
                     workspace_label = workspace_label_from_key(&key);
                     workspace_key = Some(key);
                 }
-                continue;
+                return;
             }
             "message" => {}
             // service_tier_change and any other entry types: skip.
-            _ => continue,
+            _ => return,
         }
 
         let message = match entry.message {
             Some(m) => m,
-            None => continue,
+            None => return,
         };
 
         if message.role.as_deref() != Some("assistant") {
-            continue;
+            return;
         }
 
         let usage = match message.usage {
             Some(u) => u,
-            None => continue,
+            None => return,
         };
 
         let model = match message.model {
             Some(m) => m,
-            None => continue,
+            None => return,
         };
 
         // A missing provider field is recoverable: infer it from the model name
@@ -201,13 +166,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
                 .unwrap_or(fallback_timestamp)
         });
 
-        let tokens = TokenBreakdown {
-            input: usage.input.unwrap_or(0).max(0),
-            output: usage.output.unwrap_or(0).max(0),
-            cache_read: usage.cache_read.unwrap_or(0).max(0),
-            cache_write: usage.cache_write.unwrap_or(0).max(0),
-            reasoning: 0,
-        };
+        let tokens = usage.to_breakdown();
 
         let (cost, cost_source) = embedded_cost(&usage);
 
@@ -252,7 +211,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
-    }
+    });
 
     messages
 }

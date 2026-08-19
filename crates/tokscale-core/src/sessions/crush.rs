@@ -11,7 +11,7 @@
 //! report showing 0 tokens for crush is EXPECTED behavior, NOT a bug — the
 //! signal Crush provides is cost, not tokens.
 
-use super::utils::open_readonly_sqlite_opt;
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
 use super::UnifiedMessage;
 use crate::bucket_tz::BucketTimezone;
 use crate::TokenBreakdown;
@@ -65,12 +65,12 @@ pub fn parse_crush_sqlite_in(
         return Vec::new();
     };
 
-    let root_sessions = load_root_sessions(&conn);
+    let root_sessions = load_root_sessions(db_path, &conn);
     if root_sessions.is_empty() {
         return Vec::new();
     }
 
-    let assistant_buckets = load_assistant_buckets(&conn, bucket_timezone);
+    let assistant_buckets = load_assistant_buckets(db_path, &conn, bucket_timezone);
     let db_namespace = db_path.to_string_lossy().to_string();
     let mut messages = Vec::new();
 
@@ -139,7 +139,7 @@ pub fn parse_crush_sqlite_in(
     messages
 }
 
-fn load_root_sessions(conn: &Connection) -> Vec<CrushSession> {
+fn load_root_sessions(db_path: &Path, conn: &Connection) -> Vec<CrushSession> {
     let query = r#"
         SELECT id, cost, created_at, updated_at
         FROM sessions
@@ -148,27 +148,23 @@ fn load_root_sessions(conn: &Connection) -> Vec<CrushSession> {
         ORDER BY created_at ASC
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok(CrushSession {
+    // Quiet: Crush databases from before the `sessions` schema simply have
+    // nothing to contribute here.
+    let mut sessions = Vec::new();
+    sqlite_for_each_row_on(conn, db_path, query, None, &mut |row| {
+        sessions.push(CrushSession {
             id: row.get(0)?,
             cost: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
             created_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
             updated_at: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
-
-    rows.flatten().collect()
+        });
+        Ok(())
+    });
+    sessions
 }
 
 fn load_assistant_buckets(
+    db_path: &Path,
     conn: &Connection,
     bucket_timezone: &BucketTimezone,
 ) -> HashMap<String, Vec<DayBucket>> {
@@ -191,29 +187,19 @@ fn load_assistant_buckets(
         ORDER BY st.root_session_id ASC, m.created_at ASC
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(_) => return HashMap::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        let session_id: String = row.get(0)?;
-        let created_at: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
-        Ok((session_id, created_at))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return HashMap::new(),
-    };
-
     let mut session_days: HashMap<String, BTreeMap<String, DayBucket>> = HashMap::new();
 
-    for row in rows.flatten() {
-        let (session_id, created_at) = row;
+    // Quiet: Crush databases from before the `messages` schema simply have
+    // nothing to contribute here.
+    sqlite_for_each_row_on(conn, db_path, query, None, &mut |row| {
+        let session_id: String = row.get(0)?;
+        let created_at: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+
         let Some(timestamp_ms) = normalize_crush_timestamp_ms(created_at) else {
-            continue;
+            return Ok(());
         };
         let Some(local_day) = local_day_key(timestamp_ms, bucket_timezone) else {
-            continue;
+            return Ok(());
         };
 
         let day_map = session_days.entry(session_id).or_default();
@@ -223,7 +209,8 @@ fn load_assistant_buckets(
         });
         bucket.timestamp_ms = bucket.timestamp_ms.min(timestamp_ms);
         bucket.message_count = bucket.message_count.saturating_add(1);
-    }
+        Ok(())
+    });
 
     session_days
         .into_iter()
