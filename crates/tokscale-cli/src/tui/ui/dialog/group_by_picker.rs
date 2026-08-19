@@ -54,6 +54,11 @@ impl GroupByPickerDialog {
                 description: "Group local usage by workspace key, then model",
             },
             GroupByOption {
+                value: GroupBy::WorkspaceProviderModel,
+                label: "Workspace + Provider + Model",
+                description: "Per project, split by provider then model",
+            },
+            GroupByOption {
                 value: GroupBy::Session,
                 label: "Session + Model",
                 description: "One row per session_id and model (attribute cost per session)",

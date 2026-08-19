@@ -2160,7 +2160,10 @@ fn run_models_report(
                 .entries
                 .into_iter()
                 .map(|e| ModelUsageJson {
-                    workspace_key: if group_by == GroupBy::WorkspaceModel {
+                    workspace_key: if matches!(
+                        group_by,
+                        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+                    ) {
                         Some(
                             e.workspace_key
                                 .map(serde_json::Value::String)
@@ -2169,7 +2172,10 @@ fn run_models_report(
                     } else {
                         None
                     },
-                    workspace_label: if group_by == GroupBy::WorkspaceModel {
+                    workspace_label: if matches!(
+                        group_by,
+                        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+                    ) {
                         e.workspace_label
                     } else {
                         None
@@ -2445,7 +2451,7 @@ fn run_models_report(
                     );
                     table.add_row(total_row);
                 }
-                GroupBy::WorkspaceModel => {
+                GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel => {
                     table.set_header(vec![
                         Cell::new("Workspace").fg(Color::Cyan),
                         Cell::new("Model").fg(Color::Cyan),
@@ -2760,7 +2766,7 @@ fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     ]);
                 }
-                GroupBy::WorkspaceModel => {
+                GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel => {
                     table.set_header(vec![
                         Cell::new("Workspace").fg(Color::Cyan),
                         Cell::new("Providers").fg(Color::Cyan),

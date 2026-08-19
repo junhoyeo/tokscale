@@ -268,6 +268,10 @@ fn daily_source_model_key(
 ) -> String {
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
+        GroupBy::WorkspaceProviderModel => format!(
+            "{}:{workspace_group_key}:{provider_id}:{model}",
+            workspace_group_key.len()
+        ),
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
         GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
             model.to_string()
@@ -283,6 +287,9 @@ fn daily_source_model_display_name(
 ) -> String {
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
+        GroupBy::WorkspaceProviderModel => {
+            format!("{workspace_label} / {provider_id} / {model}")
+        }
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
         GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
             model.to_string()
@@ -296,6 +303,7 @@ fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> Strin
         GroupBy::Model
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
+        | GroupBy::WorkspaceProviderModel
         | GroupBy::Session
         | GroupBy::ClientSession => model.to_string(),
     }
@@ -303,7 +311,9 @@ fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> Strin
 
 fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
-        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
+        GroupBy::ClientProviderModel | GroupBy::WorkspaceProviderModel => {
+            format!("{provider_id}:{model}")
+        }
         GroupBy::Model
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
@@ -314,7 +324,9 @@ fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> Strin
 
 fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
-        GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
+        GroupBy::ClientProviderModel | GroupBy::WorkspaceProviderModel => {
+            format!("{provider_id} / {model}")
+        }
         GroupBy::Model
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
@@ -483,24 +495,37 @@ impl DataLoader {
                 GroupBy::WorkspaceModel => {
                     format!("{}:{}", workspace_group_key, normalized_model)
                 }
+                GroupBy::WorkspaceProviderModel => format!(
+                    "{}:{}:{}",
+                    workspace_group_key, msg.provider_id, normalized_model
+                ),
                 GroupBy::Session => format!("{}:{}", msg.session_id, normalized_model),
                 GroupBy::ClientSession => {
                     format!("{}:{}:{}", msg.client, msg.session_id, normalized_model)
                 }
             };
-            let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
+            let merge_clients = matches!(
+                group_by,
+                GroupBy::Model | GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+            );
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
                 color_key: model_key.clone(),
                 provider: msg.provider_id.clone(),
                 client: msg.client.clone(),
-                workspace_key: if *group_by == GroupBy::WorkspaceModel {
+                workspace_key: if matches!(
+                    group_by,
+                    GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+                ) {
                     workspace_key.clone()
                 } else {
                     None
                 },
-                workspace_label: if *group_by == GroupBy::WorkspaceModel {
+                workspace_label: if matches!(
+                    group_by,
+                    GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+                ) {
                     Some(workspace_label.clone())
                 } else {
                     None

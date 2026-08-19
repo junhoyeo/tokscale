@@ -206,6 +206,7 @@ pub enum GroupBy {
     ClientModel,
     ClientProviderModel,
     WorkspaceModel,
+    WorkspaceProviderModel,
     Session,
     ClientSession,
 }
@@ -217,6 +218,7 @@ impl std::fmt::Display for GroupBy {
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
             GroupBy::WorkspaceModel => write!(f, "workspace,model"),
+            GroupBy::WorkspaceProviderModel => write!(f, "workspace,provider,model"),
             GroupBy::Session => write!(f, "session,model"),
             GroupBy::ClientSession => write!(f, "client,session,model"),
         }
@@ -233,12 +235,15 @@ impl std::str::FromStr for GroupBy {
             "client,model" | "client-model" => Ok(GroupBy::ClientModel),
             "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
             "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
+            "workspace,provider,model" | "workspace-provider-model" => {
+                Ok(GroupBy::WorkspaceProviderModel)
+            }
             "session" | "session,model" | "session-model" => Ok(GroupBy::Session),
             "client,session" | "client-session" | "client,session,model" | "client-session-model" => {
                 Ok(GroupBy::ClientSession)
             }
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model, session,model, client,session,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model, workspace,provider,model, session,model, client,session,model",
                 s
             )),
         }
@@ -2947,12 +2952,21 @@ fn aggregate_model_usage_entries(
                 format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
             }
             GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
+            GroupBy::WorkspaceProviderModel => {
+                format!("{}:{}:{}", workspace_group_key, msg.provider_id, normalized)
+            }
             GroupBy::Session => format!("{}:{}", msg.session_id, normalized),
             GroupBy::ClientSession => {
                 format!("{}:{}:{}", msg.client, msg.session_id, normalized)
             }
         };
-        let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
+        // Workspace grouping folds every client that touched the project into
+        // one row, since the project is the subject and the client is not part
+        // of the key.
+        let merge_clients = matches!(
+            group_by,
+            GroupBy::Model | GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+        );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
@@ -2961,12 +2975,18 @@ fn aggregate_model_usage_entries(
             } else {
                 None
             },
-            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
+            workspace_key: if matches!(
+                group_by,
+                GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+            ) {
                 workspace_key.clone()
             } else {
                 None
             },
-            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
+            workspace_label: if matches!(
+                group_by,
+                GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+            ) {
                 Some(workspace_label.clone())
             } else {
                 None
@@ -6116,6 +6136,93 @@ mod tests {
         assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
         assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    }
+
+    #[test]
+    fn test_workspace_provider_model_grouping_splits_one_project_by_provider() {
+        // The point of the variant: within a single project, the same model
+        // served by two providers must not collapse into one row, which is
+        // exactly what `WorkspaceModel` does.
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.25,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "copilot",
+                    "claude-sonnet-4-5-20250929",
+                    "github-copilot",
+                    "session-2",
+                    2.75,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+            ],
+            &GroupBy::WorkspaceProviderModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.workspace_key.as_deref(), Some("/repo-a"));
+            assert_eq!(entry.workspace_label.as_deref(), Some("repo-a"));
+            assert_eq!(entry.model, "claude-sonnet-4-5");
+        }
+        let mut providers: Vec<&str> = entries.iter().map(|e| e.provider.as_str()).collect();
+        providers.sort_unstable();
+        assert_eq!(providers, vec!["anthropic", "github-copilot"]);
+    }
+
+    #[test]
+    fn test_workspace_provider_model_grouping_keeps_projects_apart() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.25,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.75,
+                    Some("/repo-b"),
+                    Some("repo-b"),
+                ),
+            ],
+            &GroupBy::WorkspaceProviderModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let mut keys: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.workspace_key.as_deref())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["/repo-a", "/repo-b"]);
+    }
+
+    #[test]
+    fn test_workspace_provider_model_grouping_round_trips_through_its_string_form() {
+        assert_eq!(
+            "workspace,provider,model".parse::<GroupBy>(),
+            Ok(GroupBy::WorkspaceProviderModel)
+        );
+        assert_eq!(
+            GroupBy::WorkspaceProviderModel.to_string(),
+            "workspace,provider,model"
+        );
     }
 
     #[test]
