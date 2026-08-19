@@ -87,6 +87,9 @@ pub fn run(
     until: Option<String>,
     year: Option<String>,
     initial_tab: Option<Tab>,
+    // Project selectors from `--workspace`. Empty means every project, which
+    // matches the picker's own default.
+    workspaces: Vec<String>,
 ) -> Result<()> {
     if debug {
         let _ = tracing_subscriber::fmt()
@@ -126,11 +129,20 @@ pub fn run(
     // silently invalidate the cache on every launch after `submit`.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
     let initial_report_scope = background_cache_scope(&since, &until, &year);
-    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
-        &enabled_clients,
-        &initial_group_by,
-        &initial_report_scope,
-    ));
+    // The on-disk cache is always a whole-machine snapshot, because a
+    // project-filtered scan is deliberately never written to it. Serving it
+    // under `--workspace` would paint every project's totals for the first
+    // frame and then silently replace them, so scoped launches skip it and
+    // wait for the real load instead of showing a number that is wrong.
+    let (cached_data, needs_background_load) = if workspaces.is_empty() {
+        decide_initial_data(load_cache(
+            &enabled_clients,
+            &initial_group_by,
+            &initial_report_scope,
+        ))
+    } else {
+        (None, true)
+    };
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -173,6 +185,11 @@ pub fn run(
             return Err(e);
         }
     };
+    if !workspaces.is_empty() {
+        app.selected_projects
+            .borrow_mut()
+            .extend(workspaces.iter().cloned());
+    }
 
     // Cache-first load of server-side aggregated multi-device stats. The
     // background refresh (when the cache is stale or missing) is driven by

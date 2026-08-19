@@ -268,6 +268,30 @@ fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
         .saturating_add(tokens.reasoning.max(0))
 }
 
+/// Does a project selection match this message's workspace?
+///
+/// A selector is either a full `workspace_key` or a short project name. The
+/// picker only ever stores keys, but `--workspace` takes what a person would
+/// actually type, and nobody types `/Users/me/Projects/app` when they mean
+/// `app`. Matching both keeps one filter type serving both entry points.
+///
+/// Name matching is case-insensitive and deliberately matches every project
+/// sharing that name: two checkouts of one repo have distinct keys and the
+/// same label, and scoping to the repo means both. Pass the full key to single
+/// one out.
+fn project_selector_matches(
+    selectors: &HashSet<String>,
+    workspace_key: Option<&str>,
+    workspace_label: &str,
+) -> bool {
+    if workspace_key.is_some_and(|key| selectors.contains(key)) {
+        return true;
+    }
+    selectors
+        .iter()
+        .any(|selector| selector.eq_ignore_ascii_case(workspace_label))
+}
+
 fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
     format!("{workspace_label} / {model}")
 }
@@ -531,9 +555,8 @@ impl DataLoader {
             Some(selected) if !selected.is_empty() => messages
                 .into_iter()
                 .filter(|msg| {
-                    msg.workspace_key
-                        .as_deref()
-                        .is_some_and(|key| selected.contains(key))
+                    let (_, key, label) = workspace_bucket(msg);
+                    project_selector_matches(selected, key.as_deref(), &label)
                 })
                 .collect(),
             _ => messages,
@@ -1993,6 +2016,127 @@ mod tests {
              got {:?}",
             settings.opencode_db_paths
         );
+    }
+
+    #[test]
+    fn a_workspace_selector_matches_a_bare_project_name() {
+        // What `--workspace harness` has to do: nobody types the full path.
+        let messages = vec![
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s1",
+                1.0,
+                Some("/Users/me/Projects/harness"),
+                Some("harness"),
+            ),
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s2",
+                2.0,
+                Some("/other"),
+                Some("other"),
+            ),
+        ];
+
+        let data = DataLoader::new(None)
+            .with_project_filter(HashSet::from(["harness".to_string()]))
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        assert_eq!(data.models.len(), 1);
+        assert_eq!(
+            data.models[0].workspace_key.as_deref(),
+            Some("/Users/me/Projects/harness")
+        );
+    }
+
+    #[test]
+    fn a_workspace_name_matches_every_checkout_sharing_it() {
+        // Two worktrees of one repo have distinct keys and the same name.
+        // Scoping to the repo means both; the full key singles one out.
+        let messages = vec![
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s1",
+                1.0,
+                Some("/repo"),
+                Some("app"),
+            ),
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s2",
+                2.0,
+                Some("/worktrees/app"),
+                Some("app"),
+            ),
+        ];
+
+        let by_name = DataLoader::new(None)
+            .with_project_filter(HashSet::from(["app".to_string()]))
+            .aggregate_messages(messages.clone(), &GroupBy::WorkspaceModel)
+            .unwrap();
+        assert_eq!(by_name.models.len(), 2);
+
+        let by_key = DataLoader::new(None)
+            .with_project_filter(HashSet::from(["/worktrees/app".to_string()]))
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+        assert_eq!(by_key.models.len(), 1);
+        assert_eq!(
+            by_key.models[0].workspace_key.as_deref(),
+            Some("/worktrees/app")
+        );
+    }
+
+    #[test]
+    fn a_workspace_selector_ignores_case_in_the_name() {
+        let messages = vec![make_workspace_message(
+            "claude",
+            "m",
+            "anthropic",
+            "s1",
+            1.0,
+            Some("/Users/me/Harness"),
+            Some("Harness"),
+        )];
+
+        let data = DataLoader::new(None)
+            .with_project_filter(HashSet::from(["harness".to_string()]))
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        assert_eq!(data.models.len(), 1);
+    }
+
+    #[test]
+    fn an_unmatched_workspace_selector_yields_an_empty_report_not_the_whole_machine() {
+        // Failing open would silently answer a question about one project with
+        // every project's numbers, which is worse than showing nothing.
+        let messages = vec![make_workspace_message(
+            "claude",
+            "m",
+            "anthropic",
+            "s1",
+            1.0,
+            Some("/a"),
+            Some("a"),
+        )];
+
+        let data = DataLoader::new(None)
+            .with_project_filter(HashSet::from(["nonexistent".to_string()]))
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        assert!(data.models.is_empty());
+        assert_eq!(data.total_cost, 0.0);
     }
 
     #[test]

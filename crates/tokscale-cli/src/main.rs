@@ -255,6 +255,15 @@ enum Commands {
         clients: ClientFlags,
         #[command(flatten)]
         date: DateRangeFlags,
+        #[arg(
+            long = "workspace",
+            value_name = "PROJECT",
+            help = "Scope every view to this project. Takes a project name as shown in the \
+                    Workspace column, or a full workspace path. Repeat to scope to several. \
+                    A name matches every project with that name, so pass the full path to \
+                    single out one checkout of a repo that has several."
+        )]
+        workspace: Vec<String>,
     },
     #[command(about = "Submit usage data to the Tokscale social platform")]
     Submit {
@@ -653,6 +662,7 @@ fn main() -> Result<()> {
                     until,
                     year,
                     Some(Tab::Models),
+                    Vec::new(),
                 )
             }
         }
@@ -690,6 +700,7 @@ fn main() -> Result<()> {
                     until,
                     year,
                     Some(Tab::Monthly),
+                    Vec::new(),
                 )
             }
         }
@@ -727,6 +738,7 @@ fn main() -> Result<()> {
                     until,
                     year,
                     Some(Tab::Hourly),
+                    Vec::new(),
                 )
             }
         }
@@ -782,7 +794,11 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "import")?;
             run_import_command(file, format, output, dry_run)
         }
-        Some(Commands::Tui { clients, date }) => {
+        Some(Commands::Tui {
+            clients,
+            date,
+            workspace,
+        }) => {
             ensure_home_supported_for_tui(&cli.home)?;
             let (since, until) = build_date_filter(&date, &cli.home);
             let year = normalize_year_filter(&date);
@@ -797,6 +813,7 @@ fn main() -> Result<()> {
                 until,
                 year,
                 None,
+                workspace,
             )
         }
         Some(Commands::Submit {
@@ -991,6 +1008,7 @@ fn main() -> Result<()> {
                     until,
                     year,
                     None,
+                    Vec::new(),
                 )
             }
         }
