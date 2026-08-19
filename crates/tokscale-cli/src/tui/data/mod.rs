@@ -190,9 +190,25 @@ pub struct GraphData {
     pub weeks: Vec<Vec<Option<ContributionDay>>>,
 }
 
+/// One project discovered in the loaded data.
+///
+/// Built from every message regardless of the active `GroupBy`, because the
+/// project picker has to offer the full list even when the current grouping
+/// does not carry workspace metadata on its rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectUsage {
+    /// The `workspace_key` selection is stored against. `None` on the
+    /// unknown-workspace bucket, which is therefore not selectable.
+    pub key: Option<String>,
+    pub label: String,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
     pub models: Vec<ModelUsage>,
+    /// Every project seen, ordered by descending token total.
+    pub projects: Vec<ProjectUsage>,
     pub agents: Vec<AgentUsage>,
     pub daily: Vec<DailyUsage>,
     pub hourly: Vec<HourlyUsage>,
@@ -214,6 +230,9 @@ pub struct DataLoader {
     pub until: Option<String>,
     pub year: Option<String>,
     pub minutely_enabled: bool,
+    /// Workspace keys to narrow the report to. Empty or `None` means every
+    /// project, which is the unfiltered default the picker starts in.
+    pub project_filter: Option<HashSet<String>>,
 }
 
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
@@ -343,6 +362,7 @@ impl DataLoader {
             until: None,
             year: None,
             minutely_enabled: false,
+            project_filter: None,
         }
     }
 
@@ -358,11 +378,19 @@ impl DataLoader {
             until,
             year,
             minutely_enabled: false,
+            project_filter: None,
         }
     }
 
     pub fn with_minutely_enabled(mut self, enabled: bool) -> Self {
         self.minutely_enabled = enabled;
+        self
+    }
+
+    /// Narrow every view to these workspace keys. An empty set is treated as
+    /// no filter, matching the picker's "empty means all projects" default.
+    pub fn with_project_filter(mut self, keys: HashSet<String>) -> Self {
+        self.project_filter = if keys.is_empty() { None } else { Some(keys) };
         self
     }
 
@@ -480,6 +508,36 @@ impl DataLoader {
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
+        let mut project_map: HashMap<String, ProjectUsage> = HashMap::new();
+
+        // Built before any filtering so the picker always lists every project,
+        // including the ones the current selection excludes. Filtering the
+        // list by the selection would strip the rows needed to undo it.
+        for msg in &messages {
+            let (group_key, key, label) = workspace_bucket(msg);
+            let entry = project_map
+                .entry(group_key)
+                .or_insert_with(|| ProjectUsage {
+                    key,
+                    label,
+                    total_tokens: 0,
+                });
+            entry.total_tokens = entry
+                .total_tokens
+                .saturating_add(positive_unified_token_total(&msg.tokens).max(0) as u64);
+        }
+
+        let messages: Vec<UnifiedMessage> = match &self.project_filter {
+            Some(selected) if !selected.is_empty() => messages
+                .into_iter()
+                .filter(|msg| {
+                    msg.workspace_key
+                        .as_deref()
+                        .is_some_and(|key| selected.contains(key))
+                })
+                .collect(),
+            _ => messages,
+        };
 
         for msg in &messages {
             let normalized_model =
@@ -1087,8 +1145,18 @@ impl DataLoader {
         let graph = build_contribution_graph(&daily);
         let (current_streak, longest_streak) = calculate_streaks(&daily);
 
+        let mut projects: Vec<ProjectUsage> = project_map.into_values().collect();
+        // Descending usage: the projects worth filtering to should be
+        // reachable in the picker without typing.
+        projects.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+
         Ok(UsageData {
             models,
+            projects,
             agents,
             daily,
             hourly,
@@ -1925,6 +1993,101 @@ mod tests {
              got {:?}",
             settings.opencode_db_paths
         );
+    }
+
+    #[test]
+    fn project_filter_narrows_the_report_to_the_selected_projects() {
+        let messages = vec![
+            make_workspace_message("claude", "m", "anthropic", "s1", 1.0, Some("/a"), Some("a")),
+            make_workspace_message("claude", "m", "anthropic", "s2", 2.0, Some("/b"), Some("b")),
+        ];
+        let loader = DataLoader::new(None).with_project_filter(HashSet::from(["/a".to_string()]));
+
+        let data = loader
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        assert_eq!(data.models.len(), 1);
+        assert_eq!(data.models[0].workspace_key.as_deref(), Some("/a"));
+        assert_eq!(data.total_cost, 1.0);
+    }
+
+    #[test]
+    fn project_list_covers_every_project_even_the_filtered_out_ones() {
+        // The picker has to be able to undo a selection, which it cannot do
+        // if the list it renders has already been narrowed by that selection.
+        let messages = vec![
+            make_workspace_message("claude", "m", "anthropic", "s1", 1.0, Some("/a"), Some("a")),
+            make_workspace_message("claude", "m", "anthropic", "s2", 2.0, Some("/b"), Some("b")),
+        ];
+        let loader = DataLoader::new(None).with_project_filter(HashSet::from(["/a".to_string()]));
+
+        let data = loader
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        let mut keys: Vec<&str> = data
+            .projects
+            .iter()
+            .filter_map(|p| p.key.as_deref())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn an_empty_project_filter_is_treated_as_no_filter() {
+        let messages = vec![
+            make_workspace_message("claude", "m", "anthropic", "s1", 1.0, Some("/a"), Some("a")),
+            make_workspace_message("claude", "m", "anthropic", "s2", 2.0, Some("/b"), Some("b")),
+        ];
+        let loader = DataLoader::new(None).with_project_filter(HashSet::new());
+
+        assert!(loader.project_filter.is_none());
+        let data = loader
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+        assert_eq!(data.models.len(), 2);
+    }
+
+    #[test]
+    fn projects_are_ordered_by_descending_usage() {
+        let messages = vec![
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s1",
+                1.0,
+                Some("/small"),
+                Some("small"),
+            ),
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s2",
+                1.0,
+                Some("/big"),
+                Some("big"),
+            ),
+            make_workspace_message(
+                "claude",
+                "m",
+                "anthropic",
+                "s3",
+                1.0,
+                Some("/big"),
+                Some("big"),
+            ),
+        ];
+
+        let data = DataLoader::new(None)
+            .aggregate_messages(messages, &GroupBy::WorkspaceModel)
+            .unwrap();
+
+        assert_eq!(data.projects[0].label, "big");
+        assert_eq!(data.projects[1].label, "small");
     }
 
     #[test]

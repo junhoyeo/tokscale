@@ -25,7 +25,9 @@ use super::data::{
 use super::privacy::looks_like_email;
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
-use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack};
+use super::ui::dialog::{
+    ClientPickerDialog, ConfirmDialog, DialogStack, ProjectOption, ProjectPickerDialog,
+};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
@@ -303,6 +305,10 @@ pub struct App {
     /// `Vec<ClientId>` plus a `bool include_synthetic`) projects this set
     /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
     pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
+    /// Workspace keys the report is narrowed to. Empty means every project,
+    /// which is the default: the list runs to hundreds of entries, so
+    /// requiring the user to deselect the rest would invert the common case.
+    pub selected_projects: Rc<RefCell<HashSet<String>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -456,6 +462,7 @@ impl App {
             data,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
+            selected_projects: Rc::new(RefCell::new(HashSet::new())),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
             sort_field,
             sort_direction,
@@ -887,6 +894,9 @@ impl App {
             }
             KeyCode::Char('s') => {
                 self.open_client_picker();
+            }
+            KeyCode::Char('w') => {
+                self.open_project_picker();
             }
             KeyCode::Char('h') if self.current_tab == Tab::Overview => {
                 self.chart_granularity = match self.chart_granularity {
@@ -1862,6 +1872,30 @@ impl App {
         } else {
             self.set_status(&format!("Theme: {}", new_theme.as_str()));
         }
+    }
+
+    /// Open the project picker, sourcing its rows from the currently loaded
+    /// data. Unlike the client list, which is a static enum, projects are
+    /// discovered per scan, so the dialog is rebuilt on every open rather
+    /// than held as state that could go stale.
+    fn open_project_picker(&mut self) {
+        let projects: Vec<ProjectOption> = self
+            .data
+            .projects
+            .iter()
+            .filter_map(|project| {
+                project.key.as_ref().map(|key| ProjectOption {
+                    key: key.clone(),
+                    label: project.label.clone(),
+                })
+            })
+            .collect();
+        let dialog = ProjectPickerDialog::new(
+            projects,
+            self.selected_projects.clone(),
+            self.dialog_needs_reload.clone(),
+        );
+        self.dialog_stack.show(Box::new(dialog));
     }
 
     fn open_client_picker(&mut self) {

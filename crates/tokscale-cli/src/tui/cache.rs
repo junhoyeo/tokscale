@@ -641,6 +641,10 @@ impl TryFrom<CachedUsageData> for UsageData {
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
+            // Not cached: the project list is cheap to rebuild and must
+            // reflect the live scan, not a snapshot taken under a different
+            // filter. Repopulated by the first foreground refresh.
+            projects: Vec::new(),
             agents: normalize_cached_agents(u.agents),
             daily,
             hourly: hourly?,

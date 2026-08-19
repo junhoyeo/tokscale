@@ -62,8 +62,11 @@ fn background_data_loader(
     until: Option<String>,
     year: Option<String>,
     minutely_enabled: bool,
+    project_filter: HashSet<String>,
 ) -> DataLoader {
-    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+    DataLoader::with_filters(None, since, until, year)
+        .with_minutely_enabled(minutely_enabled)
+        .with_project_filter(project_filter)
 }
 
 fn background_cache_scope(
@@ -198,12 +201,24 @@ pub fn run(
         let bg_group_by = app.group_by.borrow().clone();
         let bg_report_scope = background_cache_scope(&since, &until, &year);
         let bg_minutely_enabled = app.settings.minutely_tab_enabled;
+        let bg_projects = app.selected_projects.borrow().clone();
+        let bg_projects_empty = bg_projects.is_empty();
 
         thread::spawn(move || {
-            let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
+            let loader = background_data_loader(
+                bg_since,
+                bg_until,
+                bg_year,
+                bg_minutely_enabled,
+                bg_projects,
+            );
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
-            if let Ok(ref data) = result {
+            // Never cache a project-filtered scan. The on-disk snapshot is
+            // keyed by clients, group-by and date scope but not by project,
+            // so persisting a narrowed result would serve it back to an
+            // unfiltered view on the next start.
+            if let (Ok(ref data), true) = (&result, bg_projects_empty) {
                 save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope);
             }
 
@@ -327,11 +342,13 @@ fn run_loop_with_background(
             let group_by = app.group_by.borrow().clone();
             let report_scope = background_cache_scope(&since, &until, &year);
             let minutely_enabled = app.settings.minutely_tab_enabled;
+            let projects = app.selected_projects.borrow().clone();
+            let projects_empty = projects.is_empty();
 
             thread::spawn(move || {
-                let loader = background_data_loader(since, until, year, minutely_enabled);
+                let loader = background_data_loader(since, until, year, minutely_enabled, projects);
                 let result = loader.load(&clients, &group_by, include_synthetic);
-                if let Ok(ref data) = result {
+                if let (Ok(ref data), true) = (&result, projects_empty) {
                     save_cached_data(data, &enabled_clients, &group_by, &report_scope);
                 }
                 let _ = tx.send(result);
@@ -433,10 +450,10 @@ mod tests {
 
     #[test]
     fn background_loader_preserves_minutely_toggle() {
-        let enabled = background_data_loader(None, None, None, true);
+        let enabled = background_data_loader(None, None, None, true, HashSet::new());
         assert!(enabled.minutely_enabled);
 
-        let disabled = background_data_loader(None, None, None, false);
+        let disabled = background_data_loader(None, None, None, false, HashSet::new());
         assert!(!disabled.minutely_enabled);
     }
 
