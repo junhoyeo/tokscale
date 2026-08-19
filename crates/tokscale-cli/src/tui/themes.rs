@@ -454,6 +454,8 @@ impl Theme {
             theme.current_row = Color::DarkGray;
         }
 
+        theme.highlight = legible_highlight(&theme.colors, theme.background, theme.highlight);
+
         theme
     }
 
@@ -631,6 +633,77 @@ mod tests {
             TerminalColorMode::from_env(env(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]));
 
         assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn every_theme_highlight_is_legible_on_its_own_background() {
+        // `highlight` is drawn as bar-chart foreground, so it has to clear the
+        // WCAG large-text threshold against the background it is drawn on.
+        // Taking it straight from the contribution ramp's darkest grade did
+        // not: Halloween's grade 4 is #03001C and Monochrome's is #212121.
+        for name in ThemeName::all() {
+            let theme = Theme::from_name_with_color_mode(*name, TerminalColorMode::FullColor);
+            let ratio = contrast_ratio(theme.highlight, theme.background)
+                .expect("full-color themes use concrete RGB");
+            assert!(
+                ratio >= 3.0,
+                "{} highlight {:?} on background {:?} has contrast {ratio:.2}",
+                name.as_str(),
+                theme.highlight,
+                theme.background
+            );
+        }
+    }
+
+    #[test]
+    fn legible_highlight_keeps_a_value_that_already_has_contrast() {
+        // Themes whose darkest grade was already legible must not be reshuffled.
+        let colors = [
+            Color::Rgb(22, 27, 34),
+            Color::Rgb(155, 233, 168),
+            Color::Rgb(64, 196, 99),
+            Color::Rgb(48, 161, 78),
+            Color::Rgb(220, 50, 47),
+        ];
+        let background = Color::Rgb(13, 17, 23);
+
+        let picked = legible_highlight(&colors, background, Color::Rgb(220, 50, 47));
+
+        assert_eq!(picked, Color::Rgb(220, 50, 47));
+    }
+
+    #[test]
+    fn legible_highlight_replaces_a_near_black_value() {
+        let colors = [
+            Color::Rgb(22, 27, 34),
+            Color::Rgb(255, 238, 74),
+            Color::Rgb(255, 197, 1),
+            Color::Rgb(254, 150, 0),
+            Color::Rgb(3, 0, 28),
+        ];
+        let background = Color::Rgb(13, 17, 23);
+
+        let picked = legible_highlight(&colors, background, Color::Rgb(3, 0, 28));
+
+        assert_ne!(picked, Color::Rgb(3, 0, 28));
+        assert!(contrast_ratio(picked, background).unwrap() >= 3.0);
+    }
+
+    #[test]
+    fn legible_highlight_leaves_named_colors_alone() {
+        // The 16-color fallback sets highlight to a named ANSI color, whose
+        // real value lives in the terminal's palette and cannot be measured.
+        let colors = [
+            Color::Black,
+            Color::DarkGray,
+            Color::Gray,
+            Color::White,
+            Color::Cyan,
+        ];
+
+        let picked = legible_highlight(&colors, Color::Black, Color::Cyan);
+
+        assert_eq!(picked, Color::Cyan);
     }
 
     #[test]
@@ -822,4 +895,62 @@ mod tests {
             );
         }
     }
+}
+
+/// Pick a ramp color that is actually legible as text on `background`.
+///
+/// `colors` is a contribution-graph ramp: grade 0 is the empty cell and each
+/// later grade means more activity, so the ramp runs from the background color
+/// toward the most saturated end. That ordering is built for *filled cells*,
+/// where the color is the cell's background and the darkest grade reads as the
+/// strongest. The bar chart reuses `highlight` as a *foreground*, and there the
+/// same ordering is upside down: Halloween's grade 4 is #03001C and Monochrome's
+/// is #212121, both of which render as near-black text on a dark ground.
+///
+/// So choose by measured contrast rather than by position in the ramp. The
+/// existing value is kept when it already clears the WCAG large-text threshold,
+/// which leaves every theme that was already legible untouched and only moves
+/// the ones that were not.
+fn legible_highlight(colors: &[Color; 5], background: Color, current: Color) -> Color {
+    const MIN_CONTRAST: f64 = 3.0;
+
+    if contrast_ratio(current, background).is_none_or(|ratio| ratio >= MIN_CONTRAST) {
+        return current;
+    }
+
+    colors
+        .iter()
+        .copied()
+        .filter_map(|candidate| {
+            contrast_ratio(candidate, background).map(|ratio| (candidate, ratio))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, ratio)| *ratio >= MIN_CONTRAST)
+        .map(|(candidate, _)| candidate)
+        .unwrap_or(current)
+}
+
+/// WCAG 2.1 contrast ratio, or `None` when either color is not a concrete RGB
+/// triple (named ANSI colors resolve against the terminal's own palette, which
+/// this process cannot read).
+fn contrast_ratio(a: Color, b: Color) -> Option<f64> {
+    let a = relative_luminance(a)?;
+    let b = relative_luminance(b)?;
+    let (lighter, darker) = if a >= b { (a, b) } else { (b, a) };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
+fn relative_luminance(color: Color) -> Option<f64> {
+    let Color::Rgb(r, g, b) = color else {
+        return None;
+    };
+    let channel = |value: u8| {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
 }

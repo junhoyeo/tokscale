@@ -205,7 +205,9 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else if !is_narrow && !is_very_narrow {
-            Style::default().add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(app.theme.foreground)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };

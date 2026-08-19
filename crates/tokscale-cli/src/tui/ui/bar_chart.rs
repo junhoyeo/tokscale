@@ -70,9 +70,11 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
     for (i, ch) in title.chars().enumerate() {
         let x = area.x + y_label_width + i as u16;
         if x < area.x + area.width {
-            buf[(x, title_y)]
-                .set_char(ch)
-                .set_style(Style::default().add_modifier(Modifier::BOLD));
+            buf[(x, title_y)].set_char(ch).set_style(
+                Style::default()
+                    .fg(app.theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            );
         }
     }
 

@@ -188,7 +188,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(app.theme.foreground)
+                                .add_modifier(Modifier::BOLD)
                         },
                     ),
                     Cell::from(clients_str),
