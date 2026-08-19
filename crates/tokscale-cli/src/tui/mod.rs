@@ -11,7 +11,7 @@ mod keymap;
 pub(crate) mod privacy;
 pub mod remote;
 pub mod settings;
-mod themes;
+pub mod themes;
 pub(crate) mod ui;
 
 pub use app::{App, Tab, TuiConfig};

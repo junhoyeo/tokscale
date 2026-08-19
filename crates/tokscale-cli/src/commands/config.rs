@@ -1,20 +1,22 @@
 //! `tokscale config` — read and write persistent settings from the CLI.
 //!
-//! Currently exposes exactly one key, `timezone`, because it is the one setting
-//! a user has a concrete reason to inspect by hand: the timezone a device
-//! buckets usage days into is pinned automatically on first run.
+//! Exposes the settings a user has a concrete reason to address by hand: the
+//! timezone a device buckets usage days into, pinned automatically on first
+//! run, and the TUI theme, which otherwise can only be reached by cycling
+//! through every theme in the app.
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use tokscale_core::bucket_tz::BucketTimezone;
 
 use crate::tui::settings::Settings;
+use crate::tui::themes::ThemeName;
 
 /// The settings `tokscale config` can address.
 ///
 /// Kept as an explicit list rather than a free-form path into settings.json so
 /// a typo is rejected instead of silently writing a key nothing reads.
-const KNOWN_KEYS: &[&str] = &["timezone"];
+const KNOWN_KEYS: &[&str] = &["timezone", "theme"];
 
 pub fn run_get(key: &str) -> Result<()> {
     let key = normalize_key(key)?;
@@ -31,6 +33,7 @@ pub fn run_get(key: &str) -> Result<()> {
                 );
             }
         },
+        "theme" => println!("{}", settings.theme_name().as_str()),
         _ => unreachable!("normalize_key only returns keys handled here"),
     }
 
@@ -71,6 +74,26 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
                 }
             }
         }
+        "theme" => {
+            let theme: ThemeName = value.trim().to_ascii_lowercase().parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown theme `{value}` (known themes: {})",
+                    theme_names().join(", ")
+                )
+            })?;
+            let previous = settings.theme_name();
+            settings.set_theme(theme);
+            settings.save()?;
+
+            println!("{} theme = {}", "set".green().bold(), theme.as_str().bold());
+            if previous == theme {
+                println!("(unchanged)");
+            }
+            eprintln!(
+                "A running TUI writes its own theme back when it exits, so restart it to \
+                 pick this up."
+            );
+        }
         _ => unreachable!("normalize_key only returns keys handled here"),
     }
 
@@ -93,6 +116,20 @@ pub fn run_unset(key: &str) -> Result<()> {
             }
             eprintln!("The next tokscale run re-detects this machine's timezone.");
         }
+        "theme" => {
+            // No "unset" state exists: the TUI always renders some theme, so
+            // clearing the key means returning to the default rather than
+            // leaving it absent.
+            let previous = settings.theme_name();
+            settings.set_theme(ThemeName::default_theme());
+            settings.save()?;
+            println!(
+                "{} theme (was {}, now {})",
+                "reset".green().bold(),
+                previous.as_str(),
+                ThemeName::default_theme().as_str()
+            );
+        }
         _ => unreachable!("normalize_key only returns keys handled here"),
     }
 
@@ -108,8 +145,14 @@ pub fn run_list() -> Result<()> {
         .clone()
         .unwrap_or_else(|| "(unset)".to_string());
     println!("{:<12} {}", "timezone", timezone);
+    println!("{:<12} {}", "theme", settings.theme_name().as_str());
 
     Ok(())
+}
+
+/// Every theme `config set theme` accepts, for the error message.
+fn theme_names() -> Vec<&'static str> {
+    ThemeName::all().iter().map(|t| t.as_str()).collect()
 }
 
 /// Load settings for a command that is going to write them straight back.

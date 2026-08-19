@@ -64,6 +64,8 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
             (SortField::Date, "Date"),
             (SortField::Cost, "Cost"),
             (SortField::Tokens, "Tokens"),
+            (SortField::Name, "Name"),
+            (SortField::Count, "Count"),
         ];
 
         for (field, label) in sort_buttons {

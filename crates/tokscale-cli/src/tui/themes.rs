@@ -113,6 +113,12 @@ impl ThemeName {
         ]
     }
 
+    /// The theme used when none is set. Mirrors `Settings::theme_name`'s
+    /// fallback so `config unset theme` and a fresh install agree.
+    pub fn default_theme() -> ThemeName {
+        ThemeName::Blue
+    }
+
     pub fn next(self) -> ThemeName {
         let themes = Self::all();
         let idx = themes.iter().position(|&t| t == self).unwrap_or(0);

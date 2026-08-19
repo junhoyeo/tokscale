@@ -157,6 +157,13 @@ pub enum SortField {
     Cost,
     Tokens,
     Date,
+    /// Alphabetical by whatever names the row: model, agent, project, session.
+    /// The only way to find a known row once the list runs to hundreds.
+    Name,
+    /// Whatever the row counts: messages on most tabs, sessions on the model
+    /// rows, which carry a session count rather than a message count. Named
+    /// for the column it sorts rather than for one tab's meaning of it.
+    Count,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -860,6 +867,12 @@ impl App {
             }
             KeyCode::Char('d') => {
                 self.set_sort(SortField::Date);
+            }
+            KeyCode::Char('n') => {
+                self.set_sort(SortField::Name);
+            }
+            KeyCode::Char('M') => {
+                self.set_sort(SortField::Count);
             }
             KeyCode::Char('j') => {
                 self.jump_to_today();
@@ -1807,7 +1820,14 @@ impl App {
             };
         } else {
             self.sort_field = field;
-            self.sort_direction = SortDirection::Descending;
+            // Descending is right for magnitudes, where the biggest row is the
+            // one worth seeing first, but wrong for names: A to Z is what
+            // every file listing does and what someone hunting a known row
+            // expects.
+            self.sort_direction = match field {
+                SortField::Name => SortDirection::Ascending,
+                _ => SortDirection::Descending,
+            };
         }
         self.persist_current_sort();
         if (self.current_tab == Tab::Daily && self.is_daily_detail_active())
@@ -2234,6 +2254,24 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| tie_breaker(a, b))
             }),
+            // The tie-breaker is already a name comparison, so Name sorting
+            // is that comparison promoted to the primary key.
+            (SortField::Name, SortDirection::Descending) => {
+                models.sort_by(|a, b| tie_breaker(b, a));
+            }
+            (SortField::Name, SortDirection::Ascending) => {
+                models.sort_by(|a, b| tie_breaker(a, b));
+            }
+            (SortField::Count, SortDirection::Descending) => models.sort_by(|a, b| {
+                b.session_count
+                    .cmp(&a.session_count)
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Count, SortDirection::Ascending) => models.sort_by(|a, b| {
+                a.session_count
+                    .cmp(&b.session_count)
+                    .then_with(|| tie_breaker(a, b))
+            }),
             (SortField::Date, _) => {
                 models.sort_by(|a, b| tie_breaker(a, b));
             }
@@ -2270,6 +2308,22 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| tie_breaker(a, b))
             }),
+            (SortField::Name, SortDirection::Descending) => {
+                agents.sort_by(|a, b| tie_breaker(b, a));
+            }
+            (SortField::Name, SortDirection::Ascending) => {
+                agents.sort_by(|a, b| tie_breaker(a, b));
+            }
+            (SortField::Count, SortDirection::Descending) => agents.sort_by(|a, b| {
+                b.message_count
+                    .cmp(&a.message_count)
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Count, SortDirection::Ascending) => agents.sort_by(|a, b| {
+                a.message_count
+                    .cmp(&b.message_count)
+                    .then_with(|| tie_breaker(a, b))
+            }),
             (SortField::Date, _) => {
                 agents.sort_by(|a, b| tie_breaker(a, b));
             }
@@ -2282,6 +2336,16 @@ impl App {
         let mut daily: Vec<&DailyUsage> = self.data.daily.iter().collect();
 
         match (self.sort_field, self.sort_direction) {
+            (SortField::Count, SortDirection::Descending) => daily.sort_by(|a, b| {
+                b.message_count
+                    .cmp(&a.message_count)
+                    .then_with(|| b.date.cmp(&a.date))
+            }),
+            (SortField::Count, SortDirection::Ascending) => daily.sort_by(|a, b| {
+                a.message_count
+                    .cmp(&b.message_count)
+                    .then_with(|| b.date.cmp(&a.date))
+            }),
             (SortField::Cost, SortDirection::Descending) => {
                 daily.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| a.date.cmp(&b.date)))
             }
@@ -2300,10 +2364,12 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| a.date.cmp(&b.date))
             }),
-            (SortField::Date, SortDirection::Descending) => {
+            (SortField::Date | SortField::Name, SortDirection::Descending) => {
                 daily.sort_by_key(|b| std::cmp::Reverse(b.date))
             }
-            (SortField::Date, SortDirection::Ascending) => daily.sort_by_key(|a| a.date),
+            (SortField::Date | SortField::Name, SortDirection::Ascending) => {
+                daily.sort_by_key(|a| a.date)
+            }
         }
 
         daily
@@ -2394,6 +2460,14 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| tie_breaker(a, b))
             }),
+            (SortField::Name, SortDirection::Descending) => rows.sort_by(|a, b| tie_breaker(b, a)),
+            (SortField::Name, SortDirection::Ascending) => rows.sort_by(tie_breaker),
+            (SortField::Count, SortDirection::Descending) => {
+                rows.sort_by(|a, b| b.messages.cmp(&a.messages).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Count, SortDirection::Ascending) => {
+                rows.sort_by(|a, b| a.messages.cmp(&b.messages).then_with(|| tie_breaker(a, b)))
+            }
             (SortField::Date, _) => rows.sort_by(tie_breaker),
         }
 
@@ -2404,6 +2478,16 @@ impl App {
         let mut hourly: Vec<&HourlyUsage> = self.data.hourly.iter().collect();
 
         match (self.sort_field, self.sort_direction) {
+            (SortField::Count, SortDirection::Descending) => hourly.sort_by(|a, b| {
+                b.message_count
+                    .cmp(&a.message_count)
+                    .then_with(|| b.datetime.cmp(&a.datetime))
+            }),
+            (SortField::Count, SortDirection::Ascending) => hourly.sort_by(|a, b| {
+                a.message_count
+                    .cmp(&b.message_count)
+                    .then_with(|| b.datetime.cmp(&a.datetime))
+            }),
             (SortField::Cost, SortDirection::Descending) => hourly.sort_by(|a, b| {
                 b.cost
                     .total_cmp(&a.cost)
@@ -2426,10 +2510,12 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| a.datetime.cmp(&b.datetime))
             }),
-            (SortField::Date, SortDirection::Descending) => {
+            (SortField::Date | SortField::Name, SortDirection::Descending) => {
                 hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime))
             }
-            (SortField::Date, SortDirection::Ascending) => hourly.sort_by_key(|a| a.datetime),
+            (SortField::Date | SortField::Name, SortDirection::Ascending) => {
+                hourly.sort_by_key(|a| a.datetime)
+            }
         }
 
         hourly
@@ -2460,6 +2546,20 @@ impl App {
             let mut indices: Vec<usize> = (0..data_len).collect();
 
             match (sort_field, sort_direction) {
+                (SortField::Count, SortDirection::Descending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    b.message_count
+                        .cmp(&a.message_count)
+                        .then_with(|| b.datetime.cmp(&a.datetime))
+                }),
+                (SortField::Count, SortDirection::Ascending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    a.message_count
+                        .cmp(&b.message_count)
+                        .then_with(|| b.datetime.cmp(&a.datetime))
+                }),
                 (SortField::Cost, SortDirection::Descending) => indices.sort_by(|a, b| {
                     let a = &self.data.minutely[*a];
                     let b = &self.data.minutely[*b];
@@ -2490,9 +2590,9 @@ impl App {
                         .cmp(&b.tokens.total())
                         .then_with(|| a.datetime.cmp(&b.datetime))
                 }),
-                (SortField::Date, SortDirection::Descending) => indices
+                (SortField::Date | SortField::Name, SortDirection::Descending) => indices
                     .sort_by_key(|index| std::cmp::Reverse(self.data.minutely[*index].datetime)),
-                (SortField::Date, SortDirection::Ascending) => {
+                (SortField::Date | SortField::Name, SortDirection::Ascending) => {
                     indices.sort_by_key(|index| self.data.minutely[*index].datetime)
                 }
             }
@@ -2518,6 +2618,16 @@ impl App {
         let mut monthly: Vec<&MonthlyUsage> = self.data.monthly.iter().collect();
 
         match (self.sort_field, self.sort_direction) {
+            (SortField::Count, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.message_count
+                    .cmp(&a.message_count)
+                    .then_with(|| b.month.cmp(&a.month))
+            }),
+            (SortField::Count, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.message_count
+                    .cmp(&b.message_count)
+                    .then_with(|| b.month.cmp(&a.month))
+            }),
             (SortField::Cost, SortDirection::Descending) => monthly.sort_by(|a, b| {
                 b.cost
                     .total_cmp(&a.cost)
@@ -2540,10 +2650,10 @@ impl App {
                     .cmp(&b.tokens.total())
                     .then_with(|| a.month.cmp(&b.month))
             }),
-            (SortField::Date, SortDirection::Descending) => {
+            (SortField::Date | SortField::Name, SortDirection::Descending) => {
                 monthly.sort_by(|a, b| b.month.cmp(&a.month))
             }
-            (SortField::Date, SortDirection::Ascending) => {
+            (SortField::Date | SortField::Name, SortDirection::Ascending) => {
                 monthly.sort_by(|a, b| a.month.cmp(&b.month))
             }
         }
@@ -2569,6 +2679,16 @@ impl App {
         };
 
         match (self.sort_field, self.sort_direction) {
+            (SortField::Count, SortDirection::Descending) => sessions.sort_by(|a, b| {
+                b.message_count
+                    .cmp(&a.message_count)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            }),
+            (SortField::Count, SortDirection::Ascending) => sessions.sort_by(|a, b| {
+                a.message_count
+                    .cmp(&b.message_count)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            }),
             (SortField::Cost, SortDirection::Descending) => sessions.sort_by(|a, b| {
                 b.cost
                     .total_cmp(&a.cost)
@@ -2597,16 +2717,20 @@ impl App {
             }),
             // "Date" maps to last_active for sessions: most recently active
             // session first when descending, oldest active first when ascending.
-            (SortField::Date, SortDirection::Descending) => sessions.sort_by(|a, b| {
-                b.last_active_ms
-                    .cmp(&a.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Date, SortDirection::Ascending) => sessions.sort_by(|a, b| {
-                a.last_active_ms
-                    .cmp(&b.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
+            (SortField::Date | SortField::Name, SortDirection::Descending) => {
+                sessions.sort_by(|a, b| {
+                    b.last_active_ms
+                        .cmp(&a.last_active_ms)
+                        .then_with(|| tie_breaker(a, b))
+                })
+            }
+            (SortField::Date | SortField::Name, SortDirection::Ascending) => {
+                sessions.sort_by(|a, b| {
+                    a.last_active_ms
+                        .cmp(&b.last_active_ms)
+                        .then_with(|| tie_breaker(a, b))
+                })
+            }
         }
 
         sessions
@@ -4912,6 +5036,56 @@ mod tests {
             performance: Default::default(),
             session_count: 1,
         }
+    }
+
+    #[test]
+    fn sorting_models_by_name_is_alphabetical_in_both_directions() {
+        // The reason this field exists: with hundreds of rows, finding a known
+        // one by cost or token count is guesswork.
+        let mut app = make_app();
+        app.data.models = vec![
+            model_usage("zeta", 100.0, None),
+            model_usage("alpha", 1.0, None),
+            model_usage("mid", 50.0, None),
+        ];
+
+        app.set_sort(SortField::Name);
+        let ascending: Vec<&str> = app
+            .get_sorted_models()
+            .iter()
+            .map(|m| m.model.as_str())
+            .collect();
+        assert_eq!(ascending, vec!["alpha", "mid", "zeta"]);
+
+        app.set_sort(SortField::Name);
+        let descending: Vec<&str> = app
+            .get_sorted_models()
+            .iter()
+            .map(|m| m.model.as_str())
+            .collect();
+        assert_eq!(descending, vec!["zeta", "mid", "alpha"]);
+    }
+
+    #[test]
+    fn sorting_models_by_count_uses_the_count_the_row_actually_carries() {
+        // Model rows carry a session count rather than a message count, which
+        // is why the field is named for the column and not for one tab's
+        // meaning of it.
+        let mut app = make_app();
+        let mut busy = model_usage("busy", 1.0, None);
+        busy.session_count = 9;
+        let mut quiet = model_usage("quiet", 100.0, None);
+        quiet.session_count = 2;
+        app.data.models = vec![quiet, busy];
+
+        app.set_sort(SortField::Count);
+        let sorted: Vec<&str> = app
+            .get_sorted_models()
+            .iter()
+            .map(|m| m.model.as_str())
+            .collect();
+
+        assert_eq!(sorted, vec!["busy", "quiet"]);
     }
 
     fn shade_key(provider: &str, model: &str) -> String {
