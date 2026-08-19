@@ -12,6 +12,7 @@
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
+    session_id_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
@@ -191,16 +192,23 @@ impl CodexTotals {
         // Clamp cached to not exceed input to prevent inflated totals when
         // malformed data reports more cached tokens than input tokens.
         let clamped_cached = self.cached.min(self.input).max(0);
-        // `reasoning_output_tokens` is contained in `output_tokens` the same way
-        // `cached_input_tokens` is contained in `input_tokens` (Codex reports
-        // `total_tokens == input_tokens + output_tokens`, never adding reasoning
-        // on top). `TokenBreakdown::total` and `compute_cost` both treat
-        // `reasoning` as additive to `output`, so leaving the contained portion
-        // inside `output` counts and bills those tokens twice.
-        let clamped_reasoning = self.reasoning.min(self.output).max(0);
+        // `reasoning_output_tokens` is a SUBSET of `output_tokens`, not a
+        // sibling of it: every Codex snapshot satisfies
+        // `total_tokens == input_tokens + output_tokens`, with the reasoning
+        // count never added on top. `TokenBreakdown` buckets are additive —
+        // `total()` sums output and reasoning, and `compute_cost` prices their
+        // sum at the output rate — so carrying the raw output through while
+        // also filling `reasoning` counted every reasoning token twice and
+        // billed it twice. Split it out instead, clamped so a malformed row
+        // claiming more reasoning than output cannot drive the bucket negative.
+        //
+        // This is a Codex-specific correction. Providers that genuinely report
+        // reasoning as a disjoint bucket (Gemini's `thoughtsTokenCount` beside
+        // `candidatesTokenCount`) must keep feeding it unmodified.
+        let clamped_reasoning = self.reasoning.max(0).min(self.output.max(0));
         TokenBreakdown {
             input: (self.input - clamped_cached).max(0),
-            output: (self.output - clamped_reasoning).max(0),
+            output: (self.output.max(0) - clamped_reasoning).max(0),
             cache_read: clamped_cached,
             cache_write: 0,
             reasoning: clamped_reasoning,
@@ -262,13 +270,6 @@ pub(crate) struct ParsedCodexFile {
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 fn codex_workspace_from_cwd(cwd: &str) -> (Option<String>, Option<String>) {
@@ -1689,7 +1690,7 @@ mod tests {
         assert_eq!(messages[1].tokens.cache_read, 1);
         assert_eq!(messages[1].tokens.reasoning, 0);
         assert_eq!(messages[2].tokens.input, 6);
-        assert_eq!(messages[2].tokens.output, 1);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[2].tokens.cache_read, 1);
         assert_eq!(messages[2].tokens.reasoning, 1);
 
@@ -1901,6 +1902,50 @@ mod tests {
     }
 
     #[test]
+    fn test_into_tokens_splits_reasoning_out_of_output() {
+        // A real `token_count` snapshot from ~/.codex/sessions. Codex reports
+        // `total_tokens == input_tokens + output_tokens`, with
+        // `reasoning_output_tokens` counted inside `output_tokens` rather than
+        // beside it.
+        let totals = CodexTotals {
+            input: 16_845_360,
+            output: 63_820,
+            cached: 16_358_912,
+            reasoning: 24_882,
+        };
+        let reported_total = totals.input + totals.output; // 16_909_180
+
+        let tokens = totals.into_tokens();
+
+        // Conservation: the additive buckets must land back on Codex's own
+        // total. This only holds when reasoning was split out of output; if the
+        // split regresses, the sum overshoots by exactly the reasoning count.
+        assert_eq!(tokens.total(), reported_total);
+        assert_eq!(tokens.reasoning, 24_882);
+        assert_eq!(tokens.output, 63_820 - 24_882);
+        assert_eq!(tokens.cache_read, 16_358_912);
+        assert_eq!(tokens.input, 16_845_360 - 16_358_912);
+    }
+
+    #[test]
+    fn test_into_tokens_clamps_reasoning_to_output() {
+        // A malformed row claiming more reasoning than output must not drive
+        // the output bucket negative, and must not inflate the total.
+        let totals = CodexTotals {
+            input: 100,
+            output: 10,
+            cached: 0,
+            reasoning: 999,
+        };
+
+        let tokens = totals.into_tokens();
+
+        assert_eq!(tokens.output, 0);
+        assert_eq!(tokens.reasoning, 10);
+        assert_eq!(tokens.total(), 110);
+    }
+
+    #[test]
     fn test_into_tokens_clamps_cached_to_input() {
         // When cached > input (malformed data), cached should be clamped to input
         // so that input + cache_read never exceeds the raw input value.
@@ -1913,8 +1958,11 @@ mod tests {
         let tokens = totals.into_tokens();
         assert_eq!(tokens.cache_read, 50); // Clamped to input
         assert_eq!(tokens.input, 0); // input - clamped_cached = 0
+                                     // Reasoning is a subset of output, so the output bucket carries only
+                                     // the non-reasoning remainder.
         assert_eq!(tokens.output, 25);
         assert_eq!(tokens.reasoning, 5);
+        assert_eq!(tokens.total(), 80); // 0 + 25 + 50 + 0 + 5
     }
 
     #[test]

@@ -84,6 +84,7 @@ pub fn run(
     until: Option<String>,
     year: Option<String>,
     initial_tab: Option<Tab>,
+    worktree_rollup: tokscale_core::WorktreeRollup,
 ) -> Result<()> {
     if debug {
         let _ = tracing_subscriber::fmt()
@@ -100,6 +101,7 @@ pub fn run(
         until: until.clone(),
         year: year.clone(),
         initial_tab,
+        worktree_rollup,
     };
 
     // Build the unified filter set used by the cache key, the App
@@ -327,12 +329,19 @@ fn run_loop_with_background(
             let group_by = app.group_by.borrow().clone();
             let report_scope = background_cache_scope(&since, &until, &year);
             let minutely_enabled = app.settings.minutely_tab_enabled;
+            let worktree_rollup = app.worktree_rollup;
 
             thread::spawn(move || {
-                let loader = background_data_loader(since, until, year, minutely_enabled);
+                let loader = background_data_loader(since, until, year, minutely_enabled)
+                    .with_worktree_rollup(worktree_rollup);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                    // Rolled-up rows are a different aggregation of the same
+                    // messages, so caching them under the plain workspace scope
+                    // would serve merged rows to a later un-merged view.
+                    if worktree_rollup == tokscale_core::WorktreeRollup::Separate {
+                        save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                    }
                 }
                 let _ = tx.send(result);
             });

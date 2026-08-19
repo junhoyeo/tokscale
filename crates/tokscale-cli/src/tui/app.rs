@@ -29,6 +29,7 @@ use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
+#[derive(Default)]
 pub struct TuiConfig {
     pub theme: String,
     pub refresh: u64,
@@ -38,6 +39,9 @@ pub struct TuiConfig {
     pub until: Option<String>,
     pub year: Option<String>,
     pub initial_tab: Option<Tab>,
+    /// Initial worktree rollup, so `--merge-worktrees` survives into an
+    /// interactive launch instead of being dropped. `w` toggles it from here.
+    pub worktree_rollup: tokscale_core::WorktreeRollup,
 }
 
 #[cfg(not(test))]
@@ -304,6 +308,9 @@ pub struct App {
     /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
     pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
+    /// Whether workspace rows fold git worktrees into their parent repo. Toggled
+    /// with `w`; only observable under `GroupBy::WorkspaceModel`.
+    pub worktree_rollup: tokscale_core::WorktreeRollup,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     tab_sort_state: HashMap<Tab, (SortField, SortDirection)>,
@@ -457,6 +464,7 @@ impl App {
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
+            worktree_rollup: config.worktree_rollup,
             sort_field,
             sort_direction,
             tab_sort_state: HashMap::new(),
@@ -903,6 +911,23 @@ impl App {
             }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
+            }
+            // Only meaningful while workspace rows are on screen; leaving `w`
+            // inert elsewhere keeps it free for other tabs later.
+            KeyCode::Char('w')
+                if *self.group_by.borrow() == tokscale_core::GroupBy::WorkspaceModel =>
+            {
+                self.worktree_rollup = match self.worktree_rollup {
+                    tokscale_core::WorktreeRollup::Separate => {
+                        tokscale_core::WorktreeRollup::MergeIntoRepo
+                    }
+                    tokscale_core::WorktreeRollup::MergeIntoRepo => {
+                        tokscale_core::WorktreeRollup::Separate
+                    }
+                };
+                // Rollup changes the grouping key, so rows must be rebuilt.
+                self.needs_reload = true;
+                self.reset_selection();
             }
             KeyCode::Char('a') if self.current_tab == Tab::Usage => {
                 self.start_codex_login();
@@ -2661,6 +2686,35 @@ mod tests {
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
+    /// `--merge-worktrees` has to survive into an interactive launch.
+    ///
+    /// The rollup used to be hardcoded to the default here, so the flag parsed
+    /// fine, changed `--light`/`--json` output, and was then silently dropped when
+    /// the same command opened the TUI — the user saw unmerged rows with no
+    /// indication their flag had been ignored.
+    #[test]
+    fn tui_config_seeds_the_initial_worktree_rollup() {
+        let merged = App::new_with_cached_data(
+            TuiConfig {
+                worktree_rollup: tokscale_core::WorktreeRollup::MergeIntoRepo,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.worktree_rollup,
+            tokscale_core::WorktreeRollup::MergeIntoRepo
+        );
+
+        // And the default stays per-worktree when the flag is absent.
+        let plain = App::new_with_cached_data(TuiConfig::default(), None).unwrap();
+        assert_eq!(
+            plain.worktree_rollup,
+            tokscale_core::WorktreeRollup::Separate
+        );
+    }
+
     #[test]
     fn test_reset_selection() {
         let config = TuiConfig {
@@ -2672,6 +2726,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2697,6 +2752,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2748,6 +2804,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2799,6 +2856,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2840,6 +2898,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2874,6 +2933,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2903,6 +2963,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2938,6 +2999,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let app = App::new_with_cached_data(config, None).unwrap();
 
@@ -2962,6 +3024,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         App::new_with_cached_data(config, None).unwrap()
     }
@@ -3622,6 +3685,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: Some(Tab::Minutely),
+            ..Default::default()
         };
         let app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
         assert_eq!(app.current_tab, Tab::Overview);
@@ -3958,6 +4022,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: Some(Tab::Hourly),
+            ..Default::default()
         };
 
         let app = App::new_with_cached_data(config, None).unwrap();

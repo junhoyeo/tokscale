@@ -5,12 +5,17 @@
 //! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-    read_file_or_none,
+    estimate_tokens, extract_i64, extract_string, file_modified_timestamp_ms,
+    parse_timestamp_value, read_file_or_none, AnthropicUsage,
 };
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
+
+/// The Anthropic `usage` block, kept reachable under its historical name so
+/// `sessions::claudecode::ClaudeUsage` still resolves to the same four fields
+/// after the type moved into `sessions::utils`.
+pub use super::utils::AnthropicUsage as ClaudeUsage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -67,20 +72,12 @@ impl CcMirrorVariantMetadata {
 #[derive(Debug, Deserialize)]
 pub struct ClaudeMessage {
     pub model: Option<String>,
-    pub usage: Option<ClaudeUsage>,
+    pub usage: Option<AnthropicUsage>,
     /// Message ID for deduplication (used with requestId)
     pub id: Option<String>,
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClaudeUsage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
 }
 
 /// Resolve the subagent display name for a sidechain transcript file.
@@ -888,7 +885,7 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
 
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
-    usage: &ClaudeUsage,
+    usage: &AnthropicUsage,
     parsed_timestamp: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
@@ -1210,7 +1207,7 @@ fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bo
             return None;
         }
         let chars = tool_result_output_char_count(tool_result);
-        (chars > 0).then(|| estimate_tokens_from_chars(chars))
+        (chars > 0).then(|| estimate_tokens(chars))
     })
 }
 
@@ -1290,12 +1287,6 @@ fn tool_result_content_output_chars(content: &Value) -> usize {
                 .sum()
         })
         .unwrap_or(0)
-}
-
-fn estimate_tokens_from_chars(chars: usize) -> i64 {
-    // Claude Code tool outputs may not include token metadata. Match the
-    // existing Kiro fallback of one token per four characters, rounded up.
-    chars.div_ceil(4) as i64
 }
 
 fn is_claude_synthetic_placeholder_model(model: &str) -> bool {

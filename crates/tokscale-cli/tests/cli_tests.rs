@@ -225,6 +225,18 @@ fn create_fake_codex_bin() -> TempDir {
     tmp
 }
 
+fn create_fake_mcode_bin() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create fake mcode dir");
+    let mcode_path = tmp
+        .path()
+        .join(if cfg!(windows) { "mcode.exe" } else { "mcode" });
+
+    fs::copy(Path::new(env!("CARGO_BIN_EXE_fake_codex")), &mcode_path)
+        .expect("failed to install the fake mcode onto PATH");
+
+    tmp
+}
+
 /// Build the `tokscale headless codex` invocation for one `headless_capture_*`
 /// test.
 ///
@@ -260,6 +272,38 @@ fn headless_capture_command(
         ]);
 
     cmd
+}
+
+#[test]
+fn headless_capture_mcode_injects_stream_json_after_exec() {
+    let fake_bin = create_fake_mcode_bin();
+    let output_dir = TempDir::new().expect("failed to create output dir");
+    let output_path = output_dir.path().join("mcode.jsonl");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(fake_bin.path().to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("tokscale")
+        .env("HOME", fake_bin.path())
+        .env("TOKSCALE_FAKE_CODEX_MODE", "args")
+        .env("PATH", joined_path)
+        .args([
+            "headless",
+            "--output",
+            output_path.to_str().unwrap(),
+            "mcode",
+            "exec",
+            "review this change",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "exec\n--output-format\nstream-json\nreview this change"
+    );
 }
 
 /// The parent deadline the two `fast` tests give `tokscale`, and the elapsed
@@ -873,7 +917,8 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env_remove("HERMES_HOME")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .env_remove("PRIME_AGENT_SESSION_DIR")
-        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
+        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+        .env_remove("DSH_HOME");
     cmd
 }
 
@@ -1187,26 +1232,36 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
     .unwrap();
 }
 
+/// The V1 Cherry Studio transcript root under a sandboxed home, spelled the
+/// way `PathRoot::AppData` resolves it per platform.
+///
+/// Built component-by-component rather than from a single `/`-joined literal:
+/// `Path::join` only normalizes the junction, so a `"AppData/Roaming/..."`
+/// literal keeps its own forward slashes on Windows and the fixture would not
+/// exercise the real `AppData\Roaming\CherryStudio\.claude\projects`
+/// layout the scanner walks (#1048).
 fn cherrystudio_projects_root(base: &Path) -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
-    {
-        base.join("AppData/Roaming/CherryStudio/.claude/projects")
-    }
+    let relative = "AppData/Roaming/CherryStudio/.claude/projects";
     #[cfg(target_os = "macos")]
-    {
-        base.join("Library/Application Support/CherryStudio/.claude/projects")
-    }
+    let relative = "Library/Application Support/CherryStudio/.claude/projects";
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        base.join(".config/CherryStudio/.claude/projects")
+    let relative = ".config/CherryStudio/.claude/projects";
+
+    let mut path = base.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
     }
+    path
 }
 
 /// Four snapshots of one streamed Cherry Studio API call. The final snapshot
 /// connects the UUID-only, message-only, and request-only partial records and
 /// carries the final streamed output count.
 fn write_cherrystudio_connected_alias_transcript(base: &Path) {
-    let path = cherrystudio_projects_root(base).join("workspace/session.jsonl");
+    let path = cherrystudio_projects_root(base)
+        .join("workspace")
+        .join("session.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         path,
@@ -1228,7 +1283,9 @@ fn write_cherrystudio_connected_alias_transcript(base: &Path) {
 /// replay. The replay grows output usage but must not take the transcript mtime
 /// as the call timestamp when its component has a valid event timestamp.
 fn write_cherrystudio_historical_replay_without_timestamp(base: &Path) {
-    let path = cherrystudio_projects_root(base).join("workspace/historical.jsonl");
+    let path = cherrystudio_projects_root(base)
+        .join("workspace")
+        .join("historical.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         path,
@@ -1240,6 +1297,104 @@ fn write_cherrystudio_historical_replay_without_timestamp(base: &Path) {
         ),
     )
     .unwrap();
+}
+
+/// The DSH transcript root under a sandboxed home: `<home>/.dsh/sessions`.
+///
+/// DSH keeps all user data under one root, resolved as an explicit config
+/// path, then `$DSH_HOME`, then `~/.dsh` (`util/home-paths`, `resolveDshHome`);
+/// the shipped base composition pins the session store to `sessions` beneath
+/// it. `cmd_with_home` clears `DSH_HOME` so this test reads the sandbox.
+fn dsh_sessions_root(base: &Path) -> std::path::PathBuf {
+    base.join(".dsh").join("sessions")
+}
+
+/// One zstd DSH transcript with a reasoning-bearing call, written to
+/// `<home>/.dsh/sessions/<encoded-cwd>/<session-id>/session.jsonl.zstd`.
+///
+/// Usage numbers are the committed vendor pair from
+/// `examples/acp-agent/tests/snapshots/subagent-fork-in-process`.
+fn write_dsh_zstd_session(base: &Path) {
+    let dir = dsh_sessions_root(base)
+        .join("-tmp-dsh-workspace")
+        .join("96cf59c9-b347-48b9-b234-a5200913ad05");
+    fs::create_dir_all(&dir).unwrap();
+    let payload = concat!(
+        r#"{"type":"session","version":0,"id":"96cf59c9-b347-48b9-b234-a5200913ad05","createdAt":1783352134832,"cwd":"/tmp/dsh-workspace","delegationDepth":0}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "
+"
+    );
+    fs::write(
+        dir.join("session.jsonl.zstd"),
+        zstd::encode_all(payload.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A DSH fork pair: the parent transcript plus the child whose seeded prefix
+/// repeats the parent's seq-39 call verbatim under a different session id.
+fn write_dsh_fork_pair(base: &Path) {
+    write_dsh_zstd_session(base);
+
+    let dir = dsh_sessions_root(base)
+        .join("-tmp-dsh-workspace")
+        .join("ada8966c-9fa3-441b-8721-37ff1e795e6a");
+    fs::create_dir_all(&dir).unwrap();
+    let payload = concat!(
+        r#"{"type":"session","version":0,"id":"ada8966c-9fa3-441b-8721-37ff1e795e6a","createdAt":1783352137161,"cwd":"/tmp/dsh-workspace","parentSession":"96cf59c9-b347-48b9-b234-a5200913ad05","seedLength":42,"origin":"subagent","delegationDepth":1}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":96,"time":1786358035361,"data":{"turn":2,"message":{"id":"cdc56e00-c648-4669-92b2-7299e41cb743","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":97,"outputTokens":39,"cacheReadTokens":2816,"reasoningTokens":34}}}"#,
+        "
+"
+    );
+    fs::write(
+        dir.join("session.jsonl.zstd"),
+        zstd::encode_all(payload.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A DSH transcript pair whose child header carries no `seedLength`, so only
+/// the per-call `message.id` marks the seeded rows as the parent's work.
+fn write_dsh_seeded_pair_without_seed_length(base: &Path) {
+    let row = concat!(
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "\n"
+    );
+
+    for (session_id, header) in [
+        (
+            "96cf59c9-b347-48b9-b234-a5200913ad05",
+            concat!(
+                r#"{"type":"session","version":0,"id":"96cf59c9-b347-48b9-b234-a5200913ad05","createdAt":1783352134832,"cwd":"/tmp/dsh-workspace"}"#,
+                "\n"
+            ),
+        ),
+        (
+            "ada8966c-9fa3-441b-8721-37ff1e795e6a",
+            concat!(
+                r#"{"type":"session","version":0,"id":"ada8966c-9fa3-441b-8721-37ff1e795e6a","createdAt":1783352137161,"cwd":"/tmp/dsh-workspace","parentSession":"96cf59c9-b347-48b9-b234-a5200913ad05"}"#,
+                "\n"
+            ),
+        ),
+    ] {
+        let dir = dsh_sessions_root(base)
+            .join("-tmp-dsh-workspace")
+            .join(session_id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session.jsonl.zstd"),
+            zstd::encode_all(format!("{header}{row}").as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 fn write_jcode_session(base: &Path) {
@@ -1997,6 +2152,223 @@ fn test_models_with_client_filter_jcode() {
     assert_eq!(entry["cacheWrite"].as_i64().unwrap(), 50);
     assert_eq!(entry["output"].as_i64().unwrap(), 250);
     assert_eq!(entry["reasoning"].as_i64().unwrap(), 25);
+}
+
+#[test]
+fn test_mcode_headless_stream_counts_identically_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    let stream_dir = tmp.path().join(".config/tokscale/headless/mcode");
+    fs::create_dir_all(&stream_dir).unwrap();
+    fs::write(
+        stream_dir.join("run.jsonl"),
+        concat!(
+            r#"{"type":"message","message":{"turnId":"turn-1","role":"assistant","timestamp":1786800000000,"usage":{"inputTokens":1000,"outputTokens":250,"cacheReadTokens":400,"cacheWriteTokens":50}}}"#,
+            "\n",
+            r#"{"schemaVersion":1,"type":"exec.result","sessionId":"session-1","turnId":"turn-1","status":"succeeded","model":{"providerId":"minimax","modelId":"MiniMax-M2.5","variant":"fast"},"durationMs":10}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "mcode", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{pass} cache pass");
+        let entry = &entries[0];
+        assert_eq!(entry["client"].as_str(), Some("mcode"), "{pass} cache pass");
+        assert_eq!(
+            entry["provider"].as_str(),
+            Some("minimax"),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            entry["model"].as_str(),
+            Some("minimax-m2.5"),
+            "{pass} cache pass"
+        );
+        assert_eq!(entry["input"].as_i64(), Some(1000), "{pass} cache pass");
+        assert_eq!(entry["output"].as_i64(), Some(250), "{pass} cache pass");
+        assert_eq!(entry["cacheRead"].as_i64(), Some(400), "{pass} cache pass");
+        assert_eq!(entry["cacheWrite"].as_i64(), Some(50), "{pass} cache pass");
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+    }
+}
+
+/// The Windows regression guard for the two tests below.
+///
+/// Both of them assert on parsed totals, so when discovery silently reads the
+/// wrong root they fail as `Some(0)` vs `Some(1)` with nothing pointing at the
+/// path. `PathRoot::AppData` used to resolve to the `FOLDERID_RoamingAppData`
+/// known folder under env roots, which no environment variable can redirect,
+/// so on Windows the scan walked the live profile instead of this sandbox and
+/// the fixture was never seen. Assert the emitted scan root directly.
+#[test]
+fn test_clients_json_cherrystudio_scan_root_stays_inside_the_sandboxed_home() {
+    let tmp = create_empty_fixture_dir();
+    write_cherrystudio_connected_alias_transcript(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cherry = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "cherrystudio")
+        .expect("cherrystudio must appear in `clients --json`");
+
+    assert_eq!(
+        cherry["sessionsPath"],
+        serde_json::json!(cherrystudio_projects_root(tmp.path()).to_string_lossy()),
+        "Cherry Studio's scan root must follow the sandboxed home, not the machine's app-data folder"
+    );
+}
+
+/// DSH resolves its root from `$DSH_HOME` with a `~/.dsh` fallback, so a
+/// sandboxed `HOME` must move the scan root with it. Asserting the emitted
+/// path directly keeps a discovery regression from surfacing as a bare
+/// `Some(0)` vs `Some(1)` totals mismatch in the tests below.
+#[test]
+fn test_clients_json_dsh_scan_root_stays_inside_the_sandboxed_home() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_zstd_session(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let dsh = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "dsh")
+        .expect("dsh must appear in `clients --json`");
+
+    assert_eq!(
+        dsh["sessionsPath"],
+        serde_json::json!(dsh_sessions_root(tmp.path()).to_string_lossy()),
+        "DSH's scan root must follow the sandboxed home, not the machine's ~/.dsh"
+    );
+}
+
+/// The zstd lane's cache parity guard.
+///
+/// The first pass decodes the transcript and writes the source cache; the
+/// second serves it warm. Both must report the same reasoning-corrected
+/// buckets — `reasoningTokens` is a subset of `outputTokens`, so 25 output
+/// tokens with 23 reasoning tokens leave 2 in the additive output bucket.
+#[test]
+fn test_dsh_zstd_transcript_counts_identically_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_zstd_session(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{pass} cache pass");
+        let entry = &entries[0];
+        assert_eq!(entry["client"].as_str(), Some("dsh"), "{pass} cache pass");
+        assert_eq!(
+            entry["provider"].as_str(),
+            Some("deepseek"),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            entry["model"].as_str(),
+            Some("deepseek-reasoner"),
+            "{pass} cache pass"
+        );
+        assert_eq!(entry["input"].as_i64(), Some(2885), "{pass} cache pass");
+        assert_eq!(entry["output"].as_i64(), Some(2), "{pass} cache pass");
+        assert_eq!(entry["reasoning"].as_i64(), Some(23), "{pass} cache pass");
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+    }
+}
+
+/// A forked DSH session copies the parent's completed prefix into the child
+/// transcript verbatim, so the pair must still bill the seeded call once.
+#[test]
+fn test_dsh_forked_session_counts_the_seeded_prefix_once_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_fork_pair(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        // Two distinct calls: the parent's seq-39 message and the child's own
+        // seq-96 message. The child's copy of seq 39 is the parent's work.
+        assert_eq!(json["totalMessages"].as_i64(), Some(2), "{pass} cache pass");
+        assert_eq!(
+            json["totalInput"].as_i64(),
+            Some(2885 + 97),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            json["totalOutput"].as_i64(),
+            Some(2 + 5),
+            "{pass} cache pass"
+        );
+    }
+}
+
+/// The lane's cross-file dedup pass, isolated from the seq boundary.
+///
+/// Without `seedLength` in the header the parser cannot tell a seeded row from
+/// an owned one, so the duplicate is only collapsed by the per-call
+/// `message.id` dedup key, cold and warm alike.
+#[test]
+fn test_dsh_repeated_message_ids_across_transcripts_count_once_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_seeded_pair_without_seed_length(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(2885), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(2), "{pass} cache pass");
+    }
 }
 
 #[test]

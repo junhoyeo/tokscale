@@ -9,15 +9,16 @@
 //! serializing a fork, before the copied parent is deduplicated across files.
 
 use super::pi::{
-    parse_pi_format_rlm_file_with_observer, PiFormatObserver, PiSessionEntry, PiSessionHeader,
-    PiUsage,
+    has_replacement_character, parse_pi_format_rlm_file_with_observer,
+    pre_header_line_is_skippable, raw_json_has_damaged_lineage_header_key, rlm_entry_emits_message,
+    PiFormatObserver, PiSessionEntry, PiSessionHeader, PRE_SESSION_METADATA_TYPES,
 };
-use super::utils::parse_timestamp_str;
+use super::utils::{for_each_json_line_with_bytes, parse_json_line, parse_timestamp_str};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -216,6 +217,7 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
         let parent_path = header
             .parent_session
             .as_deref()
+            .filter(|parent| !has_replacement_character(parent))
             .map(Path::new)
             .map(|parent| referenced_lineage_path(self.path, parent));
         if self.is_rlm_child {
@@ -234,14 +236,21 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
                 entry.child_usage.as_ref(),
                 entry.aggregate_usage.as_ref(),
             ) {
+                if has_replacement_character(id)
+                    || has_replacement_character(target_id)
+                    || child_usage.has_damaged_key()
+                    || aggregate_usage.has_damaged_key()
+                {
+                    return;
+                }
                 self.attributions
                     .entry(target_id.clone())
                     .or_default()
                     .push(PrimeAttribution {
                         id: id.clone(),
                         timestamp: entry_timestamp,
-                        child_usage: usage_breakdown(child_usage),
-                        aggregate_usage: usage_breakdown(aggregate_usage),
+                        child_usage: child_usage.to_breakdown(),
+                        aggregate_usage: aggregate_usage.to_breakdown(),
                     });
             }
             return;
@@ -257,8 +266,10 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
             });
         }
         if let (Some(id), Some(dedup_key)) = (entry.id.as_ref(), parsed.dedup_key.as_ref()) {
-            self.targets
-                .insert(id.clone(), (dedup_key.clone(), parsed.tokens.clone()));
+            if !has_replacement_character(id) {
+                self.targets
+                    .insert(id.clone(), (dedup_key.clone(), parsed.tokens.clone()));
+            }
         }
     }
 }
@@ -292,16 +303,6 @@ pub(crate) fn transcript_decode_call_counts() -> (usize, usize) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     (counter.messages, counter.accounting)
-}
-
-fn usage_breakdown(usage: &PiUsage) -> TokenBreakdown {
-    TokenBreakdown {
-        input: usage.input.unwrap_or(0).max(0),
-        output: usage.output.unwrap_or(0).max(0),
-        cache_read: usage.cache_read.unwrap_or(0).max(0),
-        cache_write: usage.cache_write.unwrap_or(0).max(0),
-        reasoning: 0,
-    }
 }
 
 fn add_usage(total: &mut TokenBreakdown, usage: &TokenBreakdown) {
@@ -435,59 +436,68 @@ pub(crate) fn analyze_prime_agent_accounting(
     #[cfg(test)]
     record_transcript_decode(path, true);
 
-    let Ok(file) = std::fs::File::open(path) else {
-        return PrimeFileAccounting::default();
-    };
-
     let mut accounting = PrimeAccountingBuilder::new(path);
     let mut found_header = false;
     let mut message_index = 0usize;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    let mut buffer = Vec::with_capacity(4096);
+    // A header the shared parser rejects discards the whole transcript here
+    // too, so the sink stops the scan and no accounting is reported.
+    let mut malformed_transcript = false;
+
+    for_each_json_line_with_bytes(path, &mut |line| {
+        let trimmed = line.trimmed;
         if !found_header {
-            if let Ok(header) = serde_json::from_str::<PiSessionHeader>(trimmed) {
+            if let Some(header) = parse_json_line::<PiSessionHeader>(trimmed, &mut buffer) {
                 if header.entry_type == "session" {
+                    if header.has_invalid_lineage()
+                        || raw_json_has_damaged_lineage_header_key(line.bytes)
+                    {
+                        malformed_transcript = true;
+                        return ControlFlow::Break(());
+                    }
                     found_header = true;
                     accounting.observe_header(&header);
-                    continue;
+                    return ControlFlow::Continue(());
                 }
             }
-            let is_pre_session_title = serde_json::from_str::<serde_json::Value>(trimmed)
-                .ok()
-                .and_then(|value| {
+            let parsed_type =
+                parse_json_line::<serde_json::Value>(trimmed, &mut buffer).and_then(|value| {
                     value
                         .get("type")
                         .and_then(|kind| kind.as_str())
                         .map(str::to_owned)
-                })
-                .is_some_and(|kind| kind == "title");
-            if is_pre_session_title {
-                continue;
+                });
+            let is_pre_session_metadata = parsed_type
+                .as_deref()
+                .is_some_and(|kind| PRE_SESSION_METADATA_TYPES.contains(&kind));
+            if is_pre_session_metadata
+                || pre_header_line_is_skippable(trimmed, parsed_type.as_deref())
+            {
+                return ControlFlow::Continue(());
             }
-            return PrimeFileAccounting::default();
+            malformed_transcript = true;
+            return ControlFlow::Break(());
         }
 
-        let Ok(entry) = serde_json::from_str::<PiSessionEntry>(trimmed) else {
-            continue;
+        let Some(entry) = parse_json_line::<PiSessionEntry>(trimmed, &mut buffer) else {
+            return ControlFlow::Continue(());
         };
-        let emitted = entry
-            .message
-            .as_ref()
-            .filter(|message| {
-                entry.entry_type == "message"
-                    && message.role.as_deref() == Some("assistant")
-                    && message.usage.is_some()
-                    && message.model.is_some()
-            })
-            .and_then(|_| {
+        // Which records became messages is the parser's decision, not a rule
+        // restated here: a record counted on only one side shifts every later
+        // index of `messages` and re-targets the reconciliation below.
+        let emitted = rlm_entry_emits_message(&entry, accounting.is_rlm_child)
+            .then(|| {
                 let parsed = messages.get(message_index);
                 message_index += 1;
                 parsed
-            });
+            })
+            .flatten();
         accounting.observe_entry(&entry, emitted);
+        ControlFlow::Continue(())
+    });
+
+    if malformed_transcript {
+        return PrimeFileAccounting::default();
     }
 
     accounting.finish()
@@ -1085,6 +1095,368 @@ mod tests {
     }
 
     #[test]
+    fn accepts_bom_crlf_and_later_records_after_invalid_utf8() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"\xef\xbb\xbf{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\r\n",
+        )
+        .unwrap();
+        file.write_all(b"invalid \xff record\r\n").unwrap();
+        file.write_all(
+            br#"{"type":"message","id":"assistant","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":10}}}"#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "root");
+        assert_eq!(messages[0].tokens.total(), 180);
+    }
+
+    #[test]
+    fn lossy_records_before_header_and_between_messages_preserve_accounting_alignment() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"garbage \xff before header\r\n").unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            br#"{"type":"message","id":"assistant-1","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-1","usage":{"input":10,"output":5}}}
+"#,
+        )
+        .unwrap();
+        file.write_all(b"damaged \xff record\r\n").unwrap();
+        file.write_all(
+            br#"{"type":"message","id":"assistant-2","timestamp":"2026-08-08T00:00:03Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-2","usage":{"input":20,"output":8}}}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            br#"{"type":"child_usage_attributed","id":"usage-2","targetId":"assistant-2","childUsage":{"input":3,"output":2},"aggregateUsage":{"input":20,"output":8}}"#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(accounting.adjustments.len(), 1);
+        assert_eq!(
+            accounting.adjustments[0].dedup_key,
+            "prime-agent:response:response-2"
+        );
+        assert_eq!(accounting.adjustments[0].attributions[0].id, "usage-2");
+    }
+
+    #[test]
+    fn rejects_only_headers_with_damaged_lineage_keys() {
+        for (prefix, suffix, rejected) in [
+            // A replacement consumes at least one byte of a real lineage key.
+            (b"parentSess".as_slice(), b"on".as_slice(), true),
+            (b"rlmDep".as_slice(), b"h".as_slice(), true),
+            (b"".as_slice(), b"arentSession".as_slice(), true),
+            // These can only be damaged extension keys adjacent to, rather
+            // than damaged spellings of, the complete structural key.
+            // Raw-byte identity distinguishes invalid UTF-8 damage from a
+            // clean literal replacement-bearing extension name.
+            (b"parentSession".as_slice(), b"".as_slice(), true),
+            (b"".as_slice(), b"parentSession".as_slice(), true),
+            (b"parentSession".as_slice(), b"Extra".as_slice(), false),
+            (b"xparentSess".as_slice(), b"on".as_slice(), false),
+            (b"rlmDepth".as_slice(), b"".as_slice(), true),
+            (br"rlmDepth".as_slice(), b"".as_slice(), true),
+            (br"parentSession".as_slice(), b"".as_slice(), true),
+            (b"extension".as_slice(), b"Field".as_slice(), false),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(
+                b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"",
+            )
+            .unwrap();
+            file.write_all(prefix).unwrap();
+            file.write_all(b"\xff").unwrap();
+            file.write_all(suffix).unwrap();
+            file.write_all(b"\":1}\n").unwrap();
+            file.write_all(
+                br#"{"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}
+"#,
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+
+            assert_eq!(messages.is_empty(), rejected);
+            if rejected {
+                assert!(accounting.attributions.is_empty());
+                assert!(accounting.adjustments.is_empty());
+                assert!(accounting.child_parent_path.is_none());
+                assert!(accounting.fork_parent_path.is_none());
+            }
+        }
+
+        let file = session_file(
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","extensionField":1}
+{"type":"message","id":"assistant","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":10,"output":5}}}"#,
+        );
+        assert_eq!(parse_prime_agent_file(file.path()).len(), 1);
+
+        for (encoded_key, rejected) in [
+            (r"rlmDep\uFFFDth", true),
+            (r#"unrelated\uD800":1,"rlmDep\uFFFDth"#, true),
+            (r"parentSess\uFFFDon", true),
+            (r"extension\uFFFDField", false),
+            (r#"unrelated\uD800":1,"extension\uFFFDField"#, false),
+            (r"rlmDepth\uFFFD", false),
+            (r"\uFFFDparentSession", false),
+            (r"parentSession\uFFFD", false),
+        ] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":1,\"{encoded_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert_eq!(messages.is_empty(), rejected, "escaped key {encoded_key:?}");
+            assert_eq!(
+                accounting.child_parent_path.is_none(),
+                rejected,
+                "the shared parser and accounting analyzer must agree for {encoded_key:?}"
+            );
+        }
+        for damaged_key in ["rlmDep�th", "parentSess�on"] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent.jsonl\",\"rlmDepth\":1,\"{damaged_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert!(messages.is_empty(), "literal damaged key {damaged_key:?}");
+            assert!(
+                accounting.child_parent_path.is_none(),
+                "literal damaged key {damaged_key:?}"
+            );
+        }
+
+        for extension_key in ["rlmDepth�", "�parentSession", "parentSession�"] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\",\"{extension_key}\":1}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+            ));
+            assert_eq!(
+                parse_prime_agent_file(file.path()).len(),
+                1,
+                "valid UTF-8 extension key {extension_key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn damaged_message_usage_does_not_advance_accounting_alignment() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+{"type":"message","id":"assistant-damaged","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-damaged","usage":{"in�put":999,"output":1}}}
+{"type":"message","id":"assistant-valid","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-valid","usage":{"input":20,"output":8}}}
+{"type":"child_usage_attributed","id":"usage-valid","targetId":"assistant-valid","childUsage":{"input":3,"output":2},"aggregateUsage":{"input":20,"output":8}}
+"#.as_bytes(),
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("prime-agent:response:response-valid")
+        );
+
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+        assert_eq!(accounting.adjustments.len(), 1);
+        assert_eq!(
+            accounting.adjustments[0].dedup_key,
+            "prime-agent:response:response-valid"
+        );
+        assert_eq!(accounting.adjustments[0].attributions[0].id, "usage-valid");
+    }
+
+    #[test]
+    fn skips_replacement_mangled_prime_join_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-clean\",\"targetId\":\"assistant-\xff\",\"childUsage\":{\"input\":3,\"output\":2},\"aggregateUsage\":{\"input\":20,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("prime-agent:damaged:")));
+        assert!(accounting.attributions.is_empty());
+        assert!(accounting.adjustments.is_empty());
+    }
+
+    #[test]
+    fn skips_mangled_attribution_ids_even_with_clean_message_joins() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            br#"{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":20,"output":8}}}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-\xff\",\"targetId\":\"assistant-clean\",\"childUsage\":{\"input\":3,\"output\":2},\"aggregateUsage\":{\"input\":20,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("prime-agent:response:response-clean")
+        );
+        assert!(accounting.attributions.is_empty());
+        assert!(accounting.adjustments.is_empty());
+    }
+
+    #[test]
+    fn skips_attributions_with_damaged_nested_usage_keys() {
+        for damaged_key in ["out�put", "cache�Read"] {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(
+                br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+            )
+            .unwrap();
+            file.write_all(
+                br#"{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":100,"output":8}}}
+"#,
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{{\"type\":\"child_usage_attributed\",\"id\":\"usage-clean\",\"targetId\":\"assistant-clean\",\"childUsage\":{{\"input\":50,\"{damaged_key}\":999}},\"aggregateUsage\":{{\"input\":100,\"output\":8}}}}"
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let messages = parse_prime_agent_file(file.path());
+            let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+            assert_eq!(messages.len(), 1);
+            assert!(accounting.attributions.is_empty());
+            assert!(accounting.adjustments.is_empty());
+        }
+    }
+
+    #[test]
+    fn skips_attributions_with_invalid_bytes_in_nested_usage_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":100,"output":8}}}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-child\",\"targetId\":\"assistant-clean\",\"childUsage\":{\"input\":50,\"out\xffput\":999},\"aggregateUsage\":{\"input\":100,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"child_usage_attributed\",\"id\":\"usage-aggregate\",\"targetId\":\"assistant-clean\",\"childUsage\":{\"input\":50,\"output\":0},\"aggregateUsage\":{\"in\xfeput\":100,\"output\":8}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(accounting.attributions.is_empty());
+        assert!(accounting.adjustments.is_empty());
+    }
+
+    #[test]
+    fn rejects_rlm_child_without_usable_parent_session() {
+        for parent_field in ["", ",\"parentSession\":\"\""] {
+            let file = session_file(&format!(
+                "{{\"type\":\"session\",\"id\":\"child\",\"rlmDepth\":1{parent_field}}}\n{{\"type\":\"message\",\"id\":\"assistant\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":10}}}}}}"
+            ));
+            let (messages, accounting) = parse_prime_agent_file_with_accounting(file.path());
+            assert!(messages.is_empty(), "parent field {parent_field:?}");
+            assert!(accounting.child_message_usages.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_mangled_parent_session_value() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":\"/tmp/parent-\xff.jsonl\",\"rlmDepth\":1}\n",
+        )
+        .unwrap();
+        file.write_all(
+            br#"{"type":"message","id":"assistant-clean","timestamp":"2026-08-08T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-clean","usage":{"input":20,"output":8}}}
+"#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        let accounting = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert!(messages.is_empty());
+        assert!(accounting.child_parent_path.is_none());
+        assert!(accounting.child_message_usages.is_empty());
+    }
+
+    #[test]
+    fn sanitizes_replacement_mangled_model_and_provider() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/\xff/project\",\"rlmDepth\":0}\n",
+        )
+        .unwrap();
+        file.write_all(b"{\"type\":\"session_info\",\"name\":\"agent-\xff\"}\n")
+            .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-clean\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"bad-\xff-provider\",\"model\":\"bad-\xff-model\",\"usage\":{\"input\":20,\"output\":8}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "unknown");
+        assert_eq!(messages[0].provider_id, "prime-agent");
+        assert!(messages[0].workspace_key.is_none());
+        assert!(messages[0].agent.is_none());
+    }
+
+    #[test]
     fn parses_root_session_without_counting_child_attribution_records() {
         let file = session_file(
             r#"{"type":"session","version":3,"id":"root-1","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
@@ -1144,6 +1516,62 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 10);
+    }
+
+    #[test]
+    fn unparseable_child_timestamp_does_not_shift_accounting_alignment() {
+        // The streaming parser drops an RLM child's message when its timestamp
+        // cannot be matched back to a parent attribution. The accounting-only
+        // walk replays cached messages positionally, so it has to drop the same
+        // record or every later index refers to the wrong message.
+        let file = session_file(
+            r#"{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","parentSession":"/tmp/parent.jsonl","rlmDepth":1}
+{"type":"message","id":"assistant-unparseable","parentId":null,"timestamp":"2026-08-08 00:00:01","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-unparseable","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}
+{"type":"message","id":"assistant-valid","parentId":null,"timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"response-valid","usage":{"input":20,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":28}}}
+{"type":"child_usage_attributed","id":"usage-valid","parentId":"assistant-valid","timestamp":"2026-08-08T00:00:03.000Z","targetId":"assistant-valid","childUsage":{"input":3,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":5},"aggregateUsage":{"input":20,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":28},"origin":"spawn_task"}"#,
+        );
+
+        let (messages, streamed) = parse_prime_agent_file_with_accounting(file.path());
+        let replayed = analyze_prime_agent_accounting(file.path(), &messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("prime-agent:response:response-valid")
+        );
+
+        let adjustment_keys = |accounting: &PrimeFileAccounting| {
+            accounting
+                .adjustments
+                .iter()
+                .map(|adjustment| adjustment.dedup_key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            adjustment_keys(&replayed),
+            vec!["prime-agent:response:response-valid".to_string()]
+        );
+        assert_eq!(adjustment_keys(&replayed), adjustment_keys(&streamed));
+
+        let child_joins = |accounting: &PrimeFileAccounting| {
+            accounting
+                .child_message_usages
+                .iter()
+                .map(|usage| (usage.timestamp, usage.usage.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(child_joins(&replayed), child_joins(&streamed));
+        assert_eq!(
+            child_joins(&replayed),
+            vec![(
+                parse_timestamp_str("2026-08-08T00:00:02.000Z"),
+                TokenBreakdown {
+                    input: 20,
+                    output: 8,
+                    ..TokenBreakdown::default()
+                }
+            )]
+        );
     }
 
     #[test]
@@ -1344,6 +1772,82 @@ mod tests {
         assert_eq!(original.len(), 1);
         assert_eq!(fork.len(), 1);
         assert_eq!(original[0].dedup_key, fork[0].dedup_key);
+    }
+
+    #[test]
+    fn copied_fork_history_with_corrupt_id_deduplicates_once() {
+        let mut original = NamedTempFile::new().unwrap();
+        original
+            .write_all(
+                br#"{"type":"session","version":3,"id":"root-1","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+"#,
+            )
+            .unwrap();
+        let message = b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":100,\"output\":50}}}\n";
+        original.write_all(message).unwrap();
+        original.flush().unwrap();
+
+        let mut fork = NamedTempFile::new().unwrap();
+        fork.write_all(
+            br#"{"type":"session","version":3,"id":"fork-2","timestamp":"2026-08-08T01:00:00.000Z","cwd":"/tmp/project","parentSession":"/tmp/root.jsonl","rlmDepth":0}
+"#,
+        )
+        .unwrap();
+        fork.write_all(message).unwrap();
+        fork.flush().unwrap();
+
+        let original_messages = parse_prime_agent_file(original.path());
+        let fork_messages = parse_prime_agent_file(fork.path());
+
+        assert_eq!(original_messages.len(), 1);
+        assert_eq!(fork_messages.len(), 1);
+        assert!(original_messages[0].dedup_key.is_some());
+        assert_eq!(original_messages[0].dedup_key, fork_messages[0].dedup_key);
+        let deduped = reconcile_prime_agent_messages(
+            vec![original_messages[0].clone(), fork_messages[0].clone()],
+            &[],
+        );
+        assert_eq!(deduped.len(), 1);
+    }
+
+    #[test]
+    fn distinct_invalid_utf8_ids_keep_distinct_dedup_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project"}
+"#,
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n",
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"type\":\"message\",\"id\":\"assistant-\xfe\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_prime_agent_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
+
+        let reconciled = reconcile_prime_agent_messages(messages, &[]);
+        assert_eq!(reconciled.len(), 2);
+        assert_eq!(
+            reconciled
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            20
+        );
+        assert_eq!(
+            reconciled
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            10
+        );
     }
 
     #[test]

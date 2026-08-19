@@ -1,10 +1,16 @@
 //! Shared parsing helpers for session logs.
 
+use crate::TokenBreakdown;
 use rusqlite::{Connection, OpenFlags};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::io::BufRead;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::SystemTime;
+use tracing::warn;
 
 /// Iterate a reader line by line without letting one undecodable byte discard
 /// the rest of the stream.
@@ -32,38 +38,153 @@ pub(crate) struct LossyLines<R> {
     at_start: bool,
 }
 
+/// Read one line into `buf`, stripping the line terminator and a leading BOM.
+///
+/// Returns the offset in `buf` at which the line's payload starts, so callers
+/// can borrow it without allocating, or `None` at end of input.
+fn read_line_payload<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    at_start: &mut bool,
+) -> Option<usize> {
+    buf.clear();
+    match reader.read_until(b'\n', buf) {
+        Ok(0) => None,
+        Ok(_) => {
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+            }
+
+            let bom = "\u{feff}".as_bytes();
+            if std::mem::take(at_start) && buf.starts_with(bom) {
+                Some(bom.len())
+            } else {
+                Some(0)
+            }
+        }
+        // A hard I/O error (vanished mount, EIO) does not consume input, so
+        // retrying would spin on the same failing read forever. Stop instead.
+        Err(_) => None,
+    }
+}
+
+fn read_lossy_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    at_start: &mut bool,
+) -> Option<String> {
+    let start = read_line_payload(reader, buf, at_start)?;
+    Some(String::from_utf8_lossy(&buf[start..]).into_owned())
+}
+
+/// Read `path` as line-delimited JSON, handing every non-blank, trimmed line to
+/// `sink` together with its zero-based physical line index.
+///
+/// A missing or unreadable file yields nothing, which is what every JSONL
+/// parser already did by hand.
+///
+/// This also fixes a silent-truncation bug wherever it replaces
+/// `BufReader::lines()`. That iterator ends on the first line that is not valid
+/// UTF-8, so a single stray byte discarded the entire rest of a transcript —
+/// #1031 measured ~2% of an 83 MB Grok `updates.jsonl` surviving. Decoding
+/// lossily per line keeps the damage to the line carrying the bad byte, and
+/// the index stays aligned with the physical file so callers that report line
+/// positions still agree with it.
+///
+/// The line is borrowed out of a reused buffer rather than allocated per line,
+/// so callers that need an owned value must clone it themselves.
+///
+/// `sink` is `&mut dyn FnMut` and not a generic `impl FnMut` on purpose: a type
+/// parameter would monomorphize this driver once per calling parser and grow
+/// the binary, which is what sharing it exists to avoid.
+pub(crate) fn for_each_json_line(path: &Path, sink: &mut dyn FnMut(usize, &str)) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut at_start = true;
+    let mut index = 0usize;
+
+    while let Some(start) = read_line_payload(&mut reader, &mut buf, &mut at_start) {
+        let text = String::from_utf8_lossy(&buf[start..]);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            sink(index, trimmed);
+        }
+        index += 1;
+    }
+}
+
+/// One line of a JSONL transcript, borrowed out of the driver's reusable
+/// buffer.
+pub(crate) struct JsonLineBytes<'a> {
+    /// The line's exact source bytes, with the line terminator and a leading
+    /// BOM removed and nothing else trimmed.
+    pub(crate) bytes: &'a [u8],
+    /// `bytes` decoded lossily, then trimmed.
+    pub(crate) trimmed: &'a str,
+    /// False when `bytes` was not valid UTF-8, so `trimmed` carries a
+    /// replacement character the source does not contain.
+    pub(crate) valid_utf8: bool,
+}
+
+/// Read `path` as line-delimited JSON like [`for_each_json_line`], additionally
+/// handing the sink each line's source bytes and whether they decoded
+/// losslessly.
+///
+/// The Pi-format family needs both halves. Prime Agent hashes the exact bytes
+/// of a damaged record into its fallback deduplication key, where the decoded
+/// text would collapse distinct invalid sequences onto the same U+FFFD, and it
+/// inspects those bytes for a lineage key mangled by invalid UTF-8, which is
+/// undetectable once the line is decoded. Pi, Senpi and Kimchi in turn still
+/// drop a record whose bytes are not valid UTF-8 rather than reading it
+/// through its replacement characters, which is what `valid_utf8` preserves.
+///
+/// The sink returns [`ControlFlow::Break`] to end the scan, for the header
+/// checks that discard a whole transcript rather than one record.
+///
+/// `sink` is `&mut dyn FnMut` for the same reason as [`for_each_json_line`]: a
+/// type parameter would monomorphize the driver once per calling parser.
+pub(crate) fn for_each_json_line_with_bytes(
+    path: &Path,
+    sink: &mut dyn FnMut(JsonLineBytes<'_>) -> ControlFlow<()>,
+) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut at_start = true;
+
+    while let Some(start) = read_line_payload(&mut reader, &mut buf, &mut at_start) {
+        let bytes = &buf[start..];
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line = JsonLineBytes {
+            bytes,
+            trimmed,
+            valid_utf8: matches!(text, Cow::Borrowed(_)),
+        };
+        if sink(line).is_break() {
+            break;
+        }
+    }
+}
+
 impl<R: BufRead> Iterator for LossyLines<R> {
     type Item = String;
 
-    fn next(&mut self) -> Option<String> {
-        self.buf.clear();
-        match self.reader.read_until(b'\n', &mut self.buf) {
-            Ok(0) => None,
-            Ok(_) => {
-                if self.buf.last() == Some(&b'\n') {
-                    self.buf.pop();
-                    if self.buf.last() == Some(&b'\r') {
-                        self.buf.pop();
-                    }
-                }
-
-                let mut bytes = self.buf.as_slice();
-                if std::mem::take(&mut self.at_start) {
-                    // A UTF-8 BOM decodes cleanly but leaves U+FEFF glued to the
-                    // front of the first record, where it makes an otherwise
-                    // valid JSON line fail to parse and be skipped in silence.
-                    bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
-                }
-
-                Some(String::from_utf8_lossy(bytes).into_owned())
-            }
-            // Decode failures cannot reach this arm — lossy decoding never
-            // fails — so an error here is a hard I/O failure (vanished network
-            // mount, EIO). `read_until` does not consume input when it fails
-            // that way, so skipping and retrying would spin on the same failing
-            // read forever. Stop instead, and keep the lines read so far.
-            Err(_) => None,
-        }
+    fn next(&mut self) -> Option<Self::Item> {
+        read_lossy_line(&mut self.reader, &mut self.buf, &mut self.at_start)
     }
 }
 
@@ -135,13 +256,27 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     None
 }
 
-pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+/// Modification time in epoch milliseconds, or `None` when the filesystem does
+/// not report one.
+///
+/// `SystemTime::modified` is the one timestamp every tier-1 target supports
+/// (unlike `created`, which is absent on many Linux filesystems), so callers
+/// that need a portable "when was this last written" anchor use this.
+///
+/// Returns `None` rather than substituting a value so a caller with its own
+/// fallback can reach for it instead of silently anchoring on the wrong
+/// instant. Pre-epoch mtimes also collapse to `None`: `duration_since` fails
+/// for them, and a negative anchor would bucket the record before 1970.
+pub(crate) fn file_modified_timestamp_ms_opt(path: &Path) -> Option<i64> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+}
+
+pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
+    file_modified_timestamp_ms_opt(path).unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
 }
 
 /// Open a SQLite file for read-only access with no mutex (single-threaded parser use).
@@ -160,6 +295,165 @@ pub(crate) fn open_readonly_sqlite(path: &Path) -> rusqlite::Result<Connection> 
 /// Returns `None` if the file cannot be opened — the caller treats that as "no sessions".
 pub(crate) fn open_readonly_sqlite_opt(path: &Path) -> Option<Connection> {
     open_readonly_sqlite(path).ok()
+}
+
+/// Which stage of a [`sqlite_for_each_row`] scan the driver reached.
+///
+/// A bare `bool` is not enough: parsers that keep an older query around as a
+/// fallback need "this database does not have that schema" (`prepare` failed,
+/// so try the next query) to be distinguishable from "the query ran", while
+/// parsers that degrade to a coarser data source need "rows were actually
+/// iterated".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteScan {
+    /// The statement prepared and its rows were iterated — possibly zero rows.
+    Ran,
+    /// The database could not be opened.
+    NotOpened,
+    /// `prepare` rejected the statement, normally a missing table or column.
+    NotPrepared,
+    /// The statement prepared but the query could not execute.
+    NotExecuted,
+}
+
+impl SqliteScan {
+    /// True only when rows were iterated.
+    pub(crate) fn ran(self) -> bool {
+        matches!(self, SqliteScan::Ran)
+    }
+
+    /// True unless `prepare` rejected the statement. Callers that fall back to
+    /// an older schema use this to stop at the first query the database
+    /// understands, even when executing it then failed — an execute failure
+    /// means the schema matched and something else went wrong, so retrying an
+    /// older query would silently read the wrong columns.
+    pub(crate) fn prepared(self) -> bool {
+        !matches!(self, SqliteScan::NotPrepared | SqliteScan::NotOpened)
+    }
+}
+
+/// Run `sql` on an already-open connection and hand every row to `sink`.
+///
+/// `what` labels the data being read (`"Goose session"`) in the warnings for
+/// prepare, execute and row-decode failures. `None` scans silently, which is
+/// what parsers probing an optional table want: a missing table there is the
+/// expected case, not a fault worth logging on every run.
+///
+/// A row that `sink` rejects is skipped and the scan continues, matching
+/// `query_map`'s behaviour where a per-row decode error does not end
+/// iteration. An error stepping the statement does end it, because SQLite
+/// closes the cursor at that point.
+///
+/// `sink` is `&mut dyn FnMut` and not a generic `impl FnMut` on purpose: a type
+/// parameter would monomorphize this driver once per calling parser and grow
+/// the binary, which is what sharing it exists to avoid.
+pub(crate) fn sqlite_for_each_row_on(
+    conn: &Connection,
+    db_path: &Path,
+    sql: &str,
+    what: Option<&str>,
+    sink: &mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>,
+) -> SqliteScan {
+    let mut stmt = match conn.prepare(sql) {
+        Ok(stmt) => stmt,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to prepare session query"
+                );
+            }
+            return SqliteScan::NotPrepared;
+        }
+    };
+
+    let mut rows = match stmt.query([]) {
+        Ok(rows) => rows,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to execute session query"
+                );
+            }
+            return SqliteScan::NotExecuted;
+        }
+    };
+
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => {
+                if let Err(err) = sink(row) {
+                    if let Some(what) = what {
+                        warn!(
+                            db_path = %db_path.display(),
+                            what,
+                            error = %err,
+                            "Failed to decode session row"
+                        );
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                if let Some(what) = what {
+                    warn!(
+                        db_path = %db_path.display(),
+                        what,
+                        error = %err,
+                        "Failed to decode session row"
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    SqliteScan::Ran
+}
+
+/// Open `db_path` read-only, run `sql`, and hand every row to `sink`.
+///
+/// The connection-owning half of [`sqlite_for_each_row_on`], for the common
+/// case of one query per database. Parsers that run several queries against
+/// one database should open once and call [`sqlite_for_each_row_on`].
+pub(crate) fn sqlite_for_each_row(
+    db_path: &Path,
+    sql: &str,
+    what: Option<&str>,
+    sink: &mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>,
+) -> SqliteScan {
+    let conn = match open_readonly_sqlite(db_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            if let Some(what) = what {
+                warn!(
+                    db_path = %db_path.display(),
+                    what,
+                    error = %err,
+                    "Failed to open session database"
+                );
+            }
+            return SqliteScan::NotOpened;
+        }
+    };
+    sqlite_for_each_row_on(&conn, db_path, sql, what, sink)
+}
+
+/// Decode one JSONL line into `T`, using `buffer` as simd-json's scratch space.
+///
+/// simd-json parses in place and so has to own the bytes it reads; a caller
+/// that keeps one buffer for the whole scan pays that copy without allocating
+/// a fresh one per line. A line that does not decode yields `None`, which is
+/// what every JSONL parser does with a record it cannot read.
+pub(crate) fn parse_json_line<T: DeserializeOwned>(line: &str, buffer: &mut Vec<u8>) -> Option<T> {
+    buffer.clear();
+    buffer.extend_from_slice(line.as_bytes());
+    simd_json::from_slice(buffer).ok()
 }
 
 /// Read a file into bytes, returning `None` on any I/O error instead of propagating.
@@ -188,6 +482,153 @@ pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
         .unwrap_or(end)
 }
 
+/// Fallback token estimate for records that carry no usage metadata: one token
+/// per four characters, rounded up.
+pub(crate) fn estimate_tokens(chars: usize) -> i64 {
+    chars.div_ceil(4) as i64
+}
+
+/// Session id taken from a transcript file's stem, e.g.
+/// `.../ses_abc123.jsonl` -> `ses_abc123`.
+///
+/// Clients whose session id is not the file stem — or that treat a blank stem
+/// differently — keep their own resolver rather than calling this.
+pub(crate) fn session_id_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Workspace key taken from the directory that contains a transcript file.
+pub(crate) fn workspace_key_from_path(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(super::normalize_workspace_key)
+}
+
+/// Normalize an epoch timestamp to milliseconds.
+///
+/// A recent epoch is ~1.7e12 in milliseconds versus ~1.7e9 in seconds, so a
+/// value at or under the `1e12` threshold is read as seconds and scaled up.
+/// Scaling happens in `f64` to keep sub-second precision; the cast then clamps
+/// into `i64` range so a garbage or huge timestamp saturates rather than
+/// wrapping, and a `NaN` becomes `0`.
+pub(crate) fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
+    if timestamp > 1e12 {
+        timestamp as i64
+    } else {
+        let millis = timestamp * 1000.0;
+        if millis.is_nan() {
+            0
+        } else {
+            millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+        }
+    }
+}
+
+/// Resolve a provider from the record's own provider name, falling back to
+/// inference from the model id and finally to `fallback` (normally the client
+/// id itself).
+pub(crate) fn resolved_provider(
+    provider: Option<String>,
+    model_id: &str,
+    fallback: &str,
+) -> String {
+    provider
+        .filter(|provider| !provider.trim().is_empty())
+        .and_then(|provider| crate::provider_identity::canonical_provider(provider.trim()))
+        .or_else(|| {
+            crate::provider_identity::inferred_provider_from_model(model_id).map(str::to_string)
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// The Anthropic Messages API `usage` block in its snake_case wire spelling.
+///
+/// Shared by the clients that persist Anthropic responses verbatim
+/// (`claudecode`, `augment`), which declared byte-identical copies of it.
+///
+/// Clients whose payload adds fields on top of this shape — a
+/// `reasoning_output_tokens`, a `cached_input_tokens`, a `total_tokens` — keep
+/// their own struct on purpose. Widening this one with aliases would make the
+/// clients above start counting fields they deliberately ignore today, and
+/// change reported totals.
+/// Public because `claudecode` re-exports it as its historical `ClaudeUsage`;
+/// `sessions::utils` itself is crate-private.
+#[derive(Debug, Deserialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+}
+
+impl AnthropicUsage {
+    /// Token breakdown with every field clamped at zero. This block carries no
+    /// reasoning bucket, so `reasoning` is always 0.
+    pub fn to_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input_tokens.unwrap_or(0).max(0),
+            output: self.output_tokens.unwrap_or(0).max(0),
+            cache_read: self.cache_read_input_tokens.unwrap_or(0).max(0),
+            cache_write: self.cache_creation_input_tokens.unwrap_or(0).max(0),
+            reasoning: 0,
+        }
+    }
+}
+
+/// The camelCase `{input, output, cacheRead, cacheWrite, totalTokens}` usage
+/// block with an authoritative `cost.total` in USD, as written by `gjc` and
+/// `openclaw`. They declared the same struct twice, one spelling the rename
+/// with `rename_all` and the other with per-field `rename`, so the JSON both
+/// accept is identical.
+///
+/// `pi::PiUsage` models the same wire shape and still stays separate, because
+/// the keys the two read are not the same set. `PiUsage` reads `reasoning` and
+/// routes every other key into the flattened extras map its damaged-key
+/// detection needs; this type reads `cost` and ignores the rest. A struct
+/// holding the union of those fields rejects documents that each accepts
+/// today: a Pi record whose `cost` is not an object stops deserializing, and
+/// so does a `gjc`/`openclaw` record whose `reasoning` is not a number. Losing
+/// the usage block drops the whole message, and `cost` is present on every Pi
+/// usage block, so that is not a theoretical edge.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CamelUsage {
+    pub(crate) input: Option<i64>,
+    pub(crate) output: Option<i64>,
+    pub(crate) cache_read: Option<i64>,
+    pub(crate) cache_write: Option<i64>,
+    /// Reported but unused: the breakdown is summed from the fields above, so
+    /// a disagreeing total must not silently override them.
+    #[allow(dead_code)]
+    pub(crate) total_tokens: Option<i64>,
+    pub(crate) cost: Option<CamelCost>,
+}
+
+impl CamelUsage {
+    /// Token breakdown with every field clamped at zero. This block carries no
+    /// reasoning bucket, so `reasoning` is always 0.
+    pub(crate) fn to_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input.unwrap_or(0).max(0),
+            output: self.output.unwrap_or(0).max(0),
+            cache_read: self.cache_read.unwrap_or(0).max(0),
+            cache_write: self.cache_write.unwrap_or(0).max(0),
+            reasoning: 0,
+        }
+    }
+}
+
+/// The `cost` sibling of [`CamelUsage`].
+#[derive(Debug, Deserialize)]
+pub(crate) struct CamelCost {
+    /// Authoritative total cost in USD.
+    pub(crate) total: Option<f64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +646,60 @@ mod tests {
         let raw: &[u8] = b"a\n\nb\n";
         let lines: Vec<String> = lossy_lines(raw).collect();
         assert_eq!(lines, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn for_each_json_line_with_bytes_preserves_distinct_invalid_sequences() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            b"\xef\xbb\xbf {\"clean\":1} \r\n\n  \na\xff\na\xfe\n",
+        )
+        .unwrap();
+
+        let mut lines = Vec::new();
+        for_each_json_line_with_bytes(&path, &mut |line| {
+            lines.push((
+                line.bytes.to_vec(),
+                line.trimmed.to_string(),
+                line.valid_utf8,
+            ));
+            ControlFlow::Continue(())
+        });
+
+        // The BOM is stripped, the terminator is not part of the line, blank
+        // lines are skipped, and `bytes` keeps the untrimmed payload.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].0, b" {\"clean\":1} ");
+        assert_eq!(lines[0].1, r#"{"clean":1}"#);
+        assert!(lines[0].2);
+        // Distinct invalid sequences decode to the same replacement character
+        // but keep distinct source bytes, which is what the Prime Agent
+        // fallback deduplication key hashes.
+        assert_eq!(lines[1].1, lines[2].1);
+        assert_eq!(lines[1].0, b"a\xff");
+        assert_eq!(lines[2].0, b"a\xfe");
+        assert!(!lines[1].2);
+        assert!(!lines[2].2);
+    }
+
+    #[test]
+    fn for_each_json_line_with_bytes_stops_on_break() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(&path, b"first\nsecond\nthird\n").unwrap();
+
+        let mut seen = Vec::new();
+        for_each_json_line_with_bytes(&path, &mut |line| {
+            seen.push(line.trimmed.to_string());
+            if line.trimmed == "second" {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+
+        assert_eq!(seen, vec!["first", "second"]);
     }
 
     #[test]

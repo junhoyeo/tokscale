@@ -55,6 +55,7 @@ fn main() {
 
     match mode.as_str() {
         "success" => emit("captured ok"),
+        "args" => emit(&std::env::args().skip(1).collect::<Vec<_>>().join("\n")),
         "fail" => {
             emit("captured fail");
             std::process::exit(17);

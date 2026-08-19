@@ -35,8 +35,11 @@ import {
   addClientBreakdownIncrement,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
+  SUPPORTED_VERSIONED_PARSERS,
   type DeviceParserStates,
+  type ParserHighWaterPlan,
 } from "@/lib/db/parserHighWater";
+import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
@@ -694,51 +697,72 @@ export async function POST(request: Request) {
       }
 
       const deviceParserStates = (submittedDevice.parserStates ?? {}) as DeviceParserStates;
-      const copilotIncomingDays = foldParserClientSnapshot(
-        data.contributions,
-        "copilot"
-      );
-      const existingCopilotDays = Object.fromEntries(
-        existingDeviceDays.flatMap((day) => {
-          const breakdown = day.sourceBreakdown as Record<string, ClientBreakdownData> | null;
-          return breakdown?.copilot ? [[day.date, breakdown.copilot] as const] : [];
-        })
-      );
-      const copilotWasScanned =
-        submittedClients.has("copilot") ||
-        Boolean(
-          data.scanScope &&
-            Object.prototype.hasOwnProperty.call(
-              data.scanScope.parserVersions,
-              "copilot"
-            )
-        );
-      const copilotPlan = copilotWasScanned
-        ? planParserHighWaterSubmission({
-            client: "copilot",
-            incomingVersion: isBackfill
-              ? undefined
-              : data.scanScope?.parserVersions.copilot,
-            fullHistory: data.scanScope?.fullHistory === true,
-            existingLegacyDays: existingCopilotDays,
-            incomingDays: copilotIncomingDays,
-            state: deviceParserStates.copilot,
-            persistedVersion: submittedDevice.parserVersions?.copilot,
+      // Every client whose parser can re-attribute already-submitted history
+      // runs through the high-water path, not just Copilot. A re-attribution
+      // moves a day's tokens without changing the lifetime total, and the
+      // per-day merge guard defends each stored day against a decrease, so the
+      // days that fall are pinned while the days that rise are written: the
+      // device's stored total inflates by exactly what moved. Bounding each
+      // submission by the device/client lifetime high-water makes a pure
+      // reshuffle contribute nothing, which is the only reading of it that is
+      // both non-destructive and non-inflating.
+      const parserPlans = new Map<string, ParserHighWaterPlan>();
+      for (const [client, supportedVersion] of Object.entries(
+        SUPPORTED_VERSIONED_PARSERS
+      )) {
+        const wasScanned =
+          submittedClients.has(client) ||
+          Boolean(
+            data.scanScope &&
+              Object.prototype.hasOwnProperty.call(
+                data.scanScope.parserVersions,
+                client
+              )
+          );
+        if (!wasScanned) continue;
+        const existingClientDays = Object.fromEntries(
+          existingDeviceDays.flatMap((day) => {
+            const breakdown = day.sourceBreakdown as Record<string, ClientBreakdownData> | null;
+            const stored = breakdown ? ownValue(breakdown, client) : undefined;
+            return stored ? [[day.date, stored] as const] : [];
           })
-        : { mode: "status-quo" as const, increments: {} };
-      const freezeCopilot = copilotPlan.mode === "freeze";
-      const applyCopilotIncrements =
-        copilotPlan.mode === "incremental" ||
-        copilotPlan.mode === "baseline-legacy";
-      if (copilotPlan.mode === "baseline-legacy") {
-        warnings.push(
-          "Established the Copilot parser generation 2 baseline; existing same-device history was preserved and only bounded lifetime growth was added."
         );
-      } else if (copilotPlan.mode === "freeze") {
-        warnings.push(
-          "Ignored Copilot changes because this parser generation or partial snapshot cannot safely advance the device high-water."
-        );
+        const plan = planParserHighWaterSubmission({
+          client,
+          incomingVersion: isBackfill
+            ? undefined
+            : ownValue(
+                data.scanScope?.parserVersions as
+                  | Record<string, number>
+                  | undefined,
+                client
+              ),
+          fullHistory: data.scanScope?.fullHistory === true,
+          existingLegacyDays: existingClientDays,
+          incomingDays: foldParserClientSnapshot(data.contributions, client),
+          state: ownValue(deviceParserStates, client),
+          persistedVersion: ownValue(
+            submittedDevice.parserVersions as Record<string, number> | undefined,
+            client
+          ),
+        });
+        if (plan.mode === "status-quo") continue;
+        parserPlans.set(client, plan);
+        const label = ownValue(SOURCE_DISPLAY_NAMES, client) ?? client;
+        if (plan.mode === "baseline-legacy") {
+          warnings.push(
+            `Established the ${label} parser generation ${supportedVersion} baseline; existing same-device history was preserved and only bounded lifetime growth was added.`
+          );
+        } else if (plan.mode === "freeze") {
+          warnings.push(
+            `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
+          );
+        }
       }
+      const plannedIncrementClients = [...parserPlans].filter(
+        ([, plan]) =>
+          plan.mode === "incremental" || plan.mode === "baseline-legacy"
+      );
 
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
@@ -792,27 +816,35 @@ export async function POST(request: Request) {
           }
         }
 
-        if (freezeCopilot) {
-          delete incomingClientBreakdown.copilot;
-        } else if (applyCopilotIncrements) {
-          // The full snapshot itself is never merged. Only the bounded growth
-          // calculated against the persisted generation high-water is eligible.
-          const increment = copilotPlan.increments[incomingDay.date];
-          if (increment) {
-            incomingClientBreakdown.copilot = increment;
-          } else {
-            delete incomingClientBreakdown.copilot;
+        for (const [client, plan] of parserPlans) {
+          if (plan.mode === "freeze") {
+            delete incomingClientBreakdown[client];
+          } else if (
+            plan.mode === "incremental" ||
+            plan.mode === "baseline-legacy"
+          ) {
+            // The full snapshot itself is never merged. Only the bounded growth
+            // calculated against the persisted generation high-water is eligible.
+            const increment = ownValue(plan.increments, incomingDay.date);
+            if (increment) {
+              incomingClientBreakdown[client] = increment;
+            } else {
+              delete incomingClientBreakdown[client];
+            }
           }
         }
 
         const clientsToMerge = new Set(submittedClients);
-        if (
-          (freezeCopilot || applyCopilotIncrements) &&
-          !incomingClientBreakdown.copilot
-        ) {
-          // A frozen/zero-increment Copilot plan is a no-op for that client,
-          // not a request to delete its stored row from this day.
-          clientsToMerge.delete("copilot");
+        for (const [client, plan] of parserPlans) {
+          const planRewroteClient =
+            plan.mode === "freeze" ||
+            plan.mode === "incremental" ||
+            plan.mode === "baseline-legacy";
+          if (planRewroteClient && !incomingClientBreakdown[client]) {
+            // A frozen/zero-increment plan is a no-op for that client, not a
+            // request to delete its stored row from this day.
+            clientsToMerge.delete(client);
+          }
         }
 
         const existingDay = existingDaysMap.get(incomingDay.date);
@@ -824,13 +856,14 @@ export async function POST(request: Request) {
           >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
             normalizeClientBreakdownAliases(rawExistingBreakdown);
-          if (
-            applyCopilotIncrements && incomingClientBreakdown.copilot
-          ) {
-            incomingClientBreakdown.copilot = addClientBreakdownIncrement(
-              existingClientBreakdown.copilot,
-              incomingClientBreakdown.copilot
-            );
+          for (const [client] of plannedIncrementClients) {
+            const increment = incomingClientBreakdown[client];
+            if (increment) {
+              incomingClientBreakdown[client] = addClientBreakdownIncrement(
+                ownValue(existingClientBreakdown, client),
+                increment
+              );
+            }
           }
           const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
@@ -852,15 +885,18 @@ export async function POST(request: Request) {
             );
           }
           const mergedClientBreakdown = mergeResult.merged;
-          if (
-            applyCopilotIncrements &&
-            existingClientBreakdown.copilot?.provenance?.costIsComplete === false &&
-            mergedClientBreakdown.copilot
-          ) {
-            mergedClientBreakdown.copilot.provenance = {
-              ...deriveClientBreakdownProvenance(mergedClientBreakdown.copilot),
-              costIsComplete: false,
-            };
+          for (const [client] of plannedIncrementClients) {
+            const merged = mergedClientBreakdown[client];
+            if (
+              merged &&
+              ownValue(existingClientBreakdown, client)?.provenance
+                ?.costIsComplete === false
+            ) {
+              merged.provenance = {
+                ...deriveClientBreakdownProvenance(merged),
+                costIsComplete: false,
+              };
+            }
           }
           // A preserved fold must keep its ORIGINAL raw alias keys in storage
           // (e.g. both "kilocode" and "kilo"), not the collapsed sum: the
@@ -920,17 +956,25 @@ export async function POST(request: Request) {
         }
       }
 
-      if (copilotPlan.nextState) {
+      const advancedParserStates = [...parserPlans].flatMap(([client, plan]) =>
+        plan.nextState ? [[client, plan.nextState] as const] : []
+      );
+      if (advancedParserStates.length > 0) {
         await tx
           .update(submittedDevices)
           .set({
             parserVersions: {
               ...(submittedDevice.parserVersions ?? {}),
-              copilot: copilotPlan.nextState.version,
+              ...Object.fromEntries(
+                advancedParserStates.map(([client, state]) => [
+                  client,
+                  state.version,
+                ])
+              ),
             },
             parserStates: {
               ...deviceParserStates,
-              copilot: copilotPlan.nextState,
+              ...Object.fromEntries(advancedParserStates),
             },
           })
           .where(eq(submittedDevices.id, submittedDevice.id));

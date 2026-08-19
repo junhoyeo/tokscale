@@ -8,7 +8,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
     model_name_for_grouping, normalize_model_for_grouping, parse_local_unified_messages, sessions,
-    ClientId, GroupBy, LocalParseOptions, ModelPerformance,
+    ClientId, GroupBy, LocalParseOptions, ModelPerformance, WorktreeRollup,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -214,27 +214,15 @@ pub struct DataLoader {
     pub until: Option<String>,
     pub year: Option<String>,
     pub minutely_enabled: bool,
+    pub worktree_rollup: WorktreeRollup,
 }
 
+#[cfg(test)]
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
-const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
-fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
-    match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
-        (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
-            tokscale_core::sessions::workspace_label_from_key(key)
-                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
-        ),
-        _ => (
-            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
-            None,
-            UNKNOWN_WORKSPACE_LABEL.to_string(),
-        ),
-    }
-}
+// Workspace bucketing lives in tokscale_core::workspace_bucket so this
+// aggregation and the CLI report agree on worktree rollup and on labeling
+// Claude Code's dash-mangled keys.
 
 fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
     // saturating_add (mirrors tokscale_core::TokenBreakdown::total) so a
@@ -331,6 +319,7 @@ impl DataLoader {
             until: None,
             year: None,
             minutely_enabled: false,
+            worktree_rollup: WorktreeRollup::default(),
         }
     }
 
@@ -346,11 +335,17 @@ impl DataLoader {
             until,
             year,
             minutely_enabled: false,
+            worktree_rollup: WorktreeRollup::default(),
         }
     }
 
     pub fn with_minutely_enabled(mut self, enabled: bool) -> Self {
         self.minutely_enabled = enabled;
+        self
+    }
+
+    pub fn with_worktree_rollup(mut self, rollup: WorktreeRollup) -> Self {
+        self.worktree_rollup = rollup;
         self
     }
 
@@ -468,12 +463,45 @@ impl DataLoader {
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
+        // Memoizes the filesystem probes that resolve a workspace key to a label.
+        let mut workspace_labeler = tokscale_core::WorkspaceLabeler::default();
+        // Labels are basenames, so two different directories that share one paint
+        // the same row text. Resolve the whole set up front so collisions can be
+        // qualified before the first row -- and use the same core helper the CLI
+        // report does, because a label that differs between the two views is a
+        // bug report waiting to happen.
+        let workspace_label_overrides = if *group_by == GroupBy::WorkspaceModel {
+            tokscale_core::workspace_label_overrides(
+                &messages,
+                self.worktree_rollup,
+                &mut workspace_labeler,
+            )
+        } else {
+            HashMap::new()
+        };
 
         for msg in &messages {
             let normalized_model =
                 model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
             let model_key = normalize_model_for_grouping(&msg.model_id);
-            let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
+            // Resolving a workspace label reads the filesystem, and every grouping
+            // except this one throws it away — the TUI defaults to ClientModel and
+            // auto-refreshes, so paying it unconditionally is pure waste.
+            let (workspace_group_key, workspace_key, workspace_label) =
+                if *group_by == GroupBy::WorkspaceModel {
+                    let (group_key, key, label) = tokscale_core::workspace_bucket(
+                        msg,
+                        self.worktree_rollup,
+                        &mut workspace_labeler,
+                    );
+                    let label = workspace_label_overrides
+                        .get(&group_key)
+                        .cloned()
+                        .unwrap_or(label);
+                    (group_key, key, label)
+                } else {
+                    (String::new(), None, String::new())
+                };
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
                 GroupBy::ClientModel => format!("{}:{}", msg.client, normalized_model),
@@ -1617,6 +1645,9 @@ mod tests {
         assert_eq!(clients[42], ClientId::Reasonix);
         assert_eq!(clients[43], ClientId::PrimeAgent);
         assert_eq!(clients[44], ClientId::Freebuff);
+        assert_eq!(clients[45], ClientId::CherryStudio);
+        assert_eq!(clients[46], ClientId::Dsh);
+        assert_eq!(clients[47], ClientId::Mcode);
     }
 
     #[test]
@@ -1668,6 +1699,8 @@ mod tests {
             "Prime Agent",
             "Freebuff",
             "Cherry Studio",
+            "DeepSeek Harness",
+            "MiniMax Code",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -1712,6 +1745,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Augment), 'A');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimchi), 'K');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::PrimeAgent), 'P');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mcode), 'M');
     }
 
     #[test]
@@ -2240,21 +2274,50 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        // Keys must differ even though display names are identical
+        // Keys must differ...
         let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
         assert_eq!(daily_keys.len(), 2);
         assert_ne!(daily_keys[0], daily_keys[1]);
 
-        let display_names: Vec<_> = claude
+        // ...and so must the names, or the chart legend has two entries the
+        // reader cannot tell apart. Both directories are named `demo`, so the
+        // qualifier has to come from their parents.
+        let mut display_names: Vec<_> = claude
             .models
             .values()
             .map(|info| info.display_name.clone())
             .collect();
+        display_names.sort();
         assert_eq!(
             display_names,
             vec![
-                "demo / claude-sonnet-4-5".to_string(),
-                "demo / claude-sonnet-4-5".to_string()
+                "team-a/demo / claude-sonnet-4-5".to_string(),
+                "team-b/demo / claude-sonnet-4-5".to_string()
+            ]
+        );
+
+        let mut workspace_labels: Vec<_> = usage
+            .models
+            .iter()
+            .filter_map(|model| model.workspace_label.clone())
+            .collect();
+        workspace_labels.sort();
+        assert_eq!(
+            workspace_labels,
+            vec!["team-a/demo".to_string(), "team-b/demo".to_string()]
+        );
+        // The grouping identity is still the raw key.
+        let mut workspace_keys: Vec<_> = usage
+            .models
+            .iter()
+            .filter_map(|model| model.workspace_key.clone())
+            .collect();
+        workspace_keys.sort();
+        assert_eq!(
+            workspace_keys,
+            vec![
+                "/srv/team-a/demo".to_string(),
+                "/srv/team-b/demo".to_string()
             ]
         );
     }

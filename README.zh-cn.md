@@ -104,6 +104,7 @@
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin Desktop" /> | [Devin Desktop](https://devin.ai/) | ACP 事件：macOS `~/Library/Application Support/Devin/User/acp-events/`；Linux `~/.config/Devin/User/acp-events/`；Windows `%APPDATA%\Devin\User\acp-events\` |
 | <img width="48px" src="https://github.com/augmentcode.png" alt="Augment Code" /> | [Augment Code](https://www.augmentcode.com/)（Auggie CLI） | `~/.augment/sessions/*.json` |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） |
+| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（未压缩写出时为 `session.jsonl`；可通过 `DSH_HOME` 覆盖） |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -181,7 +182,7 @@
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
 - **Web 可视化** - 带 2D 和 3D 视图的交互式贡献图
 - **灵活筛选** - 按平台、日期范围或年份筛选
-- **任务归因报告** - 由 LLM 驱动的会话摘要与任务分组，支持多种后端（Apple FM、Claude、Codex、Gemini、Kiro）
+- **任务归因报告** - 由 LLM 驱动的会话摘要与任务分组，支持多种后端（Apple FM、Claude、Codex、Gemini、Kiro、MiniMax）
 - **导出为 JSON** - 为外部可视化工具生成数据
 - **社交平台** - 分享使用情况、排行榜竞争、查看公开个人资料
 
@@ -308,7 +309,7 @@ tokscale models --json > report.json   # 保存到文件
 | **模型** | `--group-by model` | ✅ | 每个模型一行 — 合并所有客户端和提供商 |
 | **客户端 + 模型** | `--group-by client,model` | | 每个客户端-模型对一行 |
 | **客户端 + 提供商 + 模型** | `--group-by client,provider,model` | | 最详细 — 不合并 |
-| **工作区 + 模型** | `--group-by workspace,model` | | 先按工作区键、再按模型对本地使用量分组 |
+| **工作区 + 模型** | `--group-by workspace,model` | | 先按工作区键、再按模型对本地使用量分组；添加 [`--merge-worktrees`](#按工作区统计费用) 可将 git worktree 折叠进其父仓库 |
 | **会话 + 模型** | `--group-by session,model` | | 每个 `session_id` 和模型一行 — 将成本归因到特定的 agent-CLI 会话 |
 | **客户端 + 会话 + 模型** | `--group-by client,session,model` | | 每个客户端、会话和模型一行 — 适用于按 `session_id` 关联的多代理运行器 |
 
@@ -360,6 +361,30 @@ tokscale models --json > report.json   # 保存到文件
 ```
 
 当你还需要每行都带有客户端名称时，请使用 `--group-by client,session,model`（一次涵盖全部 20+ 个受支持的 CLI）。
+
+#### 按工作区统计费用
+
+`--group-by workspace,model` 会把用量归因到 agent 运行所在的目录，因此可以看到某个项目花了多少钱:
+
+```bash
+# 每个 (工作区, 模型) 一行
+tokscale models --light --group-by workspace,model --month
+
+# 把所有 git worktree 折叠进其父仓库 — 每个仓库一行
+tokscale models --light --group-by workspace,model --merge-worktrees --month
+
+# JSON 中包含 workspaceKey（分组标识）与 workspaceLabel（显示名称）
+tokscale models --json --group-by workspace,model --merge-worktrees
+```
+
+在 TUI 中按 `g` → **工作区 + 模型**，再按 `w` 切换 worktree 折叠（页脚会显示 `[w:worktrees]` 或 `[w:repos]`）。
+
+工作区行的标签为 `repo` 或 `repo ⑃ worktree`。各客户端记录工作区的方式并不一致 — Claude Code 存储的是把非字母数字替换成短横线的目录 slug（`-Users-me-devpro-app`），而 Codex 与 OpenCode 存储真实路径 — 因此 tokscale 会对照文件系统把 slug 还原成真实路径。有四点值得注意:
+
+- **不加 `--merge-worktrees` 时，每个 git worktree 各占一行。** 为每个任务单独开 worktree 的 agent CLI 会让一个仓库分散到很多行；`--merge-worktrees` 会把它们重新合并（同时也会合并不同客户端以不同键格式记录的同一个仓库）。
+- **`--merge-worktrees` 同时识别仓库内部与外部的 worktree。** `<repo>/.claude/worktrees/<name>`（agent CLI 创建的形式）和 `<repo>/.git/worktrees/<name>` 仅凭路径即可识别；检出到别处的 worktree（`git worktree add ../feature-x`）则通过读取其 `.git` 指针文件回溯到仓库。不过通过两种不同路径写法（软链接与其目标）到达的同一个仓库仍会保持两行，因为工作区标识是按字符串比较的。两种情况下总计都不受影响 — 用量只是分散到不同行，既不会丢失也不会重复计算。
+- **会显示成同名的行会用父目录加以限定。** 标签就是目录自身的名字，所以 `~/work/api` 和 `~/oss/api` 都会显示为 `api`；发生冲突的标签会不断补上前面的路径片段，直到彼此可区分（`work/api`、`oss/api`）；若路径片段也无法区分 — 同一个目录被两个客户端以不同的键格式记录 — 则改用工作区键来限定。分组不受影响，改变的只是显示文本。
+- **从不记录工作区的客户端会汇总到单独的 `Unknown workspace` 行。** 约有一半的受支持客户端（包括 gemini、cursor、amp、droid、roocode、kilocode、goose 以及 Copilot 的 OTEL 路径）不会写入工作区，因此无法把它们的用量归因到目录。
 
 ### 按平台筛选
 
@@ -739,6 +764,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
 | `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
 | `kiro` | `kiro --non-interactive` | 需要已安装并已认证的 Kiro CLI。 |
+| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M2.7`）。 |
 
 **工作原理：**
 
@@ -786,7 +812,7 @@ tokscale usage --light
 
 | 提供商 | 认证方式 | 指标 | 设置 |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth（凭据文件或 macOS 钥匙串） | Session（5 小时）、Weekly、Opus 配额 | 运行 `claude` 登录 |
+| **Claude** | OAuth（凭据文件或 macOS 钥匙串） | Session（5 小时）、Weekly、模型专属配额 | 运行 `claude` 登录 |
 | **Codex**（OpenAI） | OAuth（Codex 认证、已保存的 Tokscale 账号，或 OpenCode 的 `$XDG_DATA_HOME/opencode/auth.json`） | Session、Weekly 配额 | 使用 `[Add Codex]`、运行 `codex`、通过 `tokscale codex import --name work` 导入，或在 OpenCode 中连接 OpenAI ChatGPT Plus/Pro |
 | **Z.ai** | API key（环境变量） | Token 限额、Web Searches | 设置 `ZAI_API_KEY` 或 `GLM_API_KEY` |
 | **Amp** | API key（`~/.local/share/amp/secrets.json`） | 免费额度余额、Credits | 运行 `amp` 登录 |
