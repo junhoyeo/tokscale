@@ -37,7 +37,7 @@ use super::codebuff::{
     derive_context_from_path, extract_assistant_usage, is_assistant_role, message_timestamp,
     parse_chat_id_to_millis,
 };
-use super::utils::{file_modified_timestamp_ms, read_file_or_none};
+use super::utils::{estimate_tokens, file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
@@ -71,12 +71,6 @@ fn is_freebuff_chat(messages: &[Value]) -> bool {
         .iter()
         .filter_map(root_agent_id)
         .any(|agent| agent.starts_with(FREEBUFF_ROOT_AGENT_PREFIX))
-}
-
-/// Estimate tokens from character length at ~4 chars/token, matching the other
-/// estimated sources (CommandCode, Kiro, ZCode).
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
 }
 
 /// Collect the textual content of a Freebuff message for token estimation.

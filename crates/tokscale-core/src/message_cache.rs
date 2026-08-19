@@ -956,10 +956,11 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        // v6->v7: `reasoning_output_tokens` is contained in `output_tokens`, so
-        // it is now carved out of the output bucket instead of being passed
-        // through additively. Cached v6 entries carry the doubled split and
-        // would keep inflating totals and cost until their file changes.
+        // v6->v7: `reasoning_output_tokens` is a subset of `output_tokens`, so
+        // it is now subtracted out of the output bucket instead of being
+        // carried in both. Without this bump an existing cache keeps replaying
+        // pre-split rows, and those sessions stay double-priced while looking
+        // fixed.
         ClientId::Codex => 7,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
@@ -1050,9 +1051,26 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
+        // v1->v2: Prime Agent now strips a leading BOM and recovers records
+        // containing undecodable bytes; its accounting scan also continues past
+        // those records instead of truncating and misaligning message indices.
+        // The bump intentionally forces a full re-decode and accounting/matching
+        // rebuild; it makes the legacy v4 accounting-backfill path unreachable
+        // for live caches, but avoids mixing v1 cached messages with v2 scans.
+        // Without the bump, malformed-line loss could be mistaken for complete
+        // accounting rather than a truncated source. v2->v3 rejects damaged
+        // lineage and usage structural keys before reconciliation bookkeeping.
+        // v3->v4 rejects damaged lineage values and matching-critical child
+        // timestamps while preserving unrelated damaged usage extensions.
+        ClientId::PrimeAgent => 4,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
-        ClientId::Reasonix => 1,
+        // v1->v2: strip a leading BOM and recover records containing
+        // undecodable bytes instead of silently dropping the whole record.
+        // v2->v3: damaged providers use delimiter-aware family inference.
+        // v3->v4 applies that recovery to every family with version-aware
+        // boundaries, rejecting family-name substrings inside ordinary words.
+        ClientId::Reasonix => 4,
         // v1->v2: per-model token attribution now comes from
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
@@ -1076,6 +1094,35 @@ fn parser_version(client: ClientId) -> u32 {
         // v2->v3: duplicate merging now upgrades the retained row when a later
         // copy carries an explicit cost, including zero.
         ClientId::MiMoCode => 3,
+        // Droid's cumulative session totals now anchor on the settings file's
+        // mtime (floored at providerLockTimestamp) instead of the lock
+        // timestamp alone, so a long-running session stops reporting every
+        // token it ever spent against the day it was started. A session that
+        // has since ended never changes its bytes again, so its fingerprint
+        // stays valid forever and only this bump discards the v1 anchor.
+        // v2->v3: a session's cumulative total is no longer one record at one
+        // instant. It is now apportioned across the assistant replies in the
+        // sibling transcript, weighted by the context each reply read, so a
+        // multi-day session reports against the days it actually ran.
+        // v3->v4: a reply is weighted by the context standing before it rather
+        // than including its own bytes, so a long answer no longer charges
+        // itself for its own output.
+        // v4->v5: output and reasoning follow the reply's own size instead of
+        // the context it read, a pre-epoch transcript timestamp no longer
+        // anchors a share of the session in 1969, and an oversized transcript
+        // takes the single-record path. Versions 2 through 4 only ever existed
+        // in pre-release builds of this change; the bump past them keeps anyone
+        // who ran one from holding a superseded split.
+        // v5->v6: a coalesced run of replies now reports how many calls it
+        // stands for instead of one, an unreadable file size no longer waives
+        // the transcript ceiling, and a transcript that could not be read whole
+        // takes the single-record path rather than apportioning the session
+        // over the prefix that was read.
+        // v6->v7: the apportioned records are attribution fragments of one
+        // session, so the session's reply count now rides on exactly one of
+        // them. v6 entries carry a count on every record, which `sessionize`
+        // reads as one session per record.
+        ClientId::Droid => 7,
         _ => 1,
     }
 }
@@ -3052,7 +3099,10 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_reasoning_split_parser_version_invalidates_v6_entries() {
+    fn test_codex_duration_parser_version_invalidates_v4_entries() {
+        // v6->v7 splits `reasoning_output_tokens` out of the Codex output
+        // bucket. The bump is what stops an existing cache from replaying
+        // pre-split rows, so it has to be asserted rather than assumed.
         assert_eq!(parser_version(ClientId::Codex), 7);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
@@ -3090,6 +3140,100 @@ mod tests {
     }
 
     #[test]
+    fn test_lossy_jsonl_parser_versions_invalidate_v3_entries() {
+        assert_eq!(parser_version(ClientId::PrimeAgent), 4);
+        assert_eq!(parser_version(ClientId::Reasonix), 4);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prime_and_reasonix_v3_shards_are_rejected_before_changed_bytes_are_parsed() {
+        for (client, source_bytes, stale_provider, expected_provider) in [
+            (
+                ClientId::PrimeAgent,
+                b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"valid\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n".as_slice(),
+                "stale-prime-v3",
+                "anthropic",
+            ),
+            (
+                ClientId::Reasonix,
+                b"{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"deepseek/chat\",\"prompt\":100,\"completion\":20,\"total\":120}\n".as_slice(),
+                "stale-reasonix-v3",
+                "deepseek",
+            ),
+        ] {
+            let temp_home = TempDir::new().unwrap();
+            let _cache_env = sandbox_cache_env(temp_home.path());
+            let source = write_temp_file(source_bytes);
+            let current_identity = CacheIdentity::for_client(client);
+            assert_eq!(current_identity.parser_version, 4);
+            let stale_identity = CacheIdentity {
+                namespace: current_identity.namespace,
+                parser_version: 3,
+            };
+            let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let stale_entry = CachedSourceEntry::new(
+                stale_identity,
+                source.path(),
+                fingerprint.clone(),
+                vec![UnifiedMessage::new(
+                    current_identity.namespace,
+                    "stale-model",
+                    stale_provider,
+                    "stale-session",
+                    1,
+                    TokenBreakdown {
+                        input: 999,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            );
+            let stale_path = cache_shard_path(current_identity, source.path());
+            ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &stale_path,
+                stale_identity,
+                &[stale_entry],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
+
+            let mut cache = SourceMessageCache::load();
+            assert!(cache.get(current_identity, source.path()).is_none());
+            assert_eq!(SourceFingerprint::from_path(source.path()).unwrap(), fingerprint);
+
+            let rebuilt = match client {
+                ClientId::PrimeAgent => crate::sessions::prime_agent::parse_prime_agent_file(source.path()),
+                ClientId::Reasonix => crate::sessions::reasonix::parse_reasonix_file(source.path()),
+                _ => unreachable!(),
+            };
+            assert_eq!(rebuilt.len(), 1);
+            assert_eq!(rebuilt[0].provider_id, expected_provider);
+            assert_ne!(rebuilt[0].tokens.input, 999);
+            cache.insert(CachedSourceEntry::new(
+                current_identity,
+                source.path(),
+                fingerprint,
+                rebuilt.clone(),
+                Vec::new(),
+                None,
+            ));
+            cache.save_if_dirty();
+
+            let warm = SourceMessageCache::load();
+            let cached = warm.get(current_identity, source.path()).unwrap();
+            assert_eq!(cached.parser_version, 4);
+            assert_eq!(cached.messages, rebuilt);
+        }
+    }
+
+    #[test]
     fn test_hermes_parser_version_invalidates_v1_entries() {
         assert_eq!(parser_version(ClientId::Hermes), 2);
     }
@@ -3100,6 +3244,14 @@ mod tests {
         // fingerprint forever, so only the version bump discards the truncated
         // v6 parse and forces a cold reparse.
         assert_eq!(parser_version(ClientId::Grok), 7);
+    }
+
+    #[test]
+    fn test_droid_usage_anchor_parser_version_invalidates_v1_entries() {
+        // A finished Droid session's settings.json is never rewritten again, so
+        // its fingerprint keeps matching and only the version bump discards the
+        // v1 lock-timestamp anchor.
+        assert_eq!(parser_version(ClientId::Droid), 7);
     }
 
     #[test]

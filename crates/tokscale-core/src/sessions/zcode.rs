@@ -13,12 +13,15 @@
 //! counts are used. When absent, tokens are estimated at ~4 chars/token,
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite_opt};
+use super::utils::{
+    back_anchor_timestamp, estimate_tokens, file_modified_timestamp_ms, for_each_json_line,
+    open_readonly_sqlite_opt, session_id_from_path, sqlite_for_each_row_on,
+    workspace_key_from_path,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "zcode";
@@ -101,11 +104,6 @@ impl ZcodeUsage {
 }
 
 pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let session_id_from_path = session_id_from_path(path);
     let workspace_key = workspace_key_from_path(path);
@@ -119,20 +117,10 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let entry = match serde_json::from_str::<ZcodeEntry>(trimmed) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if session_id.is_none() {
@@ -174,7 +162,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         // emitted, so the next real assistant message in this
                         // turn must keep its is_turn_start marker.
                         context_chars += chars;
-                        continue;
+                        return;
                     }
                     TokenBreakdown {
                         input,
@@ -221,7 +209,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 context_chars += chars;
             }
         }
-    }
+    });
 
     messages
 }
@@ -361,38 +349,38 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         .prepare("SELECT computed_total_tokens FROM model_usage LIMIT 1")
         .is_err();
 
-    let mut stmt = match conn.prepare(modern_query) {
-        Ok(stmt) => stmt,
-        Err(_) => match conn.prepare(legacy_query) {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        },
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok(ZcodeUsageRow {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            turn_id: row.get(2)?,
-            model_id: row.get(3)?,
-            started_at: row.get(4)?,
-            completed_at: row.get(5)?,
-            duration_ms: row.get(6)?,
-            input_tokens: row.get(7)?,
-            output_tokens: row.get(8)?,
-            reasoning_tokens: row.get(9)?,
-            cache_read_input_tokens: row.get(10)?,
-            cache_creation_input_tokens: row.get(11)?,
-            computed_total_tokens: row.get(12)?,
-            agent: row.get(13)?,
-            mode: row.get(14)?,
-            session_directory: row.get(15)?,
-            session_path: row.get(16)?,
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
+    // Quiet: a database that understands neither query is not a ZCode usage
+    // store, which is an expected outcome of probing candidate paths.
+    let mut rows: Vec<ZcodeUsageRow> = Vec::new();
+    for query in [modern_query, legacy_query] {
+        let scan = sqlite_for_each_row_on(&conn, db_path, query, None, &mut |row| {
+            rows.push(ZcodeUsageRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                turn_id: row.get(2)?,
+                model_id: row.get(3)?,
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+                duration_ms: row.get(6)?,
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                reasoning_tokens: row.get(9)?,
+                cache_read_input_tokens: row.get(10)?,
+                cache_creation_input_tokens: row.get(11)?,
+                computed_total_tokens: row.get(12)?,
+                agent: row.get(13)?,
+                mode: row.get(14)?,
+                session_directory: row.get(15)?,
+                session_path: row.get(16)?,
+            });
+            Ok(())
+        });
+        // A query that prepared is the one this schema supports; only a
+        // prepare failure means "try the older spelling".
+        if scan.prepared() {
+            break;
+        }
+    }
 
     let mut messages = Vec::new();
     // Parallel to `messages`: each row's turn_id (if any), so is_turn_start
@@ -400,12 +388,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // timestamp is known (see below).
     let mut turn_ids: Vec<Option<String>> = Vec::new();
 
-    for row_result in rows {
-        let row = match row_result {
-            Ok(row) => row,
-            Err(_) => continue,
-        };
-
+    for row in rows {
         let session_id = row.session_id.unwrap_or_else(|| "unknown".to_string());
         let model_id = row
             .model_id
@@ -600,28 +583,10 @@ fn content_chars(content: &serde_json::Value) -> usize {
     }
 }
 
-fn estimate_tokens(chars: usize) -> i64 {
-    chars.div_ceil(4) as i64
-}
-
 fn parse_rfc3339_ms(timestamp: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-fn workspace_key_from_path(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|dir| dir.file_name())
-        .and_then(|name| name.to_str())
-        .and_then(normalize_workspace_key)
 }
 
 #[cfg(test)]

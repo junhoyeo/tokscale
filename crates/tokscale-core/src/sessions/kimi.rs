@@ -8,12 +8,11 @@
 //! ~/.kimi-code/sessions/[WORKSPACE]/[SESSION]/agents/[AGENT]/wire.jsonl
 //!   Token data comes from usage.record lines.
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, for_each_json_line};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// Top-level wire.jsonl line: either metadata or a timestamped message
@@ -174,33 +173,17 @@ struct KimiCodeWireLine {
 
 /// Parse a Kimi Code wire.jsonl file.
 pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let session_id = extract_session_id_from_kimi_code_path(path);
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
-    let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
     let mut latest_request_model: Option<String> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
         let wire_line = match simd_json::from_slice::<KimiCodeWireLine>(&mut bytes) {
             Ok(wl) => wl,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         // usage.record can contain only a symbolic config reference, while the
@@ -213,14 +196,14 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             {
                 latest_request_model = Some(model);
             }
-            continue;
+            return;
         }
 
         // Only process usage.record lines.
         // step.end also carries usage, but it duplicates the same usage.record
         // that was emitted in the same turn, so we ignore it to avoid double counting.
         if wire_line.line_type != "usage.record" {
-            continue;
+            return;
         }
 
         // Only count turn-scoped usage. kimi-code tags every usage.record with
@@ -229,12 +212,12 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
         // own tooling treats a missing usageScope as session-scoped, so require
         // an explicit "turn" to avoid counting aggregate records.
         if wire_line.usage_scope.as_deref() != Some("turn") {
-            continue;
+            return;
         }
 
         // Skip entries with zero tokens
         let Some(tokens) = wire_line.usage.as_ref().and_then(TokenUsage::to_breakdown) else {
-            continue;
+            return;
         };
 
         let model = wire_line
@@ -264,67 +247,51 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             tokens,
             0.0,
         ));
-    }
+    });
 
     messages
 }
 
 /// Parse a Kimi CLI wire.jsonl file
 pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let model = read_model_from_config(path);
     let session_id = extract_session_id(path);
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
-    let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
     let mut timestamp_sources: Vec<TimestampSource> = Vec::new();
     let mut keyed_indices: HashMap<String, usize> = HashMap::new();
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
         let wire_line = match simd_json::from_slice::<WireLine>(&mut bytes) {
             Ok(wl) => wl,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         // Skip metadata lines (first line: {"type": "metadata", ...})
         if wire_line.line_type.as_deref() == Some("metadata") {
-            continue;
+            return;
         }
 
         let message = match wire_line.message {
             Some(m) => m,
-            None => continue,
+            None => return,
         };
 
         // Only process StatusUpdate messages
         if message.msg_type != "StatusUpdate" {
-            continue;
+            return;
         }
 
         let payload = match message.payload {
             Some(p) => p,
-            None => continue,
+            None => return,
         };
 
         let token_usage = match payload.token_usage {
             Some(u) => u,
-            None => continue,
+            None => return,
         };
 
         // Convert Unix seconds (float) to milliseconds, falling back to file
@@ -343,7 +310,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
 
         // Skip entries with zero tokens
         let Some(tokens) = token_usage.to_breakdown() else {
-            continue;
+            return;
         };
 
         let dedup_key = payload.message_id;
@@ -365,7 +332,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             message,
             timestamp_source,
         );
-    }
+    });
 
     messages
 }

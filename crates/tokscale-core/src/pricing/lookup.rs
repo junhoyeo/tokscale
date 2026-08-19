@@ -333,14 +333,18 @@ impl PricingLookup {
         sakana: HashMap<String, ModelPricing>,
         models_dev: HashMap<String, ModelPricing>,
     ) -> Self {
+        // Longest key first, then alphabetical. The alphabetical leg only pins
+        // equal-length ties so a run is reproducible; it carries no pricing
+        // meaning, and the cheaper or more authoritative row does not win by
+        // being sorted earlier.
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
-        litellm_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        litellm_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut openrouter_keys: Vec<String> = openrouter.keys().cloned().collect();
-        openrouter_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        openrouter_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut models_dev_keys: Vec<String> = models_dev.keys().cloned().collect();
-        models_dev_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        models_dev_keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
         let mut litellm_lower = HashMap::with_capacity(litellm.len());
         for key in &litellm_keys {
@@ -7195,6 +7199,51 @@ mod tests {
             r_unknown.matched_key, r_none.matched_key,
             "unknown hint via source_and_provider should behave like None"
         );
+    }
+
+    /// Regression (#1092): equal-length candidate keys must be ordered by the
+    /// index, not by `HashMap` iteration order. This exercises the ordered
+    /// candidate list consumed by `select_best_match` — two litellm keys of the
+    /// same length, no models.dev entries, so the only thing that can decide the
+    /// winner is the tiebreak in the key sort. Without it the lookup returns
+    /// whichever key the hasher happened to yield first, and the reported rate
+    /// flips between $0.01 and $0.02 across processes.
+    #[test]
+    fn test_pricing_index_deterministic_key_sorting_equal_length() {
+        let build = |first: (&str, f64), second: (&str, f64)| {
+            let mut litellm = HashMap::new();
+            for (key, input_cost) in [first, second] {
+                litellm.insert(
+                    key.to_string(),
+                    ModelPricing {
+                        input_cost_per_token: Some(input_cost),
+                        ..Default::default()
+                    },
+                );
+            }
+            PricingLookup::new_with_models_dev(
+                litellm,
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+        };
+
+        let east = ("bedrock/us-east-1/zai.glm-5", 0.01);
+        let west = ("bedrock/us-west-2/zai.glm-5", 0.02);
+        assert_eq!(east.0.len(), west.0.len());
+
+        for (order, index) in [build(east, west), build(west, east)].iter().enumerate() {
+            let result = index
+                .lookup_with_provider("zai.glm-5", Some("bedrock"))
+                .unwrap_or_else(|| panic!("insertion order {order} must resolve zai.glm-5"));
+            assert_eq!(
+                result.matched_key, "bedrock/us-east-1/zai.glm-5",
+                "equal-length candidates must resolve to the alphabetically first key regardless of insertion order (order {order})"
+            );
+            assert_eq!(result.pricing.input_cost_per_token, Some(0.01));
+        }
     }
 
     /// Regression (#1062): a bare router label must not be priced from a

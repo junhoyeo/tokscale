@@ -36,9 +36,11 @@
 //! always set. If a future format needs multiple messages per turn, revisit
 //! that flag before counting turns.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str, read_file_or_none};
+use super::utils::{
+    file_modified_timestamp_ms, parse_timestamp_str, read_file_or_none, AnthropicUsage,
+};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::provider_identity;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -83,15 +85,7 @@ struct AugmentExchange {
 /// do not fail the turn.
 #[derive(Debug, Deserialize)]
 struct AugmentResponseNode {
-    token_usage: Option<AugmentTokenUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AugmentTokenUsage {
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    cache_read_input_tokens: Option<i64>,
-    cache_creation_input_tokens: Option<i64>,
+    token_usage: Option<AnthropicUsage>,
 }
 
 fn model_id(model: Option<&str>) -> String {
@@ -111,23 +105,13 @@ fn provider_for_model(model: &str) -> String {
         .to_string()
 }
 
-fn tokens_from_usage(usage: &AugmentTokenUsage) -> TokenBreakdown {
-    TokenBreakdown {
-        input: usage.input_tokens.unwrap_or(0).max(0),
-        output: usage.output_tokens.unwrap_or(0).max(0),
-        cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-        cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
-        reasoning: 0,
-    }
-}
-
-fn usage_is_nonzero(usage: &AugmentTokenUsage) -> bool {
-    tokens_from_usage(usage).total() > 0
+fn usage_is_nonzero(usage: &AnthropicUsage) -> bool {
+    usage.to_breakdown().total() > 0
 }
 
 /// Prefer the last non-empty observation so a later full total wins over an
 /// earlier partial if the format ever streams multiple usage nodes.
-fn last_token_usage(nodes: &[AugmentResponseNode]) -> Option<&AugmentTokenUsage> {
+fn last_token_usage(nodes: &[AugmentResponseNode]) -> Option<&AnthropicUsage> {
     nodes
         .iter()
         .rev()
@@ -216,7 +200,7 @@ pub fn parse_augment_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         };
 
-        let tokens = tokens_from_usage(usage);
+        let tokens = usage.to_breakdown();
 
         let model = model_id(
             exchange

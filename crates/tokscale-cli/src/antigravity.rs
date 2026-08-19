@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -17,6 +17,38 @@ const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
 static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static HTTPS_RPC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static RPC_TRANSPORT: OnceLock<Mutex<HashMap<u16, RpcTransport>>> = OnceLock::new();
+
+/// Which transport an Antigravity RPC port has already answered on.
+///
+/// `rpc_request` tries plaintext first and falls back to TLS. A DesktopAgent
+/// that only speaks TLS therefore pays the doomed plaintext leg — and its full
+/// 10s read timeout, since a TLS listener given plaintext may simply wait for a
+/// ClientHello that never comes — on *every* RPC. `sync` issues one RPC per
+/// session (`try_fetch_session_artifact`), so that cost is multiplied by the
+/// user's whole history. `probe_heartbeat` already learns the answer during
+/// discovery; this is where that answer is kept instead of thrown away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcTransport {
+    PlainHttp,
+    Https,
+}
+
+fn rpc_transport_cache() -> &'static Mutex<HashMap<u16, RpcTransport>> {
+    RPC_TRANSPORT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A poisoned lock only means some other thread panicked mid-update; the cache
+/// is an optimization, so treat that as "unknown" rather than propagating.
+fn cached_rpc_transport(port: u16) -> Option<RpcTransport> {
+    rpc_transport_cache().lock().ok()?.get(&port).copied()
+}
+
+fn remember_rpc_transport(port: u16, transport: RpcTransport) {
+    if let Ok(mut cache) = rpc_transport_cache().lock() {
+        cache.insert(port, transport);
+    }
+}
 
 fn home_dir() -> Result<PathBuf> {
     crate::paths::home_dir().context("Could not determine home directory")
@@ -1288,11 +1320,19 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
 }
 
 fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
+    // Discovery is the one place that legitimately has to try both. Record the
+    // winner so the per-session RPCs that follow do not re-derive it.
     if probe_plain_http_heartbeat(port, csrf_token) {
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
         return true;
     }
 
-    probe_https_heartbeat(port, csrf_token)
+    if probe_https_heartbeat(port, csrf_token) {
+        remember_rpc_transport(port, RpcTransport::Https);
+        return true;
+    }
+
+    false
 }
 
 fn probe_https_heartbeat(port: u16, csrf_token: &str) -> bool {
@@ -1867,13 +1907,29 @@ fn fetch_historical_session_artifact(
 }
 
 fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    // A port already known to speak TLS will never answer plaintext, so the
+    // plaintext leg here is pure latency — see [`RpcTransport`]. Deliberately
+    // no plaintext retry on failure: a listener does not change protocol
+    // mid-run, and retrying would reintroduce exactly the cost being removed.
+    if cached_rpc_transport(connection.port) == Some(RpcTransport::Https) {
+        return https_rpc_request(connection, method, body)
+            .with_context(|| format!("HTTPS RPC failed for Antigravity RPC {method}"));
+    }
+
     match rpc_request_plain_http(connection, method, body) {
-        Ok(value) => Ok(value),
-        Err(http_err) => https_rpc_request(connection, method, body).with_context(|| {
-            format!(
-                "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
-            )
-        }),
+        Ok(value) => {
+            remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
+            Ok(value)
+        }
+        Err(http_err) => {
+            let value = https_rpc_request(connection, method, body).with_context(|| {
+                format!(
+                    "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
+                )
+            })?;
+            remember_rpc_transport(connection.port, RpcTransport::Https);
+            Ok(value)
+        }
     }
 }
 
@@ -1921,6 +1977,15 @@ fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
 fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            // Defensive only — this is NOT what fixed any reported hang, and the
+            // earlier claim that it was (#1127) was wrong. `reqwest` is built
+            // `default-features = false` without `http2`, so neither it nor
+            // `hyper` links `h2` at all: this client never offers h2 over ALPN
+            // and has no HTTP/2 implementation to multiplex with. The pin only
+            // starts meaning anything if someone enables that feature later, and
+            // it stays correct if they do, because `rpc_request` issues a single
+            // unary Connect POST over loopback with nothing to multiplex.
+            .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -3154,6 +3219,8 @@ mod tests {
     }
 
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::thread;
 
     fn serve_once(body: Vec<u8>, headers_extra: &str) -> u16 {
@@ -3172,6 +3239,94 @@ mod tests {
             let _ = stream.write_all(&body);
         });
         port
+    }
+
+    /// Listener that classifies each connection by its first byte and then
+    /// closes without answering: a TLS ClientHello starts with 0x16, a
+    /// plaintext Connect POST with `P`. Closing silently is what makes the
+    /// wrong-transport leg expensive in production, and it lets these tests
+    /// count the legs that were actually attempted.
+    fn serve_transport_counter() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let plaintext = Arc::new(AtomicUsize::new(0));
+        let tls = Arc::new(AtomicUsize::new(0));
+        let (plaintext_seen, tls_seen) = (Arc::clone(&plaintext), Arc::clone(&tls));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut first = [0_u8; 1];
+                match std::io::Read::read(&mut stream, &mut first) {
+                    Ok(1) if first[0] == 0x16 => tls_seen.fetch_add(1, Ordering::SeqCst),
+                    Ok(1) => plaintext_seen.fetch_add(1, Ordering::SeqCst),
+                    _ => 0,
+                };
+            }
+        });
+        (port, plaintext, tls)
+    }
+
+    fn wait_for_at_least(counter: &AtomicUsize, target: usize) -> usize {
+        for _ in 0..100 {
+            let seen = counter.load(Ordering::SeqCst);
+            if seen >= target {
+                return seen;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        counter.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn rpc_request_skips_the_plaintext_leg_once_a_port_is_known_to_speak_tls() {
+        // The regression this guards: `sync` issues one RPC per session, and
+        // before the transport was remembered every one of them re-attempted
+        // plaintext against a TLS-only DesktopAgent, paying that leg's read
+        // timeout each time.
+        let (port, plaintext, tls) = serve_transport_counter();
+        remember_rpc_transport(port, RpcTransport::Https);
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+
+        // Errors either way -- there is no real TLS server behind the counter.
+        // What matters is which legs were attempted, not that they succeeded.
+        let _ = rpc_request(&connection, "X", &serde_json::json!({}));
+        let _ = rpc_request(&connection, "X", &serde_json::json!({}));
+
+        assert!(
+            wait_for_at_least(&tls, 1) >= 1,
+            "the HTTPS leg must still be attempted"
+        );
+        assert_eq!(
+            plaintext.load(Ordering::SeqCst),
+            0,
+            "a port known to speak TLS must never be re-probed in plaintext"
+        );
+    }
+
+    #[test]
+    fn rpc_request_remembers_a_port_that_answered_plain_http() {
+        let body = br#"{"ok":true}"#.to_vec();
+        let port = serve_once(body.clone(), &format!("Content-Length: {}\r\n", body.len()));
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+
+        rpc_request(&connection, "X", &serde_json::json!({})).unwrap();
+
+        assert_eq!(
+            cached_rpc_transport(port),
+            Some(RpcTransport::PlainHttp),
+            "a working plaintext port must be remembered, so the TLS leg is not tried later"
+        );
     }
 
     #[test]

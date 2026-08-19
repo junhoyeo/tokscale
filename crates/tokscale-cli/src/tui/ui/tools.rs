@@ -332,6 +332,7 @@ mod tests {
                 until: None,
                 year: None,
                 initial_tab: None,
+                worktree_rollup: Default::default(),
             },
             Some(UsageData::default()),
         )

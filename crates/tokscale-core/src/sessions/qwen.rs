@@ -3,11 +3,10 @@
 //! Parses JSONL files from ~/.qwen/projects/{projectPath}/chats/*.jsonl
 //! Token data comes from assistant messages with usageMetadata field.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::utils::{file_modified_timestamp_ms, for_each_json_line, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// Qwen CLI JSONL line structure
@@ -74,45 +73,29 @@ pub fn extract_session_id_with_fallback(path: &Path, json_session_id: Option<&st
 
 /// Parse a Qwen CLI JSONL file
 pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     let file_mtime = file_modified_timestamp_ms(path);
     let (workspace_key, workspace_label) = qwen_workspace_from_path(path);
 
-    let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
     // Qwen JSONL lines carry no per-message id, so anchor the dedup key to the
     // stable position of the emitted message within its session.
     let mut message_index: usize = 0;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
         let qwen_line = match simd_json::from_slice::<QwenLine>(&mut bytes) {
             Ok(q) => q,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         // Only process assistant type messages with usageMetadata
         if qwen_line.msg_type.as_deref() != Some("assistant") {
-            continue;
+            return;
         }
 
         let usage = match qwen_line.usage_metadata {
             Some(u) => u,
-            None => continue,
+            None => return,
         };
 
         // Parse timestamp, fallback to file mtime
@@ -130,7 +113,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
 
         // Skip entries with zero tokens
         if input + output + cache_read + reasoning == 0 {
-            continue;
+            return;
         }
 
         // Use model from line or fallback to "unknown"
@@ -161,7 +144,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
-    }
+    });
 
     messages
 }

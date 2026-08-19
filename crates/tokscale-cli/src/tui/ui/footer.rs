@@ -272,6 +272,17 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             format!("[g:{}]", app.group_by.borrow()),
             Style::default().fg(Color::Cyan),
         ));
+        // `w` only does anything under workspace grouping, so only advertise it there.
+        if *app.group_by.borrow() == tokscale_core::GroupBy::WorkspaceModel {
+            spans.push(Span::styled(" ", Style::default()));
+            spans.push(Span::styled(
+                match app.worktree_rollup {
+                    tokscale_core::WorktreeRollup::MergeIntoRepo => "[w:repos]",
+                    tokscale_core::WorktreeRollup::Separate => "[w:worktrees]",
+                },
+                Style::default().fg(Color::Cyan),
+            ));
+        }
         spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         spans.push(Span::styled(
             format!("[p:{}]", app.theme.name.as_str()),
@@ -420,6 +431,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: Some(tab),
+            ..Default::default()
         };
         App::new_with_cached_data(config, Some(UsageData::default())).unwrap()
     }

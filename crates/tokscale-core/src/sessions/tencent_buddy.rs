@@ -1,11 +1,11 @@
 //! Shared parsers for Tencent CodeBuddy / WorkBuddy session formats.
 
+use super::utils::for_each_json_line;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use chrono::TimeZone;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const DEFAULT_PROVIDER: &str = "tencent";
@@ -187,11 +187,6 @@ pub(crate) fn parse_jsonl_file(
     default_model: &'static str,
     path: &Path,
 ) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_session_id = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -201,26 +196,18 @@ pub(crate) fn parse_jsonl_file(
     let mut keyed_indices: HashMap<String, usize> = HashMap::new();
     let mut messages: Vec<UnifiedMessage> = Vec::new();
 
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
         let item = match simd_json::from_slice::<BuddyLine>(&mut bytes) {
             Ok(item) => item,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         let is_assistant_message = item.line_type.as_deref() == Some("message")
             && item.role.as_deref() == Some("assistant");
         let is_function_call = item.line_type.as_deref() == Some("function_call");
         if !is_assistant_message && !is_function_call {
-            continue;
+            return;
         }
 
         if item
@@ -228,7 +215,7 @@ pub(crate) fn parse_jsonl_file(
             .as_deref()
             .is_some_and(|status| status != "completed")
         {
-            continue;
+            return;
         }
 
         let usage = item
@@ -246,7 +233,7 @@ pub(crate) fn parse_jsonl_file(
                     .and_then(|provider| provider.raw_usage.as_ref())
             });
         let Some(tokens) = usage.and_then(BuddyUsage::to_breakdown) else {
-            continue;
+            return;
         };
 
         let provider_data = item.provider_data.as_ref();
@@ -296,13 +283,13 @@ pub(crate) fn parse_jsonl_file(
                 if message.tokens.total() >= messages[existing_index].tokens.total() {
                     messages[existing_index] = message;
                 }
-                continue;
+                return;
             }
             keyed_indices.insert(key, messages.len());
         }
 
         messages.push(message);
-    }
+    });
 
     messages
 }
@@ -312,11 +299,6 @@ pub(crate) fn parse_extension_log_file(
     default_model: &'static str,
     path: &Path,
 ) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = super::utils::file_modified_timestamp_ms(path);
     let fallback_session_id = path
         .file_stem()
@@ -326,44 +308,40 @@ pub(crate) fn parse_extension_log_file(
     let mut models_by_agent: HashMap<String, String> = HashMap::new();
     let mut messages = Vec::new();
 
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-
+    for_each_json_line(path, &mut |_index, line| {
         if line.contains("[CraftInvokableAgent]") && line.contains("Model prepared:") {
-            if let Some((agent_id, model_id)) = parse_model_prepared_line(&line) {
+            if let Some((agent_id, model_id)) = parse_model_prepared_line(line) {
                 models_by_agent.insert(agent_id, model_id);
             }
-            continue;
+            return;
         }
 
         if !line.contains("[AgentReporter]")
             || !line.contains("Agent execution successful with usage:")
         {
-            continue;
+            return;
         }
 
-        let Some(agent_id) = bracket_value_after(&line, "[AgentReporter]") else {
-            continue;
+        let Some(agent_id) = bracket_value_after(line, "[AgentReporter]") else {
+            return;
         };
         let Some(usage_json) = line.split("Agent execution successful with usage:").nth(1) else {
-            continue;
+            return;
         };
         let usage_json = usage_json.trim();
         let Some(json_end) = usage_json.rfind('}') else {
-            continue;
+            return;
         };
         let mut bytes = usage_json.as_bytes()[..=json_end].to_vec();
         let usage = match simd_json::from_slice::<BuddyUsage>(&mut bytes) {
             Ok(usage) => usage,
-            Err(_) => continue,
+            Err(_) => return,
         };
         let Some(tokens) = usage.to_breakdown() else {
-            continue;
+            return;
         };
 
-        let timestamp = parse_log_timestamp_ms(&line).unwrap_or(fallback_timestamp);
+        let timestamp = parse_log_timestamp_ms(line).unwrap_or(fallback_timestamp);
         let model_id = models_by_agent
             .get(&agent_id)
             .cloned()
@@ -406,7 +384,7 @@ pub(crate) fn parse_extension_log_file(
         }
 
         messages.push(message);
-    }
+    });
 
     messages
 }

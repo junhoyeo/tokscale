@@ -33,7 +33,7 @@ pub use sessionize::{
 pub use sessions::{CostSource, UnifiedMessage};
 
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -576,6 +576,9 @@ pub struct ReportOptions {
     pub until: Option<String>,
     pub year: Option<String>,
     pub group_by: GroupBy,
+    /// Whether `workspace,model` rows fold git worktrees into their parent repo.
+    /// Only consulted for [`GroupBy::WorkspaceModel`].
+    pub worktree_rollup: WorktreeRollup,
     /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
     /// Defaults to empty when callers don't care about user-configured paths.
     pub scanner_settings: scanner::ScannerSettings,
@@ -1277,6 +1280,54 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         }
     }
 
+    /// Same as [`parse_cached_lane`], for a client whose transcripts can repeat
+    /// one another's rows verbatim.
+    ///
+    /// A DSH fork seeds the child transcript with the parent's completed prefix
+    /// — same `message.id`, time and usage, under a different session id — so
+    /// the per-source cache alone cannot collapse the copy. Dedup keys survive
+    /// a warm cache hit, so the pass behaves identically cold and warm.
+    ///
+    /// Ownership, and what this pass does not decide: when the child header
+    /// carries `seedLength` the parser drops the seeded rows at the source, so
+    /// the parent's copy survives whatever order the scan hands the files over
+    /// in. This pass is the fallback for a header that lost the field, which
+    /// DSH's own readers treat as an unseeded log (`header.seedLength ?? 0` in
+    /// `core/agent/src/inbox.ts` and `schedule/src/invariant.ts`) — nothing in
+    /// the transcript then marks the prefix as inherited. It degrades to
+    /// first-wins in scan-path order: totals and per-model rollups stay
+    /// correct, and only the session label on the surviving row depends on
+    /// which transcript sorts first.
+    fn parse_cached_lane_deduped<F>(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        scan_client: ClientId,
+        parse: F,
+    ) where
+        F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+    {
+        let cache_identity = message_cache::CacheIdentity::for_client(scan_client);
+        let outcomes: Vec<CachedParseOutcome> = scan_result
+            .get(scan_client)
+            .par_iter()
+            .map(|path| load_or_parse_source(cache_identity, path, source_cache, pricing, &parse))
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        for outcome in outcomes {
+            all_messages.extend(
+                outcome
+                    .messages
+                    .into_iter()
+                    .filter(|message| should_keep_deduped_message(&mut seen, message)),
+            );
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+    }
+
     fn uncached_prime_outcome(
         mut messages: Vec<UnifiedMessage>,
         accounting: sessions::prime_agent::PrimeFileAccounting,
@@ -1910,6 +1961,15 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         &mut source_cache,
         pricing,
         &mut all_messages,
+        ClientId::Mcode,
+        sessions::mcode::parse_mcode_file,
+    );
+
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
         ClientId::Warp,
         sessions::warp::parse_warp_file,
     );
@@ -2294,6 +2354,21 @@ fn parse_all_messages_with_pricing_with_cache_policy(
             source_cache.insert(entry);
         }
     }
+
+    // DeepSeek Harness (DSH) zstd JSONL transcripts. Every `assistant/message`
+    // carries authoritative usage but never a cost, so pricing is the only cost
+    // source — the generic source cache (which reprices unconditionally) is
+    // safe here, same as opencodereview. Forking copies the parent's completed
+    // prefix into the child transcript verbatim, so the lane also needs one
+    // cross-file dedup pass on the per-call `message.id`.
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Dsh,
+        sessions::dsh::parse_dsh_file,
+    );
 
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
@@ -2922,32 +2997,357 @@ fn filter_unified_messages(
     filtered
 }
 
-fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
-    match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
-        (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
-            sessions::workspace_label_from_key(key)
-                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
-        ),
-        _ => (
-            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
-            None,
-            UNKNOWN_WORKSPACE_LABEL.to_string(),
-        ),
+/// How workspace rows treat git worktrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub enum WorktreeRollup {
+    /// One row per worktree — a task-isolating agent CLI produces many rows per repo.
+    #[default]
+    Separate,
+    /// Fold every worktree into its parent repository.
+    MergeIntoRepo,
+}
+
+/// Resolving a workspace key to a display label reads the filesystem (see
+/// [`sessions::decode_claude_project_slug`]). Reports iterate hundreds of
+/// thousands of messages over a handful of distinct workspaces, so memoize per
+/// key and keep the syscalls proportional to workspaces, not messages.
+#[derive(Default)]
+pub struct WorkspaceLabeler {
+    labels: HashMap<String, String>,
+    roots: HashMap<String, Option<String>>,
+    paths: HashMap<String, Option<String>>,
+    decoded: HashMap<String, Option<String>>,
+    resolved_roots: HashMap<String, Option<String>>,
+}
+
+impl WorkspaceLabeler {
+    pub fn label(&mut self, key: &str) -> String {
+        if let Some(cached) = self.labels.get(key) {
+            return cached.clone();
+        }
+        let decoded = self.decoded(key);
+        let label = sessions::workspace_display_label_for_decoded_key(key, decoded.as_deref())
+            .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string());
+        self.labels.insert(key.to_string(), label.clone());
+        label
+    }
+
+    /// The real filesystem path `key` names, decoded from Claude Code's slug
+    /// where it is one. `None` when the key is not a path (an opaque client id)
+    /// or its directory is gone.
+    pub fn path(&mut self, key: &str) -> Option<String> {
+        if let Some(cached) = self.paths.get(key) {
+            return cached.clone();
+        }
+        let decoded = self.decoded(key);
+        let path = sessions::workspace_path_for_decoded_key(key, decoded.as_deref());
+        self.paths.insert(key.to_string(), path.clone());
+        path
+    }
+
+    /// Claude Code's slug decoded to a real path, memoized.
+    ///
+    /// The decode is the expensive half of every method here: it walks the
+    /// filesystem, backtracking over the ambiguity in the dash encoding. Without
+    /// this cache `label`, `path` and `repo_root` each ran their own walk for the
+    /// same key, so a slug that took 7s to decode cost 23s across one row.
+    fn decoded(&mut self, key: &str) -> Option<String> {
+        if let Some(cached) = self.decoded.get(key) {
+            return cached.clone();
+        }
+        let decoded = sessions::decode_claude_project_slug(key);
+        self.decoded.insert(key.to_string(), decoded.clone());
+        decoded
+    }
+
+    /// Distinct keys whose slug decode has been resolved, for tests that need to
+    /// prove the walk is shared across `label`, `path` and `repo_root`.
+    #[cfg(test)]
+    pub(crate) fn decoded_key_count(&self) -> usize {
+        self.decoded.len()
+    }
+
+    /// The repo root a resolved filesystem path belongs to, memoized.
+    ///
+    /// Distinct from [`Self::repo_root`], which is keyed by the workspace key and
+    /// applies the slug fallbacks. This one is keyed by path because it reads the
+    /// `.git` pointer file, and several keys can resolve to the same directory.
+    pub fn repo_root_of_path(&mut self, path: &str) -> Option<String> {
+        if let Some(cached) = self.resolved_roots.get(path) {
+            return cached.clone();
+        }
+        let root = sessions::workspace_repo_root_resolved(path);
+        self.resolved_roots.insert(path.to_string(), root.clone());
+        root
+    }
+
+    /// The canonical repo identity for `key`: the real filesystem path, with any
+    /// worktree suffix stripped. `None` when the key cannot be resolved to a path
+    /// (an opaque client id, or a directory no longer on disk), leaving the
+    /// original key as its own identity.
+    ///
+    /// Decoding is what makes the rollup actually merge. Claude Code writes a
+    /// dash-mangled slug and Codex/OpenCode write real paths, so without this the
+    /// same repo keeps two identities and the "one row per repo" promise fails.
+    pub fn repo_root(&mut self, key: &str) -> Option<String> {
+        if let Some(cached) = self.roots.get(key) {
+            return cached.clone();
+        }
+        // Decode first: Claude's slug encodes `.claude/worktrees/` as dashes, so
+        // the marker is only visible once the real path is recovered.
+        let decoded = self.decoded(key);
+        let path = decoded.clone().unwrap_or_else(|| key.to_string());
+        let root = self
+            .repo_root_of_path(&path)
+            // Not a worktree: the decoded path is already the repo identity.
+            .or_else(|| decoded.clone())
+            // Undecodable slug (deleted worktree): fall back to the repo prefix
+            // recovered from the slug string so it still merges with its repo.
+            .or_else(|| sessions::workspace_repo_root_from_slug(key));
+        self.roots.insert(key.to_string(), root.clone());
+        root
     }
 }
 
+/// Grouping key, stored key and display label for a message's workspace.
+///
+/// Shared with the TUI, which runs its own aggregation over the same messages —
+/// duplicating this would let the two drift on how worktrees roll up and how
+/// Claude Code's dash-mangled keys are labeled.
+pub fn workspace_bucket(
+    msg: &UnifiedMessage,
+    rollup: WorktreeRollup,
+    labeler: &mut WorkspaceLabeler,
+) -> (String, Option<String>, String) {
+    let Some(key) = msg.workspace_key.as_deref() else {
+        return (
+            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
+            None,
+            UNKNOWN_WORKSPACE_LABEL.to_string(),
+        );
+    };
+
+    // Under MergeIntoRepo the repo root becomes the grouping identity, so every
+    // worktree of a repo lands in one row and the row reports the repo's path.
+    if rollup == WorktreeRollup::MergeIntoRepo {
+        if let Some(root) = labeler.repo_root(key) {
+            let label = labeler.label(&root);
+            return (root.clone(), Some(root), label);
+        }
+    }
+
+    // A parser-supplied label is authoritative — it is the only thing that can
+    // name a workspace whose key is not a path (Warp's workspace UUID). Keys
+    // that fell back to `workspace_label_from_key` are relabeled, because that
+    // helper returns the whole dash-mangled slug for Claude Code.
+    let label = match msg.workspace_label.as_deref() {
+        Some(label) if Some(label.to_string()) != sessions::workspace_label_from_key(key) => {
+            label.to_string()
+        }
+        _ => labeler.label(key),
+    };
+
+    (key.to_string(), Some(key.to_string()), label)
+}
+
+/// The label to display for every distinct workspace in `messages`, keyed by the
+/// grouping identity its rows will use.
+///
+/// A label is a basename, so `~/work/api` and `~/oss/api` render as the same
+/// text even though they stay separate rows with separate keys — the row is
+/// still correct, but the reader cannot tell which repo it is looking at. Each
+/// colliding label is qualified here with the fewest leading parent segments
+/// that tell the group apart (`work/api`, `oss/api`).
+///
+/// Grouping keys are never touched: this rewrites display text only, so no usage
+/// moves between rows and no total changes.
+///
+/// Resolved up front rather than as a post-pass over the rows: the daily
+/// breakdown keys its legend off the label while it aggregates, so fixing the
+/// table afterwards would leave the chart showing the ambiguous name.
+pub fn workspace_label_overrides(
+    messages: &[UnifiedMessage],
+    rollup: WorktreeRollup,
+    labeler: &mut WorkspaceLabeler,
+) -> HashMap<String, String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    for msg in messages {
+        let Some(key) = msg.workspace_key.as_deref() else {
+            continue;
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        let (group_key, _, label) = workspace_bucket(msg, rollup, labeler);
+        base.entry(group_key).or_insert(label);
+    }
+
+    disambiguate_workspace_labels(
+        base.iter()
+            .map(|(key, label)| (key.as_str(), label.as_str())),
+        labeler,
+    )
+}
+
+/// Rewrite `labeled` — (grouping key, base label) pairs — so no two keys share a
+/// label, qualifying each collision with as few leading path segments as it
+/// takes and falling back to the grouping key when the filesystem cannot
+/// separate them at all.
+fn disambiguate_workspace_labels<'a>(
+    labeled: impl IntoIterator<Item = (&'a str, &'a str)>,
+    labeler: &mut WorkspaceLabeler,
+) -> HashMap<String, String> {
+    // BTree everywhere: with two directories that encode identically there is
+    // nothing on disk to order them by, so the output must not depend on hash
+    // iteration order.
+    let mut by_label: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (key, label) in labeled {
+        by_label.entry(label).or_default().insert(key);
+    }
+
+    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+    for (label, keys) in by_label {
+        if keys.len() == 1 {
+            for key in keys {
+                resolved.insert(key.to_string(), label.to_string());
+            }
+            continue;
+        }
+
+        let keys: Vec<&str> = keys.into_iter().collect();
+        let parents: Vec<Vec<String>> = keys
+            .iter()
+            .map(|key| workspace_parent_segments(labeler, key))
+            .collect();
+        let max_depth = parents.iter().map(Vec::len).max().unwrap_or(0);
+
+        // Fewest segments that tell the most rows apart. Escalating past that
+        // buys nothing: when two keys name the SAME directory every remaining
+        // segment is identical on both rows, so a deeper qualifier only makes
+        // the label longer and pushes the part that actually differs — the key
+        // appended below — off a narrow row.
+        let mut depth = 0;
+        let mut separated = 0;
+        for candidate in 0..=max_depth {
+            let candidates: HashSet<String> = parents
+                .iter()
+                .map(|parents| qualify_workspace_label(label, parents, candidate))
+                .collect();
+            if candidates.len() > separated {
+                separated = candidates.len();
+                depth = candidate;
+            }
+            if separated == keys.len() {
+                break;
+            }
+        }
+
+        for (key, parents) in keys.iter().zip(&parents) {
+            resolved.insert(
+                (*key).to_string(),
+                qualify_workspace_label(label, parents, depth),
+            );
+        }
+    }
+
+    // Whatever the filesystem could not separate — two keys that resolve to the
+    // same directory, or keys with no path at all — is separated by the grouping
+    // key, which is unique by construction.
+    let mut duplicates: BTreeMap<&str, usize> = BTreeMap::new();
+    for label in resolved.values() {
+        *duplicates.entry(label.as_str()).or_default() += 1;
+    }
+    let ambiguous: HashSet<String> = duplicates
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(label, _)| label.to_string())
+        .collect();
+
+    resolved
+        .into_iter()
+        .map(|(key, label)| {
+            if ambiguous.contains(&label) {
+                let qualified = format!("{label} ({key})");
+                (key, qualified)
+            } else {
+                (key, label)
+            }
+        })
+        .collect()
+}
+
+/// Parent segments of the directory whose name the label leads with, nearest
+/// first. Empty when the key resolves to no path, which is what makes the
+/// caller fall through to qualifying by the key itself.
+fn workspace_parent_segments(labeler: &mut WorkspaceLabeler, key: &str) -> Vec<String> {
+    let Some(path) = labeler.path(key) else {
+        return Vec::new();
+    };
+    // A worktree label reads `repo ⑃ worktree`, so it is the REPO whose parents
+    // disambiguate it, not the worktree's `.claude/worktrees` scaffolding.
+    let anchor = labeler.repo_root_of_path(&path).unwrap_or(path);
+    let mut segments: Vec<String> = anchor
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect();
+    // The last segment is already the label's own name.
+    segments.pop();
+    segments.reverse();
+    segments
+}
+
+/// `label` prefixed with up to `depth` parent segments, outermost first, so the
+/// result reads like the tail of the path it came from.
+fn qualify_workspace_label(label: &str, parents: &[String], depth: usize) -> String {
+    let taken = depth.min(parents.len());
+    if taken == 0 {
+        return label.to_string();
+    }
+    let mut prefix: Vec<&str> = parents[..taken].iter().map(String::as_str).collect();
+    prefix.reverse();
+    format!("{}/{label}", prefix.join("/"))
+}
+
+#[cfg(test)]
 fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
+    aggregate_model_usage_entries_with_rollup(messages, group_by, WorktreeRollup::default())
+}
+
+fn aggregate_model_usage_entries_with_rollup(
+    messages: Vec<UnifiedMessage>,
+    group_by: &GroupBy,
+    rollup: WorktreeRollup,
+) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
+    let mut labeler = WorkspaceLabeler::default();
+
+    // Bucketing a workspace resolves its label, which reads the filesystem. Every
+    // other grouping discards that label a few lines below, so skip the work rather
+    // than paying it on `tokscale --light`, `monthly`, and every TUI refresh.
+    let needs_workspace = matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    );
+    let label_overrides = if needs_workspace {
+        workspace_label_overrides(&messages, rollup, &mut labeler)
+    } else {
+        HashMap::new()
+    };
 
     for msg in messages {
         let normalized = model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
+        let (workspace_group_key, workspace_key, workspace_label) = if needs_workspace {
+            let (group_key, key, label) = workspace_bucket(&msg, rollup, &mut labeler);
+            let label = label_overrides.get(&group_key).cloned().unwrap_or(label);
+            (group_key, key, label)
+        } else {
+            (String::new(), None, String::new())
+        };
         let key = match group_by {
             GroupBy::Model => normalized.clone(),
             GroupBy::ClientModel => format!("{}:{}", msg.client, normalized),
@@ -3127,7 +3527,11 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
-    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
+    let entries = aggregate_model_usage_entries_with_rollup(
+        filtered,
+        &options.group_by,
+        options.worktree_rollup,
+    );
 
     let (total_input, total_output, total_cache_read, total_cache_write) =
         model_report_token_totals(&entries);
@@ -4406,6 +4810,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
 
+    // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
+    // the parent's rows verbatim in a second file, so dedup across the lane.
+    let dsh_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Dsh)
+        .par_iter()
+        .flat_map(|path| sessions::dsh::parse_dsh_file(path))
+        .collect();
+    let mut dsh_seen: HashSet<String> = HashSet::new();
+    let dsh_msgs: Vec<ParsedMessage> = dsh_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut dsh_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let dsh_count = summed_parsed_message_count(&dsh_msgs);
+    counts.set(ClientId::Dsh, dsh_count);
+    messages.extend(dsh_msgs);
+
+    let mcode_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Mcode)
+        .par_iter()
+        .flat_map(|path| sessions::mcode::parse_mcode_file(path))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let mcode_count = summed_parsed_message_count(&mcode_msgs);
+    counts.set(ClientId::Mcode, mcode_count);
+    messages.extend(mcode_msgs);
+
     let opencodereview_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::OpenCodeReview)
         .par_iter()
@@ -5016,6 +5447,10 @@ mod tests {
         MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
         UNVERIFIED_MODEL_IDENTITY_REASON, UNVERIFIED_PROVIDER_IDENTITY_REASON,
     };
+    // Kept as its own statement rather than folded into the list above: that list
+    // is edited by nearly every PR that touches this file, and sharing it made
+    // this branch conflict on every single upstream merge.
+    use super::{aggregate_model_usage_entries_with_rollup, WorktreeRollup};
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -6265,6 +6700,513 @@ mod tests {
     }
 
     #[test]
+    fn worktree_rollup_merges_worktrees_of_one_repo_into_a_single_row() {
+        let messages = vec![
+            make_workspace_message(
+                "claude",
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("/repo-a/.claude/worktrees/feature-x"),
+                None,
+            ),
+            make_workspace_message(
+                "claude",
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-2",
+                2.0,
+                Some("/repo-a/.claude/worktrees/feature-y"),
+                None,
+            ),
+            make_workspace_message(
+                "claude",
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-3",
+                4.0,
+                Some("/repo-a"),
+                None,
+            ),
+        ];
+
+        let separate = aggregate_model_usage_entries_with_rollup(
+            messages.clone(),
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+        assert_eq!(separate.len(), 3, "each worktree stays its own row");
+
+        let merged = aggregate_model_usage_entries_with_rollup(
+            messages,
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::MergeIntoRepo,
+        );
+        assert_eq!(merged.len(), 1, "every worktree folds into the repo row");
+        assert_eq!(merged[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(merged[0].workspace_label.as_deref(), Some("repo-a"));
+        // No usage may be lost or double counted by the rollup.
+        assert_eq!(merged[0].cost, 7.0);
+        assert_eq!(merged[0].message_count, 3);
+    }
+
+    #[test]
+    fn worktree_rollup_labels_name_the_repo_and_the_worktree() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![make_workspace_message(
+                "claude",
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("/repo-a/.claude/worktrees/feature-x"),
+                None,
+            )],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        // Without rollup the row must still say WHICH worktree it is -- the bug
+        // was a label that truncated to a shared, indistinguishable prefix.
+        assert_eq!(
+            entries[0].workspace_label.as_deref(),
+            Some("repo-a ⑃ feature-x")
+        );
+    }
+
+    #[test]
+    fn worktree_rollup_merges_a_slug_key_with_the_same_repos_real_path() {
+        // Claude Code writes a dash-mangled slug and Codex/OpenCode write real
+        // paths for the SAME directory. Under rollup both must resolve to one
+        // identity, or "one row per repo" silently still yields two.
+        // Spell the fixture the way `read_dir` reports it -- see
+        // `sessions::canonical_tempdir` for why that is not just `tempdir()`.
+        let (_temp, temp_root) = crate::sessions::canonical_tempdir();
+        let repo = temp_root.join("devpro/ing/claude-witness");
+        std::fs::create_dir_all(repo.join(".claude/worktrees/feature-x")).unwrap();
+
+        let real_path = crate::sessions::normalize_workspace_key(&repo.to_string_lossy()).unwrap();
+        let worktree_path = crate::sessions::normalize_workspace_key(
+            &repo.join(".claude/worktrees/feature-x").to_string_lossy(),
+        )
+        .unwrap();
+        // How Claude Code would name that worktree's project directory.
+        let slug: String = worktree_path
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some(&slug),
+                    None,
+                ),
+                make_workspace_message(
+                    "opencode",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some(&real_path),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::MergeIntoRepo,
+        );
+
+        assert_eq!(entries.len(), 1, "slug and real path must share one row");
+        assert_eq!(entries[0].cost, 3.0);
+        assert_eq!(
+            entries[0].workspace_label.as_deref(),
+            Some("claude-witness")
+        );
+    }
+
+    /// The same directory recorded twice — Claude Code's slug and another
+    /// client's real path — stays two rows without rollup, and those two rows
+    /// must still be tellable apart. No parent segment can do it (both resolve
+    /// to one directory), so the key does; escalating the parent qualifier
+    /// first would only push that key off a narrow row.
+    #[test]
+    fn same_directory_under_two_key_formats_is_separated_by_the_key() {
+        let (_temp, temp_root) = crate::sessions::canonical_tempdir();
+        let repo = temp_root.join("devpro/ing/claude-witness");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let real_path = crate::sessions::normalize_workspace_key(&repo.to_string_lossy()).unwrap();
+        let slug: String = real_path
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some(&slug),
+                    None,
+                ),
+                make_workspace_message(
+                    "opencode",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some(&real_path),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.iter().map(|entry| entry.cost).sum::<f64>(), 3.0);
+        let labels: HashSet<&str> = entries
+            .iter()
+            .map(|entry| entry.workspace_label.as_deref().unwrap())
+            .collect();
+        assert_eq!(labels.len(), 2, "rows must be tellable apart: {labels:?}");
+        for label in labels {
+            assert!(
+                label.starts_with("claude-witness ("),
+                "the key qualifies the base label, not a longer path: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_rows_keep_parser_supplied_labels_for_non_path_keys() {
+        // Warp keys a workspace by opaque UUID; only the parser can name it, so
+        // relabeling must not clobber that.
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![make_workspace_message(
+                "warp",
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("9f2c1a04-1e4b-4c3f-a0d1-77b2e5c9aa10"),
+                Some("Ing's Team"),
+            )],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::MergeIntoRepo,
+        );
+
+        assert_eq!(entries[0].workspace_label.as_deref(), Some("Ing's Team"));
+        assert_eq!(
+            entries[0].workspace_key.as_deref(),
+            Some("9f2c1a04-1e4b-4c3f-a0d1-77b2e5c9aa10")
+        );
+    }
+
+    /// Resolving one workspace key used to walk the filesystem three times —
+    /// once each for the label, the path and the repo root — so a slug that took
+    /// seconds to decode cost three times that per row. The decode is memoized
+    /// on the labeler and shared by all three.
+    #[test]
+    fn workspace_labeler_decodes_each_key_once() {
+        let mut labeler = crate::WorkspaceLabeler::default();
+        let key = "-nonexistent-tokscale-decode-probe";
+
+        let label = labeler.label(key);
+        let path = labeler.path(key);
+        let root = labeler.repo_root(key);
+        assert_eq!(
+            labeler.decoded_key_count(),
+            1,
+            "label/path/repo_root must share one decode"
+        );
+
+        // Repeating every call adds no decodes and changes no answers.
+        assert_eq!(labeler.label(key), label);
+        assert_eq!(labeler.path(key), path);
+        assert_eq!(labeler.repo_root(key), root);
+        assert_eq!(labeler.decoded_key_count(), 1);
+    }
+
+    /// Two directories that share a basename produced the same row text, which
+    /// made `--group-by workspace,model` unreadable exactly where it matters:
+    /// the rows are distinct and correctly separated, but nothing on screen said
+    /// which repo each one was.
+    #[test]
+    fn workspace_rows_disambiguate_colliding_basenames() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/work/proj"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("/oss/proj"),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        let labels: HashMap<&str, &str> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.workspace_key.as_deref().unwrap(),
+                    entry.workspace_label.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(labels.get("/work/proj"), Some(&"work/proj"));
+        assert_eq!(labels.get("/oss/proj"), Some(&"oss/proj"));
+        // Grouping is untouched: only the display string changed.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.iter().map(|entry| entry.cost).sum::<f64>(), 3.0);
+    }
+
+    /// One parent segment is not always enough. The qualifier has to keep
+    /// walking up until the rows actually differ, and stop as soon as they do.
+    #[test]
+    fn workspace_label_qualifier_walks_up_until_the_rows_differ() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/home/x/shared/api"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("/home/z/shared/api"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-3",
+                    4.0,
+                    Some("/home/x/other/api"),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        let labels: HashMap<&str, &str> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.workspace_key.as_deref().unwrap(),
+                    entry.workspace_label.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        // `shared/api` collides, so the group escalates one more segment -- and
+        // every member of the group escalates together, so the labels stay
+        // comparable to each other.
+        assert_eq!(labels.get("/home/x/shared/api"), Some(&"x/shared/api"));
+        assert_eq!(labels.get("/home/z/shared/api"), Some(&"z/shared/api"));
+        assert_eq!(labels.get("/home/x/other/api"), Some(&"x/other/api"));
+    }
+
+    /// Non-git directories are workspaces too: a plain folder must disambiguate
+    /// the same way, and a folder that merely LOOKS like git metadata
+    /// (`notes.git/worktrees/...`) must not be mistaken for a worktree.
+    #[test]
+    fn workspace_rows_disambiguate_non_git_paths() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/home/me/Documents/notes"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("/home/me/Dropbox/notes"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-3",
+                    4.0,
+                    Some("/home/me/notes.git/worktrees/notes"),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::MergeIntoRepo,
+        );
+
+        let labels: HashMap<&str, &str> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.workspace_key.as_deref().unwrap(),
+                    entry.workspace_label.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            labels.get("/home/me/Documents/notes"),
+            Some(&"Documents/notes")
+        );
+        assert_eq!(labels.get("/home/me/Dropbox/notes"), Some(&"Dropbox/notes"));
+        // `notes.git` is a directory name, not git metadata: the row keeps its
+        // own key even under rollup, and is labeled from its real parent.
+        assert_eq!(
+            labels.get("/home/me/notes.git/worktrees/notes"),
+            Some(&"worktrees/notes")
+        );
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.iter().map(|entry| entry.cost).sum::<f64>(), 7.0);
+    }
+
+    /// Windows keys arrive with backslashes from clients that never normalized
+    /// them. Splitting on `/` alone made the whole path the label, which is the
+    /// unreadable row this labeling exists to prevent.
+    #[test]
+    fn workspace_rows_label_windows_style_paths() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some(r"C:\work\api"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some(r"D:\work\api"),
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-3",
+                    4.0,
+                    Some(r"C:\work\api\.claude\worktrees\feature-x"),
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        let labels: HashMap<&str, &str> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.workspace_key.as_deref().unwrap(),
+                    entry.workspace_label.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(labels.get(r"C:\work\api"), Some(&"C:/work/api"));
+        assert_eq!(labels.get(r"D:\work\api"), Some(&"D:/work/api"));
+        // The worktree row names its repo and its worktree, and does not collide
+        // with either repo row, so it needs no qualifier.
+        assert_eq!(
+            labels.get(r"C:\work\api\.claude\worktrees\feature-x"),
+            Some(&"api ⑃ feature-x")
+        );
+        // Keys are never rewritten -- a Windows key still groups as it arrived.
+        assert_eq!(entries.len(), 3);
+    }
+
+    /// Nothing on disk can separate two opaque client ids that were given the
+    /// same name, so the row falls back to the grouping key, which is unique by
+    /// construction. Distinguishable beats pretty here.
+    #[test]
+    fn workspace_rows_fall_back_to_the_key_when_nothing_else_separates_them() {
+        let entries = aggregate_model_usage_entries_with_rollup(
+            vec![
+                make_workspace_message(
+                    "warp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("9f2c1a04-1e4b-4c3f-a0d1-77b2e5c9aa10"),
+                    Some("Platform"),
+                ),
+                make_workspace_message(
+                    "warp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"),
+                    Some("Platform"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+            WorktreeRollup::Separate,
+        );
+
+        let labels: HashSet<&str> = entries
+            .iter()
+            .map(|entry| entry.workspace_label.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            labels.len(),
+            2,
+            "every row must be tellable apart: {labels:?}"
+        );
+        assert!(labels
+            .iter()
+            .all(|label| label.starts_with("Platform (") && label.ends_with(')')));
+    }
+
+    #[test]
     fn test_workspace_model_grouping_separates_different_workspaces() {
         let entries = aggregate_model_usage_entries(
             vec![
@@ -6995,12 +7937,25 @@ mod tests {
         assert_eq!(retained.cost_source, sessions::CostSource::ProviderReported);
     }
 
-    /// Drive the retained/live collision through cold parse, compaction,
-    /// cross-file replay, and a warm cache hit. The retained copy is a stale
-    /// Haiku partial; the live copy is the completed Sonnet observation. The
-    /// caller controls file order so provenance authority cannot accidentally
-    /// depend on lexical discovery order.
-    fn assert_claude_retained_partial_merges_completed_live(second_file_name: &str) {
+    /// Drive a retained/live collision through cold parse, compaction,
+    /// cross-file replay, and a warm cache hit.
+    ///
+    /// The retained copy is seeded into cache from a transcript that is then
+    /// rewritten empty; the live copy arrives in a second transcript named by
+    /// the caller, so file order cannot quietly become the tiebreaker. Both
+    /// copies describe the same response, one observed mid-stream and one
+    /// completed, and they lead on different token fields — so any resolution
+    /// that keeps one whole message under-reports the other field.
+    ///
+    /// Every direction reconciles to the same row: input 500, output 999,
+    /// attributed to the live observation's Sonnet metadata and repriced from
+    /// the merged tokens. That is what makes the two directions comparable —
+    /// which side happened to be retained must not change the result.
+    fn assert_claude_retained_live_merge(
+        retained_record: &str,
+        live_record: &str,
+        live_file_name: &str,
+    ) {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
@@ -7008,9 +7963,6 @@ mod tests {
         let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("myproject");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let retained_path = claude_dir.join("mmm-retained.jsonl");
-
-        let retained_partial = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_shared","provider":"bedrock","message":{"id":"msg_shared","model":"claude-3-5-haiku","provider":"bedrock","usage":{"input_tokens":500,"output_tokens":60}}}"#;
-        let live_completed = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:01.000Z","requestId":"req_shared","provider":"anthropic","message":{"id":"msg_shared","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input_tokens":200,"output_tokens":999}}}"#;
 
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -7031,7 +7983,7 @@ mod tests {
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
-        std::fs::write(&retained_path, format!("{retained_partial}\n")).unwrap();
+        std::fs::write(&retained_path, format!("{retained_record}\n")).unwrap();
         let seeded = parse_all_messages_with_pricing_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &["claude".to_string()],
@@ -7041,14 +7993,10 @@ mod tests {
         );
         assert_eq!(seeded.len(), 1, "cold scan must seed retained history");
 
-        // Claude rewrites the first transcript and the same response completes
-        // live in a fork/resume transcript.
+        // Claude rewrites the first transcript, and the same response shows up
+        // in a fork/resume transcript that is still on disk.
         std::fs::write(&retained_path, "").unwrap();
-        std::fs::write(
-            claude_dir.join(second_file_name),
-            format!("{live_completed}\n"),
-        )
-        .unwrap();
+        std::fs::write(claude_dir.join(live_file_name), format!("{live_record}\n")).unwrap();
 
         let assert_merged = |messages: &[UnifiedMessage]| {
             assert_eq!(
@@ -7057,14 +8005,11 @@ mod tests {
                 "the shared response must be counted once"
             );
             let merged = &messages[0];
-            assert_eq!(merged.tokens.input, 500, "retain the larger partial input");
-            assert_eq!(merged.tokens.output, 999, "take the completed live output");
+            assert_eq!(merged.tokens.input, 500, "take the larger input");
+            assert_eq!(merged.tokens.output, 999, "take the completed output");
             assert_eq!(merged.model_id, "claude-3-5-sonnet");
             assert_eq!(merged.provider_id, "anthropic");
-            assert_eq!(
-                merged.session_id,
-                second_file_name.trim_end_matches(".jsonl")
-            );
+            assert_eq!(merged.session_id, live_file_name.trim_end_matches(".jsonl"));
             assert_eq!(merged.workspace_key.as_deref(), Some("myproject"));
             assert_eq!(merged.workspace_label.as_deref(), Some("myproject"));
             assert_eq!(merged.cost_source, sessions::CostSource::Estimated);
@@ -7094,16 +8039,61 @@ mod tests {
         assert_merged(&warm);
     }
 
+    /// A partial observed before the transcript recorded the model the turn
+    /// billed against. Used as the retained copy, its stale Haiku attribution
+    /// must not outlive the live observation.
+    const CLAUDE_MERGE_PARTIAL_STALE_MODEL: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_shared","provider":"bedrock","message":{"id":"msg_shared","model":"claude-3-5-haiku","provider":"bedrock","usage":{"input_tokens":500,"output_tokens":60}}}"#;
+    /// The same partial, already carrying the model the completed copy names.
+    /// Used as the live copy, where model attribution is not what is under
+    /// test and a divergence would only restate the pair above.
+    const CLAUDE_MERGE_PARTIAL: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:00.000Z","requestId":"req_shared","provider":"anthropic","message":{"id":"msg_shared","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input_tokens":500,"output_tokens":60}}}"#;
+    /// The completed observation of that same response.
+    const CLAUDE_MERGE_COMPLETED: &str = r#"{"type":"assistant","timestamp":"2024-12-01T10:05:01.000Z","requestId":"req_shared","provider":"anthropic","message":{"id":"msg_shared","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input_tokens":200,"output_tokens":999}}}"#;
+
     #[test]
     #[serial_test::serial]
     fn test_claude_retained_partial_merges_completed_live_that_sorts_later() {
-        assert_claude_retained_partial_merges_completed_live("zzz-live.jsonl");
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_PARTIAL_STALE_MODEL,
+            CLAUDE_MERGE_COMPLETED,
+            "zzz-live.jsonl",
+        );
     }
 
     #[test]
     #[serial_test::serial]
     fn test_claude_retained_partial_merges_completed_live_that_sorts_earlier() {
-        assert_claude_retained_partial_merges_completed_live("aaa-live.jsonl");
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_PARTIAL_STALE_MODEL,
+            CLAUDE_MERGE_COMPLETED,
+            "aaa-live.jsonl",
+        );
+    }
+
+    /// The mirror direction: the *retained* copy is the completed observation
+    /// and the live transcript carries only the partial. Completeness has to
+    /// be monotonic here too — a merge that keeps whichever copy is live, or
+    /// whichever file sorts first, discards the completed output that only the
+    /// retained copy still holds.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_merges_live_partial_that_sorts_later() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_COMPLETED,
+            CLAUDE_MERGE_PARTIAL,
+            "zzz-live.jsonl",
+        );
+    }
+
+    /// Mirror direction, opposite file order.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_retained_completed_merges_live_partial_that_sorts_earlier() {
+        assert_claude_retained_live_merge(
+            CLAUDE_MERGE_COMPLETED,
+            CLAUDE_MERGE_PARTIAL,
+            "aaa-live.jsonl",
+        );
     }
 
     /// A cache entry written before retention provenance existed carries the
@@ -7114,6 +8104,123 @@ mod tests {
     /// stale too. Every existing user upgrades with a populated cache, so the
     /// first warm scan after the upgrade has to rebuild that provenance.
     ///
+    /// #1011: a pre-#1037 cache entry carries a `ceil(chars/4)` estimate that
+    /// the API-reported `input_tokens` of the next turn already counted. The
+    /// parser stopped minting those in #1037, but that alone does not clean an
+    /// entry already on disk — the reporter measured an upgrade changing
+    /// nothing, and asked for a migration.
+    ///
+    /// No migration is needed, and this pins why. Every such entry predates
+    /// retention provenance (#1037 merged 2026-08-06, #1085 on 2026-08-11), so
+    /// it is markerless, and `needs_retention_provenance_migration` already
+    /// routes markerless Claude entries through a full re-parse. The estimate
+    /// is re-derived away as a side effect of a mechanism built for something
+    /// else.
+    ///
+    /// The fixture is arranged so a fix that merely *kept* the cached rows
+    /// would fail: the seeded estimate is a row the current parser cannot
+    /// produce, so if the warm scan still reports it, the entry was served
+    /// rather than rebuilt.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_legacy_char_estimate_is_dropped_by_the_provenance_rebuild() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let transcript = claude_dir.join("estimate-session.jsonl");
+
+        // One assistant turn, and a tool_result with content but no token
+        // metadata — the shape Claude Code always writes, which is what made
+        // the old fallback fire on every one of them.
+        let assistant = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let tool_result = r#"{"type":"user","timestamp":"2024-12-01T10:00:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":"0123456789012345678901234567890123456789"}]}}"#;
+        std::fs::write(&transcript, format!("{assistant}\n{tool_result}\n")).unwrap();
+
+        let scan = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let total_input =
+            |messages: &[UnifiedMessage]| messages.iter().map(|m| m.tokens.input).sum::<i64>();
+
+        let clean = scan();
+        assert_eq!(
+            total_input(&clean),
+            100,
+            "current parser must report only the API number"
+        );
+
+        // Rewrite the entry the way a pre-#1037 release left it: the estimate
+        // as its own path-scoped row, and no provenance marker.
+        // Exactly what `estimate_tokens_from_chars` would have produced for the
+        // 40-character tool_result above.
+        let estimate = 40_usize.div_ceil(4) as i64;
+        {
+            let mut cache = message_cache::SourceMessageCache::load();
+            let mut entries: Vec<message_cache::CachedSourceEntry> = cache
+                .all_entries()
+                .into_iter()
+                .filter(message_cache::CachedSourceEntry::is_claude_namespace)
+                .collect();
+            assert_eq!(entries.len(), 1, "the transcript must be cached");
+            let entry = &mut entries[0];
+            entry.messages.push(UnifiedMessage::new_with_dedup(
+                "claude",
+                "claude-3-5-sonnet",
+                "anthropic",
+                "estimate-session",
+                1_733_047_205_000,
+                TokenBreakdown {
+                    input: estimate,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+                Some("claude:tool_result:estimate-session:tool_result:toolu_001".to_string()),
+            ));
+            entry.fallback_timestamp_indices.clear();
+            cache.insert(entries.pop().unwrap());
+            cache.save_if_dirty();
+        }
+
+        let poisoned = message_cache::SourceMessageCache::load()
+            .all_entries()
+            .into_iter()
+            .filter(message_cache::CachedSourceEntry::is_claude_namespace)
+            .flat_map(|entry| entry.messages)
+            .map(|message| message.tokens.input)
+            .sum::<i64>();
+        assert_eq!(
+            poisoned,
+            100 + estimate,
+            "the seeded cache must actually be inflated, or this test proves nothing"
+        );
+
+        let warm = scan();
+        assert_eq!(
+            total_input(&warm),
+            100,
+            "a markerless entry must be rebuilt, dropping the stale char estimate"
+        );
+        assert!(
+            !warm.iter().any(|m| m
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.contains(":tool_result:"))),
+            "the phantom tool_result row must not survive the rebuild"
+        );
+    }
+
     /// The strongest statement of "not stale" is that the warm scan agrees
     /// with a cold scan of the same bytes, cost included.
     #[test]
@@ -11132,12 +12239,16 @@ mod tests {
         // zeros still counts as "priced" downstream. The alias must pin the
         // canonical first-party `minimax/MiniMax-M3` key instead.
         let mut litellm = HashMap::new();
-        // Real first-party rates.
+        // Real first-party rates: $0.60 input / $2.40 output / $0.12 cache read
+        // per million tokens. The cache-read rate is part of the published
+        // first-party row, so the fixture carries it too — otherwise the guard
+        // below would pass while cached input silently priced at $0.
         litellm.insert(
             "minimax/MiniMax-M3".into(),
             pricing::ModelPricing {
-                input_cost_per_token: Some(3e-7),
-                output_cost_per_token: Some(1.2e-6),
+                input_cost_per_token: Some(6e-7),
+                output_cost_per_token: Some(2.4e-6),
+                cache_read_input_token_cost: Some(1.2e-7),
                 ..Default::default()
             },
         );
@@ -11199,7 +12310,7 @@ mod tests {
             TokenBreakdown {
                 input: 1_000_000,
                 output: 100_000,
-                cache_read: 0,
+                cache_read: 500_000,
                 cache_write: 0,
                 reasoning: 0,
             },
@@ -11208,9 +12319,10 @@ mod tests {
 
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
-        // First-party: 1_000_000 * 3e-7 + 100_000 * 1.2e-6 = 0.42.
-        // The zero-cost row would give 0.0; the fireworks row would give 42.0.
-        let expected = 1_000_000.0 * 3e-7 + 100_000.0 * 1.2e-6;
+        // First-party: 1_000_000 * 6e-7 + 100_000 * 2.4e-6 + 500_000 * 1.2e-7
+        // = 0.9. The zero-cost row would give 0.0; the fireworks row, which
+        // publishes no cache-read rate, would give 42.0.
+        let expected = 1_000_000.0 * 6e-7 + 100_000.0 * 2.4e-6 + 500_000.0 * 1.2e-7;
         assert!(
             (msg.cost - expected).abs() < 1e-12,
             "expected first-party minimax/MiniMax-M3 cost {expected}, got {}",
@@ -12334,6 +13446,7 @@ mod tests {
                     until: None,
                     year: None,
                     group_by: GroupBy::default(),
+                    worktree_rollup: WorktreeRollup::default(),
                     scanner_settings: scanner::ScannerSettings::default(),
                 },
                 None,
@@ -12898,6 +14011,321 @@ mod tests {
                 .sum::<i64>(),
             70
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_cold_and_warm_reject_damaged_nested_attribution_usage() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/root/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let root_path = sessions_dir.join("root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":100,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"out�put":999},"aggregateUsage":{"input":100,"output":0}}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.000Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"child-response","usage":{{"input":50,"output":0}}}}}}
+"#,
+                paths::json_path_literal(&root_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_decode_calls, (2, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_decode_calls,
+            "the unchanged warm scan must reuse the safely rejected accounting record"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                150,
+                "damaged child usage must not subtract the matching child from the parent"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_rejects_damaged_child_lineage_and_timestamp_cold_and_warm() {
+        for damage in ["parent-value", "timestamp-value"] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let sessions_dir = source_home.path().join(".prime/agent/sessions");
+            let child_dir = source_home
+                .path()
+                .join(".prime/agent/session-artifacts/root/sub-child");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::create_dir_all(&child_dir).unwrap();
+            let root_path = sessions_dir.join("root.jsonl");
+            std::fs::write(
+                &root_path,
+                r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","responseId":"parent-response","usage":{"input":150,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"output":0},"aggregateUsage":{"input":150,"output":0}}
+"#,
+            )
+            .unwrap();
+
+            let child_path = child_dir.join(format!("{damage}.jsonl"));
+            let clean_parent = paths::json_path_literal(&root_path);
+            let mut child = Vec::new();
+            if damage == "parent-value" {
+                child.extend_from_slice(b"{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":");
+                child.extend_from_slice(
+                    clean_parent
+                        .as_bytes()
+                        .get(0..clean_parent.len() - 1)
+                        .unwrap(),
+                );
+                child.extend_from_slice(b"\xff\",\"rlmDepth\":1}\n");
+            } else {
+                child.extend_from_slice(format!("{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"parentSession\":{clean_parent},\"rlmDepth\":1}}\n").as_bytes());
+            }
+            if damage == "timestamp-value" {
+                child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:0\xffZ\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
+            } else {
+                child.extend_from_slice(b"{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":50,\"output\":0}}}\n");
+            }
+            std::fs::write(child_path, child).unwrap();
+
+            let clients = ["prime-agent".to_string()];
+            sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+            let cold = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
+            assert_eq!(cold_calls, (2, 0), "{damage}");
+            let warm = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+            );
+            assert_eq!(
+                sessions::prime_agent::transcript_decode_call_counts(),
+                (3, 0),
+                "{damage}: warm scan may revalidate the intentionally empty child, but must reuse the parent"
+            );
+
+            for messages in [cold, warm] {
+                assert_eq!(messages.len(), 1, "{damage}");
+                assert_eq!(messages[0].tokens.input, 150, "{damage}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_escaped_replacement_lineage_key_is_safe_cold_and_warm() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/root/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let root_path = sessions_dir.join("root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"parent","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","usage":{"input":150,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-1","timestamp":"2026-08-08T00:00:02.000Z","targetId":"parent","childUsage":{"input":50,"output":0},"aggregateUsage":{"input":150,"output":0}}
+"#,
+        )
+        .unwrap();
+        let clean_parent = paths::json_path_literal(&root_path);
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"child\",\"cwd\":\"/tmp/project\",\"unrelated\\uD800\":true,\"parentSession\":{clean_parent},\"rlmDep\\uFFFDth\":1}}\n{{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-08-08T00:00:02.000Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{{\"input\":50,\"output\":0}}}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (2, 0)
+        );
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            (3, 0),
+            "the rejected child may be revalidated, but the parent stays warm"
+        );
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 1, "only the parent aggregate is emitted");
+            assert_eq!(messages[0].session_id, "root");
+            assert_eq!(messages[0].tokens.input, 150);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_dropped_damaged_usage_keeps_later_adjustment_aligned_cold_and_warm() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        let child_dir = source_home
+            .path()
+            .join(".prime/agent/session-artifacts/root/sub-child");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let root_path = sessions_dir.join("root.jsonl");
+        std::fs::write(
+            &root_path,
+            r#"{"type":"session","version":3,"id":"root","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/tmp/project","rlmDepth":0}
+{"type":"message","id":"damaged","timestamp":"2026-08-08T00:00:00.500Z","message":{"role":"assistant","provider":"anthropic","model":"damaged-model","responseId":"damaged-response","usage":{"in�put":999,"output":0}}}
+{"type":"message","id":"valid","timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"valid-model","responseId":"valid-response","usage":{"input":20,"output":0}}}
+{"type":"child_usage_attributed","id":"usage-valid","timestamp":"2026-08-08T00:00:02.000Z","targetId":"valid","childUsage":{"input":3,"output":0},"aggregateUsage":{"input":20,"output":0}}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.jsonl"),
+            format!(
+                r#"{{"type":"session","version":3,"id":"child","timestamp":"2026-08-08T00:00:01.500Z","cwd":"/tmp/project","parentSession":{},"rlmDepth":1}}
+{{"type":"message","id":"child-message","timestamp":"2026-08-08T00:00:02.000Z","message":{{"role":"assistant","provider":"anthropic","model":"child-model","responseId":"child-response","usage":{{"input":3,"output":0}}}}}}
+"#,
+                paths::json_path_literal(&root_path)
+            ),
+        )
+        .unwrap();
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_decode_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_decode_calls, (2, 0));
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_decode_calls,
+            "the unchanged warm scan must reuse aligned messages and accounting"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 2);
+            assert!(!messages
+                .iter()
+                .any(|message| message.model_id == "damaged-model"));
+            assert_eq!(
+                messages
+                    .iter()
+                    .find(|message| message.model_id == "valid-model")
+                    .unwrap()
+                    .tokens
+                    .input,
+                17,
+                "the later valid parent must retain its child-usage adjustment"
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                20
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prime_agent_warm_cache_preserves_distinct_invalid_utf8_ids() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".prime/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("damaged-ids.jsonl");
+        let mut source = std::fs::File::create(&source_path).unwrap();
+        use std::io::Write as _;
+        source
+            .write_all(
+                b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n",
+            )
+            .unwrap();
+        source
+            .write_all(b"{\"type\":\"message\",\"id\":\"assistant-\xff\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n")
+            .unwrap();
+        source
+            .write_all(b"{\"type\":\"message\",\"id\":\"assistant-\xfe\",\"timestamp\":\"2026-08-08T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":10,\"output\":5}}}\n")
+            .unwrap();
+        source.flush().unwrap();
+        drop(source);
+
+        let clients = ["prime-agent".to_string()];
+        sessions::prime_agent::reset_transcript_decode_call_counts(source_home.path());
+        let cold =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        let cold_calls = sessions::prime_agent::transcript_decode_call_counts();
+        assert_eq!(cold_calls, (1, 0));
+
+        let warm =
+            parse_all_messages_with_pricing(source_home.path().to_str().unwrap(), &clients, None);
+        assert_eq!(
+            sessions::prime_agent::transcript_decode_call_counts(),
+            cold_calls,
+            "the warm scan must reuse the two distinct cached records"
+        );
+
+        for messages in [cold, warm] {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                20
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.output)
+                    .sum::<i64>(),
+                10
+            );
+        }
     }
 
     #[test]

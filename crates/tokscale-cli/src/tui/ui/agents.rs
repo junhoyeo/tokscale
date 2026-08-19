@@ -235,6 +235,7 @@ mod tests {
                 until: None,
                 year: None,
                 initial_tab: None,
+                ..Default::default()
             },
             Some(UsageData::default()),
         )

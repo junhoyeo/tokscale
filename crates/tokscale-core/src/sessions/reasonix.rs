@@ -4,12 +4,16 @@
 //! `<REASONIX_HOME>/stats/YYYY-MM-DD.jsonl`. Session transcript JSONL is not
 //! scanned: it has no authoritative usage counters and would overlap stats.
 
-use super::utils::parse_timestamp_value;
+use super::pi::has_replacement_character;
+use super::utils::{lossy_lines, parse_timestamp_value};
 use super::UnifiedMessage;
-use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
+use crate::provider_identity::{
+    canonical_provider, inferred_provider_from_model, inferred_provider_from_model_delimited,
+};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
+use std::collections::BTreeMap;
+use std::io::BufReader;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -32,13 +36,37 @@ struct ReasonixStat {
     requests: i64,
     #[serde(default)]
     turn: bool,
+    #[serde(flatten)]
+    extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl ReasonixStat {
+    fn has_damaged_key(&self) -> bool {
+        self.extra_fields
+            .keys()
+            .any(|key| has_replacement_character(key))
+    }
 }
 
 fn split_model_ref(model_ref: &str) -> (String, String) {
     let model_ref = model_ref.trim();
     if let Some((provider, model)) = model_ref.split_once('/') {
-        let provider = canonical_provider(provider).unwrap_or_else(|| provider.to_string());
+        let model = if has_replacement_character(model) {
+            "unknown"
+        } else {
+            model
+        };
+        let provider = if has_replacement_character(provider) {
+            inferred_provider_from_model_delimited(model)
+                .unwrap_or("reasonix")
+                .to_string()
+        } else {
+            canonical_provider(provider).unwrap_or_else(|| provider.to_string())
+        };
         return (provider, model.to_string());
+    }
+    if has_replacement_character(model_ref) {
+        return ("reasonix".to_string(), "unknown".to_string());
     }
     let provider = inferred_provider_from_model(model_ref)
         .unwrap_or("reasonix")
@@ -55,13 +83,12 @@ pub fn parse_reasonix_file(path: &Path) -> Vec<UnifiedMessage> {
         return Vec::new();
     };
 
-    BufReader::new(file)
-        .lines()
+    lossy_lines(BufReader::new(file))
         .enumerate()
         .filter_map(|(line_index, line)| {
-            let line = line.ok()?;
             let record: ReasonixStat = serde_json::from_str(line.trim()).ok()?;
-            if record.turn
+            if record.has_damaged_key()
+                || record.turn
                 || record.model.trim().is_empty()
                 || (record.total <= 0 && record.requests <= 0)
             {
@@ -111,7 +138,98 @@ pub fn parse_reasonix_file(path: &Path) -> Vec<UnifiedMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn accepts_bom_crlf_and_later_records_after_invalid_utf8() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"\xef\xbb\xbf{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"deepseek/chat\",\"prompt\":100,\"completion\":20,\"cache_hit\":30,\"cache_miss\":70,\"total\":120}\r\n",
+        )
+        .unwrap();
+        file.write_all(b"invalid \xff record\r\n").unwrap();
+        file.write_all(
+            br#"{"ts":"2026-08-04T09:11:11Z","model":"deepseek/chat","prompt":10,"completion":2,"total":12}"#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_reasonix_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.total(), 120);
+        assert_eq!(messages[1].tokens.total(), 12);
+    }
+
+    #[test]
+    fn rejects_replacement_mangled_counter_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"deepseek/chat\",\"prom\xffpt\":100,\"completion\":20,\"total\":120}\n",
+        )
+        .unwrap();
+        file.write_all(
+            "{\"ts\":\"2026-08-04T09:10:12Z\",\"model\":\"deepseek/chat\",\"cache_�hit\":30,\"prompt\":100,\"completion\":20,\"total\":120}\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        file.write_all(
+            b"{\"ts\":\"2026-08-04T09:10:13Z\",\"model\":\"deepseek/chat\",\"prompt\":10,\"completion\":2,\"total\":12}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_reasonix_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 12);
+    }
+
+    #[test]
+    fn sanitizes_replacement_mangled_provider_and_model() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"bad-\xff/bad-\xff-model\",\"prompt\":100,\"completion\":20,\"total\":120}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_reasonix_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "reasonix");
+        assert_eq!(messages[0].model_id, "unknown");
+    }
+
+    #[test]
+    fn damaged_provider_uses_delimiter_aware_model_inference() {
+        for (model, expected_provider) in [
+            ("agpt-foo", "reasonix"),
+            ("declaude-x", "reasonix"),
+            ("unqwened-model", "reasonix"),
+            ("minimaximal", "reasonix"),
+            ("gpt-5", "openai"),
+            ("gpt4-turbo", "openai"),
+            ("claude-sonnet-4", "anthropic"),
+            ("claude3-opus", "anthropic"),
+            ("qwen3-coder", "qwen"),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(
+                file,
+                "{{\"ts\":\"2026-08-04T09:10:11Z\",\"model\":\"bad-�/{model}\",\"prompt\":100,\"completion\":20,\"total\":120}}"
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let messages = parse_reasonix_file(file.path());
+
+            assert_eq!(messages.len(), 1, "{model}");
+            assert_eq!(messages[0].provider_id, expected_provider, "{model}");
+            assert_eq!(messages[0].model_id, model, "{model}");
+        }
+    }
 
     #[test]
     fn parses_authoritative_stats_with_provider_usage_and_timestamp() {

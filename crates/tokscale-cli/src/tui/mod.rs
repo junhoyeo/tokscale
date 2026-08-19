@@ -90,6 +90,7 @@ pub fn run(
     // Project selectors from `--workspace`. Empty means every project, which
     // matches the picker's own default.
     workspaces: Vec<String>,
+    worktree_rollup: tokscale_core::WorktreeRollup,
 ) -> Result<()> {
     if debug {
         let _ = tracing_subscriber::fmt()
@@ -106,6 +107,7 @@ pub fn run(
         until: until.clone(),
         year: year.clone(),
         initial_tab,
+        worktree_rollup,
     };
 
     // Build the unified filter set used by the cache key, the App
@@ -361,12 +363,24 @@ fn run_loop_with_background(
             let minutely_enabled = app.settings.minutely_tab_enabled;
             let projects = app.selected_projects.borrow().clone();
             let projects_empty = projects.is_empty();
+            let worktree_rollup = app.worktree_rollup;
 
             thread::spawn(move || {
-                let loader = background_data_loader(since, until, year, minutely_enabled, projects);
+                let loader = background_data_loader(since, until, year, minutely_enabled, projects)
+                    .with_worktree_rollup(worktree_rollup);
                 let result = loader.load(&clients, &group_by, include_synthetic);
-                if let (Ok(ref data), true) = (&result, projects_empty) {
-                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                if let Ok(ref data) = result {
+                    // Two reasons the same snapshot would be wrong to keep.
+                    // Rolled-up rows are a different aggregation of the same
+                    // messages, so caching them under the plain workspace scope
+                    // would serve merged rows to a later un-merged view. A
+                    // project-filtered scan is not the whole dataset at all,
+                    // and the cache key carries no project, so it would serve a
+                    // narrowed result to an unfiltered one.
+                    if worktree_rollup == tokscale_core::WorktreeRollup::Separate && projects_empty
+                    {
+                        save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                    }
                 }
                 let _ = tx.send(result);
             });

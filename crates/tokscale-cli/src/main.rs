@@ -93,6 +93,12 @@ struct Cli {
     )]
     group_by: String,
 
+    #[arg(
+        long = "merge-worktrees",
+        help = "With --group-by workspace,model: fold git worktrees into their parent repository so each repo is one row"
+    )]
+    merge_worktrees: bool,
+
     #[arg(long, help = "Disable spinner (for AI agents and scripts)")]
     no_spinner: bool,
 }
@@ -118,6 +124,11 @@ enum Commands {
             help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
         )]
         group_by: String,
+        #[arg(
+            long = "merge-worktrees",
+            help = "With --group-by workspace,model: fold git worktrees into their parent repository so each repo is one row"
+        )]
+        merge_worktrees: bool,
         #[arg(
             long = "write-cache",
             requires = "light",
@@ -230,7 +241,7 @@ enum Commands {
         no_spinner: bool,
     },
     #[command(
-        about = "Import historical usage from a third-party aggregate export (e.g. clawdboard) into tokscale JSON"
+        about = "Import historical usage from an aggregate export (clawdboard, ccusage) into tokscale JSON"
     )]
     Import {
         #[arg(help = "Path to the export file to import")]
@@ -238,7 +249,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "clawdboard",
-            help = "Export format (currently only 'clawdboard')"
+            help = "Export format: 'clawdboard' or 'ccusage' (ccusage daily --json output)"
         )]
         format: String,
         #[arg(
@@ -284,7 +295,7 @@ enum Commands {
     },
     #[command(about = "Capture subprocess output for token usage tracking")]
     Headless {
-        #[arg(help = "Source CLI (currently only 'codex' supported)")]
+        #[arg(help = "Source CLI ('codex' or 'mcode')")]
         source: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -623,6 +634,7 @@ fn main() -> Result<()> {
             date,
             benchmark,
             group_by,
+            merge_worktrees,
             write_cache,
             no_write_cache,
             hide_zero,
@@ -644,6 +656,7 @@ fn main() -> Result<()> {
                     benchmark,
                     no_spinner || !can_use_tui,
                     group_by,
+                    worktree_rollup_from_flag(merge_worktrees),
                     write_cache,
                     no_write_cache,
                     hide_zero,
@@ -663,6 +676,9 @@ fn main() -> Result<()> {
                     year,
                     Some(Tab::Models),
                     Vec::new(),
+                    // Carry the flag in as the initial rollup rather than dropping
+                    // it; `w` toggles from there.
+                    worktree_rollup_from_flag(merge_worktrees),
                 )
             }
         }
@@ -701,6 +717,7 @@ fn main() -> Result<()> {
                     year,
                     Some(Tab::Monthly),
                     Vec::new(),
+                    tokscale_core::WorktreeRollup::default(),
                 )
             }
         }
@@ -739,6 +756,7 @@ fn main() -> Result<()> {
                     year,
                     Some(Tab::Hourly),
                     Vec::new(),
+                    tokscale_core::WorktreeRollup::default(),
                 )
             }
         }
@@ -814,6 +832,7 @@ fn main() -> Result<()> {
                 year,
                 None,
                 workspace,
+                tokscale_core::WorktreeRollup::default(),
             )
         }
         Some(Commands::Submit {
@@ -968,6 +987,8 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             });
 
+            let worktree_rollup = worktree_rollup_from_flag(cli.merge_worktrees);
+
             if cli.json {
                 run_models_report(
                     cli.json,
@@ -977,6 +998,7 @@ fn main() -> Result<()> {
                     cli.benchmark,
                     cli.no_spinner || cli.json,
                     group_by,
+                    worktree_rollup,
                     cli.write_cache,
                     cli.no_write_cache,
                     cli.hide_zero,
@@ -990,6 +1012,7 @@ fn main() -> Result<()> {
                     cli.benchmark,
                     cli.no_spinner || !can_use_tui,
                     group_by,
+                    worktree_rollup,
                     cli.write_cache,
                     cli.no_write_cache,
                     cli.hide_zero,
@@ -1009,6 +1032,7 @@ fn main() -> Result<()> {
                     year,
                     None,
                     Vec::new(),
+                    worktree_rollup,
                 )
             }
         }
@@ -1085,6 +1109,8 @@ pub enum ClientFilter {
     PrimeAgent,
     Freebuff,
     CherryStudio,
+    Dsh,
+    Mcode,
     Synthetic,
 }
 
@@ -1141,6 +1167,8 @@ impl ClientFilter {
             Self::PrimeAgent => "prime-agent",
             Self::Freebuff => "freebuff",
             Self::CherryStudio => "cherrystudio",
+            Self::Dsh => "dsh",
+            Self::Mcode => "mcode",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1200,6 +1228,8 @@ impl ClientFilter {
             Self::PrimeAgent => Some(ClientId::PrimeAgent),
             Self::Freebuff => Some(ClientId::Freebuff),
             Self::CherryStudio => Some(ClientId::CherryStudio),
+            Self::Dsh => Some(ClientId::Dsh),
+            Self::Mcode => Some(ClientId::Mcode),
             Self::Synthetic => None,
         }
     }
@@ -1255,6 +1285,8 @@ impl ClientFilter {
             ClientId::PrimeAgent => Self::PrimeAgent,
             ClientId::Freebuff => Self::Freebuff,
             ClientId::CherryStudio => Self::CherryStudio,
+            ClientId::Dsh => Self::Dsh,
+            ClientId::Mcode => Self::Mcode,
         }
     }
 
@@ -2049,6 +2081,16 @@ impl LocalReportContext {
     }
 
     fn report_options(&self, group_by: tokscale_core::GroupBy) -> tokscale_core::ReportOptions {
+        self.report_options_with_rollup(group_by, tokscale_core::WorktreeRollup::default())
+    }
+
+    /// `report_options` for the one report that can fold worktrees. Kept separate
+    /// so the other callers are not made to pass a rollup they never vary.
+    fn report_options_with_rollup(
+        &self,
+        group_by: tokscale_core::GroupBy,
+        worktree_rollup: tokscale_core::WorktreeRollup,
+    ) -> tokscale_core::ReportOptions {
         tokscale_core::ReportOptions {
             home_dir: self.home_dir.clone(),
             use_env_roots: self.use_env_roots,
@@ -2057,8 +2099,17 @@ impl LocalReportContext {
             until: self.until.clone(),
             year: self.year.clone(),
             group_by,
+            worktree_rollup,
             scanner_settings: self.scanner_settings.clone(),
         }
+    }
+}
+
+fn worktree_rollup_from_flag(merge_worktrees: bool) -> tokscale_core::WorktreeRollup {
+    if merge_worktrees {
+        tokscale_core::WorktreeRollup::MergeIntoRepo
+    } else {
+        tokscale_core::WorktreeRollup::Separate
     }
 }
 
@@ -2071,6 +2122,7 @@ fn run_models_report(
     benchmark: bool,
     no_spinner: bool,
     group_by: tokscale_core::GroupBy,
+    worktree_rollup: tokscale_core::WorktreeRollup,
     cli_write_cache: bool,
     cli_no_write_cache: bool,
     hide_zero: bool,
@@ -2086,7 +2138,10 @@ fn run_models_report(
     );
     let rt = Runtime::new()?;
     let report = rt
-        .block_on(async { get_model_report(context.report_options(group_by.clone())).await })
+        .block_on(async {
+            get_model_report(context.report_options_with_rollup(group_by.clone(), worktree_rollup))
+                .await
+        })
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut report = report;
     if hide_zero {
@@ -4070,12 +4125,6 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 
     let headless_roots =
         tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir_str, use_env_roots);
-    let headless_codex_count = parsed
-        .messages
-        .iter()
-        .filter(|m| m.agent.as_deref() == Some("headless") && m.client == "codex")
-        .count() as i32;
-
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ClientRow {
@@ -4223,7 +4272,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     vec![]
                 };
                 let (headless_supported, headless_paths, headless_message_count) =
-                    if client == ClientId::Codex {
+                    if client.supports_headless() {
                         (
                             true,
                             headless_roots
@@ -4236,7 +4285,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                                     }
                                 })
                                 .collect(),
-                            headless_codex_count,
+                            parsed
+                                .messages
+                                .iter()
+                                .filter(|message| {
+                                    message.agent.as_deref() == Some("headless")
+                                        && message.client == client.as_str()
+                                })
+                                .count() as i32,
                         )
                     } else {
                         (false, vec![], 0)
@@ -4312,7 +4368,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
             clients,
-            note: "Headless capture is supported for Codex CLI only.".to_string(),
+            note: "Headless capture is supported for Codex CLI and MiniMax Code.".to_string(),
         };
 
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -4443,7 +4499,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 
         println!(
             "  {}",
-            "Note: Headless capture is supported for Codex CLI only.".bright_black()
+            "Note: Headless capture is supported for Codex CLI and MiniMax Code.".bright_black()
         );
         println!();
     }
@@ -5243,8 +5299,9 @@ fn run_graph_command(
     Ok(())
 }
 
-/// Import a third-party aggregate export (currently clawdboard) and emit it as
-/// standard tokscale JSON — the same shape `tokscale graph` produces.
+/// Import an aggregate export (clawdboard, or ccusage's own `daily --json`)
+/// and emit it as standard tokscale JSON — the same shape `tokscale graph`
+/// produces.
 ///
 /// This deliberately does NOT upload: backfilled aggregates cannot be verified
 /// the way locally-scanned sessions are, so submitting them requires
@@ -5799,6 +5856,7 @@ fn run_submit_command(
                 until,
                 year,
                 group_by: GroupBy::default(),
+                worktree_rollup: tokscale_core::WorktreeRollup::default(),
                 scanner_settings: tui::settings::load_scanner_settings(),
             })
             .await
@@ -6459,9 +6517,9 @@ fn run_headless_command(
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
-    if source_lower != "codex" {
+    if source_lower != "codex" && source_lower != "mcode" {
         eprintln!("\n  Error: Unknown headless source '{}'.", source);
-        eprintln!("  Currently only 'codex' is supported.\n");
+        eprintln!("  Supported sources are 'codex' and 'mcode'.\n");
         std::process::exit(1);
     }
 
@@ -6474,10 +6532,12 @@ fn run_headless_command(
         None => "jsonl".to_string(),
     };
 
-    let mut final_args = args.clone();
-    if !no_auto_flags && source_lower == "codex" && !final_args.contains(&"--json".to_string()) {
-        final_args.push("--json".to_string());
+    if source_lower == "mcode" && resolved_format != "jsonl" {
+        eprintln!("\n  Error: MiniMax Code headless capture requires jsonl output.\n");
+        std::process::exit(1);
     }
+
+    let final_args = prepare_headless_args(&source_lower, args, no_auto_flags)?;
 
     let home_dir = crate::paths::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -6552,6 +6612,40 @@ fn run_headless_command(
     Ok(())
 }
 
+fn prepare_headless_args(
+    source: &str,
+    mut args: Vec<String>,
+    no_auto_flags: bool,
+) -> Result<Vec<String>> {
+    if no_auto_flags {
+        return Ok(args);
+    }
+
+    if source == "codex" {
+        if !args.iter().any(|arg| arg == "--json") {
+            args.push("--json".to_string());
+        }
+        return Ok(args);
+    }
+
+    let exec_index = args.iter().position(|arg| arg == "exec").ok_or_else(|| {
+        anyhow::anyhow!("MiniMax Code headless capture requires the `exec` subcommand")
+    })?;
+    let has_output_format = args.iter().any(|arg| {
+        arg == "--output-format"
+            || arg.starts_with("--output-format=")
+            || arg == "--format"
+            || arg.starts_with("--format=")
+    });
+    if !has_output_format {
+        args.splice(
+            exec_index + 1..exec_index + 1,
+            ["--output-format".to_string(), "stream-json".to_string()],
+        );
+    }
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6561,6 +6655,37 @@ mod tests {
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown,
     };
+
+    #[test]
+    fn mcode_headless_args_inject_stream_json_immediately_after_exec() {
+        assert_eq!(
+            prepare_headless_args(
+                "mcode",
+                vec!["exec".to_string(), "review this".to_string()],
+                false,
+            )
+            .unwrap(),
+            vec!["exec", "--output-format", "stream-json", "review this"]
+        );
+    }
+
+    #[test]
+    fn mcode_headless_args_preserve_explicit_format_and_no_auto_mode() {
+        let explicit = vec![
+            "exec".to_string(),
+            "--output-format=json".to_string(),
+            "review this".to_string(),
+        ];
+        assert_eq!(
+            prepare_headless_args("mcode", explicit.clone(), false).unwrap(),
+            explicit
+        );
+        assert_eq!(
+            prepare_headless_args("mcode", vec!["version".to_string()], true).unwrap(),
+            vec!["version"]
+        );
+        assert!(prepare_headless_args("mcode", vec!["version".to_string()], false).is_err());
+    }
 
     #[test]
     fn test_parse_variant_arg_accepts_known_values() {
@@ -8254,6 +8379,21 @@ mod tests {
             scope.parser_versions,
             std::collections::BTreeMap::from([("codex".to_string(), SUBMISSION_PARSER_VERSION)])
         );
+    }
+
+    /// Droid is bounded by the server's device/client lifetime high-water
+    /// (`SUPPORTED_VERSIONED_PARSERS` in packages/frontend/src/lib/db/parserHighWater.ts),
+    /// which accepts generation 1 for it. The submission generation is not the
+    /// cache `parser_version`: re-attribution changes which day a token lands
+    /// on, never the lifetime total, so no installed generation has to be
+    /// frozen out. Declaring anything else here freezes every Droid submission
+    /// server-side until the registry is bumped in lockstep.
+    #[test]
+    fn submit_scan_scope_declares_the_droid_generation_the_server_registers() {
+        let clients = vec!["droid".to_string()];
+        let scope = submit_scan_scope(Some(&clients), true).expect("droid scope");
+
+        assert_eq!(scope.parser_versions.get("droid"), Some(&1));
     }
 
     #[test]

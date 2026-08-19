@@ -4,7 +4,9 @@
 //! Jcode stores authoritative assistant token usage on messages under
 //! `token_usage`; user/tool messages without usage are skipped.
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, parse_timestamp_str};
+use super::utils::{
+    back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line, parse_timestamp_str,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -345,53 +347,43 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     let journal_path = jcode_journal_path(path);
-    if let Ok(file) = std::fs::File::open(&journal_path) {
-        use std::io::{BufRead, BufReader};
-        let journal_fallback_timestamp = file_modified_timestamp_ms(&journal_path);
-        for (line_index, line) in BufReader::new(file).lines().enumerate() {
-            let Ok(line) = line else {
-                continue;
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(entry) = serde_json::from_str::<JcodeJournalEntry>(trimmed) else {
-                continue;
-            };
-            if let Some(meta) = entry.meta {
-                context.apply_meta(meta);
-            }
-            let journal_messages = parse_jcode_messages(
-                lenient_jcode_messages(entry.append_messages),
-                &mut context,
-                journal_fallback_timestamp,
-                &format!("journal:{line_index}"),
-                Some(&index_by_dedup_key),
-            );
-            for mut message in journal_messages {
-                match message
-                    .dedup_key
-                    .as_ref()
-                    .and_then(|key| index_by_dedup_key.get(key).copied())
-                {
-                    Some(existing_index) => {
-                        // Preserve the snapshot's turn-start flag: turn structure
-                        // is derived from snapshot ordering, while the journal only
-                        // carries the corrected token_usage for this message_id.
-                        message.is_turn_start = parsed[existing_index].is_turn_start;
-                        parsed[existing_index] = message;
+    let journal_fallback_timestamp = file_modified_timestamp_ms(&journal_path);
+    for_each_json_line(&journal_path, &mut |line_index, trimmed| {
+        let Ok(entry) = serde_json::from_str::<JcodeJournalEntry>(trimmed) else {
+            return;
+        };
+        if let Some(meta) = entry.meta {
+            context.apply_meta(meta);
+        }
+        let journal_messages = parse_jcode_messages(
+            lenient_jcode_messages(entry.append_messages),
+            &mut context,
+            journal_fallback_timestamp,
+            &format!("journal:{line_index}"),
+            Some(&index_by_dedup_key),
+        );
+        for mut message in journal_messages {
+            match message
+                .dedup_key
+                .as_ref()
+                .and_then(|key| index_by_dedup_key.get(key).copied())
+            {
+                Some(existing_index) => {
+                    // Preserve the snapshot's turn-start flag: turn structure
+                    // is derived from snapshot ordering, while the journal only
+                    // carries the corrected token_usage for this message_id.
+                    message.is_turn_start = parsed[existing_index].is_turn_start;
+                    parsed[existing_index] = message;
+                }
+                None => {
+                    if let Some(key) = message.dedup_key.clone() {
+                        index_by_dedup_key.insert(key, parsed.len());
                     }
-                    None => {
-                        if let Some(key) = message.dedup_key.clone() {
-                            index_by_dedup_key.insert(key, parsed.len());
-                        }
-                        parsed.push(message);
-                    }
+                    parsed.push(message);
                 }
             }
         }
-    }
+    });
 
     parsed
 }

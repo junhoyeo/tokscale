@@ -103,6 +103,7 @@
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin Desktop" /> | [Devin Desktop](https://devin.ai/) | ACP 이벤트: macOS `~/Library/Application Support/Devin/User/acp-events/`; Linux `~/.config/Devin/User/acp-events/`; Windows `%APPDATA%\Devin\User\acp-events\` |
 | <img width="48px" src="https://github.com/augmentcode.png" alt="Augment Code" /> | [Augment Code](https://www.augmentcode.com/) (Auggie CLI) | `~/.augment/sessions/*.json` |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) |
+| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（압축 없이 기록된 경우 `session.jsonl`, `DSH_HOME`으로 재정의 가능） |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
 
@@ -181,7 +182,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
 - **웹 시각화** - 2D 및 3D 뷰의 인터랙티브 기여 그래프
 - **유연한 필터링** - 플랫폼, 날짜 범위 또는 연도별 필터링
-- **작업 기반 리포트** - LLM 기반 세션 요약 및 작업 그룹화, 여러 백엔드 지원 (Apple FM, Claude, Codex, Gemini, Kiro)
+- **작업 기반 리포트** - LLM 기반 세션 요약 및 작업 그룹화, 여러 백엔드 지원 (Apple FM, Claude, Codex, Gemini, Kiro, MiniMax)
 - **JSON 내보내기** - 외부 시각화 도구/자동화용 데이터 생성
 - **소셜 플랫폼** - 사용량 공유, 리더보드 경쟁, 공개 프로필 조회
 
@@ -307,7 +308,7 @@ TUI에서 `g`를 누르거나 `--light`/`--json` 모드에서 `--group-by`를 �
 | **모델** | `--group-by model` | ✅ | 모델당 한 행 — 모든 클라이언트와 프로바이더 병합 |
 | **클라이언트 + 모델** | `--group-by client,model` | | 클라이언트-모델 쌍당 한 행 |
 | **클라이언트 + 프로바이더 + 모델** | `--group-by client,provider,model` | | 가장 세분화 — 병합 없음 |
-| **워크스페이스 + 모델** | `--group-by workspace,model` | | 로컬 사용량을 워크스페이스 키별로, 그 다음 모델별로 그룹화 |
+| **워크스페이스 + 모델** | `--group-by workspace,model` | | 로컬 사용량을 워크스페이스 키별로, 그 다음 모델별로 그룹화. [`--merge-worktrees`](#워크스페이스별-비용)를 추가하면 git 워크트리를 상위 리포지터리로 병합합니다 |
 | **세션 + 모델** | `--group-by session,model` | | `session_id`와 모델당 한 행 — 특정 에이전트-CLI 세션에 비용 귀속 |
 | **클라이언트 + 세션 + 모델** | `--group-by client,session,model` | | 클라이언트, 세션, 모델당 한 행 — `session_id`로 조인하는 멀티 에이전트 러너에 유용 |
 
@@ -359,6 +360,30 @@ TUI에서 `g`를 누르거나 `--light`/`--json` 모드에서 `--group-by`를 �
 ```
 
 모든 행에 클라이언트 이름도 필요하다면 `--group-by client,session,model`을 사용하세요 (20개 이상 지원되는 모든 CLI에 걸친 단일 스폰).
+
+#### 워크스페이스별 비용
+
+`--group-by workspace,model`은 에이전트가 실행된 디렉터리에 사용량을 귀속시키므로 프로젝트별 비용을 볼 수 있습니다:
+
+```bash
+# (워크스페이스, 모델)당 한 행
+tokscale models --light --group-by workspace,model --month
+
+# 모든 git 워크트리를 상위 리포지터리로 병합 — 리포지터리당 한 행
+tokscale models --light --group-by workspace,model --merge-worktrees --month
+
+# JSON에는 workspaceKey(그룹화 식별자)와 workspaceLabel(표시 이름)이 포함됩니다
+tokscale models --json --group-by workspace,model --merge-worktrees
+```
+
+TUI에서는 `g` → **워크스페이스 + 모델**을 선택한 뒤 `w`로 워크트리 병합을 토글합니다(푸터에 `[w:worktrees]` 또는 `[w:repos]`가 표시됩니다).
+
+워크스페이스 행의 라벨은 `repo` 또는 `repo ⑃ worktree`입니다. 클라이언트마다 워크스페이스 기록 방식이 달라서(Claude Code는 대시로 변환한 디렉터리 슬러그 `-Users-me-devpro-app`, Codex와 OpenCode는 실제 경로) tokscale은 슬러그를 파일시스템과 대조해 실제 경로로 되돌립니다. 알아둘 점이 네 가지 있습니다:
+
+- **`--merge-worktrees` 없이는 각 git 워크트리가 별도 행입니다.** 작업마다 워크트리를 만드는 에이전트 CLI에서는 하나의 리포지터리가 여러 행으로 흩어집니다. `--merge-worktrees`가 이를 다시 합칩니다(서로 다른 클라이언트가 다른 키 형식으로 기록한 같은 리포지터리도 합칩니다).
+- **`--merge-worktrees`는 리포지터리 안쪽과 바깥쪽 워크트리를 모두 찾습니다.** `<repo>/.claude/worktrees/<name>`(에이전트 CLI가 만드는 형태)와 `<repo>/.git/worktrees/<name>`은 경로만으로 인식하고, 다른 위치에 체크아웃한 워크트리(`git worktree add ../feature-x`)는 `.git` 포인터 파일을 읽어 리포지터리까지 추적합니다. 다만 심볼릭 링크와 실제 경로처럼 두 가지 표기로 도달하는 리포지터리는 워크스페이스 식별자를 문자열로 비교하므로 여전히 두 행으로 남습니다. 어느 쪽이든 합계는 그대로입니다 — 사용량이 행으로 나뉠 뿐 사라지거나 중복 계산되지 않습니다.
+- **같은 이름이 될 행은 상위 디렉터리로 한정됩니다.** 라벨은 디렉터리 이름 자체라서 `~/work/api`와 `~/oss/api`는 둘 다 `api`가 됩니다. 충돌한 라벨에는 구분될 때까지 앞쪽 경로 조각이 붙고(`work/api`, `oss/api`), 경로 조각으로도 구분되지 않으면 — 같은 디렉터리를 두 클라이언트가 서로 다른 키 형식으로 기록한 경우 — 워크스페이스 키가 붙습니다. 그룹화는 바뀌지 않고 표시 문자열만 달라집니다.
+- **워크스페이스를 기록하지 않는 클라이언트는 하나의 `Unknown workspace` 행으로 모입니다.** 지원 클라이언트의 약 절반(gemini, cursor, amp, droid, roocode, kilocode, goose, Copilot의 OTEL 경로 등)은 워크스페이스를 남기지 않아 디렉터리에 귀속시킬 수 없습니다.
 
 ### 플랫폼별 필터링
 
@@ -735,6 +760,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Codex CLI가 설치되어 인증되어 있어야 함. |
 | `gemini` | `gemini -p` | Gemini CLI가 설치되어 인증되어 있어야 함. |
 | `kiro` | `kiro --non-interactive` | Kiro CLI가 설치되어 인증되어 있어야 함. |
+| `minimax` | (HTTP API) | OpenAI 호환 chat-completions API를 사용하므로 CLI가 필요하지 않음. `MINIMAX_API_KEY` 또는 `MINIMAX_API_TOKEN` 설정. 기본값은 글로벌 엔드포인트(`https://api.minimax.io/v1`)의 `MiniMax-M3`이며, `MINIMAX_API_REGION=cn`을 설정하면 `https://api.minimaxi.com/v1`을 사용하고 `MINIMAX_MODEL`로 다른 모델(예: `MiniMax-M2.7`)을 선택할 수 있음. |
 
 **동작 방식:**
 
@@ -784,7 +810,7 @@ TUI에서는 **Usage** 탭으로 이동해 구독 데이터를 확인하세요. 
 
 | 프로바이더 | 인증 방식 | 지표 | 설정 |
 |----------|-------------|---------|-------|
-| **Claude** | OAuth (자격 증명 파일 또는 macOS Keychain) | 세션(5시간), 주간, Opus 할당량 | `claude`를 실행해 로그인 |
+| **Claude** | OAuth (자격 증명 파일 또는 macOS Keychain) | 세션(5시간), 주간, 모델별 할당량 | `claude`를 실행해 로그인 |
 | **Codex** (OpenAI) | OAuth (Codex 인증, 저장된 Tokscale 계정 또는 OpenCode의 `$XDG_DATA_HOME/opencode/auth.json`) | 세션, 주간 할당량 | `[Add Codex]`, `codex`, `tokscale codex import --name work` 또는 OpenCode에서 OpenAI ChatGPT Plus/Pro 연결 사용 |
 | **Z.ai** | API 키 (환경 변수) | 토큰 한도, 웹 검색 | `ZAI_API_KEY` 또는 `GLM_API_KEY` 설정 |
 | **Amp** | API 키 (`~/.local/share/amp/secrets.json`) | 무료 티어 잔액, 크레딧 | `amp`를 실행해 로그인 |

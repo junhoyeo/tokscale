@@ -3,7 +3,7 @@
 //! The macOS desktop app stores aggregate token totals in `~/.copilot/data.db`
 //! and per-session event metadata in `~/.copilot/session-state/{session_id}`.
 
-use super::utils::{lossy_lines, open_readonly_sqlite};
+use super::utils::{lossy_lines, sqlite_for_each_row};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use chrono::{DateTime, NaiveDateTime};
@@ -239,20 +239,7 @@ fn shutdown_deltas(
 }
 
 pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match open_readonly_sqlite(db_path) {
-        Ok(conn) => conn,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Copilot Desktop database"
-            );
-            return Vec::new();
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        r#"
+    let query = r#"
         SELECT
             id,
             title,
@@ -268,53 +255,29 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
            OR total_output_tokens > 0
            OR total_cached_tokens > 0
            OR total_reasoning_tokens > 0
-        "#,
-    ) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Copilot Desktop sessions query"
-            );
-            return Vec::new();
-        }
-    };
+        "#;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok(CopilotDesktopSessionRow {
-            id: row.get(0)?,
-            model: row.get(2)?,
-            total_input_tokens: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-            total_output_tokens: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-            total_cached_tokens: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            total_reasoning_tokens: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-            created_at: row.get(8)?,
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Copilot Desktop sessions query"
-            );
-            return Vec::new();
-        }
-    };
+    let mut messages = Vec::new();
+    sqlite_for_each_row(
+        db_path,
+        query,
+        Some("Copilot Desktop session"),
+        &mut |row| {
+            let session = CopilotDesktopSessionRow {
+                id: row.get(0)?,
+                model: row.get(2)?,
+                total_input_tokens: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                total_output_tokens: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                total_cached_tokens: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                total_reasoning_tokens: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                created_at: row.get(8)?,
+            };
+            messages.extend(session_row_to_messages(db_path, session));
+            Ok(())
+        },
+    );
 
-    rows.flat_map(|row| match row {
-        Ok(row) => session_row_to_messages(db_path, row),
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to decode Copilot Desktop session row"
-            );
-            Vec::new()
-        }
-    })
-    .collect()
+    messages
 }
 
 /// Turn one `sessions` row into the messages its usage actually belongs to.
