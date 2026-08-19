@@ -245,6 +245,29 @@ impl std::str::FromStr for GroupBy {
     }
 }
 
+/// The five token buckets, which are **mutually exclusive**.
+///
+/// `total()` sums all five, and `pricing::lookup::compute_cost` prices `input`
+/// and `cache_read` against separate rates while charging `output + reasoning`
+/// at the output rate. A parser therefore has to remove every overlap the
+/// vendor reports before filling these fields, or the overlapping tokens are
+/// counted twice in the total and billed twice in the estimate.
+///
+/// Two overlaps show up repeatedly across vendors:
+///
+/// - Cached input reported inside `input_tokens`. Put the cached portion in
+///   `cache_read` and the remainder in `input`.
+/// - Reasoning reported inside `output_tokens`. Put the reasoning portion in
+///   `reasoning` and the remainder in `output`.
+///
+/// Neither is universal, so establish which shape a vendor uses before
+/// subtracting. `sessions::gemini` proves additivity by matching an inclusive
+/// sum against the vendor's own total; `sessions::goose` derives reasoning as
+/// the excess beyond input plus output, additive by construction. `sessions::codex`,
+/// `sessions::grok`, `sessions::zcode` and `sessions::reasonix` each subtract
+/// a confirmed-contained reasoning count. When a vendor gives no way
+/// to tell, `sessions::pi`, `sessions::kimi` and `sessions::zed` leave
+/// `reasoning` at zero rather than risk the double count.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TokenBreakdown {
     pub input: i64,
