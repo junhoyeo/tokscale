@@ -314,3 +314,99 @@ fn client_labels(clients: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{McpServerUsage, ToolUsage, UsageData};
+
+    fn make_app() -> App {
+        App::new_with_cached_data(
+            TuiConfig {
+                theme: "tokscale".to_string(),
+                refresh: 0,
+                sessions_path: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            Some(UsageData::default()),
+        )
+        .unwrap()
+    }
+
+    fn tool(name: &str, server: Option<&str>, calls: u64) -> ToolUsage {
+        ToolUsage {
+            name: name.to_string(),
+            server: server.map(String::from),
+            calls,
+            clients: "claude".to_string(),
+            message_count: 1,
+        }
+    }
+
+    fn server(name: &str, calls: u64, tools: u32) -> McpServerUsage {
+        McpServerUsage {
+            server: name.to_string(),
+            calls,
+            tools,
+            clients: "claude".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_summary_leads_with_the_total_and_the_busiest_servers() {
+        let mut app = make_app();
+        app.data.mcp_servers = vec![server("figma", 40, 3), server("gmail", 10, 2)];
+
+        let summary = mcp_summary(&app).expect("servers present");
+
+        assert!(
+            summary.contains("50 calls"),
+            "totals across servers: {summary}"
+        );
+        assert!(summary.contains("2 servers"), "{summary}");
+        assert!(summary.contains("figma 40"), "{summary}");
+    }
+
+    #[test]
+    fn one_server_is_not_pluralised() {
+        let mut app = make_app();
+        app.data.mcp_servers = vec![server("figma", 40, 3)];
+
+        let summary = mcp_summary(&app).unwrap();
+
+        assert!(summary.contains("1 server "), "{summary}");
+        assert!(!summary.contains("1 servers"), "{summary}");
+    }
+
+    #[test]
+    fn no_mcp_usage_shows_no_summary_rather_than_an_empty_one() {
+        let app = make_app();
+
+        assert_eq!(mcp_summary(&app), None);
+    }
+
+    #[test]
+    fn the_coverage_notice_appears_only_when_something_was_not_seen() {
+        let mut app = make_app();
+        assert_eq!(coverage_notice(&app), None, "full coverage needs no caveat");
+
+        app.data.messages_without_tool_data = 1234;
+        let notice = coverage_notice(&app).expect("partial coverage must be stated");
+        assert!(notice.contains("1,234"), "{notice}");
+    }
+
+    #[test]
+    fn a_builtin_and_an_mcp_tool_of_one_name_are_separate_rows() {
+        // Guards the view's assumption that the aggregator keeps them apart:
+        // if it ever merged them, the Server column would be a lie.
+        let rows = vec![tool("search", None, 3), tool("search", Some("figma"), 2)];
+
+        assert_ne!(rows[0].server, rows[1].server);
+        assert_eq!(rows[0].name, rows[1].name);
+    }
+}

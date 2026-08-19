@@ -606,6 +606,94 @@ mod tests {
     use chrono::FixedOffset;
 
     #[test]
+    fn tool_calls_survive_the_bincode_round_trip() {
+        // The cache is bincode, which is positional rather than
+        // self-describing, so a field that serializes correctly in JSON can
+        // still desynchronise the reader here. This asserts the shape the
+        // cache actually stores, including the `None` that a pre-extraction
+        // entry carries.
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "model",
+            "anthropic",
+            "session",
+            0,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        message.tool_calls = Some(vec![
+            ToolCall::new("Bash", 3),
+            ToolCall::from_server("figma", "get_design", 1),
+            ToolCall::mcp("web_search", 2),
+        ]);
+
+        let encoded = bincode::serialize(&message).expect("encodes");
+        let decoded: UnifiedMessage = bincode::deserialize(&encoded).expect("decodes");
+
+        assert_eq!(decoded.tool_calls, message.tool_calls);
+
+        let mut unknown = message.clone();
+        unknown.tool_calls = None;
+        let encoded = bincode::serialize(&unknown).expect("encodes");
+        let decoded: UnifiedMessage = bincode::deserialize(&encoded).expect("decodes");
+        assert_eq!(decoded.tool_calls, None);
+    }
+
+    #[test]
+    fn a_sequence_of_tool_calls_folds_per_server_and_name() {
+        let folded = fold_tool_calls(vec![
+            (None, "Bash".to_string()),
+            (Some("figma".to_string()), "search".to_string()),
+            (None, "Bash".to_string()),
+            // Same tool name, different origin: three distinct rows, not one.
+            (None, "search".to_string()),
+            (Some("gmail".to_string()), "search".to_string()),
+            (Some("figma".to_string()), "search".to_string()),
+        ]);
+
+        assert_eq!(
+            folded,
+            vec![
+                ToolCall::new("Bash", 2),
+                ToolCall::from_server("figma", "search", 2),
+                ToolCall::new("search", 1),
+                ToolCall::from_server("gmail", "search", 1),
+            ],
+            "folding preserves first-seen order and never merges across origins"
+        );
+    }
+
+    #[test]
+    fn split_mcp_tool_name_accepts_only_the_full_convention() {
+        assert_eq!(
+            split_mcp_tool_name("mcp__figma__get_design_context"),
+            Some(("figma", "get_design_context"))
+        );
+        // A tool name may itself contain the separator; only the first split
+        // counts, so the rest belongs to the tool.
+        assert_eq!(split_mcp_tool_name("mcp__srv__a__b"), Some(("srv", "a__b")));
+
+        // Not the convention: no prefix, no tool, no server, or empty halves.
+        assert_eq!(split_mcp_tool_name("Bash"), None);
+        assert_eq!(split_mcp_tool_name("my__tool"), None);
+        assert_eq!(split_mcp_tool_name("mcp__lonely"), None);
+        assert_eq!(split_mcp_tool_name("mcp____tool"), None);
+        assert_eq!(split_mcp_tool_name("mcp__srv__"), None);
+        assert_eq!(split_mcp_tool_name("mcp__"), None);
+        assert_eq!(split_mcp_tool_name(""), None);
+    }
+
+    #[test]
+    fn an_mcp_call_reports_itself_as_mcp_however_it_was_built() {
+        assert!(ToolCall::from_server("figma", "get_design", 1).is_mcp());
+        assert!(
+            ToolCall::mcp("web_search", 1).is_mcp(),
+            "an unnamed server is still an MCP call, not a built-in"
+        );
+        assert!(!ToolCall::new("Bash", 1).is_mcp());
+    }
+
+    #[test]
     fn warp_cache_parser_preserves_requests_and_spend_without_tokens() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
