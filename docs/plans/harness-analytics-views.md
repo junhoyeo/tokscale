@@ -149,9 +149,10 @@ The per-tab checklist, since every stage after the first adds one. `Tab` is hand
 | 4 | register group-by in picker | 1 | DONE | |
 | 5 | transcript survey for tool/skill/hook/command events | 2 | DONE | both clients surveyed; results above |
 | 6 | `session-data/` database survey | 4 | DONE | ruled out, holds none of this data |
-| 7 | retain tool names on the record | 2 | NEW | confirmed present in both clients |
-| 8 | Tools tab | 2 | NEW | blocked on 7 |
-| 9 | skills and commands view | 3 | NEW | Claude Code only; rides on 7 |
+| 7 | retain tool names on the record | 2 | DONE | Claude Code only so far; verified 207/207 on a real transcript |
+| 7b | Codex tool extraction | 2 | NEW | `function_call`, `custom_tool_call`, `mcp_tool_call_end` |
+| 8 | Tools tab | 2 | DONE | 54,109 calls across 38 tools on a real scan; states its own coverage gap |
+| 9 | skills and commands view | 3 | NEW | Claude Code only; rides on 7, which has landed |
 | 10 | subagent parent link | 3 | NEW | both clients carry the parent; needs retaining |
 | 11 | hooks view | 4 | NEW | Claude Code only; `hookInfos` gives command and durationMs |
 | 12 | rules view | 4 | ARCHIVED | not recorded in either transcript format |
