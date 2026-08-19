@@ -278,16 +278,18 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **8 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Stats (contribution graph), Agents. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Monthly, Sessions, Stats (contribution graph), Agents, Tools. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json`. See [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists
   - `Enter`: Open daily detail (Daily tab) / select graph cell (Stats tab)
   - `Esc` or `Backspace`: Close dialog or exit detail view
   - `c/d/t`: Sort by cost/date/tokens
+  - `n`: Sort by name (A–Z first); `M`: sort by count
   - `j`: Jump to today
   - `s`: Open source picker dialog
-  - `g`: Open group-by picker dialog (model, client+model, client+provider+model, workspace+model, session+model, client+session+model)
+  - `w`: Open project picker dialog, narrowing every view to one or more projects
+  - `g`: Open group-by picker dialog (model, client+model, client+provider+model, workspace+model, workspace+provider+model, session+model, client+session+model)
   - `h`: Toggle Daily/Hourly chart granularity (Overview tab)
   - `v`: Toggle Table/Profile view (Hourly tab)
   - `y`: Copy selected row to clipboard
@@ -296,8 +298,31 @@ The interactive TUI mode provides:
   - `e`: Export to JSON
   - `q` or `Ctrl+C`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
-- **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk
+- **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk, Tokyo Night, Catppuccin, Solarized, Gruvbox, Gruvbox Material, One Dark. Cycle with `p`, or set one directly with `tokscale config set theme <name>`
 - **Settings Persistence**: Preferences saved to `~/.config/tokscale/settings.json` (see [Configuration](#configuration))
+
+### Tools View
+
+The Tools tab reports which tools your agents actually called: how many calls each tool took, how many messages reached for it, and which MCP server served it.
+
+| Column | Meaning |
+|--------|---------|
+| Tool | The tool's own name, with any server prefix stripped |
+| Server | The MCP server serving it, or `built-in` for a tool built into the client |
+| Source | Clients that recorded calls to it |
+| Calls | Total calls |
+| Msgs | Messages that made at least one call |
+
+A line above the table rolls the same data up per MCP server, which is usually the level worth watching: a server you barely use still costs a slot in every request's tool definitions.
+
+**There is no cost or token column, on purpose.** A tool call is recorded on the message that made it, and that message's tokens pay for the whole turn. Splitting them across the tools the turn happened to call would invent an attribution nobody measured, so the view reports what was observed and leaves it at that. Sorting by cost or tokens on this tab falls back to call count for the same reason.
+
+**Coverage is partial, and the view says so.** Two things limit it:
+
+- Only Claude Code records tool calls today. Messages from other clients report *unknown* rather than zero, and a line under the table states how many.
+- Sessions parsed before this feature existed also report unknown, and stay that way until their transcript next changes. This is deliberate: forcing a re-parse would discard cached Claude Code turns that compaction has already removed from the live transcript, trading real usage data for tool metadata.
+
+Coverage therefore grows as you keep working, and old sessions never backfill.
 
 ### Group-By Strategies
 
@@ -309,6 +334,7 @@ Press `g` in the TUI or use `--group-by` in `--light`/`--json` mode to control h
 | **Client + Model** | `--group-by client,model` | | One row per client-model pair |
 | **Client + Provider + Model** | `--group-by client,provider,model` | | Most granular — no merging |
 | **Workspace + Model** | `--group-by workspace,model` | | Group local usage by workspace key, then model |
+| **Workspace + Provider + Model** | `--group-by workspace,provider,model` | | Per project, split by provider then model: what one project spent with each provider |
 | **Session + Model** | `--group-by session,model` | | One row per `session_id` and model — attribute cost to a specific agent-CLI session |
 | **Client + Session + Model** | `--group-by client,session,model` | | One row per client, session, and model — useful for multi-agent runners that join on `session_id` |
 
@@ -360,6 +386,35 @@ Press `g` in the TUI or use `--group-by` in `--light`/`--json` mode to control h
 ```
 
 Use `--group-by client,session,model` when you also need the client name on every row (one spawn across all 20+ supported CLIs at once).
+
+### Filtering by Project
+
+Narrow every view to the projects you care about, so a machine running agents across dozens of repos can answer "what did this one cost".
+
+In the TUI, press `w` to open the project picker. Type to filter, `Enter` toggles a project, `Tab` selects everything the current filter matches, and `Delete` clears the selection. **An empty selection means every project**, so scoping is something you opt into rather than something you undo for every repo you did not mean.
+
+To launch already scoped, pass `--workspace`:
+
+```bash
+# Scope to one project by name
+tokscale tui --workspace harness
+
+# Repeat the flag for several
+tokscale tui --workspace harness --workspace tokscale
+
+# Or pass a full path to single out one checkout
+tokscale tui --workspace /Users/me/Projects/_worktrees/tokscale/feature-branch
+```
+
+A **name** matches every project with that name. Two worktrees of one repo have different paths and the same name, so `--workspace harness` covers both, which is usually what "how much did this repo cost" means. Pass the **full path** when you want exactly one of them. Matching is case-insensitive.
+
+An unmatched selector produces an empty report rather than falling back to everything: answering a question about one project with the whole machine's numbers would be a wrong answer that looks plausible.
+
+Pair it with `--group-by workspace,provider,model` to see, within each project, what each provider cost:
+
+```bash
+tokscale models --group-by workspace,provider,model --light
+```
 
 ### Filtering by Platform
 
@@ -914,6 +969,7 @@ always produces the same buckets.
 ```console
 $ tokscale config list
 timezone     Asia/Seoul
+theme        solarized
 
 $ tokscale config get timezone
 Asia/Seoul
@@ -937,6 +993,26 @@ resync/replacement transition before choosing a different bucket timezone.
 Existing installs are unaffected until they pin, and the run that pins reports
 exactly what it would have reported anyway: the zone recorded is the one the
 machine was already using.
+
+#### Setting the theme
+
+`p` cycles through themes in the TUI, which is fine for browsing and poor for choosing: with eighteen of them, landing on a specific one takes a lot of keypresses. Set it directly instead:
+
+```console
+$ tokscale config set theme solarized
+set theme = solarized
+A running TUI writes its own theme back when it exits, so restart it to pick this up.
+
+$ tokscale config get theme
+solarized
+
+$ tokscale config unset theme
+reset theme (was solarized, now blue)
+```
+
+Editing `colorPalette` in `settings.json` by hand is unreliable while the TUI is running: it writes its own theme back on exit and overwrites the file. Use the command, or quit the TUI first.
+
+Available themes: `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, `ylgnbu`, `graphite`, `lagoon`, `dusk`, `tokyo-night`, `catppuccin`, `solarized`, `gruvbox`, `gruvbox-material`, `one-dark`.
 
 Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories or imported Gemini/OpenClaw histories. Tokscale automatically discovers Hermes profile databases under `$HERMES_HOME/profiles/*/state.db` (or `~/.hermes/profiles/*/state.db` when `HERMES_HOME` is unset). Use `scanner.extraScanPaths.hermes` only for non-standard Hermes profile locations; entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
