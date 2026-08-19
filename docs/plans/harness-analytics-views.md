@@ -109,7 +109,19 @@ Hooks are buildable, and richer than expected. Claude Code records `hookInfos` a
 
 Rules are closed as not buildable. Neither transcript format records which rule files were loaded, and parsing cannot recover what was never written.
 
-Context events are asymmetric. Codex emits `context_compacted` but carries no token counts on it, so a before-and-after delta has to be joined from the `token_count` events either side. No compaction marker appeared in the Claude Code sample. Worth building only if the compaction view is wanted for its own sake.
+Context events are asymmetric. Codex emits `context_compacted` but carries no token counts on it, so a before-and-after delta has to be joined from the `token_count` events either side. Claude Code records no compaction marker at all: 13,462 lines across an 80-file sample contain zero. So the compaction count is a Codex-only number and must read as "not reported" rather than zero for every other client.
+
+### window utilization, and why the obvious rollup is wrong
+
+Requested as "properly calculated up the chain", and the qualifier is load-bearing. Codex `token_count` events carry `model_context_window` (258,400 or 121,600 on this machine), so utilization looks like a division. It is not.
+
+Dividing a session's peak `total_token_usage.total_tokens` by the window produces impossible numbers: 192 of 311 sampled sessions exceed 100 percent, the worst at 63,548 percent. `total_token_usage` is cumulative billing tokens across every turn, and each turn re-sends the whole conversation as input, so summing it counts the same resident context once per turn.
+
+Segmenting at compaction events does not rescue it either. Only 17 of those 192 sessions had any compaction, and the worst case is unchanged at 63,548 percent. That hypothesis was tested and rejected rather than assumed.
+
+The measure that holds is per-turn occupancy: for each `token_count`, `last_token_usage.input_tokens + last_token_usage.output_tokens` is what was actually resident for that turn, and the session's utilization is the peak of that over its turns. Measured across the same 311 sessions this gives a median of 24 percent and a maximum of 102 percent, with only two sessions marginally over the ceiling where rounding at the boundary explains it.
+
+So the rule for the view: peak per-turn occupancy over the window, never a cumulative total, and rolled up as a maximum rather than a sum, because occupancy is a level and not a quantity. Summing it across sessions or across a day would rebuild the same error at a different altitude.
 
 ## adding a tab
 
@@ -143,11 +155,12 @@ The per-tab checklist, since every stage after the first adds one. `Tab` is hand
 | 10 | subagent parent link | 3 | NEW | both clients carry the parent; needs retaining |
 | 11 | hooks view | 4 | NEW | Claude Code only; `hookInfos` gives command and durationMs |
 | 12 | rules view | 4 | ARCHIVED | not recorded in either transcript format |
-| 13 | context/compaction view | 4 | NEW | Codex only; deltas joined from surrounding `token_count` |
+| 13 | compaction count per session | 4 | NEW | Codex only; Claude Code records no marker in 13,462 sampled lines |
+| 14 | window utilization per session | 4 | NEW | peak per-turn occupancy over `model_context_window`; rolled up as a max, never a sum |
 
 ## decisions still open
 
-`context-session-new` in the original request is not yet defined well enough to build. The two readings are a timeline of new-session and compaction events, or a per-session context-window utilization view. These need different data, so the item stays unscoped until it is settled.
+None outstanding. `context-session-new` was settled as two separate items: a per-session compaction count rolled up, and per-session window utilization computed as described above. Both are tracked as items 13 and 14.
 
 ## related
 
