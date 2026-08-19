@@ -21,8 +21,10 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-// v10->v11: Codex reasoning tokens are no longer double counted into `output`,
-// so v10 snapshots hold inflated token totals and cost for any Codex row.
+// v10->v11: Codex reasoning tokens are no longer double counted into
+// `output`, so v10 snapshots hold inflated token totals and cost for any
+// Codex row. Without the bump a v10 snapshot stays `Fresh` and keeps
+// serving the pre-split numbers for the whole staleness window.
 const CACHE_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1751,27 +1753,8 @@ mod tests {
         }
     }
 
-    #[test]
-    #[serial]
-    fn load_cache_falls_back_to_legacy_dot_cache_path() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let previous_xdg_config_home = env::var_os("XDG_CONFIG_HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-            env::set_var("XDG_CONFIG_HOME", temp_dir.path().join(".xdg-config"));
-        }
-
-        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_path,
-            r#"{
-  "schemaVersion": 11,
     const LEGACY_FALLBACK_PAYLOAD: &str = r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

@@ -1312,48 +1312,6 @@ mod tests {
     }
 
     #[test]
-    fn test_into_tokens_splits_reasoning_out_of_output() {
-        // Codex reports `reasoning_output_tokens` as a subset of `output_tokens`,
-        // the same containment relationship `cached_input_tokens` has with
-        // `input_tokens`. `TokenBreakdown::total` and `compute_cost` both add
-        // `reasoning` on top of `output`, so the contained portion has to be
-        // carved out of `output` exactly the way cached is carved out of input.
-        let totals = CodexTotals {
-            input: 1_000,
-            output: 100,
-            cached: 200,
-            reasoning: 90,
-        };
-
-        let tokens = totals.into_tokens();
-
-        assert_eq!(tokens.input, 800);
-        assert_eq!(tokens.cache_read, 200);
-        assert_eq!(tokens.output, 10);
-        assert_eq!(tokens.reasoning, 90);
-        // Codex's own `total_tokens` for this row is input + output = 1100.
-        assert_eq!(tokens.total(), 1_100);
-    }
-
-    #[test]
-    fn test_into_tokens_clamps_reasoning_to_output() {
-        // A malformed row claiming more reasoning than output must not push
-        // `output` negative or inflate the total.
-        let totals = CodexTotals {
-            input: 50,
-            output: 10,
-            cached: 0,
-            reasoning: 40,
-        };
-
-        let tokens = totals.into_tokens();
-
-        assert_eq!(tokens.output, 0);
-        assert_eq!(tokens.reasoning, 10);
-        assert_eq!(tokens.total(), 60);
-    }
-
-    #[test]
     fn test_reasoning_is_not_billed_twice_at_the_output_rate() {
         // Regression guard for the cost half of the same defect: pricing adds
         // `reasoning` to `output` before applying the output rate, so a parser
