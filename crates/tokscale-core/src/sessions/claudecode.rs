@@ -42,6 +42,16 @@ pub struct ClaudeEntry {
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
+    /// Absolute working directory the turn ran in.
+    ///
+    /// This is the only faithful source of a Claude workspace. The directory
+    /// name under `~/.claude/projects/` is a lossy encoding that replaces both
+    /// `/` and `_` with `-`, so `Projects/_worktrees` encodes to
+    /// `Projects--worktrees` and no decoder can tell that apart from a
+    /// directory literally named `-worktrees`. Every other client keys its
+    /// workspace on the real path, so a Claude session that falls back to the
+    /// encoded name lands in a second row for the same project.
+    pub cwd: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -436,6 +446,9 @@ pub fn parse_claude_file_with_cache_and_home(
     }
 
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
+    // Falls back to the encoded directory name above; upgraded to the real path
+    // by `apply_observed_cwd_workspace` once a line reports its `cwd`.
+    let mut observed_cwd: Option<String> = None;
     let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
     let client_id = cc_mirror_metadata
         .as_ref()
@@ -522,6 +535,18 @@ pub fn parse_claude_file_with_cache_and_home(
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
+            // First reported cwd wins. A session that changes directory mid-run
+            // still belongs to the project it started in, and taking the last
+            // one instead would let a single stray turn move the whole
+            // transcript's usage to another workspace.
+            if observed_cwd.is_none() {
+                if let Some(cwd) = entry.cwd.as_deref() {
+                    if !cwd.trim().is_empty() {
+                        observed_cwd = Some(cwd.to_string());
+                    }
+                }
+            }
+
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
@@ -768,7 +793,28 @@ pub fn parse_claude_file_with_cache_and_home(
         provider_confidences.push(provider_confidence);
     }
 
+    apply_observed_cwd_workspace(&mut messages, observed_cwd.as_deref());
+
     messages
+}
+
+/// Re-key every message in a transcript onto the `cwd` its lines reported.
+///
+/// Applied after the parse loop rather than inside it so the result does not
+/// depend on where in the file the first `cwd` appears: a transcript whose
+/// opening lines omit it would otherwise split its own messages across the
+/// encoded name and the real path.
+fn apply_observed_cwd_workspace(messages: &mut [UnifiedMessage], observed_cwd: Option<&str>) {
+    let Some(cwd) = observed_cwd else {
+        return;
+    };
+    let Some(key) = normalize_workspace_key(cwd) else {
+        return;
+    };
+    let label = workspace_label_from_key(&key);
+    for message in messages.iter_mut() {
+        message.set_workspace(Some(key.clone()), label.clone());
+    }
 }
 
 fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -2423,6 +2469,7 @@ mod tests {
                 agent_id: None,
                 session_id: None,
                 provider_id: None,
+                cwd: None,
             },
             last_model: Some("<synthetic>"),
             last_provider_hint: None,
@@ -2660,6 +2707,87 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn test_reported_cwd_wins_over_encoded_project_directory() {
+        // Claude Code encodes the workspace into the directory name under
+        // ~/.claude/projects by replacing both `/` and `_` with `-`, so
+        // `/Users/dev/Projects/_worktrees/app` and a directory literally named
+        // `-worktrees` collapse to the same string. Every other client keys on
+        // the real path, so keeping the encoded form splits one project across
+        // two workspace rows and halves each total.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/Users/dev/Projects/_worktrees/app","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(
+            content,
+            "-Users-dev-Projects--worktrees-app",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("/Users/dev/Projects/_worktrees/app".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("app".to_string()));
+    }
+
+    #[test]
+    fn test_cwd_reported_late_still_rekeys_earlier_messages() {
+        // The upgrade runs after the parse loop so a transcript whose opening
+        // turn omits `cwd` does not split its own messages across the encoded
+        // name and the real path.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","cwd":"/Users/dev/Projects/app","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":20,"output_tokens":6}}}"#;
+        let (_dir, path) = create_project_file(content, "-Users-dev-Projects-app", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        for message in &messages {
+            assert_eq!(
+                message.workspace_key,
+                Some("/Users/dev/Projects/app".to_string())
+            );
+            assert_eq!(message.workspace_label, Some("app".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_first_cwd_wins_when_a_session_changes_directory() {
+        // A stray turn in another directory must not move the whole
+        // transcript's usage to a different workspace.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/Users/dev/Projects/app","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","cwd":"/Users/dev/somewhere-else","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":20,"output_tokens":6}}}"#;
+        let (_dir, path) = create_project_file(content, "-Users-dev-Projects-app", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        for message in &messages {
+            assert_eq!(
+                message.workspace_key,
+                Some("/Users/dev/Projects/app".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_falls_back_to_encoded_name_without_cwd() {
+        // Older transcripts predate the `cwd` field; they must keep the
+        // directory-derived key rather than losing their workspace entirely.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(content, "legacy-project", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("legacy-project".to_string())
+        );
     }
 
     #[test]
