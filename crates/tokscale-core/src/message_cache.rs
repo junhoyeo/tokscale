@@ -947,7 +947,11 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        ClientId::Codex => 6,
+        // v6->v7: `reasoning_output_tokens` is contained in `output_tokens`, so
+        // it is now carved out of the output bucket instead of being passed
+        // through additively. Cached v6 entries carry the doubled split and
+        // would keep inflating totals and cost until their file changes.
+        ClientId::Codex => 7,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -2898,8 +2902,8 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_duration_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Codex), 6);
+    fn test_codex_reasoning_split_parser_version_invalidates_v6_entries() {
+        assert_eq!(parser_version(ClientId::Codex), 7);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 

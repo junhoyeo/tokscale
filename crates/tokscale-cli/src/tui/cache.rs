@@ -21,7 +21,9 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 10;
+// v10->v11: Codex reasoning tokens are no longer double counted into `output`,
+// so v10 snapshots hold inflated token totals and cost for any Codex row.
+const CACHE_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1161,7 +1163,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
@@ -1484,7 +1486,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1766,7 +1768,7 @@ mod tests {
         fs::write(
             &legacy_path,
             r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

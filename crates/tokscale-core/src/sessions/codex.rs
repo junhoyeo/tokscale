@@ -191,12 +191,19 @@ impl CodexTotals {
         // Clamp cached to not exceed input to prevent inflated totals when
         // malformed data reports more cached tokens than input tokens.
         let clamped_cached = self.cached.min(self.input).max(0);
+        // `reasoning_output_tokens` is contained in `output_tokens` the same way
+        // `cached_input_tokens` is contained in `input_tokens` (Codex reports
+        // `total_tokens == input_tokens + output_tokens`, never adding reasoning
+        // on top). `TokenBreakdown::total` and `compute_cost` both treat
+        // `reasoning` as additive to `output`, so leaving the contained portion
+        // inside `output` counts and bills those tokens twice.
+        let clamped_reasoning = self.reasoning.min(self.output).max(0);
         TokenBreakdown {
             input: (self.input - clamped_cached).max(0),
-            output: self.output.max(0),
+            output: (self.output - clamped_reasoning).max(0),
             cache_read: clamped_cached,
             cache_write: 0,
-            reasoning: self.reasoning.max(0),
+            reasoning: clamped_reasoning,
         }
     }
 }
@@ -1303,6 +1310,92 @@ mod tests {
         file
     }
 
+    #[test]
+    fn test_into_tokens_splits_reasoning_out_of_output() {
+        // Codex reports `reasoning_output_tokens` as a subset of `output_tokens`,
+        // the same containment relationship `cached_input_tokens` has with
+        // `input_tokens`. `TokenBreakdown::total` and `compute_cost` both add
+        // `reasoning` on top of `output`, so the contained portion has to be
+        // carved out of `output` exactly the way cached is carved out of input.
+        let totals = CodexTotals {
+            input: 1_000,
+            output: 100,
+            cached: 200,
+            reasoning: 90,
+        };
+
+        let tokens = totals.into_tokens();
+
+        assert_eq!(tokens.input, 800);
+        assert_eq!(tokens.cache_read, 200);
+        assert_eq!(tokens.output, 10);
+        assert_eq!(tokens.reasoning, 90);
+        // Codex's own `total_tokens` for this row is input + output = 1100.
+        assert_eq!(tokens.total(), 1_100);
+    }
+
+    #[test]
+    fn test_into_tokens_clamps_reasoning_to_output() {
+        // A malformed row claiming more reasoning than output must not push
+        // `output` negative or inflate the total.
+        let totals = CodexTotals {
+            input: 50,
+            output: 10,
+            cached: 0,
+            reasoning: 40,
+        };
+
+        let tokens = totals.into_tokens();
+
+        assert_eq!(tokens.output, 0);
+        assert_eq!(tokens.reasoning, 10);
+        assert_eq!(tokens.total(), 60);
+    }
+
+    #[test]
+    fn test_reasoning_is_not_billed_twice_at_the_output_rate() {
+        // Regression guard for the cost half of the same defect: pricing adds
+        // `reasoning` to `output` before applying the output rate, so a parser
+        // that leaves the contained reasoning inside `output` charges it twice.
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-04-30T10:00:00Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":100,"reasoning_output_tokens":90,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":100,"reasoning_output_tokens":90,"total_tokens":1100}}}}"#,
+            "\n",
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        let tokens = &messages[0].tokens;
+        assert_eq!(
+            tokens.output + tokens.reasoning,
+            100,
+            "output and reasoning together must equal the reported output_tokens"
+        );
+
+        let pricing = crate::pricing::ModelPricing {
+            input_cost_per_token: Some(1.25e-6),
+            output_cost_per_token: Some(1.0e-5),
+            cache_read_input_token_cost: Some(1.25e-7),
+            ..Default::default()
+        };
+        let cost = crate::pricing::lookup::compute_cost(
+            &pricing,
+            tokens.input,
+            tokens.output,
+            tokens.cache_read,
+            tokens.cache_write,
+            tokens.reasoning,
+        );
+        // 800 input + 200 cache read + 100 billed output tokens.
+        let expected = 800.0 * 1.25e-6 + 200.0 * 1.25e-7 + 100.0 * 1.0e-5;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "cost {cost} should equal {expected}"
+        );
+    }
+
     struct FailAfterFirstLine {
         inner: Cursor<Vec<u8>>,
         fail_next_read: bool,
@@ -1462,15 +1555,15 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let performance = &entries[0].performance;
         assert_eq!(performance.total_duration_ms, 7_000);
-        assert_eq!(performance.timed_tokens, 170);
+        assert_eq!(performance.timed_tokens, 160);
         assert_eq!(performance.sample_count, 3);
         assert_eq!(performance.token_coverage, 1.0);
-        let expected_ms_per_1k = 7_000.0 * 1_000.0 / 170.0;
+        let expected_ms_per_1k = 7_000.0 * 1_000.0 / 160.0;
         assert!((performance.ms_per_1k_tokens.unwrap() - expected_ms_per_1k).abs() < f64::EPSILON);
 
         let json = serde_json::to_value(performance).unwrap();
         assert_eq!(json["totalDurationMs"], 7_000);
-        assert_eq!(json["timedTokens"], 170);
+        assert_eq!(json["timedTokens"], 160);
         assert_eq!(json["sampleCount"], 3);
         assert_eq!(json["tokenCoverage"], 1.0);
         assert!(json["msPer1KTokens"].is_number());
@@ -1588,7 +1681,7 @@ mod tests {
             ]
         );
         assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(messages[0].tokens.output, 3);
+        assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 2);
         assert_eq!(messages[0].tokens.reasoning, 1);
         assert_eq!(messages[1].tokens.input, 4);
@@ -1596,7 +1689,7 @@ mod tests {
         assert_eq!(messages[1].tokens.cache_read, 1);
         assert_eq!(messages[1].tokens.reasoning, 0);
         assert_eq!(messages[2].tokens.input, 6);
-        assert_eq!(messages[2].tokens.output, 2);
+        assert_eq!(messages[2].tokens.output, 1);
         assert_eq!(messages[2].tokens.cache_read, 1);
         assert_eq!(messages[2].tokens.reasoning, 1);
 
@@ -1729,7 +1822,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
     }
@@ -1746,11 +1839,11 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
         assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
     }
@@ -1768,11 +1861,11 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
         assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
     }
@@ -1797,12 +1890,12 @@ mod tests {
         assert_eq!(messages.len(), 2);
         // First message: full total
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
         // Second message: delta from 50→80
         assert_eq!(messages[1].tokens.input, 25);
-        assert_eq!(messages[1].tokens.output, 10);
+        assert_eq!(messages[1].tokens.output, 8);
         assert_eq!(messages[1].tokens.cache_read, 5);
         assert_eq!(messages[1].tokens.reasoning, 2);
     }
@@ -1820,7 +1913,7 @@ mod tests {
         let tokens = totals.into_tokens();
         assert_eq!(tokens.cache_read, 50); // Clamped to input
         assert_eq!(tokens.input, 0); // input - clamped_cached = 0
-        assert_eq!(tokens.output, 30);
+        assert_eq!(tokens.output, 25);
         assert_eq!(tokens.reasoning, 5);
     }
 
@@ -1837,11 +1930,11 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
         assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
     }
@@ -1860,12 +1953,12 @@ mod tests {
 
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.reasoning, 5);
 
         assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
 
@@ -1920,17 +2013,17 @@ mod tests {
 
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].tokens.input, 9000);
-        assert_eq!(messages[0].tokens.output, 400);
+        assert_eq!(messages[0].tokens.output, 350);
         assert_eq!(messages[0].tokens.cache_read, 1000);
         assert_eq!(messages[0].tokens.reasoning, 50);
 
         assert_eq!(messages[1].tokens.input, 20);
-        assert_eq!(messages[1].tokens.output, 4);
+        assert_eq!(messages[1].tokens.output, 3);
         assert_eq!(messages[1].tokens.cache_read, 5);
         assert_eq!(messages[1].tokens.reasoning, 1);
 
         assert_eq!(messages[2].tokens.input, 20);
-        assert_eq!(messages[2].tokens.output, 4);
+        assert_eq!(messages[2].tokens.output, 3);
         assert_eq!(messages[2].tokens.cache_read, 5);
         assert_eq!(messages[2].tokens.reasoning, 1);
     }
@@ -1947,11 +2040,11 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 10);
-        assert_eq!(messages[0].tokens.output, 5);
+        assert_eq!(messages[0].tokens.output, 4);
         assert_eq!(messages[0].tokens.cache_read, 2);
         assert_eq!(messages[0].tokens.reasoning, 1);
         assert_eq!(messages[1].tokens.input, 10);
-        assert_eq!(messages[1].tokens.output, 5);
+        assert_eq!(messages[1].tokens.output, 4);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
     }
@@ -1969,11 +2062,11 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 450);
-        assert_eq!(messages[0].tokens.output, 80);
+        assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.reasoning, 10);
         assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
+        assert_eq!(messages[1].tokens.output, 2);
         assert_eq!(messages[1].tokens.cache_read, 2);
         assert_eq!(messages[1].tokens.reasoning, 1);
     }
@@ -2058,7 +2151,7 @@ mod tests {
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/repo-child"));
         assert_eq!(messages[0].tokens.input, 500);
         assert_eq!(messages[0].tokens.cache_read, 1000);
-        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[0].tokens.output, 150);
         assert_eq!(messages[0].tokens.reasoning, 50);
     }
 
@@ -2110,7 +2203,7 @@ mod tests {
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 500);
         assert_eq!(messages[0].tokens.cache_read, 1000);
-        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[0].tokens.output, 150);
         assert_eq!(messages[0].tokens.reasoning, 50);
     }
 
@@ -2524,7 +2617,7 @@ mod tests {
         assert_eq!(incremental.messages.len(), 1);
         assert_eq!(incremental.messages[0].tokens.input, 500);
         assert_eq!(incremental.messages[0].tokens.cache_read, 1000);
-        assert_eq!(incremental.messages[0].tokens.output, 200);
+        assert_eq!(incremental.messages[0].tokens.output, 150);
         assert_eq!(incremental.messages[0].tokens.reasoning, 50);
     }
 
@@ -2558,7 +2651,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(messages[0].tokens.output, 3);
+        assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 2);
         assert_eq!(
             messages[0].workspace_key.as_deref(),
@@ -2644,7 +2737,7 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].tokens.input, 45);
-        assert_eq!(messages[1].tokens.output, 10);
+        assert_eq!(messages[1].tokens.output, 8);
         assert_eq!(messages[1].tokens.cache_read, 5);
         assert_eq!(messages[1].tokens.reasoning, 2);
     }
