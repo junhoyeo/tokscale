@@ -28,8 +28,17 @@ use std::time::UNIX_EPOCH;
 // 5: Prime Agent entries cache reconciliation accounting beside their messages.
 // Version-4 shards have an explicit wire migration below, so other clients stay
 // warm and Prime entries need only one rebuild/backfill.
-const CACHE_FORMAT_VERSION: u32 = 5;
+// 6: UnifiedMessage gained tool_calls. Both older layouts migrate through
+// LegacyUnifiedMessagePreToolCalls rather than reading as Stale, because a
+// silent rebuild re-parses Claude Code entries from the live transcript and
+// that file no longer contains the assistant turns compaction removed (see the
+// warning on parser_version below). A rebuild would therefore retire real
+// usage from a user's totals to backfill a field that is allowed to be
+// unknown, so the migration fills tool_calls with None and keeps the history.
+const CACHE_FORMAT_VERSION: u32 = 6;
 const LEGACY_CACHE_FORMAT_VERSION: u32 = 4;
+/// The layout that added Prime accounting but predates `tool_calls`.
+const PRE_TOOL_CALLS_CACHE_FORMAT_VERSION: u32 = 5;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -1158,13 +1167,139 @@ pub(crate) struct CachedSourceEntry {
 /// migrate without discarding cached messages for unrelated clients. Prime
 /// entries convert with no accounting and are backfilled once on their next
 /// unchanged scan.
+/// `UnifiedMessage` as it was serialized before it carried `tool_calls`.
+///
+/// bincode is positional, so a new field is not additive on the wire the way it
+/// would be in a self-describing format: reading a pre-field shard with the
+/// current struct consumes the next entry's bytes as the missing field. Both
+/// v4 and v5 shards share this message layout, so both migrations decode
+/// through here and fill `tool_calls` with `None`, which is the honest value:
+/// those entries were parsed before tool calls were extracted at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyUnifiedMessagePreToolCalls {
+    client: String,
+    model_id: String,
+    provider_id: String,
+    session_id: String,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+    timestamp: i64,
+    date: String,
+    tokens: crate::TokenBreakdown,
+    cost: f64,
+    #[serde(default)]
+    cost_source: crate::sessions::CostSource,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default = "legacy_default_message_count")]
+    message_count: i32,
+    agent: Option<String>,
+    dedup_key: Option<String>,
+    #[serde(default)]
+    session_title: Option<String>,
+    #[serde(default)]
+    is_turn_start: bool,
+    #[serde(default)]
+    model_attribution_conflicted: bool,
+}
+
+const fn legacy_default_message_count() -> i32 {
+    1
+}
+
+#[cfg(test)]
+impl From<UnifiedMessage> for LegacyUnifiedMessagePreToolCalls {
+    /// Only for tests that synthesize a pre-`tool_calls` shard. Drops the
+    /// field, which is exactly what an old shard did not have.
+    fn from(msg: UnifiedMessage) -> Self {
+        Self {
+            client: msg.client,
+            model_id: msg.model_id,
+            provider_id: msg.provider_id,
+            session_id: msg.session_id,
+            workspace_key: msg.workspace_key,
+            workspace_label: msg.workspace_label,
+            timestamp: msg.timestamp,
+            date: msg.date,
+            tokens: msg.tokens,
+            cost: msg.cost,
+            cost_source: msg.cost_source,
+            duration_ms: msg.duration_ms,
+            message_count: msg.message_count,
+            agent: msg.agent,
+            dedup_key: msg.dedup_key,
+            session_title: msg.session_title,
+            is_turn_start: msg.is_turn_start,
+            model_attribution_conflicted: msg.model_attribution_conflicted,
+        }
+    }
+}
+
+impl From<LegacyUnifiedMessagePreToolCalls> for UnifiedMessage {
+    fn from(msg: LegacyUnifiedMessagePreToolCalls) -> Self {
+        Self {
+            client: msg.client,
+            model_id: msg.model_id,
+            provider_id: msg.provider_id,
+            session_id: msg.session_id,
+            workspace_key: msg.workspace_key,
+            workspace_label: msg.workspace_label,
+            timestamp: msg.timestamp,
+            date: msg.date,
+            tokens: msg.tokens,
+            cost: msg.cost,
+            cost_source: msg.cost_source,
+            duration_ms: msg.duration_ms,
+            message_count: msg.message_count,
+            agent: msg.agent,
+            dedup_key: msg.dedup_key,
+            session_title: msg.session_title,
+            is_turn_start: msg.is_turn_start,
+            model_attribution_conflicted: msg.model_attribution_conflicted,
+            tool_calls: None,
+        }
+    }
+}
+
+/// A v5 entry: identical to the current one except for the message layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyCachedSourceEntryV5 {
+    parser_namespace: String,
+    parser_version: u32,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    messages: Vec<LegacyUnifiedMessagePreToolCalls>,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+    prime_accounting: Option<crate::sessions::prime_agent::PrimeFileAccounting>,
+}
+
+impl From<LegacyCachedSourceEntryV5> for CachedSourceEntry {
+    fn from(entry: LegacyCachedSourceEntryV5) -> Self {
+        Self {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(UnifiedMessage::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LegacyCachedSourceEntryV4 {
     parser_namespace: String,
     parser_version: u32,
     path: CachedPath,
     fingerprint: SourceFingerprint,
-    messages: Vec<UnifiedMessage>,
+    messages: Vec<LegacyUnifiedMessagePreToolCalls>,
     fallback_timestamp_indices: Vec<usize>,
     codex_incremental: Option<CodexIncrementalCache>,
 }
@@ -1176,7 +1311,11 @@ impl From<LegacyCachedSourceEntryV4> for CachedSourceEntry {
             parser_version: entry.parser_version,
             path: entry.path,
             fingerprint: entry.fingerprint,
-            messages: entry.messages,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(UnifiedMessage::from)
+                .collect(),
             fallback_timestamp_indices: entry.fallback_timestamp_indices,
             codex_incremental: entry.codex_incremental,
             prime_accounting: None,
@@ -2027,6 +2166,17 @@ fn read_shard_with_limit(
         return match bincode::options()
             .with_limit(max_shard_bytes)
             .deserialize::<Vec<LegacyCachedSourceEntryV4>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries.into_iter().map(CachedSourceEntry::from).collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+    if envelope.format_version == PRE_TOOL_CALLS_CACHE_FORMAT_VERSION {
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyCachedSourceEntryV5>>(&envelope.payload)
         {
             Ok(entries) => ShardReadStatus::Migrated(
                 entries.into_iter().map(CachedSourceEntry::from).collect(),
@@ -3826,6 +3976,66 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn a_pre_tool_calls_shard_migrates_instead_of_rebuilding() {
+        // The point of the migration: a shard written before `tool_calls`
+        // existed must keep its messages. Reading it as Stale would rebuild
+        // from the live transcript, and for Claude Code that file no longer
+        // holds the assistant turns compaction removed, so real usage would
+        // vanish from totals to backfill a field allowed to be unknown.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = test_entry(identity, source.path(), "retained-session");
+        let key = CacheKey::from_entry(&entry);
+        let shard_key = key.shard();
+        let legacy_path = shard_path(&cache_shard_dir().unwrap(), &shard_key);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+
+        let legacy_entry = LegacyCachedSourceEntryV5 {
+            parser_namespace: entry.parser_namespace.clone(),
+            parser_version: entry.parser_version,
+            path: entry.path.clone(),
+            fingerprint: entry.fingerprint.clone(),
+            messages: entry
+                .messages
+                .clone()
+                .into_iter()
+                .map(LegacyUnifiedMessagePreToolCalls::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices.clone(),
+            codex_incremental: entry.codex_incremental.clone(),
+            prime_accounting: None,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: PRE_TOOL_CALLS_CACHE_FORMAT_VERSION,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![legacy_entry]).unwrap(),
+        };
+        std::fs::write(
+            &legacy_path,
+            bincode::options().serialize(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let status = read_shard(&legacy_path, identity);
+
+        match status {
+            ShardReadStatus::Migrated(entries) => {
+                assert_eq!(entries.len(), 1, "the entry survives the migration");
+                assert_eq!(entries[0].messages[0].session_id, "retained-session");
+                assert_eq!(
+                    entries[0].messages[0].tool_calls, None,
+                    "an entry parsed before extraction existed reports unknown, not zero"
+                );
+            }
+            _ => panic!("expected a migration of the pre-tool-calls shard"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_v4_shard_migrates_messages_and_rewrites_once() {
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
@@ -3841,7 +4051,11 @@ mod tests {
             parser_version: entry.parser_version,
             path: entry.path,
             fingerprint: entry.fingerprint,
-            messages: entry.messages,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(LegacyUnifiedMessagePreToolCalls::from)
+                .collect(),
             fallback_timestamp_indices: entry.fallback_timestamp_indices,
             codex_incremental: entry.codex_incremental,
         };

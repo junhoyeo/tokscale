@@ -653,6 +653,7 @@ mod tests {
             session_title: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            tool_calls: None,
         }
     }
 
@@ -1303,6 +1304,7 @@ mod tests {
             is_turn_start: false,
             model_attribution_conflicted: false,
             duration_ms: None,
+            tool_calls: None,
         }
     }
 

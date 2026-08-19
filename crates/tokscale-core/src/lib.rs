@@ -381,6 +381,9 @@ pub struct ParsedMessage {
     pub duration_ms: Option<i64>,
     pub message_count: i32,
     pub agent: Option<String>,
+    /// See `UnifiedMessage::tool_calls`. Carried here so the round trip
+    /// through `ParsedMessage` does not silently drop it.
+    pub tool_calls: Option<Vec<sessions::ToolCall>>,
 }
 
 pub struct ParsedMessages {
@@ -4926,6 +4929,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
+        tool_calls: msg.tool_calls.clone(),
     }
 }
 
@@ -4990,6 +4994,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         session_title: None,
         is_turn_start: false,
         model_attribution_conflicted: false,
+        tool_calls: msg.tool_calls.clone(),
     }
 }
 

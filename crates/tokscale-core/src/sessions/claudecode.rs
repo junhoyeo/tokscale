@@ -9,7 +9,8 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{
-    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+    fold_tool_calls, normalize_agent_name, normalize_workspace_key, workspace_label_from_key,
+    ToolCall, UnifiedMessage,
 };
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -83,6 +84,38 @@ pub struct ClaudeMessage {
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
+    /// Raw content blocks. Held as `Value` rather than a typed enum because the
+    /// shape is a moving target (`text`, `thinking`, `tool_use`, `tool_result`,
+    /// `server_tool_use`, `image`, and more arrive over time) and a strict enum
+    /// would reject a whole message over one unrecognized block kind. Content
+    /// is also sometimes a bare string rather than an array.
+    #[serde(default)]
+    pub content: Option<Value>,
+}
+
+/// Pull the tool calls out of an assistant message's content blocks.
+///
+/// `tool_use` is a built-in tool; `server_tool_use` is served by an MCP server,
+/// which is the distinction the Tools view needs and which cannot be recovered
+/// from the name alone. Returns `None` when the message carries no content
+/// array at all, so "this parser saw no content" stays distinguishable from
+/// "this message made no tool calls".
+fn claude_tool_calls(content: Option<&Value>) -> Option<Vec<ToolCall>> {
+    let blocks = content?.as_array()?;
+    let observed = blocks.iter().filter_map(|block| {
+        let kind = block.get("type")?.as_str()?;
+        let mcp = match kind {
+            "tool_use" => false,
+            "server_tool_use" => true,
+            _ => return None,
+        };
+        let name = block.get("name")?.as_str()?;
+        if name.is_empty() {
+            return None;
+        }
+        Some((name.to_string(), mcp))
+    });
+    Some(fold_tool_calls(observed))
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,6 +695,7 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                claude_tool_calls(message.content.as_ref()),
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -681,6 +715,7 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                claude_tool_calls(message.content.as_ref()),
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -740,6 +775,7 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
+                unified.tool_calls = claude_tool_calls(message.content.as_ref());
                 unified.set_workspace(workspace_key.clone(), workspace_label.clone());
                 // Mark the first assistant response after a user message as a turn start
                 if pending_turn_start {
@@ -936,7 +972,30 @@ fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
     parsed_timestamp: Option<i64>,
+    tool_calls: Option<Vec<ToolCall>>,
 ) {
+    // Tool calls accumulate across streaming frames; token counts do not.
+    //
+    // Each duplicate line of one response carries its own new content block
+    // rather than a growing snapshot, so a response that ran Bash, Read, then
+    // Bash arrives as three frames of one call each. Keeping the first frame
+    // undercounted a real transcript's 207 calls as 33, and keeping the
+    // richest frame still only reached 118. Summing is what reconstructs the
+    // response. That is the opposite of the token merge above, which takes a
+    // per-field max precisely because `usage` is a cumulative snapshot and
+    // summing it would multiply every response by its frame count.
+    if let Some(incoming) = tool_calls {
+        let merged = existing.tool_calls.get_or_insert_with(Vec::new);
+        for call in incoming {
+            match merged
+                .iter_mut()
+                .find(|seen| seen.name == call.name && seen.mcp == call.mcp)
+            {
+                Some(seen) => seen.count = seen.count.saturating_add(call.count),
+                None => merged.push(call),
+            }
+        }
+    }
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
     t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
@@ -2707,6 +2766,79 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn tool_calls_are_retained_with_their_names_and_counts() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"tool_use","name":"Bash","id":"a"},{"type":"tool_use","name":"Read","id":"b"},{"type":"tool_use","name":"Bash","id":"c"},{"type":"text","text":"done"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        let calls = messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("content was present");
+        assert_eq!(
+            calls,
+            &vec![ToolCall::new("Bash", 2), ToolCall::new("Read", 1)],
+            "repeat calls fold into a count, in first-seen order"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_calls_are_marked_as_such() {
+        // The Tools view has to separate MCP tools from built-ins, and the name
+        // alone cannot tell them apart.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"server_tool_use","name":"web_search","id":"a"},{"type":"tool_use","name":"Bash","id":"b"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        let calls = messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(
+            calls,
+            &vec![ToolCall::mcp("web_search", 1), ToolCall::new("Bash", 1)]
+        );
+    }
+
+    #[test]
+    fn a_message_with_content_but_no_tools_reports_an_empty_list_not_unknown() {
+        // Known-zero and unknown must stay distinguishable: this message did
+        // make no tool calls, which is a fact worth reporting.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"text","text":"hello"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages[0].tool_calls.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn a_message_without_content_reports_unknown_rather_than_zero() {
+        // Every transcript predating this field parses through here. Reporting
+        // an empty list would claim those sessions made no tool calls.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages[0].tool_calls, None);
+    }
+
+    #[test]
+    fn an_unrecognized_block_kind_does_not_drop_the_message() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"some_future_block"},{"type":"tool_use","name":"Bash","id":"a"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].tool_calls.as_ref().unwrap(),
+            &vec![ToolCall::new("Bash", 1)]
+        );
     }
 
     #[test]

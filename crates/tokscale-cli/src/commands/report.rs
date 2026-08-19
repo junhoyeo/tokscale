@@ -1631,6 +1631,7 @@ mod tests {
             duration_ms: None,
             message_count: 1,
             agent: None,
+            tool_calls: None,
         }
     }
 

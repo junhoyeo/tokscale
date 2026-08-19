@@ -98,6 +98,76 @@ pub struct UnifiedMessage {
     /// Such rows must remain unpriced rather than accepting fallback attribution.
     #[serde(default)]
     pub model_attribution_conflicted: bool,
+    /// Tool calls this message made, when the client's parser reports them.
+    ///
+    /// `None` means unknown, not zero. That distinction is what lets this land
+    /// without a `parser_version` bump: entries cached before the field existed
+    /// deserialize to `None` and are excluded from tool reporting, rather than
+    /// deserializing to an empty list and claiming a session made no tool calls
+    /// at all. Bumping instead would discard cached Claude Code entries that
+    /// carry assistant turns compaction has already removed from the live file
+    /// (see the warning in `message_cache::parser_version`), trading a
+    /// reporting gap for real data loss.
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+/// One tool, and how many times this message called it.
+///
+/// Counted per message rather than stored one entry per call: a single turn
+/// repeating the same tool is common, and the count keeps the cached record
+/// from growing linearly with a loop that hammers one tool.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    pub name: String,
+    pub count: u32,
+    /// True for tools served by an MCP server rather than built into the
+    /// client. Kept separate so a Tools view can distinguish them without
+    /// pattern-matching names, which differ per client.
+    #[serde(default)]
+    pub mcp: bool,
+}
+
+impl ToolCall {
+    pub fn new(name: impl Into<String>, count: u32) -> Self {
+        Self {
+            name: name.into(),
+            count,
+            mcp: false,
+        }
+    }
+
+    pub fn mcp(name: impl Into<String>, count: u32) -> Self {
+        Self {
+            name: name.into(),
+            count,
+            mcp: true,
+        }
+    }
+}
+
+/// Fold a sequence of observed tool names into per-name counts, preserving the
+/// order each tool was first seen so a view can show call order rather than
+/// only a histogram.
+pub fn fold_tool_calls<I>(names: I) -> Vec<ToolCall>
+where
+    I: IntoIterator<Item = (String, bool)>,
+{
+    let mut folded: Vec<ToolCall> = Vec::new();
+    for (name, mcp) in names {
+        match folded
+            .iter_mut()
+            .find(|call| call.name == name && call.mcp == mcp)
+        {
+            Some(existing) => existing.count = existing.count.saturating_add(1),
+            None => folded.push(ToolCall {
+                name,
+                count: 1,
+                mcp,
+            }),
+        }
+    }
+    folded
 }
 
 const fn default_message_count() -> i32 {
@@ -376,6 +446,7 @@ impl UnifiedMessage {
             session_title: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            tool_calls: None,
         }
     }
 
