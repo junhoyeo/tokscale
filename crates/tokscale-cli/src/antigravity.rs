@@ -2276,7 +2276,22 @@ fn try_fetch_session_artifact(
         return Ok(None);
     }
 
-    let lines = normalize_session_metadata(&summary.session_id, &metadata)?;
+    let usage_timestamps = if session_metadata_needs_trajectory_timestamps(&metadata) {
+        rpc_request(
+            connection,
+            "GetCascadeTrajectory",
+            &serde_json::json!({ "cascadeId": summary.session_id }),
+        )
+        .map(|trajectory| usage_timestamps_from_trajectory(&trajectory))
+        .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let lines = normalize_session_metadata_with_timestamps(
+        &summary.session_id,
+        &metadata,
+        &usage_timestamps,
+    )?;
     if lines.is_empty() {
         return Ok(None);
     }
@@ -2297,7 +2312,110 @@ fn try_fetch_session_artifact(
     }))
 }
 
+fn session_metadata_needs_trajectory_timestamps(metadata: &[Value]) -> bool {
+    metadata.iter().any(|meta| {
+        let chat_model = meta.get("chatModel").unwrap_or(meta);
+        let chat_created_at = chat_model
+            .get("chatStartMetadata")
+            .and_then(|value| value.get("createdAt"))
+            .and_then(parse_timestamp_value);
+
+        chat_model
+            .get("retryInfos")
+            .and_then(Value::as_array)
+            .map(|retry_infos| {
+                retry_infos.iter().any(|retry| {
+                    let usage = retry.get("usage").unwrap_or(retry);
+                    let has_usage = to_safe_i64(usage.get("inputTokens")) > 0
+                        || to_safe_i64(usage.get("outputTokens")) > 0
+                        || to_safe_i64(usage.get("cacheReadTokens")) > 0
+                        || to_safe_i64(usage.get("thinkingOutputTokens")) > 0;
+                    let has_timestamp = usage
+                        .get("createdAt")
+                        .or_else(|| usage.get("timestamp"))
+                        .and_then(parse_timestamp_value)
+                        .or(chat_created_at)
+                        .is_some();
+                    has_usage && !has_timestamp
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn usage_timestamp_key(prefix: &str, value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("{prefix}:{value}"))
+}
+
+fn insert_usage_timestamp(timestamps: &mut HashMap<String, i64>, usage: &Value, timestamp: i64) {
+    for key in [
+        usage_timestamp_key("response", usage.get("responseId")),
+        usage_timestamp_key("message", usage.get("messageId")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        timestamps
+            .entry(key)
+            .and_modify(|current| *current = (*current).min(timestamp))
+            .or_insert(timestamp);
+    }
+}
+
+fn usage_timestamps_from_trajectory(response: &Value) -> HashMap<String, i64> {
+    let mut timestamps = HashMap::new();
+    let trajectory = response.get("trajectory").unwrap_or(response);
+    let Some(steps) = trajectory.get("steps").and_then(Value::as_array) else {
+        return timestamps;
+    };
+
+    for step in steps {
+        let Some(metadata) = step.get("metadata") else {
+            continue;
+        };
+        let Some(usage) = metadata.get("modelUsage") else {
+            continue;
+        };
+        let timestamp = [
+            "createdAt",
+            "startedAt",
+            "completedAt",
+            "finishedGeneratingAt",
+            "viewableAt",
+        ]
+        .iter()
+        .find_map(|field| metadata.get(*field).and_then(parse_timestamp_value));
+        if let Some(timestamp) = timestamp {
+            insert_usage_timestamp(&mut timestamps, usage, timestamp);
+        }
+    }
+
+    timestamps
+}
+
+fn timestamp_for_usage(usage: &Value, timestamps: &HashMap<String, i64>) -> Option<i64> {
+    [
+        usage_timestamp_key("response", usage.get("responseId")),
+        usage_timestamp_key("message", usage.get("messageId")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|key| timestamps.get(&key).copied())
+}
+
+#[cfg(test)]
 fn normalize_session_metadata(session_id: &str, metadata: &[Value]) -> Result<Vec<String>> {
+    normalize_session_metadata_with_timestamps(session_id, metadata, &HashMap::new())
+}
+
+fn normalize_session_metadata_with_timestamps(
+    session_id: &str,
+    metadata: &[Value],
+    usage_timestamps: &HashMap<String, i64>,
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
 
     for meta in metadata {
@@ -2326,6 +2444,7 @@ fn normalize_session_metadata(session_id: &str, metadata: &[Value]) -> Result<Ve
                     .get("createdAt")
                     .or_else(|| usage.get("timestamp"))
                     .and_then(parse_timestamp_value)
+                    .or_else(|| timestamp_for_usage(usage, usage_timestamps))
                     .or(created_at);
 
                 if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
@@ -2940,6 +3059,203 @@ mod tests {
             usage.get("timestamp").and_then(Value::as_i64),
             Some(1_711_447_200_000)
         );
+    }
+
+    #[test]
+    fn standalone_usage_uses_matching_trajectory_step_timestamp() {
+        let metadata = vec![
+            serde_json::json!({
+                "chatModel": {
+                    "responseModel": "gemini-3.7-flash",
+                    "retryInfos": [{
+                        "usage": {
+                            "inputTokens": 10,
+                            "outputTokens": 5,
+                            "thinkingOutputTokens": 1,
+                            "responseId": "response-1",
+                            "messageId": "message-1"
+                        }
+                    }]
+                }
+            }),
+            serde_json::json!({
+                "chatModel": {
+                    "responseModel": "gemini-3.7-flash",
+                    "retryInfos": [{
+                        "usage": {
+                            "inputTokens": 20,
+                            "outputTokens": 7,
+                            "thinkingOutputTokens": 2,
+                            "responseId": "response-2",
+                            "messageId": "message-2"
+                        }
+                    }]
+                }
+            }),
+        ];
+        let trajectory = serde_json::json!({
+            "trajectory": {
+                "steps": [
+                    {
+                        "metadata": {
+                            "createdAt": "2026-08-19T06:34:26.163405500Z",
+                            "modelUsage": {
+                                "responseId": "response-1",
+                                "messageId": "message-1"
+                            }
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "createdAt": "2026-08-19T07:16:35.787801300Z",
+                            "modelUsage": {
+                                "responseId": "response-2",
+                                "messageId": "message-2"
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let timestamps = usage_timestamps_from_trajectory(&trajectory);
+        let lines = normalize_session_metadata_with_timestamps("session-1", &metadata, &timestamps)
+            .unwrap();
+        let usages: Vec<Value> = lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+            .collect();
+
+        assert_eq!(usages.len(), 2);
+        assert_eq!(
+            usages[0].get("timestamp").and_then(Value::as_i64),
+            parse_timestamp_value(&serde_json::json!("2026-08-19T06:34:26.163405500Z"))
+        );
+        assert_eq!(
+            usages[1].get("timestamp").and_then(Value::as_i64),
+            parse_timestamp_value(&serde_json::json!("2026-08-19T07:16:35.787801300Z"))
+        );
+    }
+
+    #[test]
+    fn standalone_usage_falls_back_to_matching_message_id() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "responseModel": "gemini-3.7-flash",
+                "retryInfos": [{
+                    "usage": {
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "messageId": "message-1"
+                    }
+                }]
+            }
+        })];
+        let trajectory = serde_json::json!({
+            "trajectory": {
+                "steps": [{
+                    "metadata": {
+                        "createdAt": "2026-08-19T06:34:26.163405500Z",
+                        "modelUsage": {
+                            "responseId": "response-1",
+                            "messageId": "message-1"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let timestamps = usage_timestamps_from_trajectory(&trajectory);
+        let lines = normalize_session_metadata_with_timestamps("session-1", &metadata, &timestamps)
+            .unwrap();
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+
+        assert_eq!(
+            usage.get("timestamp").and_then(Value::as_i64),
+            parse_timestamp_value(&serde_json::json!("2026-08-19T06:34:26.163405500Z"))
+        );
+    }
+
+    #[test]
+    fn direct_usage_timestamp_precedes_matching_trajectory_timestamp() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "responseModel": "gemini-3.7-flash",
+                "retryInfos": [{
+                    "usage": {
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "createdAt": "2026-08-19T06:30:00Z",
+                        "responseId": "response-1"
+                    }
+                }]
+            }
+        })];
+        let trajectory = serde_json::json!({
+            "trajectory": {
+                "steps": [{
+                    "metadata": {
+                        "createdAt": "2026-08-19T06:34:26.163405500Z",
+                        "modelUsage": { "responseId": "response-1" }
+                    }
+                }]
+            }
+        });
+
+        let timestamps = usage_timestamps_from_trajectory(&trajectory);
+        let lines = normalize_session_metadata_with_timestamps("session-1", &metadata, &timestamps)
+            .unwrap();
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+
+        assert_eq!(
+            usage.get("timestamp").and_then(Value::as_i64),
+            parse_timestamp_value(&serde_json::json!("2026-08-19T06:30:00Z"))
+        );
+    }
+
+    #[test]
+    fn trajectory_timestamp_lookup_keeps_earliest_duplicate_step() {
+        let trajectory = serde_json::json!({
+            "trajectory": {
+                "steps": [
+                    {
+                        "metadata": {
+                            "createdAt": "2026-08-19T06:35:00Z",
+                            "modelUsage": { "responseId": "response-1" }
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "createdAt": "2026-08-19T06:34:00Z",
+                            "modelUsage": { "responseId": "response-1" }
+                        }
+                    }
+                ]
+            }
+        });
+        let usage = serde_json::json!({ "responseId": "response-1" });
+
+        let timestamps = usage_timestamps_from_trajectory(&trajectory);
+
+        assert_eq!(
+            timestamp_for_usage(&usage, &timestamps),
+            parse_timestamp_value(&serde_json::json!("2026-08-19T06:34:00Z"))
+        );
+    }
+
+    #[test]
+    fn resolved_ide_metadata_does_not_request_trajectory_timestamps() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "chatStartMetadata": { "createdAt": "2026-08-19T06:30:00Z" },
+                "retryInfos": [{
+                    "usage": { "inputTokens": 10, "outputTokens": 5 }
+                }]
+            }
+        })];
+
+        assert!(!session_metadata_needs_trajectory_timestamps(&metadata));
     }
 
     #[test]
