@@ -922,7 +922,10 @@ impl App {
             KeyCode::Char('s') => {
                 self.open_client_picker();
             }
-            KeyCode::Char('w') => {
+            // `w` belongs to the worktree-rollup toggle below, which is guarded
+            // to the workspace grouping. An unguarded `w` here would match
+            // first and silently disable it.
+            KeyCode::Char('P') => {
                 self.open_project_picker();
             }
             KeyCode::Char('h') if self.current_tab == Tab::Overview => {
