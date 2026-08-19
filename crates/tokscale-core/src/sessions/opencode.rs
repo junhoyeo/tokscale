@@ -270,6 +270,27 @@ mod tests {
         conn
     }
 
+    /// Build a database shaped like current OpenCode v2: `session_v2` carries
+    /// metadata while `session_message` holds the assistant usage payloads.
+    fn create_opencode_session_v2_sqlite_db(db_path: &Path) -> Connection {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                title TEXT
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
     /// A representative v2 assistant payload: no `role` field, model + provider
     /// nested under `$.model`, integer timestamps.
     const V2_ASSISTANT_DATA: &str = r#"{
@@ -362,6 +383,79 @@ mod tests {
         assert_eq!(
             msg.cost_source,
             crate::sessions::CostSource::ProviderReported
+        );
+    }
+    #[test]
+    fn test_parse_v2_session_v2_message_reads_tokens_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_opencode_session_v2_sqlite_db(&db_path);
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, title) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ses_current_v2",
+                "/Users/alice/current-opencode-repo",
+                "Current OpenCode session"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "msg_current_v2",
+                "ses_current_v2",
+                "assistant",
+                V2_ASSISTANT_DATA
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1, "current session_v2 rows should parse");
+        let msg = &messages[0];
+        assert_eq!(
+            msg.workspace_key.as_deref(),
+            Some("/Users/alice/current-opencode-repo")
+        );
+        assert_eq!(msg.workspace_label.as_deref(), Some("current-opencode-repo"));
+        assert_eq!(msg.session_title.as_deref(), Some("Current OpenCode session"));
+        assert_eq!(msg.dedup_key.as_deref(), Some("msg_current_v2"));
+    }
+
+    #[test]
+    fn test_parse_v2_session_message_without_metadata_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "msg_without_metadata",
+                "ses_without_metadata",
+                "assistant",
+                V2_ASSISTANT_DATA
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1, "usage should parse without session metadata");
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].session_title, None);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("msg_without_metadata")
         );
     }
 

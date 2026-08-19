@@ -320,11 +320,29 @@ impl OpenCodeSchemaConfig {
 // Query variants
 // =============================================================================
 
-/// OpenCode v2 (`opencode-next.db`): per-message rows in `session_message`,
-/// role in the `type` column, model + provider nested under `$.model`.
-/// Databases whose `session` table predates the `title` column fall back to the
-/// title-less variant — the title is optional, not a gating column.
+/// OpenCode v2: per-message rows in `session_message`, role in the `type`
+/// column, model + provider nested under `$.model`. Current databases store
+/// session metadata in `session_v2`; older v2 databases use `session`.
+/// Databases whose metadata table predates the `title` column fall back to a
+/// title-less variant, and the final query preserves usage parsing when the
+/// metadata table is absent.
 const OPENCODE_V2_QUERIES: &[&str] = &[
+    r#"
+        SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
+        FROM session_message sm
+        LEFT JOIN session_v2 s ON s.id = sm.session_id
+        WHERE sm.type = 'assistant'
+          AND json_extract(sm.data, '$.tokens') IS NOT NULL
+        ORDER BY sm.id, sm.session_id
+    "#,
+    r#"
+        SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, NULL AS session_title
+        FROM session_message sm
+        LEFT JOIN session_v2 s ON s.id = sm.session_id
+        WHERE sm.type = 'assistant'
+          AND json_extract(sm.data, '$.tokens') IS NOT NULL
+        ORDER BY sm.id, sm.session_id
+    "#,
     r#"
         SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
         FROM session_message sm
@@ -337,6 +355,13 @@ const OPENCODE_V2_QUERIES: &[&str] = &[
         SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, NULL AS session_title
         FROM session_message sm
         LEFT JOIN session s ON s.id = sm.session_id
+        WHERE sm.type = 'assistant'
+          AND json_extract(sm.data, '$.tokens') IS NOT NULL
+        ORDER BY sm.id, sm.session_id
+    "#,
+    r#"
+        SELECT sm.id, sm.session_id, sm.data, NULL AS workspace_root, NULL AS session_title
+        FROM session_message sm
         WHERE sm.type = 'assistant'
           AND json_extract(sm.data, '$.tokens') IS NOT NULL
         ORDER BY sm.id, sm.session_id
