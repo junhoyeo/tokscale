@@ -154,6 +154,7 @@ fn current_count_label(app: &App) -> String {
     match app.current_tab {
         Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),
         Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
+        Tab::Tools => format!(" ({} tools)", app.data.tools.len()),
         Tab::Daily if app.is_daily_detail_active() => {
             format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
         }

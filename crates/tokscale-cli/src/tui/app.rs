@@ -20,7 +20,7 @@ use super::codex_login::{
 };
 use super::data::{
     AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, MonthlyUsage,
-    SessionUsage, TokenBreakdown, UsageData,
+    SessionUsage, TokenBreakdown, ToolUsage, UsageData,
 };
 use super::privacy::looks_like_email;
 use super::settings::Settings;
@@ -66,6 +66,7 @@ pub enum Tab {
     Sessions,
     Stats,
     Agents,
+    Tools,
 }
 
 impl Tab {
@@ -81,6 +82,7 @@ impl Tab {
             Tab::Sessions,
             Tab::Stats,
             Tab::Agents,
+            Tab::Tools,
         ]
     }
 
@@ -96,6 +98,7 @@ impl Tab {
             Tab::Sessions => "Sessions",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
+            Tab::Tools => "Tools",
         }
     }
 
@@ -111,6 +114,7 @@ impl Tab {
             Tab::Sessions => "Ses",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
+            Tab::Tools => "Tool",
         }
     }
 
@@ -125,13 +129,14 @@ impl Tab {
             Tab::Monthly => Tab::Sessions,
             Tab::Sessions => Tab::Stats,
             Tab::Stats => Tab::Agents,
-            Tab::Agents => Tab::Overview,
+            Tab::Agents => Tab::Tools,
+            Tab::Tools => Tab::Overview,
         }
     }
 
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Agents,
+            Tab::Overview => Tab::Tools,
             Tab::Usage => Tab::Overview,
             Tab::Models => Tab::Usage,
             Tab::Daily => Tab::Models,
@@ -141,6 +146,7 @@ impl Tab {
             Tab::Sessions => Tab::Monthly,
             Tab::Stats => Tab::Sessions,
             Tab::Agents => Tab::Stats,
+            Tab::Tools => Tab::Agents,
         }
     }
 }
@@ -1786,6 +1792,7 @@ impl App {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
+            Tab::Tools => self.data.tools.len(),
             Tab::Daily if self.is_daily_detail_active() => {
                 self.get_sorted_daily_detail_rows().len()
             }
@@ -2121,6 +2128,12 @@ impl App {
                 .get_sorted_agents()
                 .get(self.selected_index)
                 .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
+            Tab::Tools => self.get_sorted_tools().get(self.selected_index).map(|t| {
+                format!(
+                    "{}: {} calls across {} messages",
+                    t.name, t.calls, t.message_count
+                )
+            }),
             Tab::Daily if self.is_daily_detail_active() => self
                 .get_sorted_daily_detail_rows()
                 .get(self.selected_index)
@@ -2278,6 +2291,30 @@ impl App {
         }
 
         models
+    }
+
+    pub fn get_sorted_tools(&self) -> Vec<&ToolUsage> {
+        let mut tools: Vec<&ToolUsage> = self.data.tools.iter().collect();
+
+        // Tools carry no cost or token attribution: a call is recorded on the
+        // message that made it, and that message's tokens belong to the whole
+        // turn rather than to any one tool. So the cost and token sorts fall
+        // back to call count rather than pretending to an attribution that was
+        // never measured.
+        let tie_breaker =
+            |a: &&ToolUsage, b: &&ToolUsage| a.name.cmp(&b.name).then_with(|| a.mcp.cmp(&b.mcp));
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Name, SortDirection::Ascending) => tools.sort_by(tie_breaker),
+            (SortField::Name, SortDirection::Descending) => tools.sort_by(|a, b| tie_breaker(b, a)),
+            (_, SortDirection::Ascending) => {
+                tools.sort_by(|a, b| a.calls.cmp(&b.calls).then_with(|| tie_breaker(a, b)))
+            }
+            (_, SortDirection::Descending) => {
+                tools.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| tie_breaker(a, b)))
+            }
+        }
+
+        tools
     }
 
     pub fn get_sorted_agents(&self) -> Vec<&AgentUsage> {
@@ -2752,7 +2789,7 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 10);
+        assert_eq!(tabs.len(), 11);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
@@ -2763,6 +2800,7 @@ mod tests {
         assert_eq!(tabs[7], Tab::Sessions);
         assert_eq!(tabs[8], Tab::Stats);
         assert_eq!(tabs[9], Tab::Agents);
+        assert_eq!(tabs[10], Tab::Tools);
     }
 
     #[test]
@@ -2776,12 +2814,14 @@ mod tests {
         assert_eq!(Tab::Monthly.next(), Tab::Sessions);
         assert_eq!(Tab::Sessions.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
-        assert_eq!(Tab::Agents.next(), Tab::Overview);
+        assert_eq!(Tab::Agents.next(), Tab::Tools);
+        assert_eq!(Tab::Tools.next(), Tab::Overview);
     }
 
     #[test]
     fn test_tab_prev() {
-        assert_eq!(Tab::Overview.prev(), Tab::Agents);
+        assert_eq!(Tab::Overview.prev(), Tab::Tools);
+        assert_eq!(Tab::Tools.prev(), Tab::Agents);
         assert_eq!(Tab::Usage.prev(), Tab::Overview);
         assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
@@ -3710,6 +3750,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Agents);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Tools);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Overview);
     }
 
@@ -3717,6 +3760,9 @@ mod tests {
     fn test_handle_key_backtab_switch() {
         let mut app = make_app();
         assert_eq!(app.current_tab, Tab::Overview);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Tools);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Agents);
@@ -3762,6 +3808,7 @@ mod tests {
             Tab::Sessions,
             Tab::Stats,
             Tab::Agents,
+            Tab::Tools,
             Tab::Overview,
         ] {
             app.handle_key_event(key(KeyCode::Tab));

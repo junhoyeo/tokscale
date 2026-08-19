@@ -204,9 +204,33 @@ pub struct ProjectUsage {
     pub total_tokens: u64,
 }
 
+/// One tool, aggregated across every message that called it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolUsage {
+    pub name: String,
+    /// True when the tool is served by an MCP server rather than built into
+    /// the client. Two tools can share a name across that boundary, so it is
+    /// part of the identity rather than a display flag.
+    pub mcp: bool,
+    pub calls: u64,
+    /// Clients that recorded this tool, joined for display.
+    pub clients: String,
+    /// Messages that made at least one call to it, which is what "how often
+    /// does a turn reach for this" needs rather than the raw call count.
+    pub message_count: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
     pub models: Vec<ModelUsage>,
+    /// Tools called, ordered by descending call count. Empty when no loaded
+    /// client reports tool calls, which is different from every client
+    /// reporting zero.
+    pub tools: Vec<ToolUsage>,
+    /// Messages whose parser does not report tool calls at all. Non-zero means
+    /// the Tools view is showing a partial picture and has to say so rather
+    /// than presenting its totals as complete.
+    pub messages_without_tool_data: u32,
     /// Every project seen, ordered by descending token total.
     pub projects: Vec<ProjectUsage>,
     pub agents: Vec<AgentUsage>,
@@ -533,6 +557,9 @@ impl DataLoader {
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
         let mut project_map: HashMap<String, ProjectUsage> = HashMap::new();
+        let mut tool_map: HashMap<(String, bool), ToolUsage> = HashMap::new();
+        let mut tool_clients: HashMap<(String, bool), BTreeSet<String>> = HashMap::new();
+        let mut messages_without_tool_data: u32 = 0;
 
         // Built before any filtering so the picker always lists every project,
         // including the ones the current selection excludes. Filtering the
@@ -565,6 +592,28 @@ impl DataLoader {
         for msg in &messages {
             let normalized_model =
                 model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
+            match &msg.tool_calls {
+                Some(calls) => {
+                    for call in calls {
+                        let key = (call.name.clone(), call.mcp);
+                        let entry = tool_map.entry(key.clone()).or_insert_with(|| ToolUsage {
+                            name: call.name.clone(),
+                            mcp: call.mcp,
+                            ..Default::default()
+                        });
+                        entry.calls = entry.calls.saturating_add(u64::from(call.count));
+                        entry.message_count = entry.message_count.saturating_add(1);
+                        tool_clients
+                            .entry(key)
+                            .or_default()
+                            .insert(msg.client.clone());
+                    }
+                }
+                // Counted rather than ignored: a Tools view built only from the
+                // messages that do report has to say how much it could not see.
+                None => messages_without_tool_data = messages_without_tool_data.saturating_add(1),
+            }
+
             let model_key = normalize_model_for_grouping(&msg.model_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
@@ -1168,6 +1217,22 @@ impl DataLoader {
         let graph = build_contribution_graph(&daily);
         let (current_streak, longest_streak) = calculate_streaks(&daily);
 
+        let mut tools: Vec<ToolUsage> = tool_map
+            .into_iter()
+            .map(|(key, mut tool)| {
+                if let Some(clients) = tool_clients.get(&key) {
+                    tool.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
+                }
+                tool
+            })
+            .collect();
+        tools.sort_by(|a, b| {
+            b.calls
+                .cmp(&a.calls)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.mcp.cmp(&b.mcp))
+        });
+
         let mut projects: Vec<ProjectUsage> = project_map.into_values().collect();
         // Descending usage: the projects worth filtering to should be
         // reachable in the picker without typing.
@@ -1179,6 +1244,8 @@ impl DataLoader {
 
         Ok(UsageData {
             models,
+            tools,
+            messages_without_tool_data,
             projects,
             agents,
             daily,
@@ -2137,6 +2204,103 @@ mod tests {
 
         assert!(data.models.is_empty());
         assert_eq!(data.total_cost, 0.0);
+    }
+
+    fn message_with_tools(
+        client: &str,
+        calls: Option<Vec<tokscale_core::sessions::ToolCall>>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            "m",
+            "anthropic",
+            "s1",
+            1_735_689_600_000,
+            tokscale_core::TokenBreakdown::default(),
+            0.0,
+        );
+        msg.tool_calls = calls;
+        msg
+    }
+
+    #[test]
+    fn tool_calls_aggregate_per_tool_across_messages() {
+        use tokscale_core::sessions::ToolCall;
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![
+                    message_with_tools("claude", Some(vec![ToolCall::new("Bash", 2)])),
+                    message_with_tools(
+                        "claude",
+                        Some(vec![ToolCall::new("Bash", 1), ToolCall::new("Read", 1)]),
+                    ),
+                ],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.tools.len(), 2);
+        assert_eq!(data.tools[0].name, "Bash");
+        assert_eq!(data.tools[0].calls, 3, "counts sum across messages");
+        assert_eq!(
+            data.tools[0].message_count, 2,
+            "and the messages are counted too"
+        );
+        assert_eq!(data.tools[1].name, "Read");
+        assert_eq!(data.tools[1].calls, 1);
+    }
+
+    #[test]
+    fn an_mcp_tool_is_a_distinct_row_from_a_builtin_of_the_same_name() {
+        use tokscale_core::sessions::ToolCall;
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![message_with_tools(
+                    "claude",
+                    Some(vec![ToolCall::new("search", 1), ToolCall::mcp("search", 1)]),
+                )],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.tools.len(), 2, "the name alone is not the identity");
+        assert!(data.tools.iter().any(|t| !t.mcp));
+        assert!(data.tools.iter().any(|t| t.mcp));
+    }
+
+    #[test]
+    fn messages_that_do_not_report_tools_are_counted_not_ignored() {
+        // The Tools view has to be able to say how much it could not see,
+        // otherwise a partial tally reads as a complete one.
+        use tokscale_core::sessions::ToolCall;
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![
+                    message_with_tools("claude", Some(vec![ToolCall::new("Bash", 1)])),
+                    message_with_tools("codex", None),
+                    message_with_tools("codex", None),
+                ],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.messages_without_tool_data, 2);
+        assert_eq!(data.tools.len(), 1);
+    }
+
+    #[test]
+    fn a_message_reporting_no_tools_is_not_counted_as_unknown() {
+        // Known-zero differs from unknown: this message did report, and it
+        // reported nothing.
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![message_with_tools("claude", Some(Vec::new()))],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.messages_without_tool_data, 0);
+        assert!(data.tools.is_empty());
     }
 
     #[test]

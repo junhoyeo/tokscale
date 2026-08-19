@@ -13,6 +13,7 @@ mod overview;
 mod sessions;
 pub mod spinner;
 mod stats;
+mod tools;
 mod usage;
 pub(crate) mod widgets;
 
@@ -50,6 +51,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Overview => overview::render(frame, app, chunks[1]),
             Tab::Models => models::render(frame, app, chunks[1]),
             Tab::Agents => agents::render(frame, app, chunks[1]),
+            Tab::Tools => tools::render(frame, app, chunks[1]),
             Tab::Daily => daily::render(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Minutely => minutely::render(frame, app, chunks[1]),
