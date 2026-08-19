@@ -19,7 +19,10 @@ fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
 }
 
 fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
+    if matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    ) {
         format!("{} / {}", workspace_label(model), model.model)
     } else {
         model.model.clone()
@@ -75,7 +78,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec!["Model", "Cost"]
     } else if is_narrow {
         vec!["Model", "Tokens", "Cost"]
-    } else if group_by == GroupBy::WorkspaceModel {
+    } else if matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    ) {
         vec![
             "#",
             "Workspace",
@@ -165,7 +171,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
-            } else if group_by == GroupBy::WorkspaceModel {
+            } else if matches!(
+                group_by,
+                GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+            ) {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
                     Cell::from(truncate_text(workspace_label(model), 18)).style(
@@ -246,7 +255,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(25),
             Constraint::Percentage(25),
         ]
-    } else if group_by == GroupBy::WorkspaceModel {
+    } else if matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    ) {
         vec![
             Constraint::Length(3),
             Constraint::Length(18),
@@ -301,6 +313,67 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 vertical: 1,
             }),
             &mut scrollbar_state,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::data::ModelUsage;
+
+    fn usage(model: &str, workspace: Option<&str>) -> ModelUsage {
+        ModelUsage {
+            model: model.to_string(),
+            color_key: model.to_string(),
+            provider: "anthropic".to_string(),
+            client: "claude".to_string(),
+            workspace_key: workspace.map(String::from),
+            workspace_label: workspace.map(String::from),
+            tokens: Default::default(),
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 0,
+        }
+    }
+
+    #[test]
+    fn workspace_groupings_name_the_project_in_the_row_label() {
+        // Both workspace groupings split rows per project, so both have to say
+        // which project a row belongs to. Gating this on one of them left the
+        // other rendering bare model names, which reads as the grouping having
+        // done nothing at all.
+        for group_by in [GroupBy::WorkspaceModel, GroupBy::WorkspaceProviderModel] {
+            assert_eq!(
+                model_display_name(&usage("sonnet", Some("app")), &group_by),
+                "app / sonnet",
+                "{group_by} must name the project it grouped by"
+            );
+        }
+    }
+
+    #[test]
+    fn other_groupings_leave_the_row_label_as_the_model() {
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+        ] {
+            assert_eq!(
+                model_display_name(&usage("sonnet", Some("app")), &group_by),
+                "sonnet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_without_workspace_metadata_is_labelled_rather_than_dropped() {
+        assert_eq!(
+            workspace_label(&usage("sonnet", None)),
+            "Unknown workspace",
+            "an unattributed row still has to render"
         );
     }
 }

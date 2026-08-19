@@ -19,7 +19,10 @@ struct ModelRowData {
 }
 
 fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option<&str>) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
+    if matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    ) {
         format!(
             "{} / {}",
             workspace_label.unwrap_or("Unknown workspace"),
@@ -31,7 +34,10 @@ fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option
 }
 
 fn overview_color_key<'a>(group_by: &GroupBy, model: &'a str) -> &'a str {
-    if *group_by == GroupBy::WorkspaceModel {
+    if matches!(
+        group_by,
+        GroupBy::WorkspaceModel | GroupBy::WorkspaceProviderModel
+    ) {
         model
             .rsplit_once(" / ")
             .map(|(_, base_model)| base_model)
@@ -401,5 +407,60 @@ fn truncate_string(s: &str, max_chars: usize) -> String {
     } else {
         let head: String = s.chars().take(max_chars - 1).collect();
         format!("{}…", head)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_groupings_label_rows_with_their_project() {
+        // Regression guard for a silent rendering failure: the label was
+        // gated on an exact match against WorkspaceModel, so adding
+        // WorkspaceProviderModel produced correctly split rows that all
+        // rendered as the bare model name. The grouping looked like it did
+        // nothing because nothing on screen distinguished the rows.
+        for group_by in [GroupBy::WorkspaceModel, GroupBy::WorkspaceProviderModel] {
+            assert_eq!(
+                overview_model_label(&group_by, "sonnet", Some("app")),
+                "app / sonnet",
+                "{group_by} must name the project it grouped by"
+            );
+        }
+    }
+
+    #[test]
+    fn non_workspace_groupings_label_rows_with_the_model_alone() {
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+        ] {
+            assert_eq!(
+                overview_model_label(&group_by, "sonnet", Some("app")),
+                "sonnet",
+                "{group_by} does not group by project and must not imply it does"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_groupings_recover_the_base_model_for_coloring() {
+        // The color key has to strip the project prefix, or every row in a
+        // project shares one color and the model ramp is lost.
+        for group_by in [GroupBy::WorkspaceModel, GroupBy::WorkspaceProviderModel] {
+            assert_eq!(overview_color_key(&group_by, "app / sonnet"), "sonnet");
+        }
+    }
+
+    #[test]
+    fn a_missing_workspace_label_still_renders_a_row() {
+        assert_eq!(
+            overview_model_label(&GroupBy::WorkspaceProviderModel, "sonnet", None),
+            "Unknown workspace / sonnet"
+        );
     }
 }
