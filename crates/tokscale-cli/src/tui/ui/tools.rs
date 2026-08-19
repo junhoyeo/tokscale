@@ -32,6 +32,19 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // One line is reserved for the partial-coverage notice when there is one,
     // so the table never renders a row underneath it.
+    let summary = mcp_summary(app);
+    let (inner, summary_area) = match summary {
+        Some(_) if inner.height > 3 => (
+            Rect {
+                y: inner.y + 1,
+                height: inner.height - 1,
+                ..inner
+            },
+            Some(Rect { height: 1, ..inner }),
+        ),
+        _ => (inner, None),
+    };
+
     let notice = coverage_notice(app);
     let (table_area, notice_area) = match notice {
         Some(_) if inner.height > 2 => (
@@ -63,6 +76,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_selection = app.theme.selection;
     let striped_row_style = app.theme.striped_row_style();
 
+    if let (Some(text), Some(area)) = (&summary, summary_area) {
+        let line = Paragraph::new(text.clone())
+            .style(Style::default().fg(theme_accent))
+            .alignment(Alignment::Left);
+        frame.render_widget(line, area);
+    }
+
     let tools = app.get_sorted_tools();
     if tools.is_empty() {
         let empty = Paragraph::new(empty_message(app))
@@ -77,7 +97,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if is_narrow {
         vec!["Tool", "Calls", "Msgs"]
     } else {
-        vec!["#", "Tool", "Kind", "Source", "Calls", "Msgs"]
+        vec!["#", "Tool", "Server", "Source", "Calls", "Msgs"]
     };
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -155,8 +175,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(theme_foreground)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(if tool.mcp { "MCP" } else { "built-in" })
-                        .style(Style::default().fg(theme_muted)),
+                    Cell::from(truncate_text(
+                        tool.server.as_deref().unwrap_or("built-in"),
+                        20,
+                    ))
+                    .style(Style::default().fg(if tool.server.is_some() {
+                        theme_accent
+                    } else {
+                        theme_muted
+                    })),
                     Cell::from(truncate_text(&client_labels(&tool.clients), 22))
                         .style(Style::default().fg(theme_muted)),
                     Cell::from(format_tokens_with_commas(tool.calls))
@@ -190,7 +217,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec![
             Constraint::Length(3),
             Constraint::Min(22),
-            Constraint::Length(9),
+            Constraint::Length(20),
             Constraint::Length(22),
             Constraint::Length(10),
             Constraint::Length(7),
@@ -224,6 +251,32 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             &mut scrollbar_state,
         );
     }
+}
+
+/// One line summarising MCP usage above the per-tool table.
+///
+/// The server is the level a user reasons about ("how much am I leaning on the
+/// Figma server"), and the per-tool rows underneath are the detail. Without
+/// this the servers are only inferable by reading the Server column and adding
+/// up by eye.
+pub(crate) fn mcp_summary(app: &App) -> Option<String> {
+    let servers = &app.data.mcp_servers;
+    if servers.is_empty() {
+        return None;
+    }
+    let calls: u64 = servers.iter().map(|s| s.calls).sum();
+    let top: Vec<String> = servers
+        .iter()
+        .take(3)
+        .map(|s| format!("{} {}", s.server, format_tokens_with_commas(s.calls)))
+        .collect();
+    Some(format!(
+        "MCP: {} calls across {} server{} — {}",
+        format_tokens_with_commas(calls),
+        servers.len(),
+        if servers.len() == 1 { "" } else { "s" },
+        top.join(", ")
+    ))
 }
 
 /// Says how much of the loaded data this view could not see.

@@ -119,13 +119,20 @@ pub struct UnifiedMessage {
 /// from growing linearly with a loop that hammers one tool.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
+    /// The tool's own name, with any server prefix stripped. Two servers can
+    /// expose the same tool name, so this is not an identity by itself.
     pub name: String,
     pub count: u32,
-    /// True for tools served by an MCP server rather than built into the
-    /// client. Kept separate so a Tools view can distinguish them without
-    /// pattern-matching names, which differ per client.
+    /// The MCP server that serves this tool, or `None` for a tool built into
+    /// the client.
+    ///
+    /// This is the level a user actually reasons about: "how much am I calling
+    /// the Figma server" is a question about the server, and the tool under it
+    /// is the detail. A bare boolean answered neither that nor which server a
+    /// call went to, so the server travels with the call and the boolean is
+    /// recovered from it.
     #[serde(default)]
-    pub mcp: bool,
+    pub server: Option<String>,
 }
 
 impl ToolCall {
@@ -133,17 +140,47 @@ impl ToolCall {
         Self {
             name: name.into(),
             count,
-            mcp: false,
+            server: None,
         }
     }
 
-    pub fn mcp(name: impl Into<String>, count: u32) -> Self {
+    /// A call to `tool` served by `server`.
+    pub fn from_server(server: impl Into<String>, name: impl Into<String>, count: u32) -> Self {
         Self {
             name: name.into(),
             count,
-            mcp: true,
+            server: Some(server.into()),
         }
     }
+
+    /// An MCP call whose server could not be identified. Kept distinct from a
+    /// built-in so the Tools view does not silently reclassify it.
+    pub fn mcp(name: impl Into<String>, count: u32) -> Self {
+        Self::from_server(UNKNOWN_MCP_SERVER, name, count)
+    }
+
+    pub fn is_mcp(&self) -> bool {
+        self.server.is_some()
+    }
+}
+
+/// Shown for an MCP call whose server the transcript did not name.
+pub const UNKNOWN_MCP_SERVER: &str = "(unknown server)";
+
+/// Split Claude Code's `mcp__<server>__<tool>` naming into its parts.
+///
+/// MCP tools arrive as ordinary `tool_use` blocks, distinguished only by this
+/// name mangling, so without splitting it every MCP call is misfiled as a
+/// built-in and the server never appears at all. Returns `None` for a name
+/// that does not follow the convention, including a prefix with no tool after
+/// it, which is malformed rather than a server-wide call.
+pub fn split_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((server, tool))
 }
 
 /// Fold a sequence of observed tool names into per-name counts, preserving the
@@ -151,19 +188,19 @@ impl ToolCall {
 /// only a histogram.
 pub fn fold_tool_calls<I>(names: I) -> Vec<ToolCall>
 where
-    I: IntoIterator<Item = (String, bool)>,
+    I: IntoIterator<Item = (Option<String>, String)>,
 {
     let mut folded: Vec<ToolCall> = Vec::new();
-    for (name, mcp) in names {
+    for (server, name) in names {
         match folded
             .iter_mut()
-            .find(|call| call.name == name && call.mcp == mcp)
+            .find(|call| call.name == name && call.server == server)
         {
             Some(existing) => existing.count = existing.count.saturating_add(1),
             None => folded.push(ToolCall {
                 name,
                 count: 1,
-                mcp,
+                server,
             }),
         }
     }

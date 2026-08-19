@@ -208,10 +208,10 @@ pub struct ProjectUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolUsage {
     pub name: String,
-    /// True when the tool is served by an MCP server rather than built into
-    /// the client. Two tools can share a name across that boundary, so it is
-    /// part of the identity rather than a display flag.
-    pub mcp: bool,
+    /// The MCP server serving this tool, or `None` for a client built-in. Part
+    /// of the identity rather than a display flag: two servers can expose the
+    /// same tool name, and so can a built-in.
+    pub server: Option<String>,
     pub calls: u64,
     /// Clients that recorded this tool, joined for display.
     pub clients: String,
@@ -220,9 +220,22 @@ pub struct ToolUsage {
     pub message_count: u32,
 }
 
+/// One MCP server, rolled up across every tool it serves.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct McpServerUsage {
+    pub server: String,
+    pub calls: u64,
+    /// Distinct tools called on this server.
+    pub tools: u32,
+    pub clients: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
     pub models: Vec<ModelUsage>,
+    /// MCP servers, ordered by descending call count. Built from the same tool
+    /// records rather than a second pass, so the two views cannot disagree.
+    pub mcp_servers: Vec<McpServerUsage>,
     /// Tools called, ordered by descending call count. Empty when no loaded
     /// client reports tool calls, which is different from every client
     /// reporting zero.
@@ -557,8 +570,8 @@ impl DataLoader {
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
         let mut project_map: HashMap<String, ProjectUsage> = HashMap::new();
-        let mut tool_map: HashMap<(String, bool), ToolUsage> = HashMap::new();
-        let mut tool_clients: HashMap<(String, bool), BTreeSet<String>> = HashMap::new();
+        let mut tool_map: HashMap<(Option<String>, String), ToolUsage> = HashMap::new();
+        let mut tool_clients: HashMap<(Option<String>, String), BTreeSet<String>> = HashMap::new();
         let mut messages_without_tool_data: u32 = 0;
 
         // Built before any filtering so the picker always lists every project,
@@ -595,10 +608,10 @@ impl DataLoader {
             match &msg.tool_calls {
                 Some(calls) => {
                     for call in calls {
-                        let key = (call.name.clone(), call.mcp);
+                        let key = (call.server.clone(), call.name.clone());
                         let entry = tool_map.entry(key.clone()).or_insert_with(|| ToolUsage {
                             name: call.name.clone(),
-                            mcp: call.mcp,
+                            server: call.server.clone(),
                             ..Default::default()
                         });
                         entry.calls = entry.calls.saturating_add(u64::from(call.count));
@@ -1230,8 +1243,38 @@ impl DataLoader {
             b.calls
                 .cmp(&a.calls)
                 .then_with(|| a.name.cmp(&b.name))
-                .then_with(|| a.mcp.cmp(&b.mcp))
+                .then_with(|| a.server.cmp(&b.server))
         });
+
+        let mut server_map: HashMap<String, McpServerUsage> = HashMap::new();
+        let mut server_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for tool in &tools {
+            let Some(server) = tool.server.as_deref() else {
+                continue;
+            };
+            let entry = server_map
+                .entry(server.to_string())
+                .or_insert_with(|| McpServerUsage {
+                    server: server.to_string(),
+                    ..Default::default()
+                });
+            entry.calls = entry.calls.saturating_add(tool.calls);
+            entry.tools = entry.tools.saturating_add(1);
+            let clients = server_clients.entry(server.to_string()).or_default();
+            for client in tool.clients.split(", ").filter(|c| !c.is_empty()) {
+                clients.insert(client.to_string());
+            }
+        }
+        let mut mcp_servers: Vec<McpServerUsage> = server_map
+            .into_iter()
+            .map(|(server, mut usage)| {
+                if let Some(clients) = server_clients.get(&server) {
+                    usage.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
+                }
+                usage
+            })
+            .collect();
+        mcp_servers.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.server.cmp(&b.server)));
 
         let mut projects: Vec<ProjectUsage> = project_map.into_values().collect();
         // Descending usage: the projects worth filtering to should be
@@ -1244,6 +1287,7 @@ impl DataLoader {
 
         Ok(UsageData {
             models,
+            mcp_servers,
             tools,
             messages_without_tool_data,
             projects,
@@ -2264,8 +2308,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(data.tools.len(), 2, "the name alone is not the identity");
-        assert!(data.tools.iter().any(|t| !t.mcp));
-        assert!(data.tools.iter().any(|t| t.mcp));
+        assert!(data.tools.iter().any(|t| t.server.is_none()));
+        assert!(data.tools.iter().any(|t| t.server.is_some()));
+    }
+
+    #[test]
+    fn mcp_calls_roll_up_per_server() {
+        use tokscale_core::sessions::ToolCall;
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![message_with_tools(
+                    "claude",
+                    Some(vec![
+                        ToolCall::from_server("figma", "get_design", 3),
+                        ToolCall::from_server("figma", "get_screenshot", 1),
+                        ToolCall::from_server("gmail", "search", 2),
+                        ToolCall::new("Bash", 9),
+                    ]),
+                )],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.mcp_servers.len(), 2, "built-ins are not servers");
+        assert_eq!(data.mcp_servers[0].server, "figma");
+        assert_eq!(
+            data.mcp_servers[0].calls, 4,
+            "summed across the server's tools"
+        );
+        assert_eq!(data.mcp_servers[0].tools, 2);
+        assert_eq!(data.mcp_servers[1].server, "gmail");
+        assert_eq!(data.mcp_servers[1].calls, 2);
+    }
+
+    #[test]
+    fn the_same_tool_name_on_two_servers_stays_separate() {
+        use tokscale_core::sessions::ToolCall;
+        let data = DataLoader::new(None)
+            .aggregate_messages(
+                vec![message_with_tools(
+                    "claude",
+                    Some(vec![
+                        ToolCall::from_server("a", "search", 1),
+                        ToolCall::from_server("b", "search", 1),
+                    ]),
+                )],
+                &GroupBy::ClientModel,
+            )
+            .unwrap();
+
+        assert_eq!(data.tools.len(), 2);
+        assert_eq!(data.mcp_servers.len(), 2);
     }
 
     #[test]

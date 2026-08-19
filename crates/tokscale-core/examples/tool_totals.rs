@@ -19,7 +19,7 @@ async fn main() -> Result<(), String> {
     };
     let messages = tokscale_core::parse_local_unified_messages(options).await?;
 
-    let mut by_tool: BTreeMap<(String, bool), (u64, u32)> = BTreeMap::new();
+    let mut by_tool: BTreeMap<(Option<String>, String), (u64, u32)> = BTreeMap::new();
     let mut unknown = 0u64;
     let mut known = 0u64;
     for msg in &messages {
@@ -27,7 +27,9 @@ async fn main() -> Result<(), String> {
             Some(calls) => {
                 known += 1;
                 for call in calls {
-                    let entry = by_tool.entry((call.name.clone(), call.mcp)).or_default();
+                    let entry = by_tool
+                        .entry((call.server.clone(), call.name.clone()))
+                        .or_default();
                     entry.0 += u64::from(call.count);
                     entry.1 += 1;
                 }
@@ -43,11 +45,27 @@ async fn main() -> Result<(), String> {
     );
     println!("distinct tools={} total calls={total}", by_tool.len());
 
+    let by_tool_snapshot: Vec<_> = by_tool.clone().into_iter().collect();
     let mut rows: Vec<_> = by_tool.into_iter().collect();
     rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
-    for ((name, mcp), (calls, msgs)) in rows.into_iter().take(15) {
-        let kind = if mcp { "MCP" } else { "built-in" };
-        println!("  {name:<26} {calls:>8} calls  {msgs:>7} msgs  {kind}");
+    for ((server, name), (calls, msgs)) in rows.into_iter().take(40) {
+        let origin = server.as_deref().unwrap_or("built-in");
+        println!("  {name:<28} {calls:>8} calls  {msgs:>7} msgs  {origin}");
+    }
+
+    let mut by_server: BTreeMap<String, u64> = BTreeMap::new();
+    for ((server, _), (calls, _)) in &by_tool_snapshot {
+        if let Some(server) = server {
+            *by_server.entry(server.clone()).or_default() += calls;
+        }
+    }
+    if !by_server.is_empty() {
+        println!("\nMCP servers:");
+        let mut servers: Vec<_> = by_server.into_iter().collect();
+        servers.sort_by(|a, b| b.1.cmp(&a.1));
+        for (server, calls) in servers {
+            println!("  {server:<28} {calls:>8} calls");
+        }
     }
     Ok(())
 }

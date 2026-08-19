@@ -648,6 +648,7 @@ impl TryFrom<CachedUsageData> for UsageData {
             // Same reasoning, plus tool data is only as complete as the scan it
             // came from: a cached tally would outlive the messages behind it.
             tools: Vec::new(),
+            mcp_servers: Vec::new(),
             messages_without_tool_data: 0,
             agents: normalize_cached_agents(u.agents),
             daily,

@@ -2301,8 +2301,9 @@ impl App {
         // turn rather than to any one tool. So the cost and token sorts fall
         // back to call count rather than pretending to an attribution that was
         // never measured.
-        let tie_breaker =
-            |a: &&ToolUsage, b: &&ToolUsage| a.name.cmp(&b.name).then_with(|| a.mcp.cmp(&b.mcp));
+        let tie_breaker = |a: &&ToolUsage, b: &&ToolUsage| {
+            a.name.cmp(&b.name).then_with(|| a.server.cmp(&b.server))
+        };
         match (self.sort_field, self.sort_direction) {
             (SortField::Name, SortDirection::Ascending) => tools.sort_by(tie_breaker),
             (SortField::Name, SortDirection::Descending) => tools.sort_by(|a, b| tie_breaker(b, a)),

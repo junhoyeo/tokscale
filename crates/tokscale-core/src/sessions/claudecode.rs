@@ -9,8 +9,8 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{
-    fold_tool_calls, normalize_agent_name, normalize_workspace_key, workspace_label_from_key,
-    ToolCall, UnifiedMessage,
+    fold_tool_calls, normalize_agent_name, normalize_workspace_key, split_mcp_tool_name,
+    workspace_label_from_key, ToolCall, UnifiedMessage, UNKNOWN_MCP_SERVER,
 };
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -104,8 +104,11 @@ fn claude_tool_calls(content: Option<&Value>) -> Option<Vec<ToolCall>> {
     let blocks = content?.as_array()?;
     let observed = blocks.iter().filter_map(|block| {
         let kind = block.get("type")?.as_str()?;
-        let mcp = match kind {
+        let server_hosted = match kind {
             "tool_use" => false,
+            // A server-side tool with no server named in the block; the call is
+            // still not a built-in, so it keeps the unknown-server marker
+            // rather than being reclassified.
             "server_tool_use" => true,
             _ => return None,
         };
@@ -113,7 +116,14 @@ fn claude_tool_calls(content: Option<&Value>) -> Option<Vec<ToolCall>> {
         if name.is_empty() {
             return None;
         }
-        Some((name.to_string(), mcp))
+        // MCP tools arrive as ordinary `tool_use` blocks distinguished only by
+        // the `mcp__server__tool` name, so the split is what recovers the
+        // server; without it every MCP call is misfiled as a built-in.
+        Some(match split_mcp_tool_name(name) {
+            Some((server, tool)) => (Some(server.to_string()), tool.to_string()),
+            None if server_hosted => (Some(UNKNOWN_MCP_SERVER.to_string()), name.to_string()),
+            None => (None, name.to_string()),
+        })
     });
     Some(fold_tool_calls(observed))
 }
@@ -989,7 +999,7 @@ fn merge_claude_duplicate(
         for call in incoming {
             match merged
                 .iter_mut()
-                .find(|seen| seen.name == call.name && seen.mcp == call.mcp)
+                .find(|seen| seen.name == call.name && seen.server == call.server)
             {
                 Some(seen) => seen.count = seen.count.saturating_add(call.count),
                 None => merged.push(call),
@@ -2801,6 +2811,58 @@ mod tests {
             calls,
             &vec![ToolCall::mcp("web_search", 1), ToolCall::new("Bash", 1)]
         );
+    }
+
+    #[test]
+    fn an_mcp_tool_name_is_split_into_its_server_and_tool() {
+        // MCP tools arrive as ordinary tool_use blocks distinguished only by
+        // the `mcp__server__tool` name, so without the split every one is
+        // misfiled as a built-in and the server never appears at all.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"tool_use","name":"mcp__figma__get_design_context","id":"a"},{"type":"tool_use","name":"Bash","id":"b"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        let calls = messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(
+            calls,
+            &vec![
+                ToolCall::from_server("figma", "get_design_context", 1),
+                ToolCall::new("Bash", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_server_serving_two_tools_keeps_them_apart() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"tool_use","name":"mcp__figma__get_design","id":"a"},{"type":"tool_use","name":"mcp__figma__get_design","id":"b"},{"type":"tool_use","name":"mcp__figma__get_screenshot","id":"c"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        let calls = messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(
+            calls,
+            &vec![
+                ToolCall::from_server("figma", "get_design", 2),
+                ToolCall::from_server("figma", "get_screenshot", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_name_that_only_looks_mcp_shaped_stays_a_builtin() {
+        // `mcp__x` with no tool after it is malformed rather than a call to a
+        // whole server, and a plain name that merely contains the separator is
+        // not MCP at all.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"tool_use","name":"mcp__lonely","id":"a"},{"type":"tool_use","name":"my__tool","id":"b"}]}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_claude_file(file.path());
+
+        let calls = messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| call.server.is_none()));
     }
 
     #[test]
