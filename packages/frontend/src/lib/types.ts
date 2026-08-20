@@ -49,6 +49,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "prime-agent",
   "cherrystudio",
   "dsh",
+  "fx",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

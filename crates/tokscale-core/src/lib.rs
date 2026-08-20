@@ -2339,6 +2339,19 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         sessions::dsh::parse_dsh_file,
     );
 
+    // fx (fx.sh) session usage snapshots. Each `usage-v2.json` carries a
+    // cumulative snapshot with per-model token breakdowns and cost. The
+    // snapshot is the authoritative final value; pricing is applied only
+    // when the snapshot's `total_cost` is zero.
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Fx,
+        sessions::fx::parse_fx_file,
+    );
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result

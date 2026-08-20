@@ -970,6 +970,20 @@ define_clients!(
         headless: true,
         parse_local: true,
         submit_default: true
+    },
+    // fx (fx.sh) stores sessions under `~/.fx/sessions/<session-id>/usage-v2.json`.
+    // Each usage-v2.json carries a cumulative snapshot with per-model token
+    // breakdowns and cost. The session.json sibling supplies the session ID,
+    // workspace root, and timestamps.
+    Fx = 48 => {
+        id: "fx",
+        display: "fx CLI",
+        logo: None,root: PathRoot::Home,
+        relative: ".fx/sessions",
+        pattern: "usage-v2.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1085,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 48);
+        assert_eq!(ClientId::COUNT, 49);
     }
 
     #[test]

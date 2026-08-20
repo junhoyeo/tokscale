@@ -1114,6 +1114,8 @@ fn parser_version(client: ClientId) -> u32 {
         // them. v6 entries carry a count on every record, which `sessionize`
         // reads as one session per record.
         ClientId::Droid => 7,
+        // Initial fx parser: reads cumulative usage-v2.json snapshots.
+        ClientId::Fx => 1,
         _ => 1,
     }
 }

@@ -521,6 +521,9 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                // fx (fx.sh): cumulative usage snapshot per session directory
+                // at `~/.fx/sessions/<session-id>/usage-v2.json`.
+                "usage-v2.json" => file_name == "usage-v2.json",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
                 // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
                 // sidecars SQLite writes alongside the main file.
