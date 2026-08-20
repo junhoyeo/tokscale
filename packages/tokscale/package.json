@@ -24,6 +24,7 @@
     "openai",
     "gemini",
     "cursor",
+    "fx",
     "cli"
   ],
   "dependencies": {

@@ -50,6 +50,7 @@
     "cursor",
     "gemini",
     "codex",
+    "fx",
     "cli"
   ]
 }

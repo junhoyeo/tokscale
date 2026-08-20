@@ -970,6 +970,22 @@ define_clients!(
         headless: true,
         parse_local: true,
         submit_default: true
+    },
+    // fx (vercel-labs/fx) is a Unix-like coding agent written in Zig. fx
+    // aggregates per-request token usage into one snapshot per session under
+    // `~/.fx/sessions/<sessionId>/usage-v2.json`; the sibling `session.json`
+    // (`workspace_root`) and the shared `sessions/index.json` (session title)
+    // give the parser real workspace/session attribution.
+    Fx = 48 => {
+        id: "fx",
+        display: "Fx",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-fx.png"),
+        root: PathRoot::Home,
+        relative: ".fx/sessions",
+        pattern: "usage-v2.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1085,7 +1101,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 48);
+        assert_eq!(ClientId::COUNT, 49);
     }
 
     #[test]

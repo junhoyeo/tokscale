@@ -53,6 +53,9 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'G' },
     ClientUi { hotkey: 't' },
     ClientUi { hotkey: 'M' },
+    // Fx: `s` is the global "sources" picker binding; `X` mirrors the fX
+    // mnemonic (lowercase `x` belongs to Mux).
+    ClientUi { hotkey: 'X' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

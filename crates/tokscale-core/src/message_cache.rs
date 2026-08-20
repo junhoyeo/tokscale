@@ -1114,6 +1114,10 @@ fn parser_version(client: ClientId) -> u32 {
         // them. v6 entries carry a count on every record, which `sessionize`
         // reads as one session per record.
         ClientId::Droid => 7,
+        // First version of the fx (vercel-labs) usage-v2.json parser. Entries
+        // are versioned from the start so later parser changes have an
+        // obvious local counter to bump, like every other client here.
+        ClientId::Fx => 1,
         _ => 1,
     }
 }

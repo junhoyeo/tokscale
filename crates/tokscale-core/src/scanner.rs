@@ -510,6 +510,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                     file_name == "session.jsonl.zstd" || file_name == "session.jsonl"
                 }
                 "wire.jsonl" => file_name == "wire.jsonl",
+                // fx (vercel-labs/fx): one `usage-v2.json` per session
+                // directory under `~/.fx/sessions/<id>/`. WalkDir recursion
+                // picks up every session's snapshot.
+                "usage-v2.json" => file_name == "usage-v2.json",
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "unified.jsonl" => file_name == "unified.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",

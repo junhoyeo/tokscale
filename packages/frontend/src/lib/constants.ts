@@ -77,6 +77,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   "prime-agent": "Prime Agent",
   cherrystudio: "Cherry Studio",
   dsh: "DeepSeek Harness",
+  fx: "Fx",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -137,6 +138,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   "prime-agent": "https://github.com/PrimeIntellect-ai.png",
   cherrystudio: `${GITHUB_CDN_BASE}/client-cherrystudio.png`,
   dsh: "https://github.com/deepseek-ai.png",
+  fx: `${GITHUB_CDN_BASE}/client-fx.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -190,6 +192,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   "prime-agent": "#6C63FF",
   cherrystudio: "#FA7298",
   dsh: "#4D6BFE",
+  fx: "#0070F3",
 };
 
 // Derived values

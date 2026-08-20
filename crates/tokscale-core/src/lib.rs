@@ -2486,6 +2486,17 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         sessions::mux::parse_mux_file,
     );
 
+    // fx (vercel-labs/fx) per-session usage snapshots
+    // (`~/.fx/sessions/<id>/usage-v2.json`).
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Fx,
+        sessions::fx::parse_fx_file,
+    );
+
     // Kilo CLI: SQLite database
     if let Some(db_path) = &scan_result.kilo_db {
         let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)

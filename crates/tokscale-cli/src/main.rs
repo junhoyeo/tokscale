@@ -1093,6 +1093,7 @@ pub enum ClientFilter {
     CherryStudio,
     Dsh,
     Mcode,
+    Fx,
     Synthetic,
 }
 
@@ -1151,6 +1152,7 @@ impl ClientFilter {
             Self::CherryStudio => "cherrystudio",
             Self::Dsh => "dsh",
             Self::Mcode => "mcode",
+            Self::Fx => "fx",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1212,6 +1214,7 @@ impl ClientFilter {
             Self::CherryStudio => Some(ClientId::CherryStudio),
             Self::Dsh => Some(ClientId::Dsh),
             Self::Mcode => Some(ClientId::Mcode),
+            Self::Fx => Some(ClientId::Fx),
             Self::Synthetic => None,
         }
     }
@@ -1269,6 +1272,7 @@ impl ClientFilter {
             ClientId::CherryStudio => Self::CherryStudio,
             ClientId::Dsh => Self::Dsh,
             ClientId::Mcode => Self::Mcode,
+            ClientId::Fx => Self::Fx,
         }
     }
 
