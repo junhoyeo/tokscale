@@ -144,9 +144,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
         })
         .unwrap_or(0);
 
-    let workspace_root = session_meta
-        .as_ref()
-        .and_then(|s| s.workspace_root.clone());
+    let workspace_root = session_meta.as_ref().and_then(|s| s.workspace_root.clone());
 
     let (workspace_key, workspace_label) = workspace_root
         .as_deref()
