@@ -986,6 +986,23 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Oh My Pi is a pi-mono descendant and writes the same session JSONL, one
+    // level deeper than Pi: `<encoded-cwd>/<timestamp>_<uuid>.jsonl` for the
+    // session and `<timestamp>_<uuid>/<AgentName>.jsonl` for its subagents.
+    // The root is fixed rather than an env-var root on purpose: omp reads
+    // `PI_CODING_AGENT_DIR`, the same variable Pi uses, so honoring it would let
+    // one override point both clients at a single tree and double-count it.
+    Omp = 49 => {
+        id: "omp",
+        display: "Oh My Pi",
+        logo: None,
+        root: PathRoot::Home,
+        relative: ".omp/agent/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1101,7 +1118,34 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 49);
+        assert_eq!(ClientId::COUNT, 50);
+    }
+
+    #[test]
+    fn test_omp_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("omp").expect("omp client should be registered");
+        assert_eq!(client.data().relative_path, ".omp/agent/sessions");
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+    }
+
+    #[test]
+    #[serial]
+    fn test_omp_root_ignores_pi_coding_agent_dir() {
+        // given: omp reads PI_CODING_AGENT_DIR for its own session directory,
+        // but Pi uses that same variable. Honoring it here would let a single
+        // override point both clients at one tree and double-count every
+        // message in it, so omp's root must stay fixed under the home dir.
+        let mut env = EnvGuard::capture(&["PI_CODING_AGENT_DIR"]);
+        env.set("PI_CODING_AGENT_DIR", "/tmp/somewhere-else");
+
+        let client = ClientId::from_str("omp").expect("omp client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".omp/agent/sessions")
+        );
     }
 
     #[test]

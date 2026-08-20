@@ -2179,6 +2179,15 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         sessions::senpi::parse_senpi_file,
     );
 
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Omp,
+        sessions::omp::parse_omp_file,
+    );
+
     let augment_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Augment)
         .par_iter()
@@ -4665,6 +4674,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let senpi_count = senpi_msgs.len() as i32;
     counts.set(ClientId::Senpi, senpi_count);
     messages.extend(senpi_msgs);
+
+    let omp_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Omp)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::omp::parse_omp_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let omp_count = omp_msgs.len() as i32;
+    counts.set(ClientId::Omp, omp_count);
+    messages.extend(omp_msgs);
 
     let augment_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Augment)

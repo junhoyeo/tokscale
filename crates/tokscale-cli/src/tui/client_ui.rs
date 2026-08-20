@@ -56,6 +56,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // Fx: `s` is the global "sources" picker binding; `X` mirrors the fX
     // mnemonic (lowercase `x` belongs to Mux).
     ClientUi { hotkey: 'X' },
+    // Oh My Pi: every case of `o`, `m` and `p` is already taken (OpenCode /
+    // OpenClaw, MiMo Code / Mcode, Pi / Prime Agent), and `s` is the global
+    // "sources" picker binding, so `Y` stands in for the Y in "oh mY pi".
+    ClientUi { hotkey: 'Y' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

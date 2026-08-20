@@ -1094,6 +1094,7 @@ pub enum ClientFilter {
     Dsh,
     Mcode,
     Fx,
+    Omp,
     Synthetic,
 }
 
@@ -1153,6 +1154,7 @@ impl ClientFilter {
             Self::Dsh => "dsh",
             Self::Mcode => "mcode",
             Self::Fx => "fx",
+            Self::Omp => "omp",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1215,6 +1217,7 @@ impl ClientFilter {
             Self::Dsh => Some(ClientId::Dsh),
             Self::Mcode => Some(ClientId::Mcode),
             Self::Fx => Some(ClientId::Fx),
+            Self::Omp => Some(ClientId::Omp),
             Self::Synthetic => None,
         }
     }
@@ -1273,6 +1276,7 @@ impl ClientFilter {
             ClientId::Dsh => Self::Dsh,
             ClientId::Mcode => Self::Mcode,
             ClientId::Fx => Self::Fx,
+            ClientId::Omp => Self::Omp,
         }
     }
 
