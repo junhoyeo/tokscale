@@ -1938,6 +1938,40 @@ fn https_rpc_request(
     method: &str,
     body: &Value,
 ) -> Result<Value> {
+    // The idea is to bypass tokio-native-tls SChannel renegotiation deadlocks on Windows
+    // by giving the task to the native OS curl.exe
+    #[cfg(target_os = "windows")] {
+        let url = format!(
+            "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
+            connection.port, method
+        );
+        let body_str = serde_json::to_string(body)?;
+
+        let output = std::process::Command::new("curl.exe")
+            .args([
+                "-k", "-sS", "--http1.1", "--max-time", "10",
+                "-X", "POST", &url,
+                "-H", "Content-Type: application/json",
+                "-H", "Connect-Protocol-Version: 1",
+                "-H", &format!("X-Codeium-Csrf-Token: {}", connection.csrf_token),
+                "-d", &body_str,
+            ])
+            .output()
+            .with_context(|| "Failed to execute curl.exe for Windows RPC fallback")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Windows curl.exe RPC fallback failed (exit code {}): {}",
+                output.status.code().unwrap_or(0),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let response_body = String::from_utf8_lossy(&output.stdout);
+        Ok(serde_json::from_str(&response_body)?)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     antigravity_https_runtime().block_on(async {
         let url = format!(
             "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
