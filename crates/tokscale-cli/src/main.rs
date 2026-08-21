@@ -5689,6 +5689,23 @@ fn report_unpriced_submission_exclusions(
             .yellow()
         );
     }
+
+    // Homebrew-style follow-up: the warnings above name the gap, but nothing
+    // told the user the fix is one file away. #1021/#1035 reporters (and the
+    // custom-pricing docs added after them) all had to read core sources to
+    // discover that an exact-match entry in custom-pricing.json — including
+    // explicit 0 rates for free models and routing labels — is the supported fix.
+    if !excluded.is_empty() {
+        let pricing_path = crate::paths::get_config_dir().join("custom-pricing.json");
+        println!(
+            "{}",
+            format!(
+                "  Hint: excluded models stay unsubmitted until priced. Add exact-match entries to\n          {}\n          (an explicit 0 declares a free model or a known routing-label rate), then re-check with\n          `tokscale submit --dry-run` and `tokscale pricing <model-id>`.",
+                pricing_path.display(),
+            )
+            .bright_black()
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
