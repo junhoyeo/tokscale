@@ -416,6 +416,18 @@ tokscale logout
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
 
+#### 가격이 책정되지 않은 사용량은 제출에서 제외됩니다
+
+제출하기 전에 모든 메시지는 해당 메시지가 실제로 사용한 토큰 버킷(입력, 출력, 캐시 읽기, 캐시 쓰기)을 모두 커버하는 신뢰할 수 있는 가격으로 확인되어야 합니다. 가격을 확인할 수 없는 메시지는 건너뛰며 `Warning: excluded N unpriced provider/model message(s)` 경고로 보고됩니다. 알 수 없는 모델이 추측된 요금으로 제출되는 일은 없으며, 나머지 가격이 책정된 사용량은 정상적으로 제출됩니다.
+
+세 가지 제외 사유:
+
+- `no authoritative model-to-price mapping` — 모델 ID가 LiteLLM, OpenRouter, models.dev, 사용자 지정 가격 어디에도 존재하지 않습니다.
+- `generic routing label has no authoritative model-to-price mapping` — 해당 ID는 라우팅 레이블(`auto`, `gemini-default` 등)로, 요청마다 실제 모델이 달라지므로 그대로는 거부됩니다. 실제 요금을 알고 있다면 `custom-pricing.json`에 명시적 항목을 추가하는 것이 공식적으로 지원되는 방법입니다.
+- `pricing does not cover every populated token bucket` — 가격 행을 찾았지만, 실제로 사용된 토큰(대개 캐시 읽기 또는 캐시 쓰기)에 대한 요금이 누락되었습니다.
+
+제외된 사용량을 포함하려면 `~/.config/tokscale/custom-pricing.json`에 정확히 일치하는 항목을 추가하세요(명시적인 `0`은 실제 무료 모델의 선언입니다). 그런 다음 `tokscale submit --dry-run`을 다시 실행하여 경고가 없어졌는지 확인하세요. `tokscale pricing <model-id>`로 어떤 항목이 일치했는지 확인할 수 있습니다.
+
 ### Cursor IDE 명령어
 
 Cursor IDE는 세션 토큰을 통한 별도의 인증이 필요합니다 (소셜 플랫폼 로그인과 다름):

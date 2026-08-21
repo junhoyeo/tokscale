@@ -417,6 +417,18 @@ tokscale logout
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
 
+#### 未定价的用量不会提交
+
+提交前，每条消息都必须解析到一个能覆盖其所有已填充 token 桶（输入、输出、缓存读、缓存写）的权威价格。无法定价的消息会被跳过，并显示为 `Warning: excluded N unpriced provider/model message(s)` 警告——未知模型绝不会以编造或猜测的价格提交，其余已定价用量仍会正常提交。
+
+三种排除原因：
+
+- `no authoritative model-to-price mapping` — 该模型 ID 在 LiteLLM、OpenRouter、models.dev 以及你的自定义定价中都不存在。
+- `generic routing label has no authoritative model-to-price mapping` — 该 ID 是路由标签（如 `auto`、`gemini-default` 等），其实际底层模型随每次请求变化，因此直接拒绝计价。若你清楚该标签实际对应的费率，可在 `custom-pricing.json` 中为它显式声明一条条目。
+- `pricing does not cover every populated token bucket` — 找到了价格行，但缺少本次用量实际填充的某项费率（最常见的是缓存读或缓存创建）。
+
+要纳入被排除的用量，请在 `~/.config/tokscale/custom-pricing.json` 中添加精确匹配条目——显式的 `0` 即声明真正免费的模型——然后重新运行 `tokscale submit --dry-run`，直到不再出现警告。可用 `tokscale pricing <model-id>` 确认最终命中的是哪条条目。
+
 ### Cursor IDE 命令
 
 Cursor IDE 需要通过会话令牌进行单独认证（与社交平台登录不同）：
