@@ -8693,6 +8693,61 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_parse_local_clients_kimi_work_uses_kimi_code_parser() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let work_root = if cfg!(target_os = "macos") {
+            source_home
+                .path()
+                .join("Library")
+                .join("Application Support")
+        } else {
+            source_home.path().join("AppData").join("Roaming")
+        };
+        let wire = work_root
+            .join("kimi-desktop")
+            .join("daimon-share")
+            .join("daimon")
+            .join("runtime")
+            .join("kimi-code")
+            .join("home")
+            .join("sessions")
+            .join("wd_workspace_c107cac82a87")
+            .join("conv-4e171339d10b9954d0fc24da")
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire,
+            r#"{"type":"usage.record","model":"k2d6-agent","usage":{"inputOther":100,"output":10,"inputCacheRead":20,"inputCacheCreation":0},"usageScope":"turn","time":1780319377010}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["kimi".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Kimi), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        let message = &parsed.messages[0];
+        assert_eq!(message.session_id, "conv-4e171339d10b9954d0fc24da");
+        assert_eq!(message.model_id, "k2d6-agent");
+        assert_eq!(message.input, 100);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_kimchi_deduplicates_same_message_across_scan_roots() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
