@@ -6473,10 +6473,10 @@ fn run_capture_command(
         thread::sleep(Duration::from_millis(25));
     };
 
-    let output_result = output_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
     if !timed_out {
+        let output_result = output_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
         output_result?;
     }
 
