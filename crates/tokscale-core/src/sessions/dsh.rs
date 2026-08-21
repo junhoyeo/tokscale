@@ -15,7 +15,11 @@
 //!   for messages whose `source` is absent).
 //! - `assistant/message`: authoritative per-call usage on `data.usage`
 //!   (`inputTokens`, `outputTokens`, `cacheReadTokens`, ...) plus the serving
-//!   provider/model on `data.message.source`.
+//!   provider and model on `data.message.source`. `source.model` is the model
+//!   the session was configured to request; when the provider serves a
+//!   different one the LLM client records the API-reported model as
+//!   `source.replayState.response.responseModel`, and that field wins for
+//!   attribution and pricing (see [`served_model`]).
 //!
 //! DSH never embeds a cost, so every message leaves the parser at `0.0` and
 //! pricing is its only cost source — the generic source cache is safe here.
@@ -171,9 +175,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 }
 
                 let source = value.pointer("/data/message/source");
-                let model_id = source
-                    .and_then(|s| s.get("model"))
-                    .and_then(Value::as_str)
+                let model_id = served_model(source)
                     .or(fallback_model.as_deref())
                     .unwrap_or("unknown")
                     .to_string();
@@ -246,6 +248,30 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     messages
+}
+
+/// Resolve the model a call was actually served by.
+///
+/// `source.model` is the model the session was configured to request, and the
+/// provider does not always honor it: a floating alias (`~x-ai/grok-latest`)
+/// resolves server-side to a concrete model, and a pinned name can be
+/// superseded outright (glm-5.2 requests served by glm-5.3). The LLM client
+/// therefore copies the API-reported model into
+/// `source.replayState.response.responseModel`, and only when it differs from
+/// the request (`pi-ai/dist/api/openai-completions.js` guards the assignment
+/// with `chunk.model !== model.id`), so it is the authoritative attribution
+/// when present and `source.model` remains the fallback for the rows without
+/// it. Billing the configured name instead is not cosmetic: pricing the alias
+/// `~x-ai/grok-latest` resolves only a fuzzy "model_part (estimate only)"
+/// match onto another provider's listing, while the served `x-ai/grok-4.6`
+/// resolves exactly.
+fn served_model(source: Option<&Value>) -> Option<&str> {
+    source
+        .and_then(|s| s.pointer("/replayState/response/responseModel"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .or_else(|| source.and_then(|s| s.get("model")).and_then(Value::as_str))
 }
 
 /// Split DSH's usage row into Tokscale's five additive buckets.
@@ -327,6 +353,70 @@ mod tests {
 
         // Same turn, later step: not a turn start.
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn attributes_usage_to_the_served_model_when_the_provider_substitutes_one() {
+        // given: `source.model` is the model the session requested, but the
+        // provider served a different one and the LLM client recorded the
+        // API-reported model as `replayState.response.responseModel` (set only
+        // when the reported model differs from the request). Real shape from a
+        // live transcript: a glm-5.2 request served by glm-5.3.
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-served","createdAt":1,"cwd":"/work"}"#,
+            r#"{"type":"assistant/message","time":1787122684043,"data":{"turn":1,"message":{"id":"m-served","source":{"kind":"model","provider":"zai-coding-cn","model":"glm-5.2","replayState":{"response":{"kind":"pi-ai","version":2,"api":"openai-completions","provider":"zai-coding-cn","model":"glm-5.2","responseModel":"glm-5.3","responseId":"20260819145800e496ad89a4914f88","stopReason":"toolUse"},"blocks":[{"type":"tool-call"}]}}},"usage":{"inputTokens":8425,"outputTokens":207,"cacheReadTokens":576}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.3");
+        assert_eq!(messages[0].provider_id, "zai-coding-cn");
+        // The served model also defines the dedup key's model slot, so a
+        // seeded copy attributes (and collapses) under what served the call.
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .contains(":zai-coding-cn:glm-5.3:"));
+    }
+
+    #[test]
+    fn resolves_floating_model_aliases_through_the_served_model() {
+        // given: a floating alias such as `~x-ai/grok-latest` has no stable
+        // identity of its own — which model it resolved to is only recorded in
+        // the response. Pricing the alias only fuzzy-matches another
+        // provider's "estimate only" listing, while the served
+        // `x-ai/grok-4.6` resolves exactly (OpenRouter, submission-safe).
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-alias","createdAt":1,"cwd":"/work"}"#,
+            r#"{"type":"assistant/message","time":1787122684043,"data":{"turn":1,"message":{"id":"m-alias","source":{"kind":"model","provider":"openrouter","model":"~x-ai/grok-latest","replayState":{"response":{"kind":"pi-ai","version":2,"api":"openai-completions","provider":"openrouter","model":"~x-ai/grok-latest","responseModel":"x-ai/grok-4.6","stopReason":"stop"}}}},"usage":{"inputTokens":100,"outputTokens":20}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "x-ai/grok-4.6");
+        assert_eq!(messages[0].provider_id, "openrouter");
+    }
+
+    #[test]
+    fn falls_back_to_the_configured_model_without_replay_state() {
+        // given: rows without `replayState` (observed on a third of live
+        // transcripts) keep the configured `source.model` — same when the
+        // response echoed the request verbatim and `responseModel` was never
+        // set. Both spellings must attribute to the configured model.
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-noreplay","createdAt":1,"cwd":"/work"}"#,
+            r#"{"type":"assistant/message","time":1787122684043,"data":{"turn":1,"message":{"id":"m-1","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":10,"outputTokens":20}}}"#,
+            r#"{"type":"assistant/message","time":1787122684044,"data":{"turn":1,"message":{"id":"m-2","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner","replayState":{"response":{"kind":"pi-ai","version":2,"api":"openai-completions","provider":"deepseek","model":"deepseek-reasoner","stopReason":"stop"}}}},"usage":{"inputTokens":11,"outputTokens":21}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "deepseek-reasoner");
+        assert_eq!(messages[1].model_id, "deepseek-reasoner");
     }
 
     #[test]

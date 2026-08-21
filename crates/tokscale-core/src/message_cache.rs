@@ -1119,6 +1119,13 @@ fn parser_version(client: ClientId) -> u32 {
         // them. v6 entries carry a count on every record, which `sessionize`
         // reads as one session per record.
         ClientId::Droid => 7,
+        // v1->v2: usage now attributes to the model the provider actually
+        // served (`replayState.response.responseModel`) instead of the
+        // configured `source.model`. DSH transcripts are append-only and a
+        // cached entry otherwise outlives the fix, so unchanged files keep
+        // reporting the requested model (70% of rows on a real tree) and the
+        // alias-priced cost that came with it.
+        ClientId::Dsh => 2,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
