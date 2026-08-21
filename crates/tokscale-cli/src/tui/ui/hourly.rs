@@ -1,11 +1,14 @@
 use chrono::{Local, NaiveDate, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::hourly_profile;
-use super::widgets::{format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens};
+use super::widgets::{
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
+    viewport_scrollbar_state,
+};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -222,7 +225,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             cells.extend([
                 Cell::from(hour.message_count.to_string()),
-                Cell::from(format_tokens(hour.tokens.total())),
+                total_tokens_cell(hour.tokens.total(), &app.theme),
                 Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
             ]);
             cells
@@ -246,7 +249,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     hour.tokens.cache_write,
                 ))
                 .style(Style::default().fg(Color::Cyan)),
-                Cell::from(format_tokens(hour.tokens.total())),
+                total_tokens_cell(hour.tokens.total(), &app.theme),
                 Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
                 Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
                     .style(Style::default().fg(Color::Rgb(150, 200, 150))),
@@ -336,7 +339,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(hourly_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(hourly_len, scroll_offset, data_rows_shown);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -384,6 +388,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
         app.terminal_width = width;

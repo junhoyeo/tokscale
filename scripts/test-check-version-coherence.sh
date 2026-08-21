@@ -20,6 +20,7 @@ write_release_manifests() {
     packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
     packages/cli-win32-arm64-msvc \
+    packages/cli-android-arm64 \
     packages/tokscale
 
   cat > Cargo.toml <<EOF_MANIFEST
@@ -61,7 +62,8 @@ EOF_LOCK
     "@tokscale/cli-linux-arm64-gnu": "${version}",
     "@tokscale/cli-linux-arm64-musl": "${version}",
     "@tokscale/cli-win32-x64-msvc": "${version}",
-    "@tokscale/cli-win32-arm64-msvc": "${version}"
+    "@tokscale/cli-win32-arm64-msvc": "${version}",
+    "@tokscale/cli-android-arm64": "${version}"
   }
 }
 EOF_MANIFEST
@@ -74,7 +76,8 @@ EOF_MANIFEST
     cli-linux-arm64-gnu \
     cli-linux-arm64-musl \
     cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-arm64-msvc \
+    cli-android-arm64; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@tokscale/${pkg}",
@@ -172,32 +175,46 @@ PY
 }
 
 test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_are_removed() {
-  local work="${TMP_DIR}/missing-canonical-platform"
-  mkdir -p "${work}/scripts"
-  cp "${SCRIPT_UNDER_TEST}" "${work}/scripts/check-version-coherence.sh"
-  (
-    cd "${work}"
-    write_release_manifests "3.0.0"
-    rm -rf packages/cli-win32-arm64-msvc
-    python3 - <<'PY'
+  # Parameterize over every canonical platform so a regression that drops
+  # any one of them (not just Windows ARM64) is caught. This guards the
+  # required-platform check for the Android package as well.
+  for platform in \
+    cli-darwin-arm64 \
+    cli-darwin-x64 \
+    cli-linux-arm64-gnu \
+    cli-linux-arm64-musl \
+    cli-linux-x64-gnu \
+    cli-linux-x64-musl \
+    cli-win32-arm64-msvc \
+    cli-win32-x64-msvc \
+    cli-android-arm64; do
+    local work="${TMP_DIR}/missing-canonical-platform-${platform}"
+    mkdir -p "${work}/scripts"
+    cp "${SCRIPT_UNDER_TEST}" "${work}/scripts/check-version-coherence.sh"
+    (
+      cd "${work}"
+      write_release_manifests "3.0.0"
+      rm -rf "packages/${platform}"
+      python3 - <<PY
 import json
 import pathlib
 
 path = pathlib.Path("packages/cli/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"].pop("@tokscale/cli-win32-arm64-msvc")
+manifest["optionalDependencies"].pop("@tokscale/${platform}")
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
-    local output="${TMP_DIR}/missing-canonical-platform-output.txt"
-    if bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${output}" 2>&1; then
-      echo "Expected missing canonical platform to fail" >&2
-      return 1
-    fi
+      local output="${TMP_DIR}/missing-canonical-platform-${platform}-output.txt"
+      if bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${output}" 2>&1; then
+        echo "Expected missing canonical platform ${platform} to fail" >&2
+        return 1
+      fi
 
-    grep -q "Missing required platform package manifests: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
-    grep -q "Missing required platform optionalDependencies: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
-  )
+      grep -q "Missing required platform package manifests: \\['@tokscale/${platform}'\\]" "${output}"
+      grep -q "Missing required platform optionalDependencies: \\['@tokscale/${platform}'\\]" "${output}"
+    )
+  done
 }
 
 test_rejects_stale_workspace_versions_in_cargo_lock

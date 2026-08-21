@@ -52,10 +52,12 @@ fn gh_config_dir() -> std::path::PathBuf {
     if cfg!(windows) {
         return std::env::var_os("APPDATA")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+            .unwrap_or_else(|| {
+                crate::paths::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+            })
             .join("GitHub CLI");
     }
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let home = crate::paths::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     home.join(".config").join("gh")
 }
 
@@ -278,11 +280,22 @@ pub fn fetch() -> Result<UsageOutput> {
             }
         }
 
+        if metrics.is_empty() {
+            anyhow::bail!(
+                "Copilot returned no parseable usage (quota response format may have changed)"
+            );
+        }
+
         Ok(UsageOutput {
             provider: "Copilot".into(),
+            account: None,
+            credential_source: None,
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
 }

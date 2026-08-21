@@ -34,10 +34,10 @@ This applies to all GitHub-content authoring through the CLI — PR bodies, issu
 
 ## Git Identity & Merge Discipline
 
-- Before making any commit, verify the local git identity is exactly `Junho Yeo <i@junho.io>`. If it is not, set `git config user.name "Junho Yeo"` and `git config user.email "i@junho.io"` before committing.
+- Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
-- When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
-- Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
+- When merging pull requests through `gh`, use merge commits (`gh pr merge --merge ...`) unless the user explicitly requests another merge strategy.
+- Before merging, verify the merge commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
 
 ## Commit Message Convention
 
@@ -111,10 +111,33 @@ Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780
 
 If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
 
+**Never edit the SQL of a migration file after it has been applied to any database.** drizzle stores the SHA256 of the migration content in `drizzle.__drizzle_migrations` on first apply. If the local file content changes (even just a comment), the local hash diverges from the stored hash and drizzle-kit migrate will treat the migration as missing and attempt to re-apply it — which fails on idempotent-unsafe DDL. If you need to document a migration after the fact (lock-window risk, rollback notes, anything), put the commentary in a sidecar `0NNN_*.md` next to the .sql, in `schema.ts`, or in this file — never as comments inside the applied .sql.
+
 ## Agent Command Execution
 
 - When running `tokscale` CLI commands from an automated agent (tests, CI, or tool-driven shells), always pass `--no-spinner` unless spinner behavior is the thing being tested.
 - This avoids non-interactive terminal issues and keeps command output stable for assertions and logs.
+
+### Searching the codebase with `rg`
+
+**An empty `rg` result and a malformed `rg` command look identical.** Both print nothing. This is the failure that matters: a broken search reads as "I verified this does not exist," and that conclusion then gets stated as fact. Before concluding something is absent, run a control pattern you *know* matches the same file and confirm it does:
+
+```sh
+rg -c "fn parse_opencodereview_file" "$F"   # control: must print 1
+rg -c "cost" "$F"                           # only now is 0 meaningful
+```
+
+`rg` is not `grep`, and the differences are silent rather than loud:
+
+- **`-r` is `--replace`, not `--recursive`.** `rg -rn 'pattern' path` parses as "replace matches with `n`" and prints plausible-looking transformed output. `rg` recurses by default; there is no `-r` to add.
+- **`--include` does not exist.** That is a `grep` flag. Use `-g/--glob` (`rg -g '*.ts' pattern`).
+- **The pattern is a regex, so shell/template syntax breaks it.** `${` is a repetition quantifier and `(` opens a group, so searching for `SUM(${submittedDevices.totalActiveTimeMs})` or `for (const day of` is a parse error — or worse, matches the wrong thing. Use `-F` for literal searches:
+
+```sh
+rg -nF 'GREATEST(${submittedDevices.totalActiveTimeMs}' "$R"
+```
+
+Default to `-F` when the pattern contains any of `$ { } ( ) [ ] | * + ? . \` and you mean them literally — which, in this codebase, is most searches for drizzle `sql` template fragments or Rust macro bodies.
 
 ## Release & Deployment
 
@@ -174,7 +197,7 @@ Release version is stored in the Rust workspace and the npm package manifests, a
 
 ### CI-Only Workflow
 
-**`.github/workflows/build-native.yml`** — Runs on PRs touching `crates/tokscale-cli/**`. Builds all 8 native targets to verify compilation. Does not publish.
+**`.github/workflows/build-native.yml`** — Runs on PRs that affect the Rust workspace, CLI platform manifests, or native build workflow. Builds the configured native target matrix to verify compilation. Does not publish.
 
 ---
 

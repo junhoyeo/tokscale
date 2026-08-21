@@ -1,4 +1,6 @@
+use crate::process_liveness::pid_is_alive;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,19 +9,49 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
-#[cfg(test)]
-const SYNC_LOCK_STALE_SECS: u64 = 600;
 static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static HTTPS_RPC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static RPC_TRANSPORT: OnceLock<Mutex<HashMap<u16, RpcTransport>>> = OnceLock::new();
+
+/// Which transport an Antigravity RPC port has already answered on.
+///
+/// `rpc_request` tries plaintext first and falls back to TLS. A DesktopAgent
+/// that only speaks TLS therefore pays the doomed plaintext leg — and its full
+/// 10s read timeout, since a TLS listener given plaintext may simply wait for a
+/// ClientHello that never comes — on *every* RPC. `sync` issues one RPC per
+/// session (`try_fetch_session_artifact`), so that cost is multiplied by the
+/// user's whole history. `probe_heartbeat` already learns the answer during
+/// discovery; this is where that answer is kept instead of thrown away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcTransport {
+    PlainHttp,
+    Https,
+}
+
+fn rpc_transport_cache() -> &'static Mutex<HashMap<u16, RpcTransport>> {
+    RPC_TRANSPORT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A poisoned lock only means some other thread panicked mid-update; the cache
+/// is an optimization, so treat that as "unknown" rather than propagating.
+fn cached_rpc_transport(port: u16) -> Option<RpcTransport> {
+    rpc_transport_cache().lock().ok()?.get(&port).copied()
+}
+
+fn remember_rpc_transport(port: u16, transport: RpcTransport) {
+    if let Ok(mut cache) = rpc_transport_cache().lock() {
+        cache.insert(port, transport);
+    }
+}
 
 fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("Could not determine home directory")
+    crate::paths::home_dir().context("Could not determine home directory")
 }
 
 fn antigravity_data_roots() -> Result<Vec<PathBuf>> {
@@ -338,8 +370,24 @@ pub fn run_antigravity_purge_cache() -> Result<()> {
     use colored::Colorize;
 
     let cache_dir = get_antigravity_cache_dir()?;
+    let cache_lock = CacheOperationLockGuard::acquire(&cache_dir, "Antigravity cache operation")?;
     if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir)?;
+        // Hold the same legacy-visible lock as sync while purging. An old
+        // binary does not know the parent lock, so a pre-delete PID check
+        // alone leaves a TOCTOU window for it to create `sync.lock`.
+        let _sync_lock = SyncLockGuard::acquire_with_cache_lock(&cache_dir, cache_lock)?;
+        for entry in fs::read_dir(&cache_dir)? {
+            let entry = entry?;
+            if entry.file_name() == "sync.lock" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
         println!(
             "\n  {}\n",
             format!("✓ Deleted {}", cache_dir.display()).green()
@@ -372,66 +420,226 @@ fn ensure_config_dir() -> Result<()> {
 
 #[derive(Debug)]
 struct SyncLockGuard {
+    _cache_lock: CacheOperationLockGuard,
+    _os_file: std::fs::File,
     path: PathBuf,
+    record: String,
 }
 
-const SYNC_LOCK_ACQUIRE_ATTEMPTS: usize = 3;
+/// Serializes operations that create or remove the cache directory itself.
+///
+/// `sync.lock` lives inside that directory, so it cannot protect its own
+/// inode from `purge-cache`: removing the directory unlinks a held lock while
+/// a later sync creates and locks a replacement. Keep this lock beside the
+/// cache instead, where purge never removes it.
+#[derive(Debug)]
+struct CacheOperationLockGuard {
+    _file: std::fs::File,
+}
+
+impl CacheOperationLockGuard {
+    fn acquire(cache_dir: &Path, operation: &str) -> Result<Self> {
+        let lock_path = cache_dir.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Antigravity lock directory at {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| {
+                format!(
+                    "Failed to open Antigravity cache operation lock at {}",
+                    lock_path.display()
+                )
+            })?;
+
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(err) if crate::commands::autosubmit::is_lock_contention(&err) => {
+                anyhow::bail!("Another tokscale {operation} is in progress; aborting")
+            }
+            Err(err) => Err(anyhow::Error::new(err)
+                .context("Failed to acquire Antigravity cache operation lock")),
+        }
+    }
+}
 
 impl SyncLockGuard {
+    /// Take exclusive ownership of the Antigravity sync for as long as the
+    /// returned guard lives.
+    ///
+    /// Ownership is the kernel's exclusive lock on the file, not the bytes
+    /// inside it. The previous protocol created the lock file, then wrote its
+    /// pid, then probed that pid's liveness to decide whether to unlink and
+    /// retry — a read-decide-unlink sequence that is not atomic. Two
+    /// contenders could find the same dead owner and both proceed, a
+    /// contender arriving before the pid was written read an empty file and
+    /// evicted a live owner, and a recycled pid could make a stranger look
+    /// like the owner. The companion OS lock prevents those races between new
+    /// binaries, while the visible PID record remains readable by older
+    /// binaries during a rolling upgrade.
+    ///
+    /// On normal release the guard removes only its own visible record while
+    /// holding the companion lock. After a crash, a surviving visible record
+    /// fails closed and requires the documented user-mediated recovery.
     fn acquire(cache_dir: &Path) -> Result<Self> {
+        let cache_lock = CacheOperationLockGuard::acquire(cache_dir, "antigravity sync")?;
+        Self::acquire_with_cache_lock(cache_dir, cache_lock)
+    }
+
+    fn acquire_with_cache_lock(
+        cache_dir: &Path,
+        cache_lock: CacheOperationLockGuard,
+    ) -> Result<Self> {
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(cache_dir).with_context(|| {
+                format!(
+                    "Failed to create Antigravity cache directory at {}",
+                    cache_dir.display()
+                )
+            })?;
+        }
+
+        // Keep the OS-held exclusion out of the legacy PID file. On Windows,
+        // locking `sync.lock` can make legacy readers fail and unlink it.
+        let os_path = cache_dir.join("sync.os.lock");
         let lock_path = cache_dir.join("sync.lock");
-        let mut stale_recoveries = 0usize;
-        loop {
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock_path)
-            {
-                Ok(mut file) => {
-                    let pid = std::process::id();
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let _ = writeln!(file, "{pid} {timestamp}");
-                    return Ok(SyncLockGuard { path: lock_path });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Only evict the lock when its owner is provably dead.
-                    // Long-running syncs MUST keep exclusive access as
-                    // long as their PID is alive, or two processes will
-                    // overlap on the manifest and delete each other's
-                    // artifacts. Age-based eviction was removed for this
-                    // reason.
-                    if let Some((existing_pid, _)) = read_sync_lock(&lock_path) {
-                        if pid_is_alive(existing_pid) {
-                            anyhow::bail!(
-                                "Another tokscale antigravity sync is in progress (pid {existing_pid}); aborting"
-                            );
-                        }
-                    }
-                    if stale_recoveries >= SYNC_LOCK_ACQUIRE_ATTEMPTS {
-                        anyhow::bail!(
-                            "Could not acquire Antigravity sync lock after {SYNC_LOCK_ACQUIRE_ATTEMPTS} stale-lock recoveries; another process keeps recreating the lock file"
-                        );
-                    }
-                    stale_recoveries += 1;
-                    let _ = std::fs::remove_file(&lock_path);
-                    continue;
-                }
-                Err(err) => {
-                    return Err(
-                        anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock")
-                    );
-                }
+        let os_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&os_path)
+            .with_context(|| {
+                format!(
+                    "Failed to open Antigravity OS sync lock at {}",
+                    os_path.display()
+                )
+            })?;
+
+        match os_file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(err) if crate::commands::autosubmit::is_lock_contention(&err) => {
+                // Name the owner when the recorded pid is still alive. A pid
+                // left by a crashed run would only mislead, and the lock is
+                // already ours to wait on either way.
+                let owner = read_sync_lock(&lock_path)
+                    .filter(|(pid, _)| pid_is_alive(*pid))
+                    .map(|(pid, _)| format!(" (pid {pid})"))
+                    .unwrap_or_default();
+                anyhow::bail!("Another tokscale antigravity sync is in progress{owner}; aborting");
+            }
+            Err(err) => {
+                return Err(
+                    anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock")
+                );
             }
         }
+
+        // Serialize new-format publication before creating the legacy-visible
+        // record. A contender that loses the OS lock has not created any PID
+        // file to strand, and normal release removes the PID file before
+        // releasing this companion lock.
+        let record = publish_legacy_readable_lock(&lock_path)?;
+
+        Ok(SyncLockGuard {
+            _cache_lock: cache_lock,
+            _os_file: os_file,
+            path: lock_path,
+            record,
+        })
+    }
+}
+
+/// Atomically publishes a complete record that old binaries recognize before
+/// any new binary attempts the OS lock. Existing paths are never reclaimed:
+/// a legacy process can replace them between observation and unlink.
+fn publish_legacy_readable_lock(lock_path: &Path) -> Result<String> {
+    if lock_path.exists() {
+        return Err(existing_sync_lock_error(lock_path));
+    }
+
+    let temp_path = lock_path.with_extension(format!(
+        "lock.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let mut temp = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .with_context(|| {
+            format!(
+                "Failed to prepare Antigravity sync lock at {}",
+                temp_path.display()
+            )
+        })?;
+    writeln!(
+        temp,
+        "{} {}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    )?;
+    drop(temp);
+    let record = std::fs::read_to_string(&temp_path)?;
+
+    let published = fs::hard_link(&temp_path, lock_path);
+    let _ = fs::remove_file(&temp_path);
+    match published {
+        Ok(()) => Ok(record),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let owner = read_sync_lock(lock_path)
+                .filter(|(pid, _)| pid_is_alive(*pid))
+                .map(|(pid, _)| format!(" (pid {pid})"))
+                .unwrap_or_default();
+            anyhow::bail!("Another tokscale antigravity sync is in progress{owner}; aborting")
+        }
+        Err(err) => {
+            Err(anyhow::Error::new(err)
+                .context("Failed to publish Antigravity sync lock atomically"))
+        }
+    }
+}
+
+fn existing_sync_lock_error(lock_path: &Path) -> anyhow::Error {
+    if let Some((pid, _)) = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid)) {
+        anyhow::anyhow!(
+            "Another tokscale Antigravity sync may be in progress (pid {pid}); do not remove '{}' until that process has stopped. If it has stopped, remove '{}' and retry.",
+            lock_path.display(),
+            lock_path.display()
+        )
+    } else {
+        anyhow::anyhow!(
+            "Antigravity sync lock at '{}' already exists. To avoid overlapping a possible active sync during a rolling upgrade, tokscale will not replace it automatically. Confirm no tokscale Antigravity sync is running, then remove '{}' and retry.",
+            lock_path.display(),
+            lock_path.display()
+        )
     }
 }
 
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // The companion OS lock remains held while deleting. New-format
+        // contenders cannot publish until this record has gone, and the
+        // comparison prevents deleting an unexpected successor.
+        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(&self.record) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -441,28 +649,6 @@ fn read_sync_lock(path: &Path) -> Option<(u32, u64)> {
     let pid = parts.next()?.parse::<u32>().ok()?;
     let timestamp = parts.next()?.parse::<u64>().ok()?;
     Some((pid, timestamp))
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        let result = unsafe { libc_kill(pid as i32, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
 pub fn load_antigravity_manifest() -> Result<AntigravityManifest> {
@@ -556,8 +742,28 @@ fn delete_artifact_relative_path(relative_path: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Rewrite `\` to `/` so a stored path parses the same way on every platform.
+///
+/// `to_relative_artifact_path` renders with `Path::to_string_lossy`, so a
+/// manifest written on Windows records `sessions\<id>.jsonl`. Normalising here
+/// also tightens the Unix side: `Path` does not treat `\` as a separator
+/// there, so `..\..\escape.jsonl` would otherwise reach the traversal check
+/// below as one innocuous file name.
+///
+/// Safe against false positives because `sanitize_session_id` replaces every
+/// character outside `[A-Za-z0-9._-]` with `-`, so a generated artifact name
+/// can never legitimately contain a backslash.
+///
+/// `stale_relative_paths` keys its comparison through this same function.
+/// Normalising only at deletion made the two disagree about which entries name
+/// the same file, and deletion runs after the manifest has been written.
+fn normalize_artifact_path_separators(relative_path: &str) -> String {
+    relative_path.replace('\\', "/")
+}
+
 fn resolve_cache_relative_artifact_path(relative_path: &str) -> Result<PathBuf> {
-    let relative = Path::new(relative_path);
+    let normalized = normalize_artifact_path_separators(relative_path);
+    let relative = Path::new(&normalized);
     if relative.is_absolute() {
         anyhow::bail!("Artifact path must stay within cache root");
     }
@@ -1114,11 +1320,19 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
 }
 
 fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
+    // Discovery is the one place that legitimately has to try both. Record the
+    // winner so the per-session RPCs that follow do not re-derive it.
     if probe_plain_http_heartbeat(port, csrf_token) {
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
         return true;
     }
 
-    probe_https_heartbeat(port, csrf_token)
+    if probe_https_heartbeat(port, csrf_token) {
+        remember_rpc_transport(port, RpcTransport::Https);
+        return true;
+    }
+
+    false
 }
 
 fn probe_https_heartbeat(port: u16, csrf_token: &str) -> bool {
@@ -1693,13 +1907,29 @@ fn fetch_historical_session_artifact(
 }
 
 fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    // A port already known to speak TLS will never answer plaintext, so the
+    // plaintext leg here is pure latency — see [`RpcTransport`]. Deliberately
+    // no plaintext retry on failure: a listener does not change protocol
+    // mid-run, and retrying would reintroduce exactly the cost being removed.
+    if cached_rpc_transport(connection.port) == Some(RpcTransport::Https) {
+        return https_rpc_request(connection, method, body)
+            .with_context(|| format!("HTTPS RPC failed for Antigravity RPC {method}"));
+    }
+
     match rpc_request_plain_http(connection, method, body) {
-        Ok(value) => Ok(value),
-        Err(http_err) => https_rpc_request(connection, method, body).with_context(|| {
-            format!(
-                "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
-            )
-        }),
+        Ok(value) => {
+            remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
+            Ok(value)
+        }
+        Err(http_err) => {
+            let value = https_rpc_request(connection, method, body).with_context(|| {
+                format!(
+                    "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
+                )
+            })?;
+            remember_rpc_transport(connection.port, RpcTransport::Https);
+            Ok(value)
+        }
     }
 }
 
@@ -1747,6 +1977,15 @@ fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
 fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            // Defensive only — this is NOT what fixed any reported hang, and the
+            // earlier claim that it was (#1127) was wrong. `reqwest` is built
+            // `default-features = false` without `http2`, so neither it nor
+            // `hyper` links `h2` at all: this client never offers h2 over ALPN
+            // and has no HTTP/2 implementation to multiplex with. The pin only
+            // starts meaning anything if someone enables that feature later, and
+            // it stays correct if they do, because `rpc_request` issues a single
+            // unary Connect POST over loopback with nothing to multiplex.
+            .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -2140,16 +2379,24 @@ fn to_safe_i64(value: Option<&Value>) -> i64 {
 }
 
 fn stale_relative_paths(previous: &AntigravityManifest, next: &AntigravityManifest) -> Vec<String> {
-    let next_paths: std::collections::HashSet<&str> = next
+    // Key both sides the way `delete_artifact_relative_path` resolves them.
+    // `to_relative_artifact_path` renders with the native separator, so the
+    // same artifact reads `sessions\<id>.jsonl` in a manifest written on
+    // Windows and `sessions/<id>.jsonl` in one written on Unix. Comparing the
+    // raw strings would retire the old spelling while deletion normalises it
+    // back onto the file the new manifest still points at.
+    let next_paths: std::collections::HashSet<String> = next
         .sessions
         .iter()
-        .map(|session| session.artifact_path.as_str())
+        .map(|session| normalize_artifact_path_separators(&session.artifact_path))
         .collect();
 
     previous
         .sessions
         .iter()
-        .filter(|session| !next_paths.contains(session.artifact_path.as_str()))
+        .filter(|session| {
+            !next_paths.contains(&normalize_artifact_path_separators(&session.artifact_path))
+        })
         .map(|session| session.artifact_path.clone())
         .collect()
 }
@@ -2158,7 +2405,22 @@ fn cleanup_stale_session_artifacts(
     previous: &AntigravityManifest,
     next: &AntigravityManifest,
 ) -> Result<()> {
+    // Second gate, on the resolved path rather than the text. Cleanup runs
+    // after `save_antigravity_manifest`, so a deletion here is unrecoverable
+    // and unannounced: the manifest already advertises the artifact. Any future
+    // spelling that `stale_relative_paths` fails to equate but resolution does
+    // stops here instead of destroying live data.
+    let live: std::collections::HashSet<PathBuf> = next
+        .sessions
+        .iter()
+        .filter_map(|session| resolve_cache_relative_artifact_path(&session.artifact_path).ok())
+        .collect();
+
     for relative_path in stale_relative_paths(previous, next) {
+        let resolved = resolve_cache_relative_artifact_path(&relative_path)?;
+        if live.contains(&resolved) {
+            continue;
+        }
         delete_artifact_relative_path(&relative_path)?;
     }
 
@@ -2690,6 +2952,20 @@ mod tests {
         );
     }
 
+    /// The same artifact is spelled `sessions\<id>.jsonl` in a manifest written
+    /// on Windows and `sessions/<id>.jsonl` in one written on Unix, so a
+    /// textual compare calls the old spelling stale while the new spelling is
+    /// still live. Both sides must be keyed the same way `delete_artifact_relative_path`
+    /// resolves them.
+    #[test]
+    fn stale_relative_paths_ignores_separator_spelling() {
+        let mut previous = sample_manifest();
+        previous.sessions[0].artifact_path = "sessions\\session-1.jsonl".to_string();
+        let next = sample_manifest();
+
+        assert!(stale_relative_paths(&previous, &next).is_empty());
+    }
+
     #[test]
     #[serial]
     fn cleanup_stale_session_artifacts_removes_legacy_files_after_migration() {
@@ -2734,6 +3010,48 @@ mod tests {
         assert!(new_path.exists());
     }
 
+    /// Cleanup runs *after* `save_antigravity_manifest`, so anything it deletes
+    /// is gone while the manifest still advertises it. A manifest carried from
+    /// Windows spells the entry `sessions\<id>.jsonl` and the re-sync on Unix
+    /// rewrites it to `sessions/<id>.jsonl`; those are the same file, and
+    /// retiring the old spelling would silently destroy the artifact the new
+    /// manifest points at.
+    #[test]
+    #[serial]
+    fn cleanup_stale_session_artifacts_keeps_a_live_artifact_respelled_across_platforms() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        let sessions_dir = get_antigravity_sessions_dir().unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let artifact = sessions_dir.join("session-one.jsonl");
+        std::fs::write(&artifact, "live\n").unwrap();
+
+        let entry = |artifact_path: &str| ManifestSessionEntry {
+            session_id: "session-one".to_string(),
+            artifact_path: artifact_path.to_string(),
+            last_modified_ms: None,
+            step_count: None,
+            connection_fingerprint: "pid:1:port:1111".to_string(),
+            artifact_hash: None,
+        };
+
+        let previous = AntigravityManifest {
+            sessions: vec![entry("sessions\\session-one.jsonl")],
+            ..AntigravityManifest::default()
+        };
+        let next = AntigravityManifest {
+            sessions: vec![entry("sessions/session-one.jsonl")],
+            ..AntigravityManifest::default()
+        };
+
+        cleanup_stale_session_artifacts(&previous, &next).unwrap();
+        assert!(
+            artifact.exists(),
+            "cleanup deleted an artifact the new manifest still references"
+        );
+    }
+
     #[test]
     #[serial]
     fn delete_artifact_relative_path_rejects_paths_outside_cache_root() {
@@ -2749,6 +3067,41 @@ mod tests {
 
         let err = delete_artifact_relative_path("manifest.json").unwrap_err();
         assert!(err.to_string().contains("session artifact"));
+    }
+
+    /// A manifest written on Windows stores `sessions\<id>.jsonl`, because
+    /// `to_relative_artifact_path` renders with the native separator. Rejecting
+    /// that form made `cleanup_stale_session_artifacts` — and with it the whole
+    /// `antigravity sync` — fail on every run that had an artifact to retire.
+    #[test]
+    #[serial]
+    fn delete_artifact_relative_path_accepts_windows_separators() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        let sessions_dir = get_antigravity_sessions_dir().unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let artifact = sessions_dir.join("session-one.jsonl");
+        std::fs::write(&artifact, "{}\n").unwrap();
+
+        assert!(delete_artifact_relative_path("sessions\\session-one.jsonl").unwrap());
+        assert!(!artifact.exists());
+    }
+
+    /// Normalising separators before the component check also closes a hole on
+    /// Unix, where `Path` reads `..\..\outside.jsonl` as a single file name and
+    /// never sees a `ParentDir` component.
+    #[test]
+    #[serial]
+    fn delete_artifact_relative_path_rejects_backslash_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        let err = delete_artifact_relative_path("..\\..\\outside.jsonl").unwrap_err();
+        assert!(err.to_string().contains("cache root"));
+
+        let err = delete_artifact_relative_path("sessions\\..\\..\\outside.jsonl").unwrap_err();
+        assert!(err.to_string().contains("cache root"));
     }
 
     #[test]
@@ -2866,6 +3219,8 @@ mod tests {
     }
 
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::thread;
 
     fn serve_once(body: Vec<u8>, headers_extra: &str) -> u16 {
@@ -2884,6 +3239,94 @@ mod tests {
             let _ = stream.write_all(&body);
         });
         port
+    }
+
+    /// Listener that classifies each connection by its first byte and then
+    /// closes without answering: a TLS ClientHello starts with 0x16, a
+    /// plaintext Connect POST with `P`. Closing silently is what makes the
+    /// wrong-transport leg expensive in production, and it lets these tests
+    /// count the legs that were actually attempted.
+    fn serve_transport_counter() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let plaintext = Arc::new(AtomicUsize::new(0));
+        let tls = Arc::new(AtomicUsize::new(0));
+        let (plaintext_seen, tls_seen) = (Arc::clone(&plaintext), Arc::clone(&tls));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut first = [0_u8; 1];
+                match std::io::Read::read(&mut stream, &mut first) {
+                    Ok(1) if first[0] == 0x16 => tls_seen.fetch_add(1, Ordering::SeqCst),
+                    Ok(1) => plaintext_seen.fetch_add(1, Ordering::SeqCst),
+                    _ => 0,
+                };
+            }
+        });
+        (port, plaintext, tls)
+    }
+
+    fn wait_for_at_least(counter: &AtomicUsize, target: usize) -> usize {
+        for _ in 0..100 {
+            let seen = counter.load(Ordering::SeqCst);
+            if seen >= target {
+                return seen;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        counter.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn rpc_request_skips_the_plaintext_leg_once_a_port_is_known_to_speak_tls() {
+        // The regression this guards: `sync` issues one RPC per session, and
+        // before the transport was remembered every one of them re-attempted
+        // plaintext against a TLS-only DesktopAgent, paying that leg's read
+        // timeout each time.
+        let (port, plaintext, tls) = serve_transport_counter();
+        remember_rpc_transport(port, RpcTransport::Https);
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+
+        // Errors either way -- there is no real TLS server behind the counter.
+        // What matters is which legs were attempted, not that they succeeded.
+        let _ = rpc_request(&connection, "X", &serde_json::json!({}));
+        let _ = rpc_request(&connection, "X", &serde_json::json!({}));
+
+        assert!(
+            wait_for_at_least(&tls, 1) >= 1,
+            "the HTTPS leg must still be attempted"
+        );
+        assert_eq!(
+            plaintext.load(Ordering::SeqCst),
+            0,
+            "a port known to speak TLS must never be re-probed in plaintext"
+        );
+    }
+
+    #[test]
+    fn rpc_request_remembers_a_port_that_answered_plain_http() {
+        let body = br#"{"ok":true}"#.to_vec();
+        let port = serve_once(body.clone(), &format!("Content-Length: {}\r\n", body.len()));
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+
+        rpc_request(&connection, "X", &serde_json::json!({})).unwrap();
+
+        assert_eq!(
+            cached_rpc_transport(port),
+            Some(RpcTransport::PlainHttp),
+            "a working plaintext port must be remembered, so the TLS leg is not tried later"
+        );
     }
 
     #[test]
@@ -3102,27 +3545,76 @@ mod tests {
         assert_eq!(backups.len(), 1, "expected one backup file");
     }
 
+    /// Regression (#1010): a lock file exists before it means anything. The
+    /// old protocol created it, then wrote the pid on the next line, so a
+    /// contender arriving in that window read an empty file, concluded nobody
+    /// owned it, and unlinked a lock a live process had just taken. Ownership
+    /// has to come from the OS, not from the bytes in the file.
     #[test]
     #[serial]
-    fn sync_lock_guard_blocks_when_self_pid_lock_present() {
+    fn sync_lock_guard_refuses_a_held_lock_that_has_no_pid_written_yet() {
+        use fs2::FileExt;
+
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_dir = temp_dir.path().to_path_buf();
         let lock_path = cache_dir.join("sync.lock");
-        let pid = std::process::id();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        std::fs::write(&lock_path, format!("{pid} {now}")).unwrap();
+
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock_exclusive().unwrap();
 
         let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("Another tokscale antigravity sync"),
-            "got: {err:#}"
+            err.to_string().contains("already exists"),
+            "a held lock must never be evicted, got: {err:#}"
         );
 
-        std::fs::remove_file(&lock_path).unwrap();
+        FileExt::unlock(&holder).unwrap();
+    }
+
+    /// A second sync must be refused for as long as the first guard lives,
+    /// and must succeed once it is dropped. This is the property the lock
+    /// exists for; the previous protocol could only approximate it by probing
+    /// a recorded pid.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_excludes_a_second_sync_until_the_first_is_dropped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        let guard = SyncLockGuard::acquire(&cache_dir).unwrap();
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        assert!(err.to_string().contains("in progress"), "got: {err:#}");
+
+        drop(guard);
+        SyncLockGuard::acquire(&cache_dir)
+            .expect("the lock must be free once the guard is dropped");
+    }
+
+    /// A contender must take the companion lock before publishing the legacy
+    /// PID path. When it loses, no visible record is left behind.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_losing_contender_leaves_no_orphan_after_release() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+
+        let owner = SyncLockGuard::acquire(&cache_dir).unwrap();
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        assert!(err.to_string().contains("in progress"));
+        assert!(lock_path.exists(), "only the owner's record is visible");
+
+        drop(owner);
+        assert!(!lock_path.exists(), "owner release removes its record");
+        let successor = SyncLockGuard::acquire(&cache_dir).unwrap();
+        drop(successor);
+        assert!(!lock_path.exists(), "no contender record is stranded");
     }
 
     #[test]
@@ -3130,30 +3622,173 @@ mod tests {
     fn sync_lock_guard_acquires_when_no_lock_present() {
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
         {
             let _guard = SyncLockGuard::acquire(&cache_dir).unwrap();
-            assert!(cache_dir.join("sync.lock").exists());
+            assert!(lock_path.exists());
         }
+        assert!(!lock_path.exists(), "normal release removes its own lock");
+    }
+
+    /// Existing lock paths are not reclaimed: a legacy process can replace
+    /// them between observation and deletion.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_refuses_to_reclaim_a_stale_lock_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+        std::fs::write(&lock_path, "999999 1776000000").unwrap();
+
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn existing_sync_lock_error_names_the_exact_stale_lock_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lock_path = temp_dir.path().join("sync.lock");
+        std::fs::write(&lock_path, "999999 1\n").unwrap();
+
+        let err = existing_sync_lock_error(&lock_path).to_string();
+        let quoted_path = format!("'{}'", lock_path.display());
+        assert!(err.contains(&quoted_path));
+        assert!(err.contains("Confirm no tokscale Antigravity sync is running"));
+        assert!(err.contains("remove"));
+    }
+
+    /// During a rolling upgrade an older binary still uses `sync.lock` as a
+    /// PID-file lock. The new OS lock is not evidence that the old owner has
+    /// stopped, so its live record must prevent takeover.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_preserves_a_live_legacy_pid_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+        std::fs::write(&lock_path, format!("{} 1\n", std::process::id())).unwrap();
+
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
         assert!(
-            !cache_dir.join("sync.lock").exists(),
-            "guard drop should remove lock"
+            err.to_string()
+                .contains("Another tokscale Antigravity sync may be in progress"),
+            "a live legacy owner must be preserved, got: {err:#}"
         );
+        assert_eq!(
+            read_sync_lock(&lock_path).map(|(pid, _)| pid),
+            Some(std::process::id()),
+            "the new binary must not overwrite the legacy owner's record"
+        );
+    }
+
+    /// An old binary's create-new acquisition must recognize a live new
+    /// owner, then leave its inode alone.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_remains_readable_to_the_legacy_protocol() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+        let guard = SyncLockGuard::acquire(&cache_dir).unwrap();
+
+        let legacy_open = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap_err();
+        assert_eq!(legacy_open.kind(), std::io::ErrorKind::AlreadyExists);
+        let (pid, _) = read_sync_lock(&lock_path).expect("legacy PID record");
+        assert_eq!(pid, std::process::id());
+        assert!(pid_is_alive(pid), "legacy sync would preserve a live owner");
+        assert!(
+            lock_path.exists(),
+            "legacy sync must not unlink the live inode"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn publish_lock_never_exposes_an_empty_inode_to_legacy_acquire() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lock_path = temp_dir.path().join("sync.lock");
+
+        publish_legacy_readable_lock(&lock_path).unwrap();
+        let legacy_open = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap_err();
+        assert_eq!(legacy_open.kind(), std::io::ErrorKind::AlreadyExists);
+        let (pid, timestamp) = read_sync_lock(&lock_path).expect("complete legacy record");
+        assert_eq!(pid, std::process::id());
+        assert!(timestamp > 0);
+    }
+
+    /// An old binary creates its PID-file before writing the record. It may be
+    /// paused in that exact interval and holds no OS lock, so new code must
+    /// still fail closed rather than unlink its pending inode.
+    #[test]
+    fn sync_lock_guard_refuses_an_empty_legacy_inode_without_an_os_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path();
+        let lock_path = cache_dir.join("sync.lock");
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert!(lock_path.exists(), "the pending legacy inode must survive");
+    }
+
+    /// `purge-cache` must use a lock outside the cache directory. Otherwise
+    /// it can unlink a sync's held `sync.lock` inode and let another sync lock
+    /// a new file at the same path.
+    #[test]
+    #[serial]
+    fn purge_cache_refuses_while_sync_holds_the_parent_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("manifest.json"), "{}").unwrap();
+
+        let sync = SyncLockGuard::acquire(&cache_dir).unwrap();
+        let err = run_antigravity_purge_cache().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Another tokscale Antigravity cache operation is in progress"),
+            "purge must not unlink an active sync lock, got: {err:#}"
+        );
+        assert!(cache_dir.join("sync.lock").exists());
+        assert!(cache_dir.join("manifest.json").exists());
+        drop(sync);
     }
 
     #[test]
     #[serial]
-    fn sync_lock_guard_overwrites_stale_lock() {
+    fn purge_cache_refuses_a_live_legacy_pid_lock() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let cache_dir = temp_dir.path().to_path_buf();
-        let lock_path = cache_dir.join("sync.lock");
-        let stale_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            .saturating_sub(SYNC_LOCK_STALE_SECS + 60);
-        std::fs::write(&lock_path, format!("999999 {stale_ts}")).unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("manifest.json"), "{}").unwrap();
+        std::fs::write(
+            cache_dir.join("sync.lock"),
+            format!("{} 1\n", std::process::id()),
+        )
+        .unwrap();
 
-        let _guard = SyncLockGuard::acquire(&cache_dir).unwrap();
-        assert!(lock_path.exists());
+        let err = run_antigravity_purge_cache().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Another tokscale Antigravity sync may be in progress"),
+            "purge must preserve a live legacy sync, got: {err:#}"
+        );
+        assert!(cache_dir.join("manifest.json").exists());
+        assert!(cache_dir.join("sync.lock").exists());
     }
 }

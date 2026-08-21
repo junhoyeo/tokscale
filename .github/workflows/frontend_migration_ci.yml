@@ -1,0 +1,71 @@
+name: Frontend Migration CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &frontend_migration_paths
+      - "package.json"
+      - ".npmrc"
+      - "bun.lock"
+      - "packages/frontend/package.json"
+      - "packages/frontend/drizzle.config.ts"
+      - "packages/frontend/scripts/check-migrations.ts"
+      - "packages/frontend/src/lib/db/**"
+      - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
+      - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
+      - ".github/workflows/frontend_migration_ci.yml"
+  pull_request:
+    branches: [main]
+    paths: *frontend_migration_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-migration-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BUN_VERSION: 1.3.10
+
+jobs:
+  migration-replay:
+    name: Frontend Migration Replay
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tokscale_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tokscale_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tokscale_ci
+      NODE_ENV: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Replay frontend database migrations
+        run: bun run --cwd packages/frontend test:migrations
+
+      - name: Execute reconciliation census against PostgreSQL
+        env:
+          RATCHET_CENSUS_DB_INTEGRATION: "1"
+        run: bun run --cwd packages/frontend test:reconciliation:db

@@ -14,14 +14,6 @@ import { SUPPORTED_CLIENT_TYPES } from "../types";
 // SCHEMAS
 // ============================================================================
 
-// Hard cap: 10B tokens per day. f6aeca7 raised this to 100B; reverting because
-// 100B/day is implausible for any single device and would hide data errors.
-// A warn band at 5B logs structured warnings for high-but-plausible volumes
-// without rejecting them (see warnIfHighDailyTokens below).
-const MAX_DAILY_TOKENS = 10_000_000_000;
-const WARN_DAILY_TOKENS = 5_000_000_000;
-const MAX_DAILY_COST = 10_000;
-const MAX_COST_PER_MILLION_TOKENS = 10_000;
 const COST_RELATIVE_TOLERANCE = 0.01;
 const COST_ABSOLUTE_TOLERANCE = 0.1;
 // Sub-cent epsilon for "is there real cost left after subtracting the
@@ -49,6 +41,11 @@ const ClientContributionProvenanceSchema = z.object({
   schemaVersion: NonNegativeIntegerSchema.min(1),
   messageCount: NonNegativeIntegerSchema,
   modelCount: NonNegativeIntegerSchema,
+  // Per-client origin tag; the submit route stamps "backfill" on every client
+  // of a backfill-origin submission before persisting into
+  // daily_breakdown.source_breakdown. Optional so existing CLIs (which never
+  // send it) are unaffected.
+  origin: z.enum(["cli", "backfill"]).optional(),
 });
 
 const CcMirrorSourceSchema = z.string().regex(
@@ -75,6 +72,19 @@ const DailyContributionSchema = z.object({
     tokens: NonNegativeIntegerSchema,
     cost: NonNegativeNumberSchema,
     messages: NonNegativeIntegerSchema,
+    /**
+     * Whether `cost` accounts for every token counted in `tokens`.
+     *
+     * `cost` alone cannot distinguish "this day cost $0.00" from "I could not
+     * price this day", and the write path overwrites cost per day, so a client
+     * with degraded pricing coverage would silently lower recorded spend
+     * (#1044). Sending `false` declares the cost a floor rather than a total,
+     * and the server then refuses to let it reduce what is already stored.
+     *
+     * Optional, and absent means complete — every already-released CLI keeps
+     * exact overwrite semantics, including downward corrections.
+     */
+    costIsComplete: z.boolean().optional(),
   }),
   intensity: NonNegativeIntegerSchema.max(4),
   tokenBreakdown: TokenBreakdownSchema,
@@ -186,13 +196,58 @@ const TimeMetricsSchema = z.object({
   sessionCount: z.number().int().min(0),
 });
 
+/**
+ * Submission-level provenance: distinguishes usage the CLI computed from raw
+ * local session files ("cli") from usage recovered out of a third-party
+ * aggregate export via `tokscale import` ("backfill"). Backfilled aggregates
+ * are not independently verifiable the way locally-scanned sessions are.
+ *
+ * NOTE (https://github.com/junhoyeo/tokscale/issues/888): Phase 1 persistence
+ * has landed. The submit route now (a) sets the sticky `submissions.has_backfill`
+ * flag when origin === "backfill" (never reset by later live submits), and
+ * (b) stamps `origin: "backfill"` into each client's provenance inside
+ * `daily_breakdown.source_breakdown`. The flag is surfaced as an
+ * "includes imported history" badge on profiles. Segregating backfilled data
+ * in RANKING (e.g. excluding it from competitive totals, or a separate
+ * "imported" view) is still TODO in the leaderboard queries, so a "backfill"
+ * submission must not yet be treated as ranked-equivalent to live CLI usage.
+ *
+ * Optional, so existing CLIs (which omit it) are unaffected, and excluded from
+ * `generateSubmissionHash` below since it is derived metadata.
+ */
+const SubmissionProvenanceSchema = z.object({
+  origin: z.enum(["cli", "backfill"]),
+  // Free-form importer id (e.g. "clawdboard"); bounded so it stays a label.
+  importer: z.string().trim().min(1).max(64).optional(),
+});
+
 const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   meta: ExportMetaSchema,
   device: SubmitDeviceSchema.optional(),
+  // Parser identity and snapshot completeness are separate: date-filtered
+  // scans still identify their parser but cannot establish/advance a
+  // cumulative rollout high-water.
+  scanScope: z.object({
+    parserVersions: z.record(SourceSchema, NonNegativeIntegerSchema.min(1)),
+    fullHistory: z.boolean(),
+  }).optional(),
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
-  contributions: z.array(DailyContributionSchema),
+  // Each date must appear at most once. The submit route builds its insert
+  // batch from a date-keyed map of EXISTING rows that is not updated as the
+  // loop runs, so a repeated date produces two rows with the same
+  // (submission_id, submitted_device_id, date). Postgres then either aborts
+  // the statement ("ON CONFLICT DO UPDATE command cannot affect row a second
+  // time") or, if the duplicates land in different INSERT chunks, lets the
+  // second silently overwrite the first through the ON CONFLICT arm --
+  // bypassing the monotonic active-time guard. Rejecting up front turns both
+  // into a clear 400.
+  contributions: z.array(DailyContributionSchema).refine(
+    (days) => new Set(days.map((day) => day.date)).size === days.length,
+    { message: "Duplicate dates in contributions: each date may appear at most once" }
+  ),
   timeMetrics: TimeMetricsSchema.optional(),
+  provenance: SubmissionProvenanceSchema.optional(),
 }));
 
 export type SubmissionData = z.infer<typeof SubmissionDataSchema>;
@@ -272,24 +327,6 @@ function describeTokenlessOffenders(clients: ClientLike[]): string {
     .join("; ");
 }
 
-function pushCostPerMillionError(
-  errors: string[],
-  label: string,
-  cost: number,
-  tokens: number
-): void {
-  if (cost <= 1 || tokens === 0) {
-    return;
-  }
-
-  const costPerMillion = (cost * 1_000_000) / tokens;
-  if (costPerMillion > MAX_COST_PER_MILLION_TOKENS) {
-    errors.push(
-      `${label}: Cost per million tokens exceeds ${MAX_COST_PER_MILLION_TOKENS.toLocaleString("en-US")}: ${costPerMillion.toFixed(2)}`
-    );
-  }
-}
-
 /**
  * Validate submission data (Level 1 validation)
  */
@@ -363,57 +400,25 @@ export function validateSubmission(data: unknown): ValidationResult {
     );
   }
 
-  const claimedDays = Math.max(submission.summary.totalDays, submission.contributions.length, 1);
-  const maxSubmissionTokens = MAX_DAILY_TOKENS * claimedDays;
-  const maxSubmissionCost = MAX_DAILY_COST * claimedDays;
-
-  if (submission.summary.totalTokens > maxSubmissionTokens) {
-    errors.push(
-      `Submission token total exceeds ${maxSubmissionTokens.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalTokens.toLocaleString("en-US")}`
-    );
-  }
-
-  if (submission.summary.totalCost > maxSubmissionCost) {
-    errors.push(
-      `Submission cost exceeds ${maxSubmissionCost.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalCost.toFixed(2)}`
-    );
-  }
-
-  if (submission.summary.maxCostInSingleDay > MAX_DAILY_COST) {
-    errors.push(
-      `Summary maxCostInSingleDay exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${submission.summary.maxCostInSingleDay.toFixed(2)}`
-    );
-  }
-
-  {
+  if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
+    // Cursor legacy: subtract premium-tool-call cost before the tokenless-cost
+    // detection so a legacy charge cannot trip the error.
     const allClients: ClientLike[] = submission.contributions.flatMap(
       (d) => d.clients
     );
-    // Cursor legacy: subtract premium-tool-call cost before both sanity caps
-    // so a legacy charge cannot inflate the cost-per-million ratio either,
-    // not just the tokenless-cost error.
     const legacyCost = allClients
       .filter(isLegacyTokenlessCursorClient)
       .reduce((sum, c) => sum + c.cost, 0);
     const checkableCost = Math.max(0, submission.summary.totalCost - legacyCost);
 
-    if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
-      if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
-        const offenders = describeTokenlessOffenders(
-          allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
-        );
-        const detail =
-          `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
-          (offenders ? `; offending clients: ${offenders}` : "");
-        errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
-      }
-    } else {
-      pushCostPerMillionError(
-        errors,
-        "Submission summary",
-        checkableCost,
-        submission.summary.totalTokens
+    if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
+      const offenders = describeTokenlessOffenders(
+        allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
       );
+      const detail =
+        `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
+        (offenders ? `; offending clients: ${offenders}` : "");
+      errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
     }
   }
 
@@ -427,25 +432,6 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // 3c. Day token breakdown should sum to totals
   for (const day of submission.contributions) {
-    if (day.totals.tokens > MAX_DAILY_TOKENS) {
-      errors.push(
-        `Daily token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")} on ${day.date}: ${day.totals.tokens.toLocaleString("en-US")}`
-      );
-    } else if (day.totals.tokens > WARN_DAILY_TOKENS) {
-      console.warn("[submission] high daily token count", {
-        date: day.date,
-        tokens: day.totals.tokens,
-        warnThreshold: WARN_DAILY_TOKENS,
-        cap: MAX_DAILY_TOKENS,
-      });
-    }
-
-    if (day.totals.cost > MAX_DAILY_COST) {
-      errors.push(
-        `Daily cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")} on ${day.date}: ${day.totals.cost.toFixed(2)}`
-      );
-    }
-
     {
       // Cursor legacy: subtract premium-tool-call cost before both sanity
       // caps so legacy charges that share a day with normal token-bearing
@@ -465,13 +451,6 @@ export function validateSubmission(data: unknown): ValidationResult {
             (offenders ? `; offending clients: ${offenders}` : "");
           errors.push(`Day ${day.date}: Cost submitted without tokens (${detail})`);
         }
-      } else {
-        pushCostPerMillionError(
-          errors,
-          `Day ${day.date}`,
-          checkableCost,
-          day.totals.tokens
-        );
       }
     }
 
@@ -506,17 +485,6 @@ export function validateSubmission(data: unknown): ValidationResult {
 
     for (const client of day.clients) {
       const clientTokens = tokenTotal(client.tokens);
-      if (clientTokens > MAX_DAILY_TOKENS) {
-        errors.push(
-          `Client ${client.client} on ${day.date}: token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")}: ${clientTokens.toLocaleString("en-US")}`
-        );
-      }
-
-      if (client.cost > MAX_DAILY_COST) {
-        errors.push(
-          `Client ${client.client} on ${day.date}: cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${client.cost.toFixed(2)}`
-        );
-      }
 
       if (client.cost > 0 && clientTokens === 0) {
         if (!isLegacyTokenlessCursorClient(client)) {
@@ -529,13 +497,6 @@ export function validateSubmission(data: unknown): ValidationResult {
               `(cost=${formatCost(client.cost)}, tokens={${formatTokenBreakdown(client.tokens)}})`
           );
         }
-      } else {
-        pushCostPerMillionError(
-          errors,
-          `Client ${client.client}/${client.modelId} on ${day.date}`,
-          client.cost,
-          clientTokens
-        );
       }
     }
   }

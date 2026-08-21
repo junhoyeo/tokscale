@@ -3,6 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import styled from "styled-components";
+import {
+  CompactBadge,
+  GroupMark,
+  PrimaryActionLink,
+  SecondaryButton,
+  SegmentedControl,
+} from "@/components/leaderboard/RankingUI";
+import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 
 // Inlined view of the groups list that lives under the /leaderboard ?view=groups
 // segmented control. The /groups/[slug], /groups/new, and /groups/join/[token]
@@ -48,115 +56,94 @@ interface GroupsBrowserProps {
 
 type ActiveTab = "public" | "mine";
 
-const Header = styled.section`
-  margin: 16px 0 20px;
+const Toolbar = styled.section`
   display: flex;
   justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
 
   @media (max-width: 640px) {
-    flex-direction: column;
+    align-items: stretch;
+    flex-direction: column-reverse;
   }
 `;
 
-const Description = styled.p`
+const DirectoryStatus = styled.p`
   margin: 0;
-  max-width: 680px;
-  color: var(--color-fg-muted);
-  line-height: 1.6;
-`;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
 
-const PrimaryLink = styled(Link)`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 0 16px;
-  border-radius: 8px;
-  border: 1px solid var(--color-primary);
-  background: var(--color-primary);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-  white-space: nowrap;
-`;
-
-const Tabs = styled.div`
-  display: inline-flex;
-  padding: 4px;
-  margin-bottom: 16px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-subtle);
-`;
-
-const TabButton = styled.button<{ $active: boolean }>`
-  min-height: 32px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 6px;
-  background: ${({ $active }) => ($active ? "var(--color-bg-default)" : "transparent")};
-  color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
-  font-weight: 600;
-  cursor: pointer;
-
-  &:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
+  @media (max-width: 640px) {
+    font-size: 1rem;
   }
 `;
 
-const Grid = styled.div`
+const FilterGroup = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+`;
+
+const DirectoryAction = styled(PrimaryActionLink)`
+  align-self: flex-start;
+`;
+
+const Grid = styled.ul`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
   gap: 12px;
+  margin: 0;
+  padding: 0;
+
+  @media (min-width: 1240px) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+`;
+
+const GridItem = styled.li`
+  min-width: 0;
+  list-style: none;
 `;
 
 const Card = styled(Link)`
-  display: flex;
-  flex-direction: column;
-  min-height: 150px;
-  padding: 16px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 100%;
+  padding: 14px;
+  border: 1px solid var(--service-border);
+  border-radius: 10px;
+  background: var(--service-surface);
   color: inherit;
   text-decoration: none;
-  transition: border-color 0.15s, background 0.15s;
 
   &:hover {
-    border-color: var(--color-primary);
-    background: var(--color-bg-subtle);
+    border-color: var(--service-border-strong);
+    background: var(--service-surface-muted);
   }
 
   &:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--service-focus);
     outline-offset: 2px;
-    border-color: var(--color-primary);
   }
 `;
 
-const SkeletonGrid = styled(Grid)`
+const SkeletonGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 12px;
   pointer-events: none;
 `;
 
 const SkeletonCard = styled.div`
-  min-height: 150px;
-  padding: 16px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
+  min-height: 94px;
+  border: 1px solid var(--service-border);
+  border-radius: 10px;
   background: linear-gradient(
     90deg,
-    var(--color-bg-default) 0%,
-    var(--color-bg-subtle) 50%,
-    var(--color-bg-default) 100%
+    var(--service-surface) 0%,
+    var(--service-surface-muted) 50%,
+    var(--service-surface) 100%
   );
   background-size: 200% 100%;
   animation: groups-skeleton-shimmer 1.6s ease-in-out infinite;
@@ -171,89 +158,85 @@ const SkeletonCard = styled.div`
   }
 `;
 
-const CardTop = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-`;
-
-const Avatar = styled.div<{ $image?: string | null }>`
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
-  flex: 0 0 auto;
-  border: 1px solid var(--color-border-default);
-  background: ${({ $image }) =>
-    $image ? `url(${$image}) center/cover` : "linear-gradient(135deg, #0073ff, #13a10e)"};
+const CardContent = styled.div`
+  min-width: 0;
 `;
 
 const CardTitle = styled.h2`
   margin: 0;
-  font-size: 16px;
-  color: var(--color-fg-default);
+  overflow: hidden;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const Meta = styled.div`
-  margin-top: 3px;
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
-  color: var(--color-fg-muted);
-  font-size: 12px;
+  gap: 6px;
+  margin-top: 6px;
 `;
 
 const BodyText = styled.p`
-  margin: 0;
-  color: var(--color-fg-muted);
-  line-height: 1.5;
-  font-size: 14px;
+  display: -webkit-box;
+  margin: 10px 0 0;
+  overflow: hidden;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  text-wrap: pretty;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+    line-height: 1.5;
+  }
 `;
 
 const EmptyState = styled.div`
-  padding: 28px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
-  color: var(--color-fg-muted);
+  padding: 28px 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const ErrorText = styled.p`
-  color: var(--color-danger-fg, #f85149);
+  margin: 0 0 12px;
+  color: #ff8c85;
 `;
 
-const LoadMoreButton = styled.button`
+const LoadMoreButton = styled(SecondaryButton)`
   margin-top: 16px;
-  min-height: 36px;
-  padding: 0 16px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-default);
-  color: var(--color-fg-default);
-  cursor: pointer;
-
-  &:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
 `;
 
 function GroupCard({ group }: { group: GroupCardData }) {
   return (
-    <Card href={`/groups/${group.slug}`}>
-      <CardTop>
-        <Avatar $image={group.avatarUrl} />
-        <div>
+    <GridItem>
+      <Card href={`/groups/${group.slug}`}>
+        <GroupMark name={group.name} avatarUrl={group.avatarUrl} />
+        <CardContent>
           <CardTitle>{group.name}</CardTitle>
           <Meta>
-            <span>{group.isPublic ? "Public" : "Private"}</span>
-            <span>{group.memberCount} members</span>
-            {group.role && <span>{group.role}</span>}
+            <CompactBadge>{group.isPublic ? "Public" : "Private"}</CompactBadge>
+            <CompactBadge>{formatGroupMemberCount(group.memberCount)}</CompactBadge>
+            {group.role && <CompactBadge>{group.role}</CompactBadge>}
           </Meta>
-        </div>
-      </CardTop>
-      <BodyText>{group.description || "A scoped Tokscale leaderboard."}</BodyText>
-    </Card>
+          {group.description && <BodyText>{group.description}</BodyText>}
+        </CardContent>
+      </Card>
+    </GridItem>
   );
 }
 
@@ -395,33 +378,33 @@ export default function GroupsBrowser({
   // Send unauthenticated users back to /leaderboard?view=groups so they land
   // on the groups view after sign-in (was /groups before the consolidation).
   const signInHref = "/api/auth/github?returnTo=/leaderboard?view=groups";
+  const directoryCount = activePagination.total;
 
   return (
     <>
-      <Header>
-        <Description>
-          Create private or public leaderboards for teams, friends, and workspaces without changing
-          the global Tokscale rankings.
-        </Description>
+      <Toolbar>
+        <FilterGroup>
+          <SegmentedControl
+            label="Group filter"
+            value={activeTab}
+            options={[
+              { value: "public", label: "Public" },
+              { value: "mine", label: "My groups", disabled: !currentUser },
+            ]}
+            onChange={handleTabChange}
+          />
+          <DirectoryStatus role="status" aria-live="polite">
+            {activeTab === "mine"
+              ? `${directoryCount.toLocaleString("en-US")} ${directoryCount === 1 ? "group" : "groups"}`
+              : `${directoryCount.toLocaleString("en-US")} public ${directoryCount === 1 ? "group" : "groups"}`}
+          </DirectoryStatus>
+        </FilterGroup>
         {currentUser ? (
-          <PrimaryLink href="/groups/new">New group</PrimaryLink>
+          <DirectoryAction href="/groups/new">New group</DirectoryAction>
         ) : (
-          <PrimaryLink href={signInHref}>Sign in</PrimaryLink>
+          <DirectoryAction href={signInHref}>Sign in</DirectoryAction>
         )}
-      </Header>
-
-      <Tabs aria-label="Group filters">
-        <TabButton $active={activeTab === "public"} onClick={() => handleTabChange("public")}>
-          Public
-        </TabButton>
-        <TabButton
-          $active={activeTab === "mine"}
-          onClick={() => handleTabChange("mine")}
-          disabled={!currentUser}
-        >
-          My groups
-        </TabButton>
-      </Tabs>
+      </Toolbar>
 
       {error && <ErrorText role="alert">{error}</ErrorText>}
       {isLoading && groups.length === 0 ? (
@@ -438,7 +421,7 @@ export default function GroupsBrowser({
             </EmptyState>
           ) : (
             <>
-              <Grid>
+              <Grid role="list">
                 {groups.map((group) => (
                   <GroupCard key={group.id} group={group} />
                 ))}

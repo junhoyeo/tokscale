@@ -1,14 +1,21 @@
 //! Claude Code session parser
 //!
-//! Parses JSONL files from ~/.claude/projects/
+//! Parses JSONL files from `<claude_config_dir>/projects/`, where
+//! `claude_config_dir` defaults to `~/.claude` but honors `CLAUDE_CONFIG_DIR`
+//! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-    read_file_or_none,
+    estimate_tokens, extract_i64, extract_string, file_modified_timestamp_ms,
+    parse_timestamp_value, read_file_or_none, AnthropicUsage,
 };
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
+
+/// The Anthropic `usage` block, kept reachable under its historical name so
+/// `sessions::claudecode::ClaudeUsage` still resolves to the same four fields
+/// after the type moved into `sessions::utils`.
+pub use super::utils::AnthropicUsage as ClaudeUsage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -65,20 +72,12 @@ impl CcMirrorVariantMetadata {
 #[derive(Debug, Deserialize)]
 pub struct ClaudeMessage {
     pub model: Option<String>,
-    pub usage: Option<ClaudeUsage>,
+    pub usage: Option<AnthropicUsage>,
     /// Message ID for deduplication (used with requestId)
     pub id: Option<String>,
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClaudeUsage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
 }
 
 /// Resolve the subagent display name for a sidechain transcript file.
@@ -128,36 +127,136 @@ fn resolve_subagent_name(
     normalize_agent_name("claude-code-subagent")
 }
 
+/// True for nested-layout workflow orchestration journals
+/// (`.../<session>/subagents/**/journal.jsonl`).
+///
+/// Claude Code writes a `journal.jsonl` alongside `agent-*.jsonl` transcripts to
+/// record subagent workflow orchestration (spawn/verdict/result events). It shares
+/// the `.jsonl` extension and lives under the recursively-scanned project dir, so
+/// the dir-walk discovers it — but it is metadata, NOT a message transcript, and
+/// must never be ingested as usage. Its lines carry `type: "started"`/`"result"`
+/// (not `user`/`assistant`) so they currently parse to zero usage, but we drop it
+/// explicitly so a future journal schema can't silently leak token-like fields.
+fn is_workflow_journal(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("journal.jsonl") {
+        return false;
+    }
+    path.ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents"))
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session>.jsonl`
+/// Deep nested layout (workflows): `.../projects/<key>/<session>/subagents/workflows/<wf>/agent-X.jsonl`
+///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
-fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+fn parent_session_paths(sidechain_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
+    let mut candidates = Vec::with_capacity(2);
 
-    // Nested layout: parent dir is 3 levels up (file → subagents → session-dir → project-dir)
-    if let Some(dir) = sidechain_path.parent() {
-        if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-            if let Some(project_dir) = dir.parent().and_then(|d| d.parent()) {
-                let candidate = project_dir.join(&parent_filename);
-                if candidate.exists() {
-                    return Some(candidate);
+    // Nested layout: locate the `subagents` directory anywhere in the ancestry.
+    // The session dir is its parent and the project dir its grandparent, so the
+    // parent session file sits at `<project>/<session>.jsonl`. Anchoring on the
+    // `subagents` marker (rather than a fixed depth) handles both the shallow
+    // `subagents/agent-X.jsonl` and the deeper `subagents/workflows/<wf>/agent-X.jsonl`.
+    for ancestor in sidechain_path.ancestors() {
+        if ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+            if let Some(project_dir) = ancestor.parent().and_then(|d| d.parent()) {
+                candidates.push(project_dir.join(&parent_filename));
+            }
+            break;
+        }
+    }
+
+    // Flat layout, and the existing nested-layout fallback: parent dir is one
+    // level up. Preserve this as the lower-priority candidate when nested.
+    if let Some(parent_dir) = sidechain_path.parent() {
+        let candidate = parent_dir.join(parent_filename);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+    parent_session_paths(sidechain_path, parent_session_id)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+/// How far the parent probe reads before giving up. A sidechain transcript's
+/// first row is already a sidechain row in practice, so the probe stops almost
+/// immediately; this cap only prevents a mislabeled or corrupt file that
+/// matches the `agent-*` / `subagents/` layout but carries no sidechain row
+/// from triggering a whole-file read on every warm cache validation.
+const PARENT_PROBE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Resolve the parent transcript that can influence a sidechain's cached agent
+/// attribution. The probe follows the parser until its first parseable
+/// sidechain row, then returns every candidate in parser precedence order.
+/// Missing candidates are retained so their later appearance invalidates the
+/// cache.
+pub(crate) fn parent_session_paths_for_cache(sidechain_path: &Path) -> Vec<PathBuf> {
+    parent_session_paths_for_cache_bounded(sidechain_path, PARENT_PROBE_MAX_BYTES)
+}
+
+/// Cap-parameterized core of [`parent_session_paths_for_cache`]. The current
+/// line is always read and parsed in full, so a marker on the first row is
+/// found regardless of `max_probe_bytes`; the cap only bounds how many *later*
+/// rows a marker-less file is scanned for before the probe gives up.
+fn parent_session_paths_for_cache_bounded(
+    sidechain_path: &Path,
+    max_probe_bytes: u64,
+) -> Vec<PathBuf> {
+    if is_workflow_journal(sidechain_path) {
+        return Vec::new();
+    }
+    let likely_nested = sidechain_path
+        .ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents"));
+    let likely_flat = sidechain_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("agent-"));
+    if !likely_nested && !likely_flat {
+        return Vec::new();
+    }
+
+    let Ok(file) = std::fs::File::open(sidechain_path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut consumed: u64 = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        consumed = consumed.saturating_add(read as u64);
+        if let Ok(entry) = serde_json::from_str::<ClaudeEntry>(line.trim_end()) {
+            if entry.is_sidechain {
+                if let Some(parent_session_id) = entry
+                    .session_id
+                    .as_deref()
+                    .filter(|session_id| !session_id.trim().is_empty())
+                {
+                    return parent_session_paths(sidechain_path, parent_session_id);
                 }
             }
         }
-    }
-
-    // Flat layout: parent dir is 1 level up
-    if let Some(project_dir) = sidechain_path.parent() {
-        let candidate = project_dir.join(&parent_filename);
-        if candidate.exists() {
-            return Some(candidate);
+        if consumed >= max_probe_bytes {
+            break;
         }
     }
 
-    None
+    Vec::new()
 }
 
 /// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
@@ -306,7 +405,7 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 
 /// Parse a Claude Code JSONL file
 pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
-    let home_dir = dirs::home_dir();
+    let home_dir = crate::paths::home_dir();
     parse_claude_file_with_home(path, home_dir.as_deref())
 }
 
@@ -319,7 +418,7 @@ pub fn parse_claude_file_with_cache(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
 ) -> Vec<UnifiedMessage> {
-    let home_dir = dirs::home_dir();
+    let home_dir = crate::paths::home_dir();
     parse_claude_file_with_cache_and_home(path, parent_cache, home_dir.as_deref())
 }
 
@@ -328,6 +427,11 @@ pub fn parse_claude_file_with_cache_and_home(
     parent_cache: &mut ParentSubagentTypeCache,
     home_dir: Option<&Path>,
 ) -> Vec<UnifiedMessage> {
+    // Workflow orchestration journals are metadata, not transcripts — never ingest.
+    if is_workflow_journal(path) {
+        return Vec::new();
+    }
+
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
     let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
     let client_id = cc_mirror_metadata
@@ -343,6 +447,15 @@ pub fn parse_claude_file_with_cache_and_home(
         .unwrap_or("unknown")
         .to_string();
 
+    // Never char-estimate tool_result content for Claude Code transcripts.
+    //
+    // Project transcripts already carry API-reported `usage.input_tokens` on the
+    // next assistant turn, and that figure already includes prior tool_result
+    // text. Estimating `ceil(chars/4)` on the tool_result row therefore double-
+    // counts the same content (tokscale#1011). Bare transcripts under
+    // `~/.claude/transcripts/` have the same hazard when a third-party client
+    // (e.g. OpenCode) also logs the turn. Explicit tool-result token metadata
+    // is still honored — only the char-based fallback is suppressed.
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
@@ -382,6 +495,11 @@ pub fn parse_claude_file_with_cache_and_home(
     let mut pending_request_start_timestamp_ms: Option<i64> = None;
     let mut last_model: Option<String> = None;
     let mut last_provider_hint: Option<String> = None;
+    // Claude Code writes local API-error and auth notices as assistant messages
+    // with `<synthetic>` rather than an API model. A following tool result has
+    // no model of its own, so it must not inherit that placeholder and turn a
+    // char estimate into unpriceable usage.
+    let mut suppress_unattributed_tool_results = false;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_detected = false;
@@ -433,6 +551,8 @@ pub fn parse_claude_file_with_cache_and_home(
                         workspace_key: workspace_key.clone(),
                         workspace_label: workspace_label.clone(),
                         sidechain_agent: sidechain_agent.clone(),
+                        suppress_unattributed: suppress_unattributed_tool_results,
+                        allow_char_estimate: false,
                     },
                 );
 
@@ -473,6 +593,14 @@ pub fn parse_claude_file_with_cache_and_home(
                 };
 
                 if let Some(model) = message.model.as_deref() {
+                    if is_claude_synthetic_placeholder_model(model) {
+                        last_model = None;
+                        last_provider_hint = None;
+                        pending_request_start_timestamp_ms = None;
+                        suppress_unattributed_tool_results = true;
+                        continue;
+                    }
+                    suppress_unattributed_tool_results = false;
                     last_model = Some(model.to_string());
                     last_provider_hint = message
                         .provider_id
@@ -506,7 +634,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -526,7 +653,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -558,7 +684,8 @@ pub fn parse_claude_file_with_cache_and_home(
                 let model = canonicalize_claude_model(&raw_model);
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
-                let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                let timestamp = pending_request_start_timestamp_ms
+                    .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
                 let duration_ms =
                     duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
 
@@ -758,9 +885,8 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
 
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
-    usage: &ClaudeUsage,
+    usage: &AnthropicUsage,
     parsed_timestamp: Option<i64>,
-    request_start_timestamp_ms: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
@@ -775,23 +901,63 @@ fn merge_claude_duplicate(
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
-            // Recover the original request-start timestamp from the existing
-            // message's recorded duration. The parent loop clears
-            // `pending_request_start_timestamp_ms` after the first chunk of a
-            // message commits (so a NEW message with no preceding user doesn't
-            // inflate by reusing a stale start), which would otherwise blank
-            // out streaming duplicates' duration. Recovering from
-            // `existing.timestamp - existing.duration_ms` keeps the duration
-            // honest for late chunks of the same logical message.
-            let recovered_start = existing
-                .duration_ms
-                .map(|d| existing.timestamp - d)
-                .or(request_start_timestamp_ms);
-            existing.set_timestamp(timestamp_ms);
-            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
-                existing.duration_ms = Some(new_duration);
+            let new_duration = timestamp_ms.saturating_sub(existing.timestamp);
+            if new_duration > 0 {
+                // Duplicates can arrive out of order (e.g. late-processed
+                // streaming chunks), so never let a later-processed duplicate
+                // with an earlier completion timestamp shrink a duration
+                // already established by another duplicate.
+                existing.duration_ms = Some(existing.duration_ms.unwrap_or(0).max(new_duration));
             }
         }
+    }
+}
+
+/// Merge two cached/live copies of the same globally-stable Claude response.
+///
+/// A scan can observe one transcript mid-stream and later find the completed
+/// replay in a fork. The parser already applies per-field maxima to streaming
+/// duplicates inside one file; cross-file/cache dedup must preserve the same
+/// monotonic completeness contract instead of keeping whichever path sorted
+/// first.
+pub(crate) fn merge_message_completeness(
+    existing: &mut UnifiedMessage,
+    candidate: &UnifiedMessage,
+) {
+    existing.tokens.input = existing.tokens.input.max(candidate.tokens.input);
+    existing.tokens.output = existing.tokens.output.max(candidate.tokens.output);
+    existing.tokens.cache_read = existing.tokens.cache_read.max(candidate.tokens.cache_read);
+    existing.tokens.cache_write = existing
+        .tokens
+        .cache_write
+        .max(candidate.tokens.cache_write);
+    existing.tokens.reasoning = existing.tokens.reasoning.max(candidate.tokens.reasoning);
+    existing.duration_ms = match (existing.duration_ms, candidate.duration_ms) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (None, right) => right,
+        (left, None) => left,
+    };
+    existing.message_count = existing.message_count.max(candidate.message_count);
+    existing.is_turn_start |= candidate.is_turn_start;
+    existing.model_attribution_conflicted |= candidate.model_attribution_conflicted;
+
+    if existing.workspace_key.is_none() {
+        existing.workspace_key.clone_from(&candidate.workspace_key);
+    }
+    if existing.workspace_label.is_none() {
+        existing
+            .workspace_label
+            .clone_from(&candidate.workspace_label);
+    }
+    if existing.session_title.is_none() {
+        existing.session_title.clone_from(&candidate.session_title);
+    }
+    if existing.agent.is_none() {
+        existing.agent.clone_from(&candidate.agent);
+    }
+    if candidate.has_authoritative_cost() && !existing.has_authoritative_cost() {
+        existing.cost = candidate.cost;
+        existing.mark_provider_reported_cost();
     }
 }
 
@@ -811,6 +977,35 @@ struct ClaudeToolResultUsage {
     dedup_key: Option<String>,
 }
 
+/// The segment that marks a dedup key as scoped to one transcript file.
+/// `tool_result_dedup_key` puts the session id — which is the transcript's
+/// file stem — behind it.
+const PATH_SCOPED_KEY_MARKER: &str = ":tool_result:";
+
+/// Whether a dedup key this parser mints identifies its message by content
+/// wherever that message happens to be written.
+///
+/// Assistant keys are `messageId:requestId` (or `message:{id}` when the
+/// transcript recorded no request id). Both come straight out of the API
+/// response, so the same turn replayed into a forked transcript keys
+/// identically and the two copies collapse at the cross-file dedup.
+/// Tool-result keys do not: they embed the session id, so the same tool result
+/// under a new filename is a different key and both copies count.
+///
+/// Only globally stable keys may be carried across an in-place rewrite. A
+/// retained path-scoped copy could never collapse against a live replay of
+/// itself, so retaining one would double count its input tokens.
+pub(crate) fn dedup_key_is_globally_stable(key: &str) -> bool {
+    !key.contains(PATH_SCOPED_KEY_MARKER)
+}
+
+/// A tool_use id is only unique within the conversation that issued it, so the
+/// key is deliberately scoped to the session. See `dedup_key_is_globally_stable`
+/// for what that costs.
+fn tool_result_dedup_key(client_id: &str, session_id: &str, usage_key: &str) -> String {
+    format!("{client_id}{PATH_SCOPED_KEY_MARKER}{session_id}:{usage_key}")
+}
+
 struct ClaudeToolResultContext<'a> {
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
@@ -822,6 +1017,15 @@ struct ClaudeToolResultContext<'a> {
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     sidechain_agent: Option<String>,
+    /// A preceding local Claude Code notice used `<synthetic>` instead of an API
+    /// model. A following tool result with no model cannot be attributed safely.
+    suppress_unattributed: bool,
+    /// Whether char-based token estimation may be used as a fallback when no
+    /// explicit tool-result token count is present. Claude Code always passes
+    /// `false`: API-reported assistant `input_tokens` already include prior
+    /// tool_result text, so the char fallback double-counts (tokscale#1011).
+    /// Explicit tool-result token metadata is still honored.
+    allow_char_estimate: bool,
 }
 
 fn extract_claude_tool_result_message(
@@ -829,18 +1033,15 @@ fn extract_claude_tool_result_message(
     context: ClaudeToolResultContext<'_>,
 ) -> Option<UnifiedMessage> {
     let value: Value = serde_json::from_str(line).ok()?;
-    let usage = extract_claude_tool_result_usage(&value)?;
+    let usage = extract_claude_tool_result_usage(&value, context.allow_char_estimate)?;
 
-    let raw_model = extract_claude_model(&value)
-        .or_else(|| {
-            context
-                .entry
-                .message
-                .as_ref()
-                .and_then(|message| message.model.clone())
-        })
-        .or_else(|| context.last_model.map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
+    let explicit_model = extract_claude_model(&value).or_else(|| {
+        context
+            .entry
+            .message
+            .as_ref()
+            .and_then(|message| message.model.clone())
+    });
     let provider_hint = extract_claude_provider(&value)
         .or_else(|| {
             context
@@ -849,7 +1050,39 @@ fn extract_claude_tool_result_message(
                 .as_ref()
                 .and_then(|message| message.provider_id.clone())
         })
-        .or_else(|| context.entry.provider_id.clone())
+        .or_else(|| context.entry.provider_id.clone());
+    let raw_model = match explicit_model {
+        Some(model) if is_claude_synthetic_placeholder_model(&model) => return None,
+        Some(model) => model,
+        // A provider alone cannot identify a billable model. Suppress every
+        // model-less result after a local synthetic notice rather than emit
+        // another unpriceable `provider/unknown` estimate.
+        None if context.suppress_unattributed => return None,
+        // A tool result inherits the preceding assistant model. That carrier can
+        // still be Claude Code's local `<synthetic>` notice when the placeholder
+        // arrived in a different transcript (a subagent sidechain resets the
+        // per-file suppression flag), so re-check the inherited value instead of
+        // trusting `suppress_unattributed` alone.
+        //
+        // Without this the row is emitted as `unknown/<synthetic>`. Production
+        // passes `allow_char_estimate: false`, so it carries tokens only when
+        // the tool result declared them explicitly; a text-only result yields
+        // no usage and is dropped before reaching submission.
+        //
+        // What that costs depends on pricing coverage, and neither outcome is
+        // the "aborts the whole submission" this comment once claimed:
+        //   - dataset loaded but not covering the model — #1053 excludes the
+        //     row with a named warning and submits the priced remainder, if any
+        //   - no pricing dataset loaded at all — #1055 fails the submission
+        // The first is a warning in a long run rather than a hard stop, so a
+        // regression here is easy to miss. Keep the guard.
+        None => match context.last_model {
+            Some(model) if is_claude_synthetic_placeholder_model(model) => return None,
+            Some(model) => model.to_string(),
+            None => "unknown".to_string(),
+        },
+    };
+    let provider_hint = provider_hint
         .or_else(|| context.last_provider_hint.map(str::to_string))
         .or_else(|| context.default_provider_hint.map(str::to_string));
 
@@ -873,12 +1106,9 @@ fn extract_claude_tool_result_message(
             reasoning: 0,
         },
         0.0,
-        usage.dedup_key.map(|key| {
-            format!(
-                "{}:tool_result:{}:{key}",
-                context.client_id, context.session_id
-            )
-        }),
+        usage
+            .dedup_key
+            .map(|key| tool_result_dedup_key(context.client_id, context.session_id, &key)),
     );
     message.message_count = 0;
     message.agent = context.sidechain_agent;
@@ -886,7 +1116,10 @@ fn extract_claude_tool_result_message(
     Some(message)
 }
 
-fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
+fn extract_claude_tool_result_usage(
+    value: &Value,
+    allow_char_estimate: bool,
+) -> Option<ClaudeToolResultUsage> {
     let mut total_tokens = 0;
     let mut first_dedup_id: Option<String> = None;
     let mut seen_ids = HashSet::new();
@@ -901,7 +1134,8 @@ fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsa
         if first_dedup_id.is_none() {
             first_dedup_id = tool_result_id;
         }
-        total_tokens += extract_tool_result_input_tokens(tool_result).unwrap_or(0);
+        total_tokens +=
+            extract_tool_result_input_tokens(tool_result, allow_char_estimate).unwrap_or(0);
     }
 
     if total_tokens <= 0 {
@@ -967,10 +1201,13 @@ fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
         .or_else(|| extract_string(tool_result.get("tool_result_id")))
 }
 
-fn extract_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bool) -> Option<i64> {
     explicit_tool_result_input_tokens(tool_result).or_else(|| {
+        if !allow_char_estimate {
+            return None;
+        }
         let chars = tool_result_output_char_count(tool_result);
-        (chars > 0).then(|| estimate_tokens_from_chars(chars))
+        (chars > 0).then(|| estimate_tokens(chars))
     })
 }
 
@@ -1052,10 +1289,20 @@ fn tool_result_content_output_chars(content: &Value) -> usize {
         .unwrap_or(0)
 }
 
-fn estimate_tokens_from_chars(chars: usize) -> i64 {
-    // Claude Code tool outputs may not include token metadata. Match the
-    // existing Kiro fallback of one token per four characters, rounded up.
-    chars.div_ceil(4) as i64
+fn is_claude_synthetic_placeholder_model(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("<synthetic>")
+}
+
+/// Remove Claude Code's local `<synthetic>` placeholder rows from a cached
+/// transcript. These notices are not API usage and old cache entries can
+/// contain a tool-result char estimate attributed to the placeholder.
+///
+/// This lives with the parser rather than the cache so the sentinel definition
+/// stays consistent between cold parsing and cache migration.
+pub(crate) fn remove_synthetic_placeholder_messages(messages: &mut Vec<UnifiedMessage>) -> bool {
+    let message_count = messages.len();
+    messages.retain(|message| !is_claude_synthetic_placeholder_model(&message.model_id));
+    messages.len() != message_count
 }
 
 fn canonicalize_claude_model(model: &str) -> String {
@@ -1073,6 +1320,10 @@ struct ClaudeHeadlessState {
     cache_read: i64,
     cache_write: i64,
     timestamp_ms: Option<i64>,
+    /// A local Claude Code notice uses `<synthetic>` as its model. Ignore all
+    /// stream deltas until its matching stop event so they cannot leak into the
+    /// next real response.
+    skipping_synthetic_stream: bool,
 }
 
 fn parse_claude_headless_json(
@@ -1126,6 +1377,11 @@ fn process_claude_headless_line(
 
     match event_type {
         "message_start" => {
+            if state.skipping_synthetic_stream {
+                // A new start without a stop means the synthetic stream was
+                // truncated. Its deltas must not survive into the new stream.
+                *state = ClaudeHeadlessState::default();
+            }
             completed_message = finalize_headless_state(
                 state,
                 session_id,
@@ -1134,7 +1390,16 @@ fn process_claude_headless_line(
                 default_provider_hint,
             );
 
-            state.model = extract_claude_model(&value);
+            let model = extract_claude_model(&value);
+            if model
+                .as_deref()
+                .is_some_and(is_claude_synthetic_placeholder_model)
+            {
+                *state = ClaudeHeadlessState::default();
+                state.skipping_synthetic_stream = true;
+                return completed_message;
+            }
+            state.model = model;
             state.provider_id = extract_claude_provider(&value);
             state.timestamp_ms = extract_claude_timestamp(&value).or(state.timestamp_ms);
             if let Some(usage) = value
@@ -1146,6 +1411,9 @@ fn process_claude_headless_line(
             }
         }
         "message_delta" => {
+            if state.skipping_synthetic_stream {
+                return None;
+            }
             if let Some(usage) = value
                 .get("usage")
                 .or_else(|| value.get("delta").and_then(|delta| delta.get("usage")))
@@ -1154,6 +1422,10 @@ fn process_claude_headless_line(
             }
         }
         "message_stop" => {
+            if state.skipping_synthetic_stream {
+                *state = ClaudeHeadlessState::default();
+                return None;
+            }
             completed_message = finalize_headless_state(
                 state,
                 session_id,
@@ -1189,6 +1461,9 @@ fn extract_claude_headless_message(
         .get("usage")
         .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
     let raw_model = extract_claude_model(value)?;
+    if is_claude_synthetic_placeholder_model(&raw_model) {
+        return None;
+    }
     let provider_hint = extract_claude_provider(value);
     let provider_id = claude_provider_id(
         &raw_model,
@@ -1414,6 +1689,10 @@ fn finalize_headless_state(
     default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let raw_model = state.model.clone()?;
+    if is_claude_synthetic_placeholder_model(&raw_model) {
+        *state = ClaudeHeadlessState::default();
+        return None;
+    }
     let provider_id = claude_provider_id(
         &raw_model,
         state.provider_id.as_deref().or(default_provider_hint),
@@ -1448,6 +1727,7 @@ fn finalize_headless_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::json_path_literal;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -1473,6 +1753,40 @@ mod tests {
     fn is_human_turn_skips_array_content() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#;
         assert!(!is_human_turn(line));
+    }
+
+    #[test]
+    fn parent_probe_resolves_first_row_marker_under_tiny_budget() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let content =
+            format!("{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n");
+        let (_dir, path) = create_project_file(&content, "proj", "agent-abc.jsonl");
+
+        // The current row is always parsed in full, so a first-row marker is
+        // found even with a probe budget smaller than the row itself.
+        let candidates = parent_session_paths_for_cache_bounded(&path, 8);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.file_name().and_then(|name| name.to_str())
+                == Some("11111111-2222-3333-4444-555555555555.jsonl")
+        }));
+    }
+
+    #[test]
+    fn parent_probe_stops_at_byte_cap_for_late_marker() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut content = String::new();
+        while content.len() < 4096 {
+            content.push_str("{\"type\":\"summary\",\"isSidechain\":false}\n");
+        }
+        content.push_str(&format!(
+            "{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n"
+        ));
+        let (_dir, path) = create_project_file(&content, "proj", "agent-late.jsonl");
+
+        // A budget smaller than the marker's offset gives up before reaching it.
+        assert!(parent_session_paths_for_cache_bounded(&path, 1024).is_empty());
+        // An ample budget still finds it — the cap only bounds marker-less scans.
+        assert!(!parent_session_paths_for_cache_bounded(&path, 1024 * 1024).is_empty());
     }
 
     fn create_test_file(content: &str) -> NamedTempFile {
@@ -1514,8 +1828,8 @@ mod tests {
         std::fs::write(
             variant_dir.join("variant.json"),
             format!(
-                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"{variant}","provider":"{provider}","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();
@@ -1745,9 +2059,49 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 250);
-        assert_eq!(messages[0].timestamp, 1_733_047_203_500);
+        assert_eq!(messages[0].timestamp, 1_733_047_200_000);
         assert_eq!(messages[0].duration_ms, Some(3500));
         assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+    }
+
+    #[test]
+    fn test_dedup_merge_duration_is_monotonic_across_out_of_order_duplicates() {
+        // Regression: several streaming duplicates of one message can be
+        // processed out of order (e.g. a late-arriving chunk carrying an
+        // earlier completion timestamp than one already merged). The start
+        // anchor (existing.timestamp) must survive every merge, and
+        // duration_ms must never shrink below a value already established by
+        // an earlier-processed duplicate — it must track the latest
+        // (largest) end timestamp seen so far.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:07.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":200}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "all streaming duplicates should collapse to one message"
+        );
+        assert_eq!(
+            messages[0].timestamp, 1_733_047_200_000,
+            "the start anchor must survive every merge (the user entry's timestamp)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(7_000),
+            "duration_ms must equal the latest end timestamp minus the start \
+             anchor (7s), not shrink when an out-of-order duplicate with an \
+             earlier timestamp is merged"
+        );
+        assert_eq!(
+            messages[0].tokens.output, 200,
+            "token fields keep the per-field max across all duplicates"
+        );
     }
 
     #[test]
@@ -1821,8 +2175,8 @@ mod tests {
 
         assert_eq!(
             messages.len(),
-            4,
-            "Should include 3 assistant messages plus 1 tool-result input message"
+            3,
+            "Should include 3 assistant messages; tool_result without explicit tokens is not counted"
         );
         let assistant_messages: Vec<_> = messages
             .iter()
@@ -1925,28 +2279,37 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_output_counts_as_input() {
+    fn test_tool_result_without_explicit_tokens_is_not_char_estimated() {
+        // tokscale#1011: Claude Code never writes token metadata on tool_result
+        // blocks. The next assistant turn's API usage already includes that
+        // content, so ceil(chars/4) would double-count.
         let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[0].tokens.input, 4);
-        assert_eq!(messages[0].tokens.output, 0);
-        assert_eq!(messages[0].tokens.cache_read, 0);
-        assert_eq!(messages[0].tokens.cache_write, 0);
-        let expected_dedup_key = format!(
-            "claude:tool_result:{}:tool_result:toolu_input",
-            messages[0].session_id
+        assert!(
+            messages.is_empty(),
+            "tool_result rows without explicit token metadata must not be char-estimated"
         );
-        assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some(expected_dedup_key.as_str())
+    }
+
+    /// History retention across an in-place transcript rewrite is only sound
+    /// for keys that identify a message by content across files. This pins
+    /// which of the parser's own key shapes qualify, so a future key change
+    /// trips here rather than silently making a retained copy double count.
+    #[test]
+    fn test_only_content_derived_dedup_keys_are_globally_stable() {
+        let tool_result =
+            tool_result_dedup_key("claude", "0f1e2d3c-session", "tool_result:toolu_1");
+        assert!(
+            !dedup_key_is_globally_stable(&tool_result),
+            "tool-result keys embed the transcript file stem: {tool_result}"
         );
-        assert_eq!(messages[0].message_count, 0);
+
+        // The two shapes `parse_claude_file` mints for assistant turns.
+        assert!(dedup_key_is_globally_stable("msg_01ABC:req_01XYZ"));
+        assert!(dedup_key_is_globally_stable("message:msg_01ABC"));
     }
 
     #[test]
@@ -1972,8 +2335,8 @@ mod tests {
 
     #[test]
     fn test_tool_result_duplicate_uses_max_input_tokens() {
-        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop"}}}
-{"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop","input_tokens":4}}}
+{"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":8}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1986,7 +2349,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_repeated_in_same_record_is_not_counted_twice() {
-        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop","input_tokens":4}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop","input_tokens":4}}]}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2004,6 +2367,103 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 3);
+    }
+
+    #[test]
+    fn test_synthetic_notice_does_not_seed_an_unmodelled_tool_result() {
+        let content = r#"{"type":"user","timestamp":"2026-06-24T01:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}
+{"type":"assistant","timestamp":"2026-06-24T01:00:01.000Z","isApiErrorMessage":true,"error":"unknown","message":{"id":"m1","role":"assistant","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"API Error"}]}}
+{"type":"user","timestamp":"2026-06-24T01:00:02.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"XXXXXXXXXXXXXXXX"}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_synthetic_notice_does_not_hide_an_explicitly_modelled_tool_result() {
+        let content = r#"{"type":"assistant","timestamp":"2026-06-24T01:00:01.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"user","timestamp":"2026-06-24T01:00:02.000Z","message":{"model":"claude-sonnet-4-6","content":[{"tool_use_id":"toolu_1","type":"tool_result","tool_output":{"output":"XXXXXXXXXXXXXXXX","input_tokens":4}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        // Explicit tool-result token metadata is honored even after a
+        // synthetic notice; the char fallback stays off for this client (#1011).
+        assert_eq!(messages[0].tokens.input, 4);
+    }
+
+    #[test]
+    fn test_inherited_synthetic_model_does_not_price_a_tool_result() {
+        // A `<synthetic>` notice that is not immediately followed by the tool
+        // result in the same transcript still leaves the placeholder as the
+        // inherited carrier model. The usage must be dropped rather than
+        // emitted as `unknown/<synthetic>`: submission cannot price that model,
+        // so it either excludes the row or fails outright depending on pricing
+        // coverage. See the guard in `extract_claude_tool_result_message`.
+        let context = ClaudeToolResultContext {
+            entry: &ClaudeEntry {
+                entry_type: "user".to_string(),
+                timestamp: Some("2026-05-30T01:00:00.000Z".to_string()),
+                message: None,
+                request_id: None,
+                is_sidechain: false,
+                agent_id: None,
+                session_id: None,
+                provider_id: None,
+            },
+            last_model: Some("<synthetic>"),
+            last_provider_hint: None,
+            client_id: "claude",
+            default_provider_hint: None,
+            session_id: "session",
+            fallback_timestamp: 1_782_259_200_000,
+            workspace_key: None,
+            workspace_label: None,
+            sidechain_agent: None,
+            suppress_unattributed: false,
+            allow_char_estimate: true,
+        };
+        let raw = r#"{"type":"user","timestamp":"2026-05-30T01:00:00.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"XXXXXXXXXXXXXXXX"}]}}"#;
+
+        assert!(extract_claude_tool_result_message(raw, context).is_none());
+    }
+
+    #[test]
+    fn test_synthetic_notice_does_not_emit_a_provider_only_tool_result() {
+        let content = r#"{"type":"assistant","timestamp":"2026-06-24T01:00:01.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"user","timestamp":"2026-06-24T01:00:02.000Z","provider":"openrouter","message":{"content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"XXXXXXXXXXXXXXXX"}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_api_reported_input_not_inflated_by_tool_result_char_estimate() {
+        // Minimal repro from tokscale#1011: assistant usage.input_tokens=7 plus a
+        // 21-char tool_result. Before the fix, reported input was 13
+        // (7 + ceil(21/4)=6). After, only the API figure remains.
+        let content = concat!(
+            r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_api","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"/tmp/x"}}],"usage":{"input_tokens":7,"output_tokens":1}}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-05-27T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"123456789012345678901"}]}}"#,
+            "\n",
+        );
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        assert_eq!(
+            total_input, 7,
+            "tool_result char estimate must not stack on API input_tokens; got {messages:#?}"
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 1);
     }
 
     #[test]
@@ -2041,12 +2501,14 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].provider_id, "anthropic");
         assert_eq!(messages[1].provider_id, "openai");
         assert_eq!(messages[2].provider_id, "google");
         assert_eq!(messages[3].provider_id, "minimax");
-        assert_eq!(messages[4].provider_id, "unknown");
+        assert!(!messages
+            .iter()
+            .any(|message| message.model_id == "<synthetic>"));
     }
 
     #[test]
@@ -2145,6 +2607,41 @@ mod tests {
     }
 
     #[test]
+    fn test_headless_synthetic_stream_deltas_do_not_leak_into_next_response() {
+        let content = r#"{"type":"message_start","timestamp":"2026-06-24T01:00:00Z","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}
+{"type":"message_delta","usage":{"output_tokens":999,"cache_read_input_tokens":888}}
+{"type":"message_stop"}
+{"type":"message_start","timestamp":"2026-06-24T01:00:02Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"cache_read_input_tokens":2}}}
+{"type":"message_delta","usage":{"output_tokens":3}}
+{"type":"message_stop"}"#;
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 3);
+        assert_eq!(messages[0].tokens.cache_read, 2);
+    }
+
+    #[test]
+    fn test_truncated_headless_synthetic_stream_does_not_leak_into_next_response() {
+        let content = r#"{"type":"message_start","timestamp":"2026-06-24T01:00:00Z","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}
+{"type":"message_delta","usage":{"output_tokens":999,"cache_read_input_tokens":888}}
+{"type":"message_start","timestamp":"2026-06-24T01:00:02Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"cache_read_input_tokens":2}}}
+{"type":"message_delta","usage":{"output_tokens":3}}
+{"type":"message_stop"}"#;
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 3);
+        assert_eq!(messages[0].tokens.cache_read, 2);
+    }
+
+    #[test]
     fn test_workspace_metadata_from_claude_project_path() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(content, "myproject", "session.jsonl");
@@ -2188,6 +2685,85 @@ mod tests {
             messages.is_empty(),
             "wrapper transcripts without usage metadata must not be estimated"
         );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_tool_outputs_is_not_estimated() {
+        let content = r#"{"type":"tool_use","timestamp":"2026-04-01T10:00:00.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"},"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:02.000Z","tool_name":"bash","tool_input":{"command":"cargo build"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:03.000Z","tool_name":"bash","tool_input":{"command":"cargo build"},"tool_output":{"output":"   Compiling myproject v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.34s\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_aabbccdd11223344556677889.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "bare transcripts with only tool outputs must not produce estimated token messages"
+        );
+    }
+
+    #[test]
+    fn test_project_transcript_with_tool_outputs_is_not_char_estimated() {
+        // Same rule as bare transcripts (tokscale#1011): project sessions'
+        // assistant usage already includes tool_result text.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":[{"type":"text","text":"fn main() { println!(\"hello\"); }"}]}]}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject")
+            .join("ses_project123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "project transcripts must not char-estimate tool_result rows without explicit tokens"
+        );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_explicit_tool_result_tokens_is_counted() {
+        // Bare transcripts must not char-estimate tokens, but explicit tool-result
+        // token counts (e.g. reported by the originating client) should still be honored.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","input_tokens":42,"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_explicit112233445566778899.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "bare transcripts must still count explicit tool-result token usage"
+        );
+        assert_eq!(messages[0].tokens.input, 42);
+    }
+
+    #[test]
+    fn test_transcripts_dir_under_project_keeps_workspace_attribution() {
+        // A `transcripts/` directory nested under a resolvable `projects/<key>/`
+        // path must still resolve workspace attribution. Char estimation is off
+        // everywhere now (#1011), so pin the workspace via an assistant usage row.
+        let content = r#"{"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":2}}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects")
+            .join("myproject")
+            .join("transcripts")
+            .join("ses_scoped112233445566778899.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
+        assert_eq!(messages[0].tokens.input, 10);
     }
 
     // --- Sidechain / Agent tracking tests ---
@@ -2267,6 +2843,145 @@ mod tests {
             "Without meta sidecar, should fall back to generic label"
         );
         assert_eq!(messages[0].session_id, "parent-uuid-002");
+    }
+
+    /// Helper: create a deep nested-layout workflow transcript
+    /// `.../projects/<project>/<parent_session>/subagents/workflows/<wf>/<agent_stem>.jsonl`.
+    fn create_workflow_files(
+        project: &str,
+        parent_session: &str,
+        workflow: &str,
+        file_stem: &str,
+        jsonl_content: &str,
+        meta_content: Option<&str>,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflow_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join(project)
+            .join(parent_session)
+            .join("subagents")
+            .join("workflows")
+            .join(workflow);
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+
+        let jsonl_path = workflow_dir.join(format!("{}.jsonl", file_stem));
+        std::fs::write(&jsonl_path, jsonl_content).unwrap();
+
+        if let Some(meta) = meta_content {
+            let meta_path = workflow_dir.join(format!("{}.meta.json", file_stem));
+            std::fs::write(&meta_path, meta).unwrap();
+        }
+
+        (temp_dir, jsonl_path)
+    }
+
+    #[test]
+    fn test_workflow_agent_transcript_counts_tokens() {
+        // #815: agent-*.jsonl nested under subagents/workflows/<wf>/ is a real
+        // transcript and its usage must be counted, keyed to the parent session.
+        let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"wf-parent-001","agentId":"wfa1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"do work"}}
+{"type":"assistant","isSidechain":true,"sessionId":"wf-parent-001","agentId":"wfa1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_wf1","message":{"id":"msg_wf1","model":"claude-3-5-sonnet","usage":{"input_tokens":500,"output_tokens":200,"cache_read_input_tokens":100,"cache_creation_input_tokens":40}}}"#;
+        let meta = r#"{"agentType":"workflow-subagent","spawnDepth":1}"#;
+
+        let (_dir, path) = create_workflow_files(
+            "myproject",
+            "wf-parent-001",
+            "wf_de048031",
+            "agent-wfa1",
+            jsonl,
+            Some(meta),
+        );
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_id, "wf-parent-001",
+            "deep nested transcript must key to the parent session, not the file/workflow"
+        );
+        assert_eq!(messages[0].tokens.input, 500);
+        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[0].tokens.cache_read, 100);
+        assert_eq!(messages[0].tokens.cache_write, 40);
+        assert_eq!(
+            messages[0].agent,
+            Some("Workflow Subagent".to_string()),
+            "Tier 1 meta sidecar next to the deep nested transcript should resolve the name"
+        );
+    }
+
+    #[test]
+    fn test_workflow_journal_not_ingested() {
+        // #815 CRITICAL: journal.jsonl is workflow orchestration metadata, not a
+        // transcript. Even if it grows lines that superficially resemble usage, the
+        // parser must drop the whole file.
+        let journal = r#"{"type":"started","key":"v2:abc","agentId":"wfa1"}
+{"type":"result","key":"v2:abc","agentId":"wfa1","result":{"verdict":"needs_fixes","summary":"Input tokens are estimated"}}
+{"type":"assistant","isSidechain":true,"sessionId":"wf-parent-002","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_j","message":{"id":"msg_j","model":"claude-3-5-sonnet","usage":{"input_tokens":9999,"output_tokens":9999}}}"#;
+
+        let (_dir, path) = create_workflow_files(
+            "myproject",
+            "wf-parent-002",
+            "wf_journal",
+            "journal",
+            journal,
+            None,
+        );
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "journal.jsonl");
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "journal.jsonl must never be ingested, even with usage-shaped lines; got {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_tier2_deep_nested_workflow_recovers_agent() {
+        // Deep nested layout without a meta sidecar: agent name must be recovered
+        // from the parent session tool_use, proving find_parent_session_path walks
+        // up past the extra workflows/<wf>/ levels.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "deep-parent-uuid";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_dp","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_deep","name":"Agent","input":{"subagent_type":"code-reviewer","prompt":"review"}}],"usage":{"input_tokens":80,"output_tokens":40}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_deep","type":"tool_result","content":[{"type":"text","text":"agentId: deepagent1 (use SendMessage)"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let workflow_dir = project_dir
+            .join(parent_session_id)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_deep");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"deep-parent-uuid","agentId":"deepagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"deep-parent-uuid","agentId":"deepagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_deep","message":{"id":"msg_deep","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#;
+        let sidechain_path = workflow_dir.join("agent-deepagent1.jsonl");
+        std::fs::write(&sidechain_path, sidechain_content).unwrap();
+
+        let messages = parse_claude_file(&sidechain_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent,
+            Some("Code Reviewer".to_string()),
+            "Tier 2 must resolve the agent name across the deep workflows/<wf>/ nesting"
+        );
+        assert_eq!(messages[0].session_id, parent_session_id);
+        assert_eq!(messages[0].tokens.input, 300);
     }
 
     #[test]

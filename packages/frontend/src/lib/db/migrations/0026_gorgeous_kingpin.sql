@@ -1,0 +1,1 @@
+ALTER TABLE "daily_breakdown" ADD COLUMN "cost_is_complete" boolean DEFAULT true NOT NULL;

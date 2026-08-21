@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import Image from "next/image";
 import styled, { css, keyframes } from "styled-components";
 import { useCopy, useSquircleClip } from "../hooks";
@@ -8,12 +9,21 @@ import { SquircleBorder } from "../components";
 export function QuickstartSection() {
   const tui = useCopy("bunx tokscale@latest");
   const submit = useCopy("bunx tokscale@latest submit");
+  const cardsWrapperRef = useRef<HTMLDivElement>(null);
   const {
     setElementRef: setCardsRowRef,
     clipPath: cardsRowClipPath,
     svgDef: cardsRowSvgDef,
     borderDef: cardsRowBorderDef,
   } = useSquircleClip<HTMLDivElement>(32, 0.6, true, 1);
+
+  const scrollToCommands = () => {
+    const wrapper = cardsWrapperRef.current;
+    if (!wrapper) return;
+
+    // Scroll to the wrapper, not the row — the row's clip-path would clip the target.
+    wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   return (
     <>
@@ -41,12 +51,12 @@ export function QuickstartSection() {
       <SeparatorBar />
 
       {/* Quickstart Label */}
-      <QuickstartLabel>
+      <QuickstartLabel type="button" onClick={scrollToCommands}>
         <QuickstartText>Quickstart</QuickstartText>
       </QuickstartLabel>
 
       {/* Quickstart Cards */}
-      <QuickstartCardsWrapper>
+      <QuickstartCardsWrapper ref={cardsWrapperRef}>
         <QuickstartCardsRow
           ref={setCardsRowRef}
           style={{
@@ -59,7 +69,7 @@ export function QuickstartSection() {
             <CardPatternOverlay $position="left" />
             <CardScreenshot>
               <Image
-                src="/assets/landing/screenshot-tui-4d3240.png"
+                src="/assets/landing/screenshot-tui-4d3240.webp"
                 alt="TUI Screenshot"
                 width={171}
                 height={168}
@@ -89,7 +99,7 @@ export function QuickstartSection() {
             <CardPatternOverlay $position="right" />
             <CardScreenshot>
               <Image
-                src="/assets/landing/screenshot-leaderboard-75a76a.png"
+                src="/assets/landing/screenshot-leaderboard-75a76a.webp"
                 alt="Leaderboard Screenshot"
                 width={152}
                 height={180}
@@ -135,15 +145,28 @@ const SeparatorBar = styled.div`
 `;
 
 /* ── Quickstart Label ── */
-const QuickstartLabel = styled.div`
+const QuickstartLabel = styled.button`
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px 32px;
   background: #0073ff;
+  border: none;
   border-left: 1px solid #10233e;
   border-right: 1px solid #10233e;
+  cursor: pointer;
+
+  &:hover {
+    opacity: 0.9;
+  }
+  &:active {
+    transform: scale(0.99);
+  }
+  &:focus-visible {
+    outline: 2px solid #75b6ff;
+    outline-offset: 3px;
+  }
 `;
 
 const QuickstartText = styled.span`
@@ -160,6 +183,8 @@ const QuickstartText = styled.span`
 const QuickstartCardsWrapper = styled.div`
   width: 100%;
   padding-bottom: 64px;
+  /* 72px clears the fixed nav (40px at top: 17px) plus breathing room */
+  scroll-margin-top: 72px;
 `;
 
 const QuickstartCardsRow = styled.div`

@@ -24,6 +24,7 @@ git_add_release_files() {
     packages/cli-linux-arm64-musl/package.json \
     packages/cli-win32-x64-msvc/package.json \
     packages/cli-win32-arm64-msvc/package.json \
+    packages/cli-android-arm64/package.json \
     packages/tokscale/package.json \
     scripts/check-version-coherence.sh \
     scripts/prepare-release-provenance.sh
@@ -41,6 +42,7 @@ write_manifests() {
     packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
     packages/cli-win32-arm64-msvc \
+    packages/cli-android-arm64 \
     packages/tokscale
 
   cat > Cargo.toml <<EOF_MANIFEST
@@ -76,7 +78,8 @@ EOF_LOCK
     "@tokscale/cli-linux-arm64-gnu": "${version}",
     "@tokscale/cli-linux-arm64-musl": "${version}",
     "@tokscale/cli-win32-x64-msvc": "${version}",
-    "@tokscale/cli-win32-arm64-msvc": "${version}"
+    "@tokscale/cli-win32-arm64-msvc": "${version}",
+    "@tokscale/cli-android-arm64": "${version}"
   }
 }
 EOF_MANIFEST
@@ -89,7 +92,8 @@ EOF_MANIFEST
     cli-linux-arm64-gnu \
     cli-linux-arm64-musl \
     cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-arm64-msvc \
+    cli-android-arm64; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@tokscale/${pkg}",

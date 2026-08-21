@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db, groupMembers, groups, type Group, type GroupRole } from "@/lib/db";
 
@@ -14,10 +15,17 @@ function mapGroupSummary(row: Group & { memberCount?: number | string; role?: Gr
   };
 }
 
-export async function getGroupBySlug(slug: string): Promise<Group | null> {
-  const result = await db.select().from(groups).where(eq(groups.slug, slug)).limit(1);
-  return result[0] ?? null;
-}
+/**
+ * Wrapped in React `cache()` so the group page's `generateMetadata` and its
+ * default export share one lookup instead of issuing the same query twice per
+ * request. The cache is per-request, so this is deduplication, not staleness.
+ */
+export const getGroupBySlug = cache(
+  async (slug: string): Promise<Group | null> => {
+    const result = await db.select().from(groups).where(eq(groups.slug, slug)).limit(1);
+    return result[0] ?? null;
+  }
+);
 
 export async function getGroupMemberCount(groupId: string): Promise<number> {
   const result = await db

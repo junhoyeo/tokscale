@@ -3,7 +3,7 @@
 //! Detects synthetic.new API usage across existing agent sessions by model/provider patterns,
 //! and parses Octofriend's SQLite database when token data is available.
 
-use super::utils::open_readonly_sqlite;
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use std::path::Path;
@@ -110,7 +110,7 @@ pub fn matches_synthetic_filter(client: &str, model_id: &str, provider_id: &str)
 /// This function checks for token-related tables and parses them when available,
 /// making it future-proof for when Octofriend adds token persistence.
 pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 
@@ -134,11 +134,16 @@ pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // SELECT id, session_id, data FROM messages WHERE role = 'assistant' AND tokens IS NOT NULL
     let mut messages = Vec::new();
 
+    // Quiet scans: Octofriend may have any one of these tables, so a missing
+    // one is the expected case rather than a fault worth logging.
+
     // Try 'messages' table first (most likely schema)
-    if let Ok(mut stmt) = conn.prepare(
+    sqlite_for_each_row_on(
+        &conn,
+        db_path,
         "SELECT id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, timestamp, session_id, provider FROM messages WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
+        None,
+        &mut |row| {
             let id: String = row.get(0)?;
             let model_id: String = row.get::<_, String>(1).unwrap_or_default();
             let input: i64 = row.get::<_, i64>(2).unwrap_or(0);
@@ -151,15 +156,52 @@ pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             let session_id: String = row.get::<_, String>(9).unwrap_or_else(|_| "unknown".to_string());
             let provider: String = row.get::<_, String>(10).unwrap_or_else(|_| "synthetic".to_string());
 
-            Ok((id, model_id, input, output, cache_read, cache_write, reasoning, cost, timestamp, session_id, provider))
-        }) {
-            for row_result in rows.flatten() {
-                let (id, model_id, input, output, cache_read, cache_write, reasoning, cost, timestamp, session_id, provider) = row_result;
+            let total = input + output + cache_read + cache_write + reasoning;
+            if total == 0 {
+                return Ok(());
+            }
 
-                let total = input + output + cache_read + cache_write + reasoning;
-                if total == 0 {
-                    continue;
-                }
+            let ts_ms = if timestamp > 1e12 {
+                timestamp as i64
+            } else {
+                (timestamp * 1000.0) as i64
+            };
+
+            let mut msg = UnifiedMessage::new(
+                "synthetic",
+                normalize_synthetic_model(&model_id),
+                provider,
+                session_id,
+                ts_ms,
+                TokenBreakdown {
+                    input: input.max(0),
+                    output: output.max(0),
+                    cache_read: cache_read.max(0),
+                    cache_write: cache_write.max(0),
+                    reasoning: reasoning.max(0),
+                },
+                cost.max(0.0),
+            );
+            msg.dedup_key = Some(id);
+            messages.push(msg);
+            Ok(())
+        },
+    );
+
+    // Try 'token_usage' table as alternative schema
+    if messages.is_empty() {
+        sqlite_for_each_row_on(
+            &conn,
+            db_path,
+            "SELECT id, model, input_tokens, output_tokens, timestamp, session_id FROM token_usage WHERE input_tokens > 0 OR output_tokens > 0",
+            None,
+            &mut |row| {
+                let id: String = row.get(0)?;
+                let model_id: String = row.get::<_, String>(1).unwrap_or_default();
+                let input: i64 = row.get::<_, i64>(2).unwrap_or(0);
+                let output: i64 = row.get::<_, i64>(3).unwrap_or(0);
+                let timestamp: f64 = row.get::<_, f64>(4).unwrap_or(0.0);
+                let session_id: String = row.get::<_, String>(5).unwrap_or_else(|_| "unknown".to_string());
 
                 let ts_ms = if timestamp > 1e12 {
                     timestamp as i64
@@ -170,68 +212,23 @@ pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 let mut msg = UnifiedMessage::new(
                     "synthetic",
                     normalize_synthetic_model(&model_id),
-                    provider,
+                    "synthetic",
                     session_id,
                     ts_ms,
                     TokenBreakdown {
                         input: input.max(0),
                         output: output.max(0),
-                        cache_read: cache_read.max(0),
-                        cache_write: cache_write.max(0),
-                        reasoning: reasoning.max(0),
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
                     },
-                    cost.max(0.0),
+                    0.0,
                 );
                 msg.dedup_key = Some(id);
                 messages.push(msg);
-            }
-        }
-    }
-
-    // Try 'token_usage' table as alternative schema
-    if messages.is_empty() {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, model, input_tokens, output_tokens, timestamp, session_id FROM token_usage WHERE input_tokens > 0 OR output_tokens > 0",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                let id: String = row.get(0)?;
-                let model_id: String = row.get::<_, String>(1).unwrap_or_default();
-                let input: i64 = row.get::<_, i64>(2).unwrap_or(0);
-                let output: i64 = row.get::<_, i64>(3).unwrap_or(0);
-                let timestamp: f64 = row.get::<_, f64>(4).unwrap_or(0.0);
-                let session_id: String = row.get::<_, String>(5).unwrap_or_else(|_| "unknown".to_string());
-
-                Ok((id, model_id, input, output, timestamp, session_id))
-            }) {
-                for row_result in rows.flatten() {
-                    let (id, model_id, input, output, timestamp, session_id) = row_result;
-
-                    let ts_ms = if timestamp > 1e12 {
-                        timestamp as i64
-                    } else {
-                        (timestamp * 1000.0) as i64
-                    };
-
-                    let mut msg = UnifiedMessage::new(
-                        "synthetic",
-                        normalize_synthetic_model(&model_id),
-                        "synthetic",
-                        session_id,
-                        ts_ms,
-                        TokenBreakdown {
-                            input: input.max(0),
-                            output: output.max(0),
-                            cache_read: 0,
-                            cache_write: 0,
-                            reasoning: 0,
-                        },
-                        0.0,
-                    );
-                    msg.dedup_key = Some(id);
-                    messages.push(msg);
-                }
-            }
-        }
+                Ok(())
+            },
+        );
     }
 
     messages

@@ -102,8 +102,22 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
 
 /// Calculate summary statistics
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
-    let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
+    // Daily totals already saturate at i64::MAX (clamped extreme inputs), so
+    // summing several such days must saturate too rather than overflow.
+    let total_tokens: i64 = contributions
+        .iter()
+        .map(|c| c.totals.tokens)
+        .fold(0i64, i64::saturating_add);
+    // @keep: the trailing `+ 0.0` looks redundant and is not.
+    // `Sum for f64` folds from `-0.0`, the additive identity that preserves the
+    // sign of every addend, so an empty set sums to `-0.0` and `{:.2}` renders
+    // it as "-0.00". Adding `+0.0` normalizes that sign without changing any
+    // other value, matching the report aggregators.
+    //
+    // Only an empty set, or one whose addends are exclusively `-0.0`, reaches
+    // the fold's identity unchanged. A single `+0.0` contribution already
+    // produced `+0.0` before this fix, since `-0.0 + 0.0 == +0.0`.
+    let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum::<f64>() + 0.0;
     let active_days = contributions
         .iter()
         .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
@@ -162,7 +176,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
         let year = &c.date[0..4];
         let entry = years_map.entry(year.to_string()).or_default();
-        entry.tokens += c.totals.tokens;
+        entry.tokens = entry.tokens.saturating_add(c.totals.tokens);
         entry.cost += c.totals.cost;
 
         if entry.start.is_empty() || c.date < entry.start {
@@ -215,6 +229,7 @@ pub fn generate_graph_result(
         years,
         contributions,
         time_metrics: None,
+        unpriced_submission_exclusions: Vec::new(),
     }
 }
 
@@ -240,13 +255,7 @@ impl Default for DayAccumulator {
 
 impl DayAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
@@ -255,36 +264,23 @@ impl DayAccumulator {
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        self.token_breakdown += &msg.tokens;
 
         // Update client contribution
+        // Canonical (alias-free) id: this contribution is serialized into the
+        // submit/upload/export payload, so a machine-local `modelAliases` config
+        // must not rewrite the model identity that leaves the machine.
         let key = format!(
             "{}:{}",
             msg.client,
-            crate::normalize_model_for_grouping(&msg.model_id)
+            crate::canonical_model_id(&msg.model_id)
         );
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.clone(),
-                model_id: crate::normalize_model_for_grouping(&msg.model_id),
+                model_id: crate::canonical_model_id(&msg.model_id),
                 provider_id: msg.provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
@@ -300,20 +296,7 @@ impl DayAccumulator {
             client_entry.provider_id = format!("{}, {}", client_entry.provider_id, msg.provider_id);
         }
 
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        client_entry.tokens += &msg.tokens;
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -331,26 +314,7 @@ impl DayAccumulator {
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
-        self.token_breakdown.input = self
-            .token_breakdown
-            .input
-            .saturating_add(other.token_breakdown.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(other.token_breakdown.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(other.token_breakdown.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(other.token_breakdown.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(other.token_breakdown.reasoning);
+        self.token_breakdown += &other.token_breakdown;
 
         for (key, client_contrib) in other.clients {
             let entry = self
@@ -372,26 +336,7 @@ impl DayAccumulator {
                 }
             }
 
-            entry.tokens.input = entry
-                .tokens
-                .input
-                .saturating_add(client_contrib.tokens.input);
-            entry.tokens.output = entry
-                .tokens
-                .output
-                .saturating_add(client_contrib.tokens.output);
-            entry.tokens.cache_read = entry
-                .tokens
-                .cache_read
-                .saturating_add(client_contrib.tokens.cache_read);
-            entry.tokens.cache_write = entry
-                .tokens
-                .cache_write
-                .saturating_add(client_contrib.tokens.cache_write);
-            entry.tokens.reasoning = entry
-                .tokens
-                .reasoning
-                .saturating_add(client_contrib.tokens.reasoning);
+            entry.tokens += &client_contrib.tokens;
             entry.cost += client_contrib.cost;
             entry.messages = entry.messages.saturating_add(client_contrib.messages);
         }
@@ -475,13 +420,7 @@ impl Default for SessionAccumulator {
 
 impl SessionAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
@@ -490,26 +429,12 @@ impl SessionAccumulator {
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        self.token_breakdown += &msg.tokens;
 
         // Track tightest (client, provider, model) by cost contribution.
-        let normalized_model = crate::normalize_model_for_grouping(&msg.model_id);
+        // Canonical (alias-free) id — this feeds the submitted/exported payload,
+        // so machine-local aliases must not rewrite it (see `add_message`).
+        let normalized_model = crate::canonical_model_id(&msg.model_id);
         let key = format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model);
         let client_entry = self
             .clients
@@ -522,20 +447,7 @@ impl SessionAccumulator {
                 cost: 0.0,
                 messages: 0,
             });
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        client_entry.tokens += &msg.tokens;
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -568,26 +480,7 @@ impl SessionAccumulator {
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
-        self.token_breakdown.input = self
-            .token_breakdown
-            .input
-            .saturating_add(other.token_breakdown.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(other.token_breakdown.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(other.token_breakdown.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(other.token_breakdown.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(other.token_breakdown.reasoning);
+        self.token_breakdown += &other.token_breakdown;
 
         for (key, contrib) in other.clients {
             let entry = self
@@ -601,20 +494,7 @@ impl SessionAccumulator {
                     cost: 0.0,
                     messages: 0,
                 });
-            entry.tokens.input = entry.tokens.input.saturating_add(contrib.tokens.input);
-            entry.tokens.output = entry.tokens.output.saturating_add(contrib.tokens.output);
-            entry.tokens.cache_read = entry
-                .tokens
-                .cache_read
-                .saturating_add(contrib.tokens.cache_read);
-            entry.tokens.cache_write = entry
-                .tokens
-                .cache_write
-                .saturating_add(contrib.tokens.cache_write);
-            entry.tokens.reasoning = entry
-                .tokens
-                .reasoning
-                .saturating_add(contrib.tokens.reasoning);
+            entry.tokens += &contrib.tokens;
             entry.cost += contrib.cost;
             entry.messages = entry.messages.saturating_add(contrib.messages);
 
@@ -701,7 +581,9 @@ struct YearAccumulator {
     end: String,
 }
 
-fn calculate_intensities(contributions: &mut [DailyContribution]) {
+/// Cost-relative intensity buckets (0-4): each day's intensity is a function
+/// of its cost relative to the maximum cost across all `contributions`.
+pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
@@ -763,11 +645,14 @@ mod tests {
                 reasoning: 0,
             },
             cost,
+            cost_source: Default::default(),
             duration_ms: None,
             message_count: 1,
             agent: None,
             dedup_key: None,
+            session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
         }
     }
 
@@ -866,6 +751,39 @@ mod tests {
         assert_eq!(summary.active_days, 0);
         assert_eq!(summary.average_per_day, 0.0);
         assert_eq!(summary.max_cost_in_single_day, 0.0);
+        // `-0.0 == 0.0` under IEEE, so the assertion above cannot catch a
+        // negative zero. The CLI formats this straight through, and "$-0.00"
+        // is what the user sees when every row was excluded from a submission.
+        assert!(
+            !summary.total_cost.is_sign_negative(),
+            "an empty summary must not carry a negative zero cost"
+        );
+    }
+
+    #[test]
+    fn empty_summary_cost_does_not_format_as_negative_zero() {
+        let summary = calculate_summary(&[]);
+        assert_eq!(format!("${:.2}", summary.total_cost), "$0.00");
+    }
+
+    /// Pins the boundary the `+ 0.0` comment describes. Only the empty fold
+    /// (and an all-`-0.0` one) ever reached the `-0.0` identity: a single
+    /// `+0.0` addend already normalized it, because `-0.0 + 0.0 == +0.0`.
+    /// Without this, "all-zero" reads as if every zero-cost day was affected.
+    #[test]
+    fn a_positive_zero_contribution_was_never_the_negative_zero_case() {
+        let messages = vec![mock_unified_message(
+            "2024-01-01",
+            0,
+            0.0,
+            "claude-sonnet-4-20250514",
+            "claude",
+        )];
+        let contributions = aggregate_by_date(messages);
+        let summary = calculate_summary(&contributions);
+
+        assert!(!summary.total_cost.is_sign_negative());
+        assert_eq!(format!("${:.2}", summary.total_cost), "$0.00");
     }
 
     #[test]
@@ -986,6 +904,32 @@ mod tests {
         assert_eq!(summary.total_days, 3);
         assert_eq!(summary.active_days, 2);
         assert!((summary.average_per_day - 0.65).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_extreme_day_totals_saturate_in_summary_and_years() {
+        // Daily totals clamp extreme inputs to i64::MAX; summing several such
+        // days must saturate rather than overflow (debug panic / release wrap).
+        let saturated_day = |date: &str| DailyContribution {
+            date: date.to_string(),
+            totals: DailyTotals {
+                tokens: i64::MAX,
+                cost: 1.0,
+                messages: 1,
+            },
+            intensity: 0,
+            token_breakdown: TokenBreakdown::default(),
+            clients: Vec::new(),
+            active_time_ms: None,
+        };
+        let contributions = vec![saturated_day("2024-01-01"), saturated_day("2024-01-02")];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_tokens, i64::MAX);
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].total_tokens, i64::MAX);
     }
 
     #[test]
@@ -1351,10 +1295,13 @@ mod tests {
             date: date.to_string(),
             tokens,
             cost,
+            cost_source: Default::default(),
             message_count: 1,
             agent: None,
             dedup_key: None,
+            session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
             duration_ms: None,
         }
     }

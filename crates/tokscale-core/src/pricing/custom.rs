@@ -21,6 +21,11 @@ pub struct CustomPricing {
 pub struct CustomLookupResult<'a> {
     pub matched_key: &'a str,
     pub pricing: &'a ModelPricing,
+    /// Whether `matched_key` was reached through synthetic-model
+    /// normalization rather than the requested id. Provenance reports this,
+    /// so a `hf:zai-org/GLM-4.7` usage row priced by a `glm-4.7` custom entry
+    /// says which key actually matched.
+    pub normalized: bool,
 }
 
 #[derive(Deserialize)]
@@ -78,12 +83,20 @@ impl CustomModelPricing {
             "output_cost_per_token",
         )?;
 
-        if !input_cost_per_token.is_some_and(|value| value > 0.0)
-            && !output_cost_per_token.is_some_and(|value| value > 0.0)
-        {
-            return Err(
-                "at least one of input or output pricing must be present and positive".into(),
-            );
+        // @keep: requiring a POSITIVE rate here locked users out of the one
+        // escape hatch they have for free models.
+        //
+        // A rate of 0.0 is a statement — "this model is free" — and it is
+        // exactly what a user needs to express for a free tier that no upstream
+        // dataset publishes. Demanding a positive rate made that unsayable, so
+        // free usage stayed unpriced and was excluded from submission with no
+        // way to correct it (#1021).
+        //
+        // Absence is still rejected: a row that names no rate at all says
+        // nothing, and silently reading that as free would invent a $0 total
+        // for genuinely unknown pricing.
+        if input_cost_per_token.is_none() && output_cost_per_token.is_none() {
+            return Err("at least one of input or output pricing must be present".into());
         }
 
         Ok(ModelPricing {
@@ -247,6 +260,7 @@ impl CustomPricing {
             return Some(CustomLookupResult {
                 matched_key: pricing.0,
                 pricing: pricing.1,
+                normalized: false,
             });
         }
 
@@ -256,6 +270,7 @@ impl CustomPricing {
                 return Some(CustomLookupResult {
                     matched_key: pricing.0,
                     pricing: pricing.1,
+                    normalized: true,
                 });
             }
         }
@@ -414,7 +429,7 @@ mod tests {
         fs::write(
             &path,
             r#"{
-                "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+                "$schema": "https://tokscale.ai/custom-pricing.schema.json",
                 "models": {
                         "accounts/fireworks/routers/kimi-k2p6-turbo": {
                         "input_cost_per_million_tokens": 2.00,
@@ -657,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_entries_with_zero_prices() {
+    fn keeps_free_models_but_still_drops_negative_prices() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("custom-pricing.json");
         fs::write(
@@ -683,11 +698,18 @@ mod tests {
 
         let loaded = CustomPricing::load_from_path(&path);
 
-        assert!(loaded.lookup("all-zero").is_none());
+        // A free model is the case this file exists to let users express when
+        // no upstream dataset publishes the model (#1021). 0.0 is an assertion
+        // ("free"), not an absence, so an all-zero row is kept.
+        let all_zero = loaded.lookup("all-zero").expect("free model must load");
+        assert_eq!(all_zero.input_cost_per_token, Some(0.0));
+        assert_eq!(all_zero.output_cost_per_token, Some(0.0));
+
         assert_eq!(
             loaded.lookup("free-input").unwrap().output_cost_per_token,
             Some(0.000008)
         );
+        // Unchanged: a negative rate is nonsense, not a statement about price.
         assert!(loaded.lookup("negative-output").is_none());
     }
 

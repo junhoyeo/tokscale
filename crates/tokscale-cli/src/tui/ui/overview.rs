@@ -1,15 +1,16 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
-use super::widgets::format_tokens;
+use super::widgets::{
+    fit_workspace_label_to_width, format_tokens, truncate_to_width, viewport_scrollbar_state,
+};
 use crate::tui::app::{App, ChartGranularity};
 use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    color_key: String,
     provider: String,
     workspace_label: Option<String>,
     tokens_input: u64,
@@ -156,7 +157,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         .map(|m| {
             (
                 overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
-                app.model_color_for(&m.provider, &m.model),
+                app.model_color_for(&m.provider, &m.color_key),
             )
         })
         .collect();
@@ -207,6 +208,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            color_key: m.color_key.clone(),
             provider: m.provider.clone(),
             workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
@@ -269,7 +271,18 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     let models_len = models_data.len();
     let start = scroll_offset.min(models_len);
     let end = (start + items_per_page).min(models_len);
-    let max_name_width = if is_narrow { 20 } else { 35 };
+    // `workspace / model` is roughly twice the text of a bare model name, and
+    // the label's distinguishing part (repo, worktree) sits at the far end, so a
+    // 35-cell cap truncated every row down to the same shared path prefix. The
+    // panel is full-width here, so spend it rather than clipping to a constant.
+    let max_name_width = if is_narrow {
+        20
+    } else if group_by == GroupBy::WorkspaceModel {
+        // Leave room for the "● " marker and the trailing " (12.3%)".
+        inner.width.saturating_sub(12).max(35) as usize
+    } else {
+        35
+    };
 
     if start >= models_len {
         return;
@@ -289,10 +302,21 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             Style::default()
         };
 
-        let model_color = app.model_color_for(&model.provider, &model.model);
+        let model_color = app.model_color_for(&model.provider, &model.color_key);
         let display_name =
             overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
-        let name = truncate_string(&display_name, max_name_width);
+        // Measured in cells, not code points: `max_name_width` is derived from
+        // `inner.width`, and a workspace path can hold full-width graphemes (a CJK
+        // directory name), which a char count calls short at twice the cells it
+        // occupies -- overflowing the row and pushing the cost percentage off it.
+        let name = if group_by == GroupBy::WorkspaceModel {
+            // `workspace / model` is identified by both ends, so a head cut on a
+            // narrow panel leaves the shared path prefix and drops the model
+            // entirely. Same reasoning as the Workspace column in the table.
+            fit_workspace_label_to_width(&display_name, max_name_width)
+        } else {
+            truncate_to_width(&display_name, max_name_width)
+        };
         let percentage = if model.cost.is_finite() && total.is_finite() && total > 0.0 {
             (model.cost / total) * 100.0
         } else {
@@ -375,7 +399,8 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             .track_symbol(Some("│"))
             .thumb_symbol("█");
 
-        let mut scrollbar_state = ScrollbarState::new(models_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(models_len, scroll_offset, items_per_page);
 
         frame.render_stateful_widget(
             scrollbar,

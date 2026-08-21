@@ -13,6 +13,7 @@ import {
   index,
   unique,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 import {
@@ -32,6 +33,20 @@ export const users = pgTable(
     displayName: varchar("display_name", { length: 255 }),
     avatarUrl: text("avatar_url"),
     email: varchar("email", { length: 255 }),
+    /**
+     * Excludes the user from leaderboard RANKINGS only. Their profile, badge
+     * and embeds stay public, and their usage still counts toward site-wide
+     * totals — see lib/leaderboard/getLeaderboard.ts for exactly which queries
+     * honour this and which deliberately do not.
+     *
+     * Reversible by design: moderation_actions keeps the full hide/unhide
+     * history, so this column is current state, not the record.
+     *
+     * Intentionally unindexed. Nearly every row passes `NOT leaderboard_hidden`,
+     * so an index has no selectivity to offer; the check rides the existing
+     * join against users.
+     */
+    leaderboardHidden: boolean("leaderboard_hidden").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -60,6 +75,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   groupMemberships: many(groupMembers, { relationName: "memberUser" }),
   createdGroups: many(groups, { relationName: "groupCreator" }),
   createdGroupInvites: many(groupInvites, { relationName: "groupInviteCreator" }),
+  moderationActionsReceived: many(moderationActions, { relationName: "moderationTarget" }),
+  moderationActionsTaken: many(moderationActions, { relationName: "moderationActor" }),
 }));
 
 // ============================================================================
@@ -168,7 +185,7 @@ export const submissions = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
 
     totalTokens: bigint("total_tokens", { mode: "number" }).notNull(),
-    totalCost: decimal("total_cost", { precision: 12, scale: 4 }).notNull(),
+    totalCost: decimal("total_cost", { precision: 18, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     cacheCreationTokens: bigint("cache_creation_tokens", { mode: "number" })
@@ -192,11 +209,34 @@ export const submissions = pgTable(
     submitCount: integer("submit_count").notNull().default(1),
     /** 0=legacy (no timestamps), 1=timestamp-aware CLI */
     schemaVersion: integer("schema_version").notNull().default(0),
+    /**
+     * True once ANY accepted submission for this user carried a
+     * submission-level `provenance.origin === "backfill"` tag (e.g. from
+     * `tokscale import`). Sticky: later live CLI submits never reset it,
+     * because the merged totals still include the imported history.
+     */
+    hasBackfill: boolean("has_backfill").notNull().default(false),
+
+    /**
+     * Whether `total_cost` accounts for every token in `total_tokens`.
+     *
+     * Composed as `BOOL_AND` over this user's `daily_breakdown` rows, so ONE
+     * device or day submitting a floored cost makes the whole total a lower
+     * bound. Not sticky, unlike `has_backfill`: it is recomputed from the day
+     * rows on every submit, so a user whose pricing recovers gets an exact
+     * total back once every contributing row is complete again.
+     *
+     * Defaults true, which is correct for every row written before the day
+     * rows could express incompleteness (#1044).
+     */
+    costIsComplete: boolean("cost_is_complete").notNull().default(true),
 
     totalActiveTimeMs: bigint("total_active_time_ms", { mode: "number" }),
     longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
     maxConcurrentSessions: integer("max_concurrent_sessions"),
     sessionCount: integer("session_count"),
+
+    mcpServers: jsonb("mcp_servers").$type<string[]>(),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -242,6 +282,45 @@ export const submittedDevices = pgTable(
       .notNull()
       .defaultNow(),
     lastSubmittedAt: timestamp("last_submitted_at", { withTimezone: true }),
+
+    /**
+     * Per-device session-shape metrics, kept as monotonic high-water marks.
+     *
+     * These mirror the identically-named columns on `submissions`, but at the
+     * scope the CLI actually measures: one machine's local session files. The
+     * submission-level values are DERIVED from these (SUM for additive metrics,
+     * MAX for shape metrics) so a second device no longer overwrites the first.
+     *
+     * `totalActiveTimeMs` here comes from the CLI's `timeMetrics`, which sums
+     * raw interval durations and is therefore TIMEZONE-INVARIANT. The daily
+     * `active_time_ms` rows are not: they apportion each interval across LOCAL
+     * calendar days, so re-scanning under a different TZ re-splits them and
+     * their monotonic merge inflates the sum. Deriving the submission total
+     * from these columns instead of SUM(daily) avoids that.
+     */
+    totalActiveTimeMs: bigint("total_active_time_ms", { mode: "number" }),
+    longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
+    maxConcurrentSessions: integer("max_concurrent_sessions"),
+    sessionCount: integer("session_count"),
+
+    /**
+     * Highest allowlisted parser generation accepted per client. Mirrored
+     * inside `parserStates` and advanced atomically with the high-water.
+     */
+    parserVersions: jsonb("parser_versions")
+      .$type<Record<string, number>>()
+      .notNull()
+      .default({}),
+
+    /**
+     * Accepted version and non-destructive cumulative high-water state for
+     * allowlisted parser rollouts, keyed by client. Updated atomically with
+     * the daily rows that consume a bounded increment.
+     */
+    parserStates: jsonb("parser_states")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
   },
   (table) => [
     index("idx_submitted_devices_user_id").on(table.userId),
@@ -273,7 +352,7 @@ export const dailyBreakdown = pgTable(
 
     date: date("date").notNull(),
     tokens: bigint("tokens", { mode: "number" }).notNull(),
-    cost: decimal("cost", { precision: 10, scale: 4 }).notNull(),
+    cost: decimal("cost", { precision: 14, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     /** Unix ms timestamp of earliest message in this UTC day bucket. NULL for legacy data. */
@@ -305,6 +384,12 @@ export const dailyBreakdown = pgTable(
             schemaVersion: number;
             messageCount: number;
             modelCount: number;
+            /**
+             * "backfill" when this client's contribution came from a
+             * backfill-origin submission (`tokscale import`); absent/"cli"
+             * for locally-scanned usage.
+             */
+            origin?: "cli" | "backfill";
           };
           modelId?: string;
         }
@@ -312,6 +397,23 @@ export const dailyBreakdown = pgTable(
     >(),
     /** Total active coding time in this UTC day bucket (milliseconds). NULL for legacy data. */
     activeTimeMs: bigint("active_time_ms", { mode: "number" }),
+
+    /**
+     * Whether `cost` accounts for every token the client counted for this day.
+     *
+     * The submission protocol previously had no way to say "I do not know what
+     * this cost", only "this cost is $0.00", while the write path overwrote
+     * `cost` unconditionally. A client whose pricing coverage degraded — a
+     * dataset failing to load, a stale cache, a proxy blocking the fetch —
+     * would therefore lower a day's recorded spend permanently (#1044).
+     *
+     * `false` means the client knowingly submitted a day whose cost is a floor,
+     * not a total, and the write path refuses to let it reduce what is already
+     * stored. Defaults to `true` so every already-released CLI, which cannot
+     * send the flag, keeps exact overwrite semantics including downward
+     * corrections.
+     */
+    costIsComplete: boolean("cost_is_complete").notNull().default(true),
   },
   (table) => [
     index("idx_daily_breakdown_submission_id").on(table.submissionId),
@@ -335,6 +437,221 @@ export const dailyBreakdownRelations = relations(dailyBreakdown, ({ one }) => ({
     references: [submittedDevices.id],
   }),
 }));
+
+// ============================================================================
+// DAILY BREAKDOWN REPORTED (ratchet-inflation shadow, Phase 4a)
+// ============================================================================
+/**
+ * Unguarded latest observations for reported (device, date, client) cells.
+ *
+ * Phase 4a of docs/ratchet-inflation-recovery.md. **Nothing reads this table.**
+ * It records explicit cell reports that the monotonic merge on
+ * `daily_breakdown` throws away. It is not a whole-scan snapshot and has no
+ * reader or recovery behavior today.
+ *
+ * Merge semantics: last-write-wins on conflict. No `GREATEST`, no regression
+ * guard, no alias-fold normalisation. A `--since` scan that omits a cell does
+ * not touch that cell's row — absence is not zero. A future recovery workflow
+ * needs client-declared authoritative coverage and snapshot generations or
+ * tombstones before an omitted cell can be treated as absent.
+ *
+ * **Never backfill this from `daily_breakdown`.** The stored rows are the
+ * inflated values this table exists to contradict; seeding from them would
+ * leave Phase 4b with nothing to heal.
+ *
+ * `origin` is a plain column, not part of the primary key. Unlike
+ * `submitted_device_client_totals`, a later scan of either origin replaces the
+ * previous explicit observation for that (device, date, client) outright — it
+ * is a per-cell LWW table, not a complete payload snapshot or high-water.
+ */
+export const dailyBreakdownReported = pgTable(
+  "daily_breakdown_reported",
+  {
+    submittedDeviceId: uuid("submitted_device_id")
+      .notNull()
+      .references(() => submittedDevices.id, { onDelete: "cascade" }),
+    date: date("date").notNull(),
+    /** Canonical client id (post alias normalization, e.g. "kilo" not "kilocode"). */
+    client: varchar("client", { length: 128 }).notNull(),
+
+    tokens: bigint("tokens", { mode: "number" }).notNull(),
+    cost: decimal("cost", { precision: 14, scale: 4 }).notNull(),
+    input: bigint("input", { mode: "number" }).notNull(),
+    output: bigint("output", { mode: "number" }).notNull(),
+    /** Day-level active time, repeated on each client row for that date. */
+    activeTimeMs: bigint("active_time_ms", { mode: "number" }),
+    /** "cli" for locally-scanned usage, "backfill" for `tokscale import`. */
+    origin: varchar("origin", { length: 16 }).notNull(),
+
+    reportedAt: timestamp("reported_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.submittedDeviceId, table.date, table.client],
+    }),
+    index("idx_daily_breakdown_reported_device_date").on(
+      table.submittedDeviceId,
+      table.date
+    ),
+  ]
+);
+
+export const dailyBreakdownReportedRelations = relations(
+  dailyBreakdownReported,
+  ({ one }) => ({
+    submittedDevice: one(submittedDevices, {
+      fields: [dailyBreakdownReported.submittedDeviceId],
+      references: [submittedDevices.id],
+    }),
+  })
+);
+
+// ============================================================================
+// SUBMITTED DEVICE CLIENT TOTALS (ratchet-inflation census, Phase 1)
+// ============================================================================
+/**
+ * Per-device, per-client, per-bucket token/cost HIGH-WATER marks.
+ *
+ * Phase 1 of docs/ratchet-inflation-recovery.md. **Nothing reads this table.**
+ * It exists so the inflation that `SUM(daily_breakdown.tokens)` accumulates can
+ * be measured against a bucket-level high-water reconstruction of the same
+ * history, on live traffic, before any read path is switched over (Phase 2).
+ *
+ * Merge semantics: `GREATEST` on conflict, mirroring the per-device session
+ * metrics on `submitted_devices`. A `--clients`/`--date` filtered submit
+ * reports only a slice of a bucket and must never lower the stored value.
+ *
+ * **This table must never be backfilled from `daily_breakdown`.** Seeding
+ * `tokens_highwater` with `SUM(daily in bucket)` would seed it with the
+ * INFLATED value; a later truthful full scan reports the true, lower total and
+ * `GREATEST(inflated, true)` keeps the inflated one permanently. The table
+ * starts empty and is filled only by incoming payloads — the warm-up is forced
+ * by the merge semantics, not a convenience to optimise away.
+ *
+ * `origin` is part of the primary key and is load-bearing. `getSubmitDevice`
+ * in the submit route falls back to `LEGACY_SUBMIT_DEVICE_KEY` when a payload
+ * omits `device`, so a `tokscale import` backfill and a legacy CLI submit land
+ * on the SAME `submitted_devices` row. Keyed without origin, `GREATEST` would
+ * take the max of imported and locally-scanned history instead of their sum,
+ * silently dropping whichever is smaller.
+ *
+ * The flip side of that key, also KNOWN and also left for Phase 2: `origin` is
+ * caller-controlled (`provenance.origin` on the payload), and the two origins
+ * ADD here while `daily_breakdown` MERGES. `mergeClientBreakdownsWithRegression
+ * Guard` REPLACES a client's day entry rather than summing it, so resubmitting
+ * the same history twice — once tagged `backfill`, once untagged — leaves the
+ * daily rows at H but leaves this table with two rows summing to 2H. Additivity
+ * across origins is only correct when the two bodies of history are DISJOINT,
+ * which is the honest case (import old history, scan recent history) but is not
+ * enforced. Phase 2 must not read `SUM(tokens_highwater)` across origins
+ * without accounting for this; Phase 1.5 surfaces it as a served/high-water
+ * ratio near 0.5, the same signature as the adoption case below.
+ *
+ * KNOWN, and deliberately not fixed here — Phase 2 inherits it. The submit
+ * route's legacy-adoption path re-parents a user's `daily_breakdown` rows from
+ * the LEGACY device to their first device-aware device, so those days are
+ * counted once. This table has no equivalent re-parenting: a user who submits
+ * from a legacy CLI and later from a device-aware one ends up with the same
+ * history recorded under BOTH device ids, so a naive
+ * `SUM(tokens_highwater)` over their devices double-counts it. Phase 1 is
+ * inert so nothing is wrong today, and Phase 1.5 is exactly what surfaces it —
+ * those accounts show a served/high-water ratio near 0.5. Phase 2 must handle
+ * it (adopt the rows the same way, or aggregate per user+client+bucket)
+ * BEFORE it reads from here.
+ *
+ * Column types are chosen deliberately (see the `LEAST(...)` clamps in the
+ * submit route): `tokens_highwater` is bigint because a bucket total is a sum
+ * of day totals, and any aggregate reading it back must clamp before casting.
+ * `cost_highwater` is numeric(18,4) — wider than `daily_breakdown.cost`'s
+ * numeric(14,4), so a month-wide sum of day costs that already fit the
+ * narrower column cannot overflow this one.
+ */
+export const submittedDeviceClientTotals = pgTable(
+  "submitted_device_client_totals",
+  {
+    submittedDeviceId: uuid("submitted_device_id")
+      .notNull()
+      .references(() => submittedDevices.id, { onDelete: "cascade" }),
+    /** Canonical client id (post alias normalization, e.g. "kilo" not "kilocode"). */
+    client: varchar("client", { length: 128 }).notNull(),
+    /** "cli" for locally-scanned usage, "backfill" for `tokscale import`. */
+    origin: varchar("origin", { length: 16 }).notNull(),
+    /** Only "month" is written today; the column keeps Phase 3 open. */
+    bucketWidth: varchar("bucket_width", { length: 8 }).notNull(),
+    /** Stable bucket label: `YYYY-MM` for bucket_width = "month". */
+    bucketKey: varchar("bucket_key", { length: 16 }).notNull(),
+
+    tokensHighwater: bigint("tokens_highwater", { mode: "number" })
+      .notNull()
+      .default(0),
+    costHighwater: decimal("cost_highwater", { precision: 18, scale: 4 })
+      .notNull()
+      .default("0"),
+
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.submittedDeviceId,
+        table.client,
+        table.origin,
+        table.bucketWidth,
+        table.bucketKey,
+      ],
+    }),
+  ]
+);
+
+export const submittedDeviceClientTotalsRelations = relations(
+  submittedDeviceClientTotals,
+  ({ one }) => ({
+    submittedDevice: one(submittedDevices, {
+      fields: [submittedDeviceClientTotals.submittedDeviceId],
+      references: [submittedDevices.id],
+    }),
+  })
+);
+
+// ============================================================================
+// RATCHET CENSUS WORK (durable post-commit high-water writes)
+// ============================================================================
+/**
+ * One durable deferred high-water write. It is registered in the submit
+ * transaction, then replayed and deleted only after its idempotent upsert
+ * succeeds. This lets a later submit recover work abandoned by an interrupted
+ * request without mistaking that gap for a stable census divergence.
+ */
+export const ratchetCensusWork = pgTable(
+  "ratchet_census_work",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    submissionId: uuid("submission_id")
+      .notNull()
+      .references(() => submissions.id, { onDelete: "cascade" }),
+    submittedDeviceId: uuid("submitted_device_id")
+      .notNull()
+      .references(() => submittedDevices.id, { onDelete: "cascade" }),
+    buckets: jsonb("buckets").$type<
+      Array<{
+        client: string;
+        origin: "cli" | "backfill";
+        bucketWidth: string;
+        bucketKey: string;
+        tokens: number;
+        cost: number;
+      }>
+    >().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("idx_ratchet_census_work_submission_id").on(table.submissionId)]
+);
 
 // ============================================================================
 // GROUPS
@@ -474,6 +791,66 @@ export const groupInvitesRelations = relations(groupInvites, ({ one }) => ({
 }));
 
 // ============================================================================
+// MODERATION
+// ============================================================================
+export const MODERATION_ACTION_TYPES = ["hide", "unhide"] as const;
+export type ModerationAction = (typeof MODERATION_ACTION_TYPES)[number];
+
+/**
+ * Append-only log of every leaderboard hide/unhide.
+ *
+ * `users.leaderboard_hidden` is current state; this is the record of how it got
+ * there. Rows are never updated or deleted, so a sequence of hide → unhide →
+ * hide stays fully reconstructible — which is the point of preferring a
+ * reversible flag over deleting an account.
+ */
+export const moderationActions = pgTable(
+  "moderation_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // User accounts are deletable, while this record is intentionally not.
+    // The immutable names preserve a useful audit trail after either account
+    // has gone away; nullable FKs retain relational lookup while present.
+    targetUserId: uuid("target_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    targetUsername: varchar("target_username", { length: 39 }).notNull(),
+    actorUserId: uuid("actor_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    actorUsername: varchar("actor_username", { length: 39 }).notNull(),
+    action: varchar("action", { length: 10 }).notNull().$type<ModerationAction>(),
+    /** Free-text justification, required at the API layer. */
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Serves the per-user history panel on the review screen.
+    index("idx_moderation_actions_target_created").on(
+      table.targetUserId,
+      table.createdAt
+    ),
+    // FK coverage: nulling a deleted actor does a seq scan without this.
+    index("idx_moderation_actions_actor").on(table.actorUserId),
+  ]
+);
+
+export const moderationActionsRelations = relations(moderationActions, ({ one }) => ({
+  targetUser: one(users, {
+    fields: [moderationActions.targetUserId],
+    references: [users.id],
+    relationName: "moderationTarget",
+  }),
+  actorUser: one(users, {
+    fields: [moderationActions.actorUserId],
+    references: [users.id],
+    relationName: "moderationActor",
+  }),
+}));
+
+// ============================================================================
 // TYPE EXPORTS
 // ============================================================================
 export type User = typeof users.$inferSelect;
@@ -490,9 +867,13 @@ export type SubmittedDevice = typeof submittedDevices.$inferSelect;
 export type NewSubmittedDevice = typeof submittedDevices.$inferInsert;
 export type DailyBreakdown = typeof dailyBreakdown.$inferSelect;
 export type NewDailyBreakdown = typeof dailyBreakdown.$inferInsert;
+export type SubmittedDeviceClientTotal = typeof submittedDeviceClientTotals.$inferSelect;
+export type NewSubmittedDeviceClientTotal = typeof submittedDeviceClientTotals.$inferInsert;
 export type Group = typeof groups.$inferSelect;
 export type NewGroup = typeof groups.$inferInsert;
 export type GroupMember = typeof groupMembers.$inferSelect;
 export type NewGroupMember = typeof groupMembers.$inferInsert;
 export type GroupInvite = typeof groupInvites.$inferSelect;
 export type NewGroupInvite = typeof groupInvites.$inferInsert;
+export type ModerationActionRow = typeof moderationActions.$inferSelect;
+export type NewModerationActionRow = typeof moderationActions.$inferInsert;

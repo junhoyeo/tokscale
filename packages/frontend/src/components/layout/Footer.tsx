@@ -1,6 +1,7 @@
 "use client";
 
 import Image from 'next/image';
+import Link from 'next/link';
 import styled from 'styled-components';
 
 const Container = styled.div`
@@ -196,7 +197,35 @@ const SpinningGlobe = styled(Image)`
   }
 `;
 
+// Reachable from the landing page on purpose: ad networks check that a privacy
+// policy is linked from the site root, not just from inner pages.
+const LegalLinks = styled.nav`
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+
+  a {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.8125rem;
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: rgba(255, 255, 255, 0.9);
+    text-decoration: underline;
+  }
+
+  a:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid rgba(255, 255, 255, 0.7);
+    outline-offset: 3px;
+  }
+`;
+
 export function Footer() {
+  const currentYear = new Date().getFullYear();
+
   return (
     <Container>
       <FooterElement>
@@ -206,6 +235,7 @@ export function Footer() {
               src="/assets/footer-logo-icon.png"
               alt="Tokscale Icon"
               fill
+              sizes="(max-width: 400px) 64px, (max-width: 560px) 80px, 108px"
             />
           </LogoContainer>
 
@@ -226,15 +256,20 @@ export function Footer() {
 
           <TextContainer>
             <CopyrightText>
-              © 2025 Tokscale. All rights reserved.
+              © <time dateTime={String(currentYear)} suppressHydrationWarning>{currentYear}</time> Tokscale. All rights reserved.
             </CopyrightText>
-            <GitHubLink 
-              href="https://github.com/junhoyeo/tokscale" 
-              target="_blank" 
+            <GitHubLink
+              href="https://github.com/junhoyeo/tokscale"
+              target="_blank"
               rel="noopener noreferrer"
             >
               github.com/junhoyeo/tokscale
             </GitHubLink>
+            <LegalLinks aria-label="Legal">
+              <Link href="/privacy">Privacy</Link>
+              <Link href="/terms">Terms</Link>
+              <Link href="/contact">Contact</Link>
+            </LegalLinks>
           </TextContainer>
         </ContentContainer>
 

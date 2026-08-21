@@ -8,7 +8,9 @@ mod hourly;
 mod hourly_profile;
 mod minutely;
 mod models;
+mod monthly;
 mod overview;
+mod sessions;
 pub mod spinner;
 mod stats;
 mod usage;
@@ -51,6 +53,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Daily => daily::render(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Minutely => minutely::render(frame, app, chunks[1]),
+            Tab::Monthly => monthly::render(frame, app, chunks[1]),
+            Tab::Sessions => sessions::render(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
             Tab::Usage => usage::render(frame, app, chunks[1]),
         }

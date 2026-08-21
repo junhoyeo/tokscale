@@ -9,10 +9,10 @@
 //! ACP agents are billed and logged by their own providers/CLIs, and counting
 //! their Zed UI rows would duplicate those sources.
 
-use super::utils::parse_timestamp_str;
+use super::utils::{open_readonly_sqlite, parse_timestamp_str, sqlite_for_each_row_on};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Read;
@@ -34,10 +34,7 @@ struct ZedThreadRow {
 }
 
 pub fn parse_zed_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match open_readonly_sqlite(db_path) {
         Ok(conn) => conn,
         Err(err) => {
             warn!(
@@ -49,21 +46,10 @@ pub fn parse_zed_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    let query = build_threads_query(&conn);
-    let mut stmt = match conn.prepare(&query) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Zed thread query"
-            );
-            return Vec::new();
-        }
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok(ZedThreadRow {
+    let query = build_threads_query(db_path, &conn);
+    let mut messages = Vec::new();
+    sqlite_for_each_row_on(&conn, db_path, &query, Some("Zed thread"), &mut |row| {
+        let thread = ZedThreadRow {
             id: row.get(0)?,
             updated_at: row.get(1)?,
             created_at: row.get(2)?,
@@ -71,35 +57,18 @@ pub fn parse_zed_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             folder_paths_order: row.get(4)?,
             data_type: row.get(5)?,
             data: row.get(6)?,
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Zed thread query"
-            );
-            return Vec::new();
+        };
+        if let Some(message) = parse_thread_row(db_path, thread) {
+            messages.push(message);
         }
-    };
+        Ok(())
+    });
 
-    rows.filter_map(|row| match row {
-        Ok(row) => parse_thread_row(db_path, row),
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to decode Zed thread row"
-            );
-            None
-        }
-    })
-    .collect()
+    messages
 }
 
-fn build_threads_query(conn: &Connection) -> String {
-    let columns = thread_columns(conn);
+fn build_threads_query(db_path: &Path, conn: &Connection) -> String {
+    let columns = thread_columns(db_path, conn);
     let created_at = optional_column(&columns, "created_at");
     let folder_paths = optional_column(&columns, "folder_paths");
     let folder_paths_order = optional_column(&columns, "folder_paths_order");
@@ -117,18 +86,21 @@ fn optional_column(columns: &HashSet<String>, column: &'static str) -> &'static 
     }
 }
 
-fn thread_columns(conn: &Connection) -> HashSet<String> {
-    let mut stmt = match conn.prepare("PRAGMA table_info(threads)") {
-        Ok(stmt) => stmt,
-        Err(_) => return HashSet::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
-        Ok(rows) => rows,
-        Err(_) => return HashSet::new(),
-    };
-
-    rows.filter_map(Result::ok).collect()
+fn thread_columns(db_path: &Path, conn: &Connection) -> HashSet<String> {
+    let mut columns = HashSet::new();
+    // Quiet: a database without a `threads` table is simply not a Zed thread
+    // store, which the caller already handles by querying NULL columns.
+    sqlite_for_each_row_on(
+        conn,
+        db_path,
+        "PRAGMA table_info(threads)",
+        None,
+        &mut |row| {
+            columns.insert(row.get::<_, String>(1)?);
+            Ok(())
+        },
+    );
+    columns
 }
 
 fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage> {
@@ -180,7 +152,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     let (tokens, message_count) = thread_usage(&thread)?;
     let timestamp = timestamp_ms(&row, &thread)?;
 
-    let mut message = UnifiedMessage::new(
+    let mut message = UnifiedMessage::new_with_dedup(
         "zed",
         model_id,
         ZED_HOSTED_PROVIDER,
@@ -188,9 +160,9 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
         timestamp,
         tokens,
         0.0,
+        Some(format!("zed:{}", row.id)),
     );
     message.message_count = message_count;
-    message.dedup_key = Some(format!("zed:{}", row.id));
 
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),
@@ -268,11 +240,7 @@ fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
         if usage.total() <= 0 {
             continue;
         }
-        total.input = total.input.saturating_add(usage.input);
-        total.output = total.output.saturating_add(usage.output);
-        total.cache_read = total.cache_read.saturating_add(usage.cache_read);
-        total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.reasoning = total.reasoning.saturating_add(usage.reasoning);
+        total += &usage;
         count = count.saturating_add(1);
     }
 

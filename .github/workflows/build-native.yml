@@ -2,11 +2,28 @@ name: Build Native (Test Only)
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      bumped-manifests:
+        description: "Artifact containing release-bumped manifests to overlay before building"
+        required: false
+        type: string
+        default: ""
   pull_request:
     paths:
+      - ".github/workflows/build-native.yml"
       - "crates/**"
+      - "packages/cli/package.json"
+      - "packages/cli-*/package.json"
       - "Cargo.toml"
       - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-native-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
@@ -23,41 +40,76 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
+            package_dir: cli-darwin-x64
+            artifact_name: cli-binary-x86_64-apple-darwin
             build: cargo build --release -p tokscale-cli --target x86_64-apple-darwin
             strip: strip -x target/x86_64-apple-darwin/release/tokscale
             bin_name: tokscale
-          - host: macos-latest
+          # Apple Silicon: build with the `apple-fm` feature so the on-device
+          # Apple Foundation Models summarizer is available. Requires the macOS
+          # 26 SDK + Swift toolchain (Xcode 26 on the macos-26 runner) to build
+          # the vendored foundation-models-c shim; statically linked, so the
+          # artifact stays a single self-contained binary. Apple Intelligence is
+          # Apple-Silicon-only, so this is intentionally not enabled for x86_64.
+          - host: macos-26
             target: aarch64-apple-darwin
-            build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin
+            package_dir: cli-darwin-arm64
+            artifact_name: cli-binary-aarch64-apple-darwin
+            build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin --features apple-fm
             strip: strip -x target/aarch64-apple-darwin/release/tokscale
             bin_name: tokscale
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            package_dir: cli-linux-x64-gnu
+            artifact_name: cli-binary-x86_64-unknown-linux-gnu
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
             bin_name: tokscale
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            package_dir: cli-linux-x64-musl
+            artifact_name: cli-binary-x86_64-unknown-linux-musl
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-musl
             strip: strip target/x86_64-unknown-linux-musl/release/tokscale
             bin_name: tokscale
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            package_dir: cli-linux-arm64-gnu
+            artifact_name: cli-binary-aarch64-unknown-linux-gnu
             build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-gnu
             strip: ""
             bin_name: tokscale
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
+            package_dir: cli-linux-arm64-musl
+            artifact_name: cli-binary-aarch64-unknown-linux-musl
             build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-musl
+            strip: ""
+            bin_name: tokscale
+          # Android (Termux) on aarch64. Requires the Android NDK cross
+          # toolchain (Bionic libc) — zigbuild does not apply here.
+          # taiki-e/setup-cross-toolchain-action handles NDK setup
+          # automatically for `aarch64-linux-android` (Clang 14, API 21
+          # by default) and wires the CC/AR env vars so `cargo build
+          # --target aarch64-linux-android` links against Bionic.
+          - host: ubuntu-latest
+            target: aarch64-linux-android
+            package_dir: cli-android-arm64
+            artifact_name: cli-binary-aarch64-linux-android
+            build: cargo build --release -p tokscale-cli --target aarch64-linux-android
             strip: ""
             bin_name: tokscale
           - host: windows-latest
             target: x86_64-pc-windows-msvc
+            package_dir: cli-win32-x64-msvc
+            artifact_name: cli-binary-x86_64-pc-windows-msvc
             build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
             strip: ""
             bin_name: tokscale.exe
           - host: windows-latest
             target: aarch64-pc-windows-msvc
+            package_dir: cli-win32-arm64-msvc
+            artifact_name: cli-binary-aarch64-pc-windows-msvc
             build: cargo build --release -p tokscale-cli --target aarch64-pc-windows-msvc
             strip: ""
             bin_name: tokscale.exe
@@ -65,8 +117,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check release workflow safety
-        run: python3 scripts/check-release-workflow-safety.py
+      - name: Download bumped release files
+        if: ${{ inputs.bumped-manifests != '' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ inputs.bumped-manifests }}
+          path: .
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -85,20 +141,32 @@ jobs:
           key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
 
       - uses: mlugg/setup-zig@v2
-        if: ${{ contains(matrix.settings.target, 'linux') }}
+        if: ${{ contains(matrix.settings.target, 'linux') && !contains(matrix.settings.target, 'android') }}
         with:
           version: 0.13.0
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
-        if: ${{ contains(matrix.settings.target, 'linux') }}
+        if: ${{ contains(matrix.settings.target, 'linux') && !contains(matrix.settings.target, 'android') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           tool: cargo-zigbuild
 
+      - name: Setup Android cross toolchain
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: aarch64-linux-android
+          runner: qemu-user
+
       - name: Build CLI binary
         run: ${{ matrix.settings.build }}
+        shell: bash
+
+      - name: Smoke Android binary
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version
         shell: bash
 
       - name: Strip CLI binary
@@ -106,9 +174,23 @@ jobs:
         shell: bash
         run: ${{ matrix.settings.strip }}
 
-      - name: Upload artifact
+      # Keep release and PR artifacts identical. The Apple Silicon build may
+      # include a dynamically loaded Foundation Models sidecar.
+      - name: Stage CLI binary artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}" dist/
+          if [ -f "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" ]; then
+            cp "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" dist/
+            echo "staged sidecar libFoundationModels.dylib"
+          fi
+          ls -la dist
+
+      - name: Upload CLI binary artifact
         uses: actions/upload-artifact@v6
         with:
-          name: cli-binary-${{ matrix.settings.target }}
-          path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
+          name: ${{ matrix.settings.artifact_name }}
+          path: dist
           if-no-files-found: error
+          retention-days: 7

@@ -1,15 +1,19 @@
 import { Suspense } from "react";
+import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { Navigation } from "@/components/layout/Navigation";
-import { Footer } from "@/components/layout/Footer";
-import { BlackholeHero } from "@/components/BlackholeHero";
+import { ServiceFooter } from "@/components/layout/ServiceFooter";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
-import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboard";
+import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
-import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
+import {
+  SORT_BY_COOKIE_NAME,
+  resolveSortByParam,
+} from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
+import { leaderboardUrl } from "@/lib/seo/urls";
 import LeaderboardClient from "./LeaderboardClient";
 import GroupsBrowser from "./GroupsBrowser";
 import ViewSelector, { type LeaderboardView } from "./ViewSelector";
@@ -34,8 +38,6 @@ function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
     stats: {
       totalTokens: 0,
       totalCost: 0,
-      totalActiveTimeMs: null,
-      totalSubmissions: null,
       uniqueUsers: 0,
     },
     period: "all",
@@ -51,26 +53,60 @@ interface PageProps {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }
 
+/**
+ * Collapses the filter params onto one of two canonical URLs.
+ *
+ * period, sortBy, page, from/to and search are all views of the same ranking,
+ * and `search` in particular spans an unbounded set of URLs that would
+ * otherwise be crawled as distinct near-duplicates. `view=groups` is the one
+ * param that selects a genuinely different page, so it canonicalizes to itself.
+ */
+export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  const params = await searchParams;
+  const view = resolveView(params.view);
+  const canonical = leaderboardUrl(view);
+
+  const title =
+    view === "groups"
+      ? "Groups Leaderboard - Team AI Token Usage | Tokscale"
+      : "Leaderboard - Who Burns the Most AI Tokens | Tokscale";
+
+  const description =
+    view === "groups"
+      ? "Browse public groups and compare combined AI coding assistant token usage and spend across teams, companies, and communities."
+      : "Live ranking of developers by AI coding assistant token usage and cost, across Claude Code, Cursor, Codex, Copilot, Gemini, and more.";
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      title,
+      description,
+      type: "website",
+      url: canonical,
+      siteName: "Tokscale",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+    },
+  };
+}
+
 export default function LeaderboardPage({ searchParams }: PageProps) {
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: "var(--color-bg-default)",
-      }}
-    >
+    <div className="service-page-shell">
       <Navigation />
 
-      <main className="main-container">
-        <BlackholeHero />
+      <main className="service-main" id="main-content">
         <Suspense fallback={<LeaderboardSkeleton />}>
           <LeaderboardWithPreferences searchParams={searchParams} />
         </Suspense>
       </main>
 
-      <Footer />
+      <ServiceFooter />
     </div>
   );
 }
@@ -103,11 +139,7 @@ async function LeaderboardWithPreferences({
     typeof searchParams.search === "string" ? searchParams.search.trim() : "";
 
   const sortBy: SortBy =
-    sortByParam && isValidSortBy(sortByParam)
-      ? sortByParam
-      : isValidSortBy(sortByCookie)
-      ? sortByCookie
-      : "tokens";
+    resolveSortByParam(sortByParam) ?? resolveSortByParam(sortByCookie) ?? "tokens";
 
   let period: Period =
     periodParam && VALID_PERIODS.includes(periodParam as Period)
@@ -139,15 +171,6 @@ async function LeaderboardWithPreferences({
     }),
   ]);
 
-  const initialUserRank = session
-    ? await getUserRank(session.username, period, sortBy, customFrom, customTo).catch((error) => {
-        if (isMissingDatabaseUrl(error)) {
-          return null;
-        }
-        throw error;
-      })
-    : null;
-
   return (
     <>
       <ViewSelector current="users" searchParams={searchParams} />
@@ -155,7 +178,6 @@ async function LeaderboardWithPreferences({
         initialData={initialData}
         currentUser={session}
         initialSortBy={sortBy}
-        initialUserRank={initialUserRank}
       />
     </>
   );

@@ -1,12 +1,13 @@
 use chrono::Local;
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name,
+    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -186,7 +187,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 cells.extend([
                     Cell::from(day.message_count.to_string()),
-                    Cell::from(format_tokens(day.tokens.total())),
+                    total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                 ]);
                 cells
@@ -222,7 +223,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(day.tokens.total())),
+                    total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
                         .style(Style::default().fg(Color::Rgb(150, 200, 150))),
@@ -301,7 +302,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(daily_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(daily_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -427,7 +429,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(row.model, 18)).style(
+                    Cell::from(truncate_text(row.model, 18)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -436,7 +438,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(row.model, 24)).style(
+                    Cell::from(truncate_text(row.model, 24)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -444,13 +446,13 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(get_client_display_name(row.source))
                         .style(Style::default().fg(theme_muted)),
                     Cell::from(row.messages.to_string()),
-                    Cell::from(format_tokens(row.tokens.total())),
+                    total_tokens_cell(row.tokens.total(), &app.theme),
                     Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(row.model, 30)).style(
+                    Cell::from(truncate_text(row.model, 30)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -470,7 +472,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(row.tokens.total())),
+                    total_tokens_cell(row.tokens.total(), &app.theme),
                     Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
                 ]
             };
@@ -525,7 +527,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(detail_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(detail_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -535,21 +538,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
     }
 }
 
@@ -583,6 +571,7 @@ mod tests {
             until: None,
             year: None,
             initial_tab: None,
+            ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
         app.terminal_width = width;

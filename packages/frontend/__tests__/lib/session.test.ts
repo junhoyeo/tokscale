@@ -237,6 +237,10 @@ describe("browser sessions", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
+      // Personal tokens carry no GitHub id. isAdmin() requires a numeric one,
+      // so a CLI token can never satisfy an admin check even if a route
+      // forgets to disable Authorization-header auth.
+      githubId: null,
     });
     expect(authenticatePersonalToken).toHaveBeenCalledWith("tt_personal_token");
   });

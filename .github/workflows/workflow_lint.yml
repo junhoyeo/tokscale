@@ -1,0 +1,30 @@
+name: Workflow Lint
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &workflow_lint_paths
+      - ".github/workflows/**"
+  pull_request:
+    branches: [main]
+    paths: *workflow_lint_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Lint GitHub Actions workflows
+        # actionlint 1.7.12; keep the image immutable and review the version when updating this digest.
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

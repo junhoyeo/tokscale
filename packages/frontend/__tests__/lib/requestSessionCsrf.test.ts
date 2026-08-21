@@ -1,10 +1,11 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * B6: CSRF origin allowlist for cookie-based sessions.
  * - Mutating requests (POST/PATCH/PUT/DELETE) with a mismatched Origin are rejected.
  * - Requests with a valid Bearer token bypass the origin check.
  * - Requests without an Origin header are rejected on mutating cookie sessions (non-browser clients should use Bearer).
+ * - The APP_URL origin (self-hosted deployments) is always allowed.
  */
 
 const mockState = vi.hoisted(() => {
@@ -36,6 +37,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => mockState.reset());
+
+afterEach(() => vi.unstubAllEnvs());
 
 const validUser = { id: "user-1", username: "alice", displayName: null, avatarUrl: null };
 
@@ -99,14 +102,15 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).toHaveBeenCalledTimes(1);
   });
 
-  it("allows cookie session when Origin is in the default allowlist (production)", async () => {
+  it("rejects the removed tokscale.dev origin (domain does not exist)", async () => {
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(
       makeRequest("POST", { Origin: "https://tokscale.dev" })
     );
 
-    expect(result).toEqual(validUser);
+    expect(result).toBeNull();
+    expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
   it("allows cookie session from the production custom domain when bearer auth is disabled", async () => {
@@ -194,6 +198,101 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(result).toEqual(validUser);
     expect(mockState.getSessionFromHeader).not.toHaveBeenCalled();
     expect(mockState.getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows cookie session from the APP_URL origin (self-hosted deployment)", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://tokscale.my-company.example" }),
+      { allowAuthorizationHeader: false }
+    );
+
+    expect(result).toEqual(validUser);
+    expect(mockState.getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives the allowed origin from APP_URL with a path or trailing slash", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example/app/");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://tokscale.my-company.example" }),
+      { allowAuthorizationHeader: false }
+    );
+
+    expect(result).toEqual(validUser);
+  });
+
+  it("still allows the APP_URL origin when CSRF_ALLOWED_ORIGINS is set to other origins", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
+    vi.stubEnv("CSRF_ALLOWED_ORIGINS", "https://other.example.com");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://tokscale.my-company.example" }),
+      { allowAuthorizationHeader: false }
+    );
+
+    expect(result).toEqual(validUser);
+  });
+
+  it("keeps rejecting unknown origins when APP_URL is set", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://evil.example.com" })
+    );
+
+    expect(result).toBeNull();
+    expect(mockState.getSession).not.toHaveBeenCalled();
+  });
+
+  it("does not allowlist the opaque 'null' origin from a non-HTTP APP_URL", async () => {
+    vi.stubEnv("APP_URL", "mailto:admin@example.com");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    // new URL("mailto:...").origin === "null"; sandboxed iframes send
+    // Origin: null, so accepting it would reopen CSRF.
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "null" })
+    );
+
+    expect(result).toBeNull();
+    expect(mockState.getSession).not.toHaveBeenCalled();
+  });
+
+  it("ignores a malformed APP_URL and keeps the explicit allowlist working", async () => {
+    vi.stubEnv("APP_URL", "not-a-valid-url");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const allowed = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "http://localhost:3000" })
+    );
+    expect(allowed).toEqual(validUser);
+
+    const rejected = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://evil.example.com" })
+    );
+    expect(rejected).toBeNull();
+  });
+
+  it("does not append the hosted fallback to an explicit allowlist", async () => {
+    vi.stubEnv("APP_URL", "not-a-valid-url");
+    vi.stubEnv("CSRF_ALLOWED_ORIGINS", "https://other.example.com");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const hosted = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://tokscale.ai" })
+    );
+    expect(hosted).toBeNull();
+
+    const explicit = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://other.example.com" })
+    );
+    expect(explicit).toEqual(validUser);
   });
 
   it("ignores Authorization headers when bearer auth is disabled and still uses valid cookies", async () => {

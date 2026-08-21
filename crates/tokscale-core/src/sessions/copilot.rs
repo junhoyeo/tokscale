@@ -4,38 +4,22 @@
 //! Copilot Chat monitoring. Chat spans and inference log records are preferred;
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, for_each_json_line};
 use super::UnifiedMessage;
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let mut records = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(path, &mut |_index, trimmed| {
         if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
             records.push(record);
         }
-    }
+    });
 
     let trace_contexts = collect_trace_contexts(&records);
     let candidates: Vec<CopilotUsageCandidate> = records
@@ -55,7 +39,7 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
     let agent_turn_response_ids =
         candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
 
-    candidates
+    let emitted_candidates = candidates
         .into_iter()
         .filter(|candidate| {
             should_emit_candidate(
@@ -68,6 +52,10 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
                 &agent_turn_response_ids,
             )
         })
+        .collect();
+
+    merge_duplicate_candidates(emitted_candidates)
+        .into_iter()
         .map(CopilotUsageCandidate::into_message)
         .collect()
 }
@@ -84,6 +72,7 @@ struct TraceContext {
     model: Option<String>,
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
+    agent_id: Option<String>,
 }
 
 struct CopilotUsageCandidate {
@@ -95,8 +84,13 @@ struct CopilotUsageCandidate {
     session_id: String,
     timestamp_ms: i64,
     duration_ms: Option<i64>,
+    start_timestamp_ms: Option<i64>,
+    end_timestamp_ms: Option<i64>,
+    inclusive_input_tokens: i64,
     tokens: TokenBreakdown,
     dedup_key: String,
+    agent: Option<String>,
+    agent_is_direct: bool,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -120,7 +114,57 @@ impl CopilotUsageCandidate {
             Some(self.dedup_key),
         );
         message.duration_ms = self.duration_ms;
+        message.agent = self.agent;
         message
+    }
+
+    fn merge_duplicate(&mut self, duplicate: Self) {
+        self.inclusive_input_tokens = self
+            .inclusive_input_tokens
+            .max(duplicate.inclusive_input_tokens);
+        self.tokens = normalize_input_tokens(
+            self.inclusive_input_tokens,
+            self.tokens.output.max(duplicate.tokens.output),
+            self.tokens.cache_read.max(duplicate.tokens.cache_read),
+            self.tokens.cache_write.max(duplicate.tokens.cache_write),
+            self.tokens.reasoning.max(duplicate.tokens.reasoning),
+        );
+
+        let fallback_timestamp_ms = self.timestamp_ms.min(duplicate.timestamp_ms);
+        let fallback_duration_ms = self.duration_ms.max(duplicate.duration_ms);
+        self.start_timestamp_ms = match (self.start_timestamp_ms, duplicate.start_timestamp_ms) {
+            (Some(current), Some(candidate)) => Some(current.min(candidate)),
+            (current, candidate) => current.or(candidate),
+        };
+        self.end_timestamp_ms = self.end_timestamp_ms.max(duplicate.end_timestamp_ms);
+        self.timestamp_ms = self.start_timestamp_ms.unwrap_or(fallback_timestamp_ms);
+        self.duration_ms = self
+            .start_timestamp_ms
+            .zip(self.end_timestamp_ms)
+            .and_then(|(start_timestamp_ms, end_timestamp_ms)| {
+                let duration_ms = end_timestamp_ms.saturating_sub(start_timestamp_ms);
+                (duration_ms > 0).then_some(duration_ms)
+            })
+            .max(fallback_duration_ms);
+
+        let duplicate_agent = duplicate.agent.filter(|agent| !agent.is_empty());
+        // Direct attribution outranks fallback; equal-authority conflicts use a
+        // stable lexical tie-break so duplicate merging is order-independent.
+        let replace_agent = match (
+            self.agent.as_deref().filter(|agent| !agent.is_empty()),
+            duplicate_agent.as_deref(),
+        ) {
+            (None, Some(_)) => true,
+            (Some(_), Some(_)) if self.agent_is_direct != duplicate.agent_is_direct => {
+                duplicate.agent_is_direct
+            }
+            (Some(current), Some(candidate)) => candidate < current,
+            _ => false,
+        };
+        if replace_agent {
+            self.agent = duplicate_agent;
+            self.agent_is_direct = duplicate.agent_is_direct;
+        }
     }
 }
 
@@ -142,6 +186,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 model: None,
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
+                agent_id: None,
             });
 
         if context.model.is_none() {
@@ -156,7 +201,131 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
         }
     }
 
+    // Trace-level agent is only a FALLBACK for records that carry no
+    // gen_ai.agent.id of their own (see candidate_from_attributes). Prefer the
+    // ROOT invoke_agent span's agent id — the invoke_agent span whose parent
+    // chain contains no other invoke_agent span — so a nested task/sub-agent
+    // invoke inside the main invocation does not become the trace default.
+    // This is resolved in a dedicated pass because OTel export order is not
+    // guaranteed: the root invoke_agent span may export after a nested one (or
+    // after the chat spans it should cover), so the whole span hierarchy must
+    // be known before the root can be picked. Per-record agent ids still take
+    // precedence at attribution time.
+    for (trace_id, agent_id) in resolve_trace_fallback_agents(records) {
+        if let Some(context) = contexts.get_mut(&trace_id) {
+            context.agent_id = Some(agent_id);
+        }
+    }
+
     contexts
+}
+
+/// Resolve the trace-level fallback agent id for each trace, preferring the
+/// ROOT invoke_agent span (the invoke_agent span whose parent chain contains no
+/// other invoke_agent span). A trace can hold several invoke_agent spans when a
+/// task/sub-agent is invoked inside the main agent invocation; the sub-agent's
+/// invoke_agent is nested and must not become the trace default. When a trace
+/// has no invoke_agent span, fall back to the first non-empty gen_ai.agent.id
+/// seen in the trace (input order).
+fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
+    // Span ids are unique only within a trace, so keep the OTel structural
+    // identity scoped by both ids.
+    let mut parent_of: HashMap<(&str, &str), &str> = HashMap::new();
+    // Span ids of every invoke_agent span, used to detect a nested invoke.
+    let mut invoke_agent_span_ids: HashSet<(&str, &str)> = HashSet::new();
+    // Per trace: invoke_agent spans in input order, each with its agent id.
+    let mut trace_invoke_agents: HashMap<&str, Vec<(&str, Option<&str>)>> = HashMap::new();
+    // Per trace: first non-empty agent id seen on any record (ultimate fallback
+    // for traces whose invoke_agent spans name no agent, or that have none).
+    let mut trace_first_agent: HashMap<&str, &str> = HashMap::new();
+
+    for record in records {
+        let Some(trace_id) = trace_id_from_record(record) else {
+            continue;
+        };
+
+        // Parent edges are OTel structure, not attributes. Collect them before
+        // the attributes gate so attribute-less intermediary spans still link
+        // nested invokes back to the root.
+        let span_id = span_id_from_record(record);
+        if let Some(span_id) = span_id {
+            if let Some(parent_span_id) = parent_span_id_from_record(record) {
+                parent_of.insert((trace_id, span_id), parent_span_id);
+            }
+        }
+
+        let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
+            continue;
+        };
+
+        let agent_id = first_non_empty_attr(attributes, &["gen_ai.agent.id"]);
+
+        if is_agent_summary_span_record(record, attributes) {
+            if let Some(span_id) = span_id {
+                invoke_agent_span_ids.insert((trace_id, span_id));
+                trace_invoke_agents
+                    .entry(trace_id)
+                    .or_default()
+                    .push((span_id, agent_id));
+            }
+        }
+
+        if let Some(agent_id) = agent_id {
+            trace_first_agent.entry(trace_id).or_insert(agent_id);
+        }
+    }
+
+    let mut fallback = HashMap::new();
+
+    for (trace_id, invokes) in &trace_invoke_agents {
+        // Prefer the first ROOT invoke_agent span that carries an agent id.
+        // Fall back to any invoke_agent span with an agent id when no root does
+        // (e.g. only a nested invoke names an agent) so the trace still
+        // resolves to an invoke_agent default rather than a bare chat span.
+        let resolved = invokes
+            .iter()
+            .filter(|(span_id, _)| {
+                is_root_invoke_agent(trace_id, span_id, &parent_of, &invoke_agent_span_ids)
+            })
+            .find_map(|(_, agent_id)| *agent_id)
+            .or_else(|| invokes.iter().find_map(|(_, agent_id)| *agent_id));
+        if let Some(agent_id) = resolved {
+            fallback.insert((*trace_id).to_string(), agent_id.to_string());
+        }
+    }
+
+    // Traces without any invoke_agent span (or whose invoke_agent spans name no
+    // agent) keep the first non-empty agent id seen in the trace.
+    for (trace_id, agent_id) in trace_first_agent {
+        fallback
+            .entry(trace_id.to_string())
+            .or_insert_with(|| agent_id.to_string());
+    }
+
+    fallback
+}
+
+/// An invoke_agent span is a ROOT when no span in its parent chain is itself an
+/// invoke_agent span. Nested task/sub-agent invokes therefore resolve to false.
+fn is_root_invoke_agent(
+    trace_id: &str,
+    span_id: &str,
+    parent_of: &HashMap<(&str, &str), &str>,
+    invoke_agent_span_ids: &HashSet<(&str, &str)>,
+) -> bool {
+    let mut current = parent_of.get(&(trace_id, span_id)).copied();
+    let mut visited: HashSet<(&str, &str)> = HashSet::new();
+    while let Some(parent) = current {
+        if invoke_agent_span_ids.contains(&(trace_id, parent)) {
+            return false;
+        }
+        if !visited.insert((trace_id, parent)) {
+            // Guard against malformed/cyclic parent references.
+            break;
+        }
+        current = parent_of.get(&(trace_id, parent)).copied();
+    }
+    true
 }
 
 fn usage_candidate_from_record(
@@ -233,12 +402,20 @@ fn candidate_from_attributes(
 ) -> Option<CopilotUsageCandidate> {
     let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
     let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
-    let cache_read = attr_i64_first(attributes, &["gen_ai.usage.cache_read.input_tokens"]);
+    let cache_read = attr_i64_first(
+        attributes,
+        &[
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.cache_read_input_tokens",
+        ],
+    );
     let cache_write = attr_i64_first(
         attributes,
         &[
             "gen_ai.usage.cache_write.input_tokens",
             "gen_ai.usage.cache_creation.input_tokens",
+            "gen_ai.usage.cache_write_input_tokens",
+            "gen_ai.usage.cache_creation_input_tokens",
         ],
     );
     let reasoning = attr_i64_first(
@@ -274,8 +451,21 @@ fn candidate_from_attributes(
         .or(trace_id.as_deref())
         .unwrap_or("unknown-session")
         .to_string();
-    let timestamp_ms = timestamp_ms_from_record(record).unwrap_or(fallback_timestamp);
+    let record_timestamp_ms = timestamp_ms_from_record(record);
+    let timestamp_ms = record_timestamp_ms.unwrap_or(fallback_timestamp);
     let duration_ms = duration_ms_from_record(record);
+    // Preserve explicit interval boundaries separately: an end-only exporter
+    // update uses endTime as its timestamp but must not treat that end as a start.
+    let explicit_start_ms = record.get("startTime").and_then(timestamp_ms_from_value);
+    let explicit_end_ms = record.get("endTime").and_then(timestamp_ms_from_value);
+    let start_timestamp_ms = explicit_start_ms.or_else(|| {
+        record_timestamp_ms.filter(|_| duration_ms.is_some() || explicit_end_ms.is_none())
+    });
+    let end_timestamp_ms = explicit_end_ms.or_else(|| {
+        record_timestamp_ms
+            .zip(duration_ms)
+            .map(|(start, duration)| start.saturating_add(duration))
+    });
     let dedup_key = dedup_key_for_record(
         source,
         record,
@@ -285,6 +475,8 @@ fn candidate_from_attributes(
         timestamp_ms,
         index,
     );
+    let direct_agent = first_non_empty_attr(attributes, &["gen_ai.agent.id"]).map(str::to_string);
+    let agent_is_direct = direct_agent.is_some();
 
     Some(CopilotUsageCandidate {
         source,
@@ -295,8 +487,18 @@ fn candidate_from_attributes(
         session_id,
         timestamp_ms,
         duration_ms,
+        start_timestamp_ms,
+        end_timestamp_ms,
+        inclusive_input_tokens: input.max(0),
         tokens,
         dedup_key,
+        // Per-record attribution first: when a chat/inference record carries its
+        // own gen_ai.agent.id (e.g. a sub-agent turn inside a shared trace), use
+        // it so sub-agents are not mis-attributed to the trace's first agent.
+        // Fall back to the trace-level agent (typically from the invoke_agent
+        // span) only when the record itself has none.
+        agent: direct_agent.or_else(|| trace_context.and_then(|tc| tc.agent_id.clone())),
+        agent_is_direct,
     })
 }
 
@@ -364,6 +566,24 @@ fn should_emit_candidate(
                 && !response_match(agent_turn_response_ids)
         }
     }
+}
+
+fn merge_duplicate_candidates(
+    candidates: Vec<CopilotUsageCandidate>,
+) -> Vec<CopilotUsageCandidate> {
+    let mut merged: Vec<CopilotUsageCandidate> = Vec::with_capacity(candidates.len());
+    let mut indexes: HashMap<String, usize> = HashMap::with_capacity(candidates.len());
+
+    for candidate in candidates {
+        if let Some(index) = indexes.get(&candidate.dedup_key).copied() {
+            merged[index].merge_duplicate(candidate);
+        } else {
+            indexes.insert(candidate.dedup_key.clone(), merged.len());
+            merged.push(candidate);
+        }
+    }
+
+    merged
 }
 
 const MODEL_ATTRS: &[&str] = &["gen_ai.response.model", "gen_ai.request.model"];
@@ -450,24 +670,65 @@ fn is_span_record(value: &Value) -> bool {
     has_name && (has_span_identity || has_span_timing || value.get("kind").is_some())
 }
 
+// A W3C Trace Context id (trace or span) is INVALID when it is all-zero hex
+// (32 zero chars for a trace id, 16 for a span id) — the sentinel a
+// non-recording span context carries. Empty behaves the same way. Records
+// without a recording span context carry these sentinel ids, so treat both
+// as absent rather than as a real (and, worse, shared-with-other-records)
+// identity.
+fn is_valid_span_identity_id(id: &str) -> bool {
+    !id.is_empty() && !id.chars().all(|c| c == '0')
+}
+
 fn trace_id_from_record(value: &Value) -> Option<&str> {
-    value.get("traceId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("traceId"))
-            .and_then(Value::as_str)
-    })
+    // Filter each candidate individually: a zero/empty top-level sentinel must
+    // fall through to a valid nested `spanContext` id instead of masking it.
+    value
+        .get("traceId")
+        .and_then(Value::as_str)
+        .filter(|trace_id| is_valid_span_identity_id(trace_id))
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("traceId"))
+                .and_then(Value::as_str)
+                .filter(|trace_id| is_valid_span_identity_id(trace_id))
+        })
 }
 
 fn span_id_from_record(value: &Value) -> Option<&str> {
-    value.get("spanId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("spanId"))
-            .and_then(Value::as_str)
-    })
+    value
+        .get("spanId")
+        .and_then(Value::as_str)
+        .filter(|span_id| is_valid_span_identity_id(span_id))
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("spanId"))
+                .and_then(Value::as_str)
+                .filter(|span_id| is_valid_span_identity_id(span_id))
+        })
+}
+
+fn parent_span_id_from_record(value: &Value) -> Option<&str> {
+    // OTel exporters may emit an empty, absent, or all-zero parent for a root
+    // span; treat those as "no parent" so they never match a real span id —
+    // filtering each candidate so a top-level sentinel can't mask a valid
+    // nested `spanContext` value.
+    value
+        .get("parentSpanId")
+        .and_then(Value::as_str)
+        .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("parentSpanId"))
+                .and_then(Value::as_str)
+                .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
+        })
 }
 
 fn dedup_key_for_record(
@@ -485,6 +746,10 @@ fn dedup_key_for_record(
         CopilotUsageSource::ChatSpan | CopilotUsageSource::AgentSummarySpan => {
             match (trace_id, span_id) {
                 (Some(trace_id), Some(span_id)) => format!("{trace_id}:{span_id}"),
+                // No trace id, but a valid span id is still a stable identity
+                // (unlike the line-index fallback below): key on it directly
+                // so duplicate span-id-only snapshots collapse to one entry.
+                (None, Some(span_id)) => format!("span:{session_id}:{span_id}"),
                 _ => format!("span:{session_id}:{timestamp_ms}:{index}"),
             }
         }
@@ -530,7 +795,7 @@ fn attr_i64_first(attributes: &Map<String, Value>, keys: &[&str]) -> i64 {
         .unwrap_or(0)
 }
 
-fn normalize_input_tokens(
+pub(crate) fn normalize_input_tokens(
     input: i64,
     output: i64,
     cache_read: i64,
@@ -554,7 +819,12 @@ fn normalize_input_tokens(
 fn first_non_empty_attr<'a>(attributes: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .filter_map(|key| attributes.get(*key).and_then(Value::as_str))
-        .find(|value| !value.trim().is_empty())
+        // Return the trimmed slice: callers store this value directly (model,
+        // agent id), and a surrounding-whitespace variant like
+        // " github.copilot.default " must match the same normalization branch
+        // as the trimmed form — otherwise it bypasses agent-name normalization.
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 fn best_session_attr(attributes: &Map<String, Value>) -> Option<(&str, SessionIdPriority)> {
@@ -588,9 +858,14 @@ fn value_as_i64(value: &Value) -> Option<i64> {
 
 fn timestamp_ms_from_record(value: &Value) -> Option<i64> {
     value
-        .get("endTime")
+        .get("startTime")
         .and_then(timestamp_ms_from_value)
-        .or_else(|| value.get("startTime").and_then(timestamp_ms_from_value))
+        .or_else(|| {
+            // When only endTime is available, back-calculate the start if duration is known.
+            let end_ms = value.get("endTime").and_then(timestamp_ms_from_value)?;
+            let duration = duration_ms_from_record(value).unwrap_or(0);
+            Some(end_ms.saturating_sub(duration))
+        })
         .or_else(|| value.get("hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("_hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("time").and_then(timestamp_ms_from_value))
@@ -704,7 +979,7 @@ mod tests {
         assert_eq!(message.tokens.output, 281);
         assert_eq!(message.tokens.cache_read, 123);
         assert_eq!(message.tokens.reasoning, 128);
-        assert_eq!(message.timestamp, 1_775_934_264_967);
+        assert_eq!(message.timestamp, 1_775_934_260_133);
         assert_eq!(message.duration_ms, Some(4834));
         assert_eq!(message.dedup_key.as_deref(), Some("trace-1:span-1"));
     }
@@ -789,6 +1064,241 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 0);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_attributes() {
+        // Copilot CLI OTEL emits cache fields with underscores instead of dots:
+        // gen_ai.usage.cache_read_input_tokens / gen_ai.usage.cache_creation_input_tokens
+        let content = r#"{"type":"span","traceId":"trace-cli","spanId":"span-cli","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot","service.version":"1.0.62"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":21884,"gen_ai.usage.output_tokens":80,"gen_ai.usage.cache_creation_input_tokens":21881}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 21881);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_read_and_creation() {
+        let content = r#"{"type":"span","traceId":"trace-cli2","spanId":"span-cli2","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":23000,"gen_ai.usage.output_tokens":120,"gen_ai.usage.cache_read_input_tokens":21881,"gen_ai.usage.cache_creation_input_tokens":1397}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_read, 21881);
+        assert_eq!(messages[0].tokens.cache_write, 1397);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_sets_agent_from_invoke_agent_span() {
+        // invoke_agent and chat spans share a traceId; gen_ai.agent.id from
+        // invoke_agent should propagate to chat messages via TraceContext so
+        // the Agents tab is populated for Copilot CLI sessions.
+        let content = r#"{"type":"span","traceId":"trace-agent","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default","gen_ai.agent.version":"1.0.62"}}
+{"type":"span","traceId":"trace-agent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-agent","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trims_whitespace_agent_id() {
+        // The invoke_agent span carries a gen_ai.agent.id padded with
+        // surrounding whitespace. first_non_empty_attr must store the TRIMMED
+        // value so the agent id matches the same normalization branch as a
+        // clean " github.copilot.default" id (without trimming, the stored
+        // agent would be " github.copilot.default " and bypass normalization).
+        let content = r#"{"type":"span","traceId":"trace-ws","spanId":"invoke-ws","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-ws","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"  github.copilot.default  "}}
+{"type":"span","traceId":"trace-ws","spanId":"chat-ws","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-ws","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_per_record_agent_id_wins_over_trace_agent() {
+        // A trace's invoke_agent span names the default agent, but a later chat
+        // record carries its OWN gen_ai.agent.id for a sub-agent. Per-record
+        // attribution must win so the sub-agent's tokens are not mis-attributed
+        // to the trace's first (default) agent.
+        let content = r#"{"type":"span","traceId":"trace-sub","spanId":"invoke-sub","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-sub","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-sub","spanId":"chat-sub","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-sub","gen_ai.agent.id":"github.copilot.reviewer","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some("github.copilot.reviewer")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_prefers_invoke_agent_over_child_span() {
+        // OTel export order is not guaranteed. A child chat span that carries
+        // its own gen_ai.agent.id (a sub-agent turn) can be exported BEFORE the
+        // parent invoke_agent span. The trace-level fallback agent must still
+        // resolve to the invoke_agent span's default rather than whichever agent
+        // id appears first in the trace, so a later agentless turn inherits the
+        // trace default instead of the sub-agent that happened to export first.
+        let content = r#"{"type":"span","traceId":"trace-order","spanId":"chat-sub","name":"chat claude-sonnet-4.6","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.reviewer","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-order","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-order","spanId":"chat-plain","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        // The child sub-agent turn keeps its own agent id (per-record wins).
+        let sub = messages
+            .iter()
+            .find(|message| message.model_id == "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(sub.agent.as_deref(), Some("github.copilot.reviewer"));
+        // The agentless turn inherits the invoke_agent default, not the
+        // sub-agent that happened to export first.
+        let plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_prefers_root_invoke_agent_over_nested() {
+        // A trace can contain several invoke_agent spans: the top-level agent
+        // invocation plus a NESTED invoke_agent when the main agent launches a
+        // task/sub-agent via a tool call. The nested invoke's parent chain runs
+        // execute_tool -> root invoke_agent, so it must NOT become the trace
+        // fallback. The nested invoke and its sub-agent chat are exported BEFORE
+        // the root invoke_agent (OTel export order is not guaranteed), which is
+        // exactly the case a first-invoke-wins lock would mis-attribute.
+        let content = r#"{"type":"span","traceId":"trace-nested","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
+{"type":"span","traceId":"trace-nested","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-nested","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"execute_tool","gen_ai.tool.name":"task"}}
+{"type":"span","traceId":"trace-nested","spanId":"invoke-root","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-nested","spanId":"chat-plain","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        // The sub-agent chat keeps its own agent id (per-record wins).
+        let sub = messages
+            .iter()
+            .find(|message| message.model_id == "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(sub.agent.as_deref(), Some("github.copilot.subagent"));
+        // The agentless turn inherits the ROOT invoke_agent default, not the
+        // nested sub-agent invoke that exported first.
+        let plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_single_invoke_agent_unchanged() {
+        // The common single-invoke_agent trace (no nesting) is unaffected by the
+        // root-preference logic: the one invoke_agent span is trivially the root,
+        // so its agent id still propagates to an agentless chat turn.
+        let content = r#"{"type":"span","traceId":"trace-single","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-single","spanId":"chat-1","parentSpanId":"invoke-1","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-single","gen_ai.usage.input_tokens":50,"gen_ai.usage.output_tokens":8}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        let plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_links_through_attribute_less_intermediary() {
+        let content = r#"{"type":"span","traceId":"trace-attrless","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
+{"type":"span","traceId":"trace-attrless","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-attrless","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task"}
+{"type":"span","traceId":"trace-attrless","spanId":"invoke-root","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-attrless","spanId":"chat-plain","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        let sub = messages
+            .iter()
+            .find(|message| message.model_id == "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(sub.agent.as_deref(), Some("github.copilot.subagent"));
+
+        let plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_scopes_reused_span_ids_per_trace() {
+        let content = r#"{"type":"span","traceId":"trace-scope-a","spanId":"invoke-nested-a","parentSpanId":"tool-a","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent-a"}}
+{"type":"span","traceId":"trace-scope-a","spanId":"tool-a","parentSpanId":"invoke-shared","name":"execute_tool task","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"execute_tool","gen_ai.tool.name":"task"}}
+{"type":"span","traceId":"trace-scope-a","spanId":"invoke-shared","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.root-a"}}
+{"type":"span","traceId":"trace-scope-a","spanId":"chat-a","parentSpanId":"invoke-shared","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-a","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}
+{"type":"span","traceId":"trace-scope-b","spanId":"invoke-outer-b","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.root-b"}}
+{"type":"span","traceId":"trace-scope-b","spanId":"invoke-shared","parentSpanId":"invoke-outer-b","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent-b"}}
+{"type":"span","traceId":"trace-scope-b","spanId":"chat-b","parentSpanId":"invoke-outer-b","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-b","gen_ai.usage.input_tokens":300,"gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        let chat_a = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("trace-scope-a:chat-a"))
+            .unwrap();
+        assert_eq!(chat_a.agent.as_deref(), Some("github.copilot.root-a"));
+
+        let chat_b = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("trace-scope-b:chat-b"))
+            .unwrap();
+        assert_eq!(chat_b.agent.as_deref(), Some("github.copilot.root-b"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_write_attribute() {
+        // Copilot CLI may emit the cache-write bucket with the fully
+        // underscored key gen_ai.usage.cache_write_input_tokens (a sibling of
+        // the documented cache_read_input_tokens variant). It must map to the
+        // cache_write token bucket.
+        let content = r#"{"type":"span","traceId":"trace-cw","spanId":"span-cw","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":21884,"gen_ai.usage.output_tokens":80,"gen_ai.usage.cache_write_input_tokens":21881}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 21881);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_no_agent_when_invoke_agent_absent() {
+        let content = r#"{"type":"span","traceId":"trace-noagent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-noagent","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
     }
 
     #[test]
@@ -1082,6 +1592,346 @@ mod tests {
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("agent-turn:trace-session-upgrade:4")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_merges_duplicate_spans_monotonically() {
+        let root = r#"{"type":"span","traceId":"trace-merge","spanId":"invoke-root","name":"invoke_agent","startTime":[1775934259,0],"endTime":[1775934269,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"root-agent","gen_ai.usage.input_tokens":999,"gen_ai.usage.output_tokens":999}}"#;
+        let first = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,"gen_ai.usage.cache_read.input_tokens":30,"gen_ai.usage.cache_write.input_tokens":40,"gen_ai.usage.reasoning_tokens":50}}"#;
+        let second = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","startTime":[1775934262,0],"endTime":[1775934268,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.agent.id":"agent-merge","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":10,"gen_ai.usage.cache_read.input_tokens":40,"gen_ai.usage.cache_write.input_tokens":20,"gen_ai.usage.reasoning_tokens":60}}"#;
+        let forward_file = create_test_file(&format!("{root}\n{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{root}\n{second}\n{first}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        let message = &forward[0];
+        assert_eq!(message.tokens.input, 160);
+        assert_eq!(message.tokens.output, 20);
+        assert_eq!(message.tokens.cache_read, 40);
+        assert_eq!(message.tokens.cache_write, 40);
+        assert_eq!(message.tokens.reasoning, 60);
+        assert_eq!(message.timestamp, 1_775_934_260_000);
+        assert_eq!(message.duration_ms, Some(8_000));
+        assert_eq!(message.agent.as_deref(), Some("agent-merge"));
+        assert_eq!(message.dedup_key.as_deref(), Some("trace-merge:span-merge"));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_uses_end_only_update_for_interval() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-end-update","spanId":"span-end-update","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-end-update","spanId":"span-end-update","name":"chat gpt-5.4-mini","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_775_934_260_000);
+        assert_eq!(messages[0].duration_ms, Some(5_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_end_only_updates_do_not_invent_duration() {
+        let first = r#"{"type":"span","traceId":"trace-end-only","spanId":"span-end-only","name":"chat gpt-5.4-mini","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let second = r#"{"type":"span","traceId":"trace-end-only","spanId":"span-end-only","name":"chat gpt-5.4-mini","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{second}\n{first}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].timestamp, 1_775_934_261_000);
+        assert_eq!(forward[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_fallback_timestamp_is_not_interval_start() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-fallback-time","spanId":"span-fallback-time","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-fallback-time","spanId":"span-fallback-time","name":"chat gpt-5.4-mini","endTime":[4102444800,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_duration_only_fallback_is_not_interval_start() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-fallback-duration","spanId":"span-fallback-duration","name":"chat gpt-5.4-mini","duration":[1,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-fallback-duration","spanId":"span-fallback-duration","name":"chat gpt-5.4-mini","endTime":[4102444800,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, Some(1_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_keeps_larger_duration_only_update() {
+        let interval = r#"{"type":"span","traceId":"trace-duration-update","spanId":"span-duration-update","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let duration_only = r#"{"type":"span","traceId":"trace-duration-update","spanId":"span-duration-update","name":"chat gpt-5.4-mini","duration":[5,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{interval}\n{duration_only}\n"));
+        let reverse_file = create_test_file(&format!("{duration_only}\n{interval}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].timestamp, 1_775_934_260_000);
+        assert_eq!(forward[0].duration_ms, Some(5_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_direct_agents_are_order_independent() {
+        let first = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-z","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let second = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-a","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{second}\n{first}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].agent.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_normalizes_merged_cache_read() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-cache-merge","spanId":"span-cache-merge","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-cache-merge","spanId":"span-cache-merge","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":10,"gen_ai.usage.cache_read.input_tokens":500}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 500);
+        assert_eq!(messages[0].tokens.cache_read, 500);
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_keeps_primary_identity() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-identity","spanId":"span-identity","name":"chat claude-sonnet-4.5","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.5","gen_ai.response.model":"claude-sonnet-4.5","gen_ai.conversation.id":"primary-session","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":2}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-identity","spanId":"span-identity","name":"chat gpt-5.4","startTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4","gen_ai.response.model":"gpt-5.4","gen_ai.conversation.id":"duplicate-session","gen_ai.usage.input_tokens":20,"gen_ai.usage.output_tokens":3}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].session_id, "primary-session");
+    }
+
+    #[test]
+    fn test_parse_copilot_keeps_different_duplicate_keys() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-keys","spanId":"span-a","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":2}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-keys","spanId":"span-b","name":"chat gpt-5.4-mini","startTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":20,"gen_ai.usage.output_tokens":3}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().any(|message| {
+            message.dedup_key.as_deref() == Some("trace-keys:span-a") && message.tokens.input == 10
+        }));
+        assert!(messages.iter().any(|message| {
+            message.dedup_key.as_deref() == Some("trace-keys:span-b") && message.tokens.input == 20
+        }));
+    }
+
+    #[test]
+    fn test_parse_copilot_priority_filtered_duplicate_does_not_merge() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-priority","spanId":"span-priority","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":2}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-priority","spanId":"span-priority","name":"invoke_agent gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934269,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":999,"gen_ai.usage.output_tokens":999}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("trace-priority:span-priority")
+        );
+        assert_eq!(messages[0].tokens.input, 11);
+        assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_merge_copilot_duplicate_recovers_agent_and_keeps_primary_identity() {
+        let primary = CopilotUsageCandidate {
+            source: CopilotUsageSource::ChatSpan,
+            trace_id: Some("trace-merge-helper".to_string()),
+            response_id: None,
+            model: "primary-model".to_string(),
+            provider_id: "primary-provider".to_string(),
+            session_id: "primary-session".to_string(),
+            timestamp_ms: 100,
+            duration_ms: Some(20),
+            start_timestamp_ms: Some(100),
+            end_timestamp_ms: Some(120),
+            inclusive_input_tokens: 40,
+            tokens: TokenBreakdown {
+                input: 10,
+                output: 2,
+                cache_read: 30,
+                cache_write: 4,
+                reasoning: 5,
+            },
+            dedup_key: "same-key".to_string(),
+            agent: Some("fallback-agent".to_string()),
+            agent_is_direct: false,
+        };
+        let duplicate = CopilotUsageCandidate {
+            source: CopilotUsageSource::AgentSummarySpan,
+            trace_id: Some("trace-duplicate".to_string()),
+            response_id: Some("response-duplicate".to_string()),
+            model: "duplicate-model".to_string(),
+            provider_id: "duplicate-provider".to_string(),
+            session_id: "duplicate-session".to_string(),
+            timestamp_ms: 90,
+            duration_ms: Some(30),
+            start_timestamp_ms: Some(90),
+            end_timestamp_ms: Some(120),
+            inclusive_input_tokens: 60,
+            tokens: TokenBreakdown {
+                input: 20,
+                output: 1,
+                cache_read: 40,
+                cache_write: 8,
+                reasoning: 6,
+            },
+            dedup_key: "same-key".to_string(),
+            agent: Some("recovered-agent".to_string()),
+            agent_is_direct: true,
+        };
+
+        let merged = merge_duplicate_candidates(vec![primary, duplicate]);
+
+        assert_eq!(merged.len(), 1);
+        let candidate = &merged[0];
+        assert!(candidate.source == CopilotUsageSource::ChatSpan);
+        assert_eq!(candidate.trace_id.as_deref(), Some("trace-merge-helper"));
+        assert_eq!(candidate.model, "primary-model");
+        assert_eq!(candidate.provider_id, "primary-provider");
+        assert_eq!(candidate.session_id, "primary-session");
+        assert_eq!(candidate.timestamp_ms, 90);
+        assert_eq!(candidate.duration_ms, Some(30));
+        assert_eq!(candidate.tokens.input, 20);
+        assert_eq!(candidate.tokens.output, 2);
+        assert_eq!(candidate.tokens.cache_read, 40);
+        assert_eq!(candidate.tokens.cache_write, 8);
+        assert_eq!(candidate.tokens.reasoning, 6);
+        assert_eq!(candidate.agent.as_deref(), Some("recovered-agent"));
+    }
+
+    #[test]
+    fn adversarial_zero_span_identity_spans_are_not_collapsed() {
+        // W3C/OTel "invalid" ids are all-zeros. Two UNRELATED chat spans that
+        // both carry the invalid all-zero traceId/spanId must not be merged
+        // into one message: they are distinct requests whose exporter simply
+        // had no recording span context. Expected: 2 messages, totals summed.
+        let content = concat!(
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-zero","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","name":"chat claude-sonnet-4.5","startTime":[1775934300,0],"endTime":[1775934301,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"claude-sonnet-4.5","gen_ai.conversation.id":"conv-zero","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
+        assert_eq!(
+            (messages.len(), total_input, total_output),
+            (2, 300, 30),
+            "unrelated zero-id spans were collapsed: {:?}",
+            messages
+                .iter()
+                .map(|m| (m.model_id.clone(), m.tokens.input))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn zero_top_level_ids_fall_through_to_valid_span_context_ids() {
+        // A zero top-level sentinel must not mask a valid nested spanContext
+        // identity: duplicate snapshots of the SAME span, identified only via
+        // spanContext, must still merge instead of falling back to the
+        // line-index key and double counting.
+        let content = concat!(
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","spanContext":{"traceId":"aaaabbbbccccddddaaaabbbbccccdddd","spanId":"1122334455667788"},"name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-ctx","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","spanContext":{"traceId":"aaaabbbbccccddddaaaabbbbccccdddd","spanId":"1122334455667788"},"name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-ctx","gen_ai.usage.input_tokens":150,"gen_ai.usage.output_tokens":12}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "duplicate snapshots with valid spanContext ids behind zero top-level ids must merge: keys {:?}",
+            messages
+                .iter()
+                .map(|m| m.dedup_key.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(messages[0].tokens.input, 150);
+    }
+
+    #[test]
+    fn adversarial_spanid_only_duplicates_do_merge() {
+        // Duplicate exporter snapshots of the SAME span (same spanId) that lack
+        // a traceId. Per the #939 intent these should merge into one message,
+        // but the fallback dedup key previously ignored span_id and appended
+        // the line index, so they stayed distinct -> double count.
+        let content = concat!(
+            r#"{"type":"span","spanId":"span-dup","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-dup","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","spanId":"span-dup","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-dup","gen_ai.usage.input_tokens":150,"gen_ai.usage.output_tokens":12}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "spanId-only duplicate snapshots were not merged: keys {:?}",
+            messages
+                .iter()
+                .map(|m| m.dedup_key.clone())
+                .collect::<Vec<_>>()
         );
     }
 }

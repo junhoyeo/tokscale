@@ -2,7 +2,7 @@
 
 use crate::sessions::UnifiedMessage;
 use crate::TokenBreakdown;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Default idle gap threshold: 3 minutes (ms).
 pub const DEFAULT_IDLE_GAP_MS: i64 = 3 * 60 * 1000;
@@ -71,13 +71,14 @@ impl SessionBlock {
 
     fn add(&mut self, span: &SessionMessageSpan<'_>) {
         self.end_ts = self.end_ts.max(span.end_ts);
-        self.tokens.input += span.msg.tokens.input;
-        self.tokens.output += span.msg.tokens.output;
-        self.tokens.cache_read += span.msg.tokens.cache_read;
-        self.tokens.cache_write += span.msg.tokens.cache_write;
-        self.tokens.reasoning += span.msg.tokens.reasoning;
+        // Aggregate the complete breakdown so future token buckets cannot be
+        // omitted from session totals.
+        self.tokens += &span.msg.tokens;
         self.cost += span.msg.cost;
-        self.message_count += span.msg.message_count.max(1);
+        // Zero is intentional for attribution fragments split from one
+        // authoritative source row; default construction already supplies one
+        // for ordinary messages, so coercing zero here inflates session counts.
+        self.message_count += span.msg.message_count.max(0);
     }
 }
 
@@ -179,7 +180,30 @@ pub fn compute_time_metrics(intervals: &[SessionInterval], _idle_gap_ms: i64) ->
 
     let total_active_time_ms: i64 = intervals.iter().map(|s| s.active_duration_ms).sum();
     let total_wall_time_ms: i64 = intervals.iter().map(|s| s.wall_duration_ms).sum();
-    let session_count = intervals.len() as u32;
+    // Count authoritative source sessions, not count-neutral attribution blocks.
+    // A single Copilot SQLite session may be split across shutdown days/models
+    // that exceed the idle gap; only its one counted fragment contributes. A
+    // source whose every interval legitimately reports zero messages still
+    // counts once, preserving the historical existence semantics.
+    let mut positive_groups = HashSet::new();
+    let mut zero_groups = HashSet::new();
+    let mut session_count = 0_u32;
+    for interval in intervals {
+        let group = (interval.client.as_str(), interval.session_id.as_str());
+        if interval.message_count > 0 {
+            session_count = session_count.saturating_add(1);
+            positive_groups.insert(group);
+        } else {
+            zero_groups.insert(group);
+        }
+    }
+    session_count = session_count.saturating_add(
+        zero_groups
+            .difference(&positive_groups)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX),
+    );
 
     // --- Longest continuous usage ---
     // Collect all session [start, end] as activity windows, merge overlapping
@@ -275,6 +299,26 @@ pub fn compute_daily_active_time(
     intervals: &[SessionInterval],
 ) -> std::collections::HashMap<String, i64> {
     compute_daily_active_time_with_timezone(intervals, &chrono::Local)
+}
+
+/// Per-day active time keyed by the scan's bucketing timezone.
+///
+/// Active time is keyed by day just like tokens are, so it has to follow the
+/// same pinned zone or the two disagree about which day a session near midnight
+/// belongs to — and `active_time_ms` is written per `(device, date)` on the
+/// server alongside the token totals.
+pub fn compute_daily_active_time_in(
+    intervals: &[SessionInterval],
+    timezone: &crate::bucket_tz::BucketTimezone,
+) -> std::collections::HashMap<String, i64> {
+    match timezone {
+        crate::bucket_tz::BucketTimezone::Local => {
+            compute_daily_active_time_with_timezone(intervals, &chrono::Local)
+        }
+        crate::bucket_tz::BucketTimezone::Pinned(tz) => {
+            compute_daily_active_time_with_timezone(intervals, tz)
+        }
+    }
 }
 
 fn compute_daily_active_time_with_timezone<Tz>(
@@ -392,10 +436,13 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.01,
+            cost_source: Default::default(),
             message_count: 1,
             agent: None,
             dedup_key: None,
+            session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
             duration_ms: None,
         }
     }
@@ -425,6 +472,31 @@ mod tests {
         assert_eq!(result[0].wall_duration_ms, 0);
         assert_eq!(result[0].active_duration_ms, 0);
         assert_eq!(result[0].message_count, 1);
+    }
+
+    #[test]
+    fn test_sessionize_saturates_overflowing_token_fold() {
+        // A parser can clamp an untrusted token count to i64::MAX (e.g.
+        // antigravity_cli). Two such messages in one (client, session_id) block
+        // within the idle gap fold into the same SessionBlock; a plain `+=`
+        // fold would overflow (debug panic / release wrap) before it is
+        // serialized into SessionInterval.tokens.
+        let overlarge = |ts: i64| {
+            let mut message = make_msg("antigravity-cli", "ses1", ts);
+            message.tokens = TokenBreakdown {
+                input: i64::MAX,
+                output: 0,
+                cache_read: i64::MAX,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            message
+        };
+        let msgs = vec![overlarge(1_000_000), overlarge(1_001_000)];
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tokens.input, i64::MAX);
+        assert_eq!(result[0].tokens.cache_read, i64::MAX);
     }
 
     #[test]
@@ -488,6 +560,37 @@ mod tests {
         assert_eq!(result[1].active_duration_ms, 0);
         assert_eq!(result[1].wall_duration_ms, 0);
         assert_eq!(result[1].message_count, 1);
+    }
+
+    #[test]
+    fn test_sessionize_preserves_count_neutral_split_fragments() {
+        let mut counted = make_msg("copilot", "session-1", 1_000_000);
+        counted.message_count = 1;
+        let mut split_model = make_msg("copilot", "session-1", 1_000_000 + DEFAULT_IDLE_GAP_MS + 1);
+        split_model.message_count = 0;
+        let mut residual = make_msg(
+            "copilot",
+            "session-1",
+            1_000_000 + 2 * (DEFAULT_IDLE_GAP_MS + 1),
+        );
+        residual.message_count = 0;
+
+        let result = sessionize(&[counted, split_model, residual], DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(
+            result.len(),
+            3,
+            "idle-separated activity remains three time blocks"
+        );
+        assert_eq!(
+            result
+                .iter()
+                .map(|interval| interval.message_count)
+                .sum::<i32>(),
+            1
+        );
+        let metrics = compute_time_metrics(&result, DEFAULT_IDLE_GAP_MS);
+        assert_eq!(metrics.session_count, 1);
     }
 
     #[test]

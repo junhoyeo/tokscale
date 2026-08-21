@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalColorMode {
@@ -7,6 +7,11 @@ pub(crate) enum TerminalColorMode {
 }
 
 impl TerminalColorMode {
+    // Terminal 2.15 (build 464, shipped with macOS 26 Tahoe) is the first
+    // Terminal.app that renders 24-bit SGR reliably. Older builds garble RGB
+    // sequences into saturated color blocks (see #559 and #1060).
+    const APPLE_TERMINAL_TRUECOLOR_VERSION: u32 = 464;
+
     pub(crate) fn from_env<I, K, V>(env: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -14,8 +19,9 @@ impl TerminalColorMode {
         V: AsRef<str>,
     {
         let mut term = String::new();
-        let mut term_program = String::new();
         let mut colorterm = String::new();
+        let mut term_program = String::new();
+        let mut term_program_version = String::new();
         let mut no_color = false;
 
         for (key, value) in env {
@@ -23,14 +29,15 @@ impl TerminalColorMode {
             let value = value.as_ref();
             match key {
                 "TERM" => term = value.to_ascii_lowercase(),
-                "TERM_PROGRAM" => term_program = value.to_ascii_lowercase(),
                 "COLORTERM" => colorterm = value.to_ascii_lowercase(),
+                "TERM_PROGRAM" => term_program = value.to_ascii_lowercase(),
+                "TERM_PROGRAM_VERSION" => term_program_version = value.to_string(),
                 "NO_COLOR" => no_color = true,
                 _ => {}
             }
         }
 
-        if no_color || term == "dumb" || term_program == "apple_terminal" {
+        if no_color || term == "dumb" {
             return Self::Compatible;
         }
 
@@ -41,7 +48,22 @@ impl TerminalColorMode {
             return Self::FullColor;
         }
 
-        Self::FullColor
+        // Terminal.app never sets COLORTERM, and only modern builds (macOS 26+)
+        // render 24-bit SGR. Gate on the version so old builds fall back to the
+        // named-color palette instead of garbling every theme into blocks.
+        if term_program == "apple_terminal" {
+            let version = term_program_version
+                .split('.')
+                .next()
+                .and_then(|v| v.parse::<u32>().ok());
+            if version.is_some_and(|v| v >= Self::APPLE_TERMINAL_TRUECOLOR_VERSION) {
+                return Self::FullColor;
+            }
+        }
+
+        // No positive evidence of truecolor support: prefer the named-color
+        // palette over raw RGB, which non-truecolor terminals garble.
+        Self::Compatible
     }
 }
 
@@ -56,6 +78,15 @@ pub enum ThemeName {
     Orange,
     Monochrome,
     YlGnBu,
+    Graphite,
+    Lagoon,
+    Dusk,
+    TokyoNight,
+    Catppuccin,
+    Solarized,
+    Gruvbox,
+    GruvboxMaterial,
+    OneDark,
 }
 
 impl ThemeName {
@@ -70,6 +101,15 @@ impl ThemeName {
             ThemeName::Orange,
             ThemeName::Monochrome,
             ThemeName::YlGnBu,
+            ThemeName::Graphite,
+            ThemeName::Lagoon,
+            ThemeName::Dusk,
+            ThemeName::TokyoNight,
+            ThemeName::Catppuccin,
+            ThemeName::Solarized,
+            ThemeName::Gruvbox,
+            ThemeName::GruvboxMaterial,
+            ThemeName::OneDark,
         ]
     }
 
@@ -90,6 +130,15 @@ impl ThemeName {
             ThemeName::Orange => "orange",
             ThemeName::Monochrome => "monochrome",
             ThemeName::YlGnBu => "ylgnbu",
+            ThemeName::Graphite => "graphite",
+            ThemeName::Lagoon => "lagoon",
+            ThemeName::Dusk => "dusk",
+            ThemeName::TokyoNight => "tokyo-night",
+            ThemeName::Catppuccin => "catppuccin",
+            ThemeName::Solarized => "solarized",
+            ThemeName::Gruvbox => "gruvbox",
+            ThemeName::GruvboxMaterial => "gruvbox-material",
+            ThemeName::OneDark => "one-dark",
         }
     }
 }
@@ -108,6 +157,15 @@ impl std::str::FromStr for ThemeName {
             "orange" => Ok(ThemeName::Orange),
             "monochrome" => Ok(ThemeName::Monochrome),
             "ylgnbu" => Ok(ThemeName::YlGnBu),
+            "graphite" => Ok(ThemeName::Graphite),
+            "lagoon" => Ok(ThemeName::Lagoon),
+            "dusk" => Ok(ThemeName::Dusk),
+            "tokyo-night" => Ok(ThemeName::TokyoNight),
+            "catppuccin" => Ok(ThemeName::Catppuccin),
+            "solarized" => Ok(ThemeName::Solarized),
+            "gruvbox" => Ok(ThemeName::Gruvbox),
+            "gruvbox-material" => Ok(ThemeName::GruvboxMaterial),
+            "one-dark" => Ok(ThemeName::OneDark),
             _ => Err(()),
         }
     }
@@ -124,6 +182,8 @@ pub struct Theme {
     pub muted: Color,
     pub accent: Color,
     pub selection: Color,
+    striped_row: Color,
+    current_row: Color,
     color_mode: TerminalColorMode,
 }
 
@@ -201,6 +261,69 @@ impl Theme {
                 Color::Rgb(44, 127, 184),  // grade3: #2c7fb8
                 Color::Rgb(37, 52, 148),   // grade4: #253494
             ],
+            ThemeName::Graphite => [
+                Color::Rgb(24, 27, 34),    // grade0: empty
+                Color::Rgb(148, 163, 184), // grade1: #94a3b8
+                Color::Rgb(125, 211, 252), // grade2: #7dd3fc
+                Color::Rgb(56, 189, 248),  // grade3: #38bdf8
+                Color::Rgb(14, 116, 144),  // grade4: #0e7490
+            ],
+            ThemeName::Lagoon => [
+                Color::Rgb(6, 32, 36),     // grade0: empty
+                Color::Rgb(153, 246, 228), // grade1: #99f6e4
+                Color::Rgb(94, 234, 212),  // grade2: #5eead4
+                Color::Rgb(45, 212, 191),  // grade3: #2dd4bf
+                Color::Rgb(15, 118, 110),  // grade4: #0f766e
+            ],
+            ThemeName::Dusk => [
+                Color::Rgb(27, 24, 38),    // grade0: empty
+                Color::Rgb(196, 181, 253), // grade1: #c4b5fd
+                Color::Rgb(167, 139, 250), // grade2: #a78bfa
+                Color::Rgb(139, 92, 246),  // grade3: #8b5cf6
+                Color::Rgb(109, 40, 217),  // grade4: #6d28d9
+            ],
+            ThemeName::TokyoNight => [
+                Color::Rgb(36, 40, 59),    // grade0: empty
+                Color::Rgb(125, 207, 255), // grade1: #7dcfff
+                Color::Rgb(122, 162, 247), // grade2: #7aa2f7
+                Color::Rgb(187, 154, 247), // grade3: #bb9af7
+                Color::Rgb(247, 118, 142), // grade4: #f7768e
+            ],
+            ThemeName::Catppuccin => [
+                Color::Rgb(49, 50, 68),    // grade0: empty
+                Color::Rgb(166, 227, 161), // grade1: #a6e3a1
+                Color::Rgb(137, 180, 250), // grade2: #89b4fa
+                Color::Rgb(203, 166, 247), // grade3: #cba6f7
+                Color::Rgb(243, 139, 168), // grade4: #f38ba8
+            ],
+            ThemeName::Solarized => [
+                Color::Rgb(7, 54, 66),    // grade0: empty
+                Color::Rgb(42, 161, 152), // grade1: #2aa198
+                Color::Rgb(38, 139, 210), // grade2: #268bd2
+                Color::Rgb(181, 137, 0),  // grade3: #b58900
+                Color::Rgb(220, 50, 47),  // grade4: #dc322f
+            ],
+            ThemeName::Gruvbox => [
+                Color::Rgb(50, 48, 47),    // grade0: empty
+                Color::Rgb(142, 192, 124), // grade1: #8ec07c
+                Color::Rgb(131, 165, 152), // grade2: #83a598
+                Color::Rgb(250, 189, 47),  // grade3: #fabd2f
+                Color::Rgb(251, 73, 52),   // grade4: #fb4934
+            ],
+            ThemeName::GruvboxMaterial => [
+                Color::Rgb(40, 40, 40),   // grade0: empty
+                Color::Rgb(184, 187, 38), // grade1: #b8bb26
+                Color::Rgb(250, 189, 47), // grade2: #fabd2f
+                Color::Rgb(215, 153, 33), // grade3: #d79921
+                Color::Rgb(251, 73, 52),  // grade4: #fb4934
+            ],
+            ThemeName::OneDark => [
+                Color::Rgb(40, 44, 52),    // grade0: empty
+                Color::Rgb(152, 195, 121), // grade1: #98c379
+                Color::Rgb(97, 175, 239),  // grade2: #61afef
+                Color::Rgb(198, 120, 221), // grade3: #c678dd
+                Color::Rgb(224, 108, 117), // grade4: #e06c75
+            ],
         };
 
         let mut theme = Self {
@@ -213,8 +336,104 @@ impl Theme {
             muted: Color::Rgb(139, 148, 158),
             accent: Color::Cyan,
             selection: Color::Rgb(48, 54, 61),
+            striped_row: Color::Rgb(20, 24, 30),
+            current_row: Color::Rgb(28, 42, 34),
             color_mode,
         };
+
+        match name {
+            ThemeName::Graphite => {
+                theme.background = Color::Rgb(10, 12, 16);
+                theme.foreground = Color::Rgb(226, 232, 240);
+                theme.border = Color::Rgb(55, 65, 81);
+                theme.muted = Color::Rgb(148, 163, 184);
+                theme.accent = Color::Rgb(125, 211, 252);
+                theme.selection = Color::Rgb(31, 41, 55);
+                theme.striped_row = Color::Rgb(15, 18, 24);
+                theme.current_row = Color::Rgb(24, 39, 38);
+            }
+            ThemeName::Lagoon => {
+                theme.background = Color::Rgb(5, 20, 23);
+                theme.foreground = Color::Rgb(216, 241, 238);
+                theme.border = Color::Rgb(31, 83, 88);
+                theme.muted = Color::Rgb(133, 177, 175);
+                theme.accent = Color::Rgb(94, 234, 212);
+                theme.selection = Color::Rgb(15, 54, 58);
+                theme.striped_row = Color::Rgb(7, 26, 30);
+                theme.current_row = Color::Rgb(18, 54, 42);
+            }
+            ThemeName::Dusk => {
+                theme.background = Color::Rgb(17, 16, 26);
+                theme.foreground = Color::Rgb(232, 226, 238);
+                theme.border = Color::Rgb(63, 57, 82);
+                theme.muted = Color::Rgb(166, 154, 184);
+                theme.accent = Color::Rgb(196, 181, 253);
+                theme.selection = Color::Rgb(43, 37, 58);
+                theme.striped_row = Color::Rgb(22, 20, 32);
+                theme.current_row = Color::Rgb(40, 45, 36);
+            }
+            ThemeName::TokyoNight => {
+                theme.background = Color::Rgb(26, 27, 38); // #1a1b26
+                theme.foreground = Color::Rgb(192, 202, 245); // #c0caf5
+                theme.border = Color::Rgb(65, 72, 104); // #414868
+                theme.muted = Color::Rgb(86, 95, 137); // #565f89
+                theme.accent = Color::Rgb(187, 154, 247); // #bb9af7
+                theme.selection = Color::Rgb(41, 46, 66); // #292e42
+                theme.striped_row = Color::Rgb(31, 35, 53);
+                theme.current_row = Color::Rgb(45, 74, 102);
+            }
+            ThemeName::Catppuccin => {
+                theme.background = Color::Rgb(30, 30, 46); // #1e1e2e
+                theme.foreground = Color::Rgb(205, 214, 244); // #cdd6f4
+                theme.border = Color::Rgb(88, 91, 112); // #585b70
+                theme.muted = Color::Rgb(166, 173, 200); // #a6adc8
+                theme.accent = Color::Rgb(203, 166, 247); // #cba6f7
+                theme.selection = Color::Rgb(69, 71, 90); // #45475a
+                theme.striped_row = Color::Rgb(49, 50, 68);
+                theme.current_row = Color::Rgb(69, 71, 90);
+            }
+            ThemeName::Solarized => {
+                theme.background = Color::Rgb(0, 43, 54); // #002b36
+                theme.foreground = Color::Rgb(147, 161, 161); // #93a1a1
+                theme.border = Color::Rgb(88, 110, 117); // #586e75
+                theme.muted = Color::Rgb(101, 123, 131); // #657b83
+                theme.accent = Color::Rgb(181, 137, 0); // #b58900
+                theme.selection = Color::Rgb(7, 54, 66); // #073642
+                theme.striped_row = Color::Rgb(0, 52, 65);
+                theme.current_row = Color::Rgb(7, 54, 66);
+            }
+            ThemeName::Gruvbox => {
+                theme.background = Color::Rgb(40, 40, 40); // #282828
+                theme.foreground = Color::Rgb(235, 219, 178); // #ebdbb2
+                theme.border = Color::Rgb(102, 92, 84); // #665c54
+                theme.muted = Color::Rgb(168, 153, 132); // #a89984
+                theme.accent = Color::Rgb(250, 189, 47); // #fabd2f
+                theme.selection = Color::Rgb(60, 56, 54); // #3c3836
+                theme.striped_row = Color::Rgb(50, 48, 47);
+                theme.current_row = Color::Rgb(69, 133, 136);
+            }
+            ThemeName::GruvboxMaterial => {
+                theme.background = Color::Rgb(50, 48, 47); // #32302f
+                theme.foreground = Color::Rgb(235, 219, 178); // #ebdbb2
+                theme.border = Color::Rgb(102, 92, 84); // #665c54
+                theme.muted = Color::Rgb(168, 153, 132); // #a89984
+                theme.accent = Color::Rgb(215, 153, 33); // #d79921
+                theme.selection = Color::Rgb(80, 73, 69); // #504945
+                theme.striped_row = Color::Rgb(60, 56, 54);
+                theme.current_row = Color::Rgb(69, 133, 136);
+            }
+            ThemeName::OneDark => {
+                theme.background = Color::Rgb(40, 44, 52); // #282c34
+                theme.foreground = Color::Rgb(171, 178, 191); // #abb2bf
+                theme.border = Color::Rgb(92, 99, 112); // #5c6370
+                theme.muted = Color::Rgb(130, 137, 151); // #828997
+                theme.accent = Color::Rgb(97, 175, 239); // #61afef
+                theme.selection = Color::Rgb(62, 68, 81); // #3e4451
+                theme.striped_row = Color::Rgb(44, 49, 58);
+                theme.current_row = Color::Rgb(58, 73, 94);
+            }
+            _ => {}
+        }
 
         if color_mode == TerminalColorMode::Compatible {
             theme.colors = [
@@ -231,6 +450,8 @@ impl Theme {
             theme.muted = Color::DarkGray;
             theme.accent = Color::Cyan;
             theme.selection = Color::DarkGray;
+            theme.striped_row = Color::Black;
+            theme.current_row = Color::DarkGray;
         }
 
         theme
@@ -259,6 +480,12 @@ impl Theme {
         Style::default().fg(self.color(Color::Rgb(200, 150, 100)))
     }
 
+    pub(crate) fn metric_total_style(&self) -> Style {
+        Style::default()
+            .fg(self.foreground)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub(crate) fn secondary_text_style(&self) -> Style {
         Style::default().fg(self.color(Color::Rgb(170, 170, 170)))
     }
@@ -271,7 +498,7 @@ impl Theme {
         if self.color_mode == TerminalColorMode::Compatible {
             Style::default()
         } else {
-            Style::default().bg(Color::Rgb(20, 24, 30))
+            Style::default().bg(self.striped_row)
         }
     }
 
@@ -279,7 +506,7 @@ impl Theme {
         if self.color_mode == TerminalColorMode::Compatible {
             Style::default().bg(self.selection)
         } else {
-            Style::default().bg(Color::Rgb(28, 42, 34))
+            Style::default().bg(self.current_row)
         }
     }
 }
@@ -335,11 +562,54 @@ mod tests {
     }
 
     #[test]
-    fn apple_terminal_uses_compatible_color_mode() {
+    fn apple_terminal_keeps_full_color_and_per_theme_palettes() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM_PROGRAM_VERSION", "487"),
+            ("TERM", "xterm-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::FullColor);
+
+        // The regression this guards: in `Compatible` mode every theme collapses
+        // onto one grey/cyan palette, so cycling themes changed the footer label
+        // and nothing else.
+        let green = Theme::from_name_with_color_mode(ThemeName::Green, mode);
+        let blue = Theme::from_name_with_color_mode(ThemeName::Blue, mode);
+        assert_ne!(green.colors, blue.colors);
+    }
+
+    #[test]
+    fn old_apple_terminal_falls_back_to_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM_PROGRAM_VERSION", "455"),
+            ("TERM", "xterm-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn apple_terminal_without_version_uses_compatible_colors() {
         let mode = TerminalColorMode::from_env(env(&[
             ("TERM_PROGRAM", "Apple_Terminal"),
             ("TERM", "xterm-256color"),
         ]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn xterm_256_without_truecolor_evidence_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[("TERM", "xterm-256color")]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn screen_without_truecolor_evidence_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[("TERM", "screen-256color")]));
 
         assert_eq!(mode, TerminalColorMode::Compatible);
     }
@@ -361,6 +631,138 @@ mod tests {
             TerminalColorMode::from_env(env(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]));
 
         assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn theme_names_round_trip_through_settings_value() {
+        for theme in ThemeName::all() {
+            assert_eq!(theme.as_str().parse::<ThemeName>(), Ok(*theme));
+        }
+    }
+
+    #[test]
+    fn theme_pack_names_parse_from_settings_strings() {
+        assert_eq!("tokyo-night".parse(), Ok(ThemeName::TokyoNight));
+        assert_eq!("catppuccin".parse(), Ok(ThemeName::Catppuccin));
+        assert_eq!("solarized".parse(), Ok(ThemeName::Solarized));
+        assert_eq!("gruvbox".parse(), Ok(ThemeName::Gruvbox));
+        assert_eq!("gruvbox-material".parse(), Ok(ThemeName::GruvboxMaterial));
+        assert_eq!("one-dark".parse(), Ok(ThemeName::OneDark));
+    }
+
+    #[test]
+    fn theme_pack_themes_are_listed_for_cycling() {
+        let themes = ThemeName::all();
+
+        assert!(themes.contains(&ThemeName::TokyoNight));
+        assert!(themes.contains(&ThemeName::Catppuccin));
+        assert!(themes.contains(&ThemeName::Solarized));
+        assert!(themes.contains(&ThemeName::Gruvbox));
+        assert!(themes.contains(&ThemeName::GruvboxMaterial));
+        assert!(themes.contains(&ThemeName::OneDark));
+    }
+
+    #[test]
+    fn gruvbox_material_differs_from_gruvbox() {
+        let gruvbox =
+            Theme::from_name_with_color_mode(ThemeName::Gruvbox, TerminalColorMode::FullColor);
+        let material = Theme::from_name_with_color_mode(
+            ThemeName::GruvboxMaterial,
+            TerminalColorMode::FullColor,
+        );
+
+        assert_ne!(gruvbox.background, material.background);
+        assert_ne!(gruvbox.accent, material.accent);
+        assert_ne!(gruvbox.selection, material.selection);
+        assert_ne!(gruvbox.colors, material.colors);
+    }
+
+    #[test]
+    fn surface_themes_customize_background_and_row_colors() {
+        let cases = [
+            (
+                ThemeName::Graphite,
+                Color::Rgb(10, 12, 16),
+                Color::Rgb(226, 232, 240),
+                Color::Rgb(31, 41, 55),
+                Color::Rgb(15, 18, 24),
+                Color::Rgb(24, 39, 38),
+            ),
+            (
+                ThemeName::Lagoon,
+                Color::Rgb(5, 20, 23),
+                Color::Rgb(216, 241, 238),
+                Color::Rgb(15, 54, 58),
+                Color::Rgb(7, 26, 30),
+                Color::Rgb(18, 54, 42),
+            ),
+            (
+                ThemeName::Dusk,
+                Color::Rgb(17, 16, 26),
+                Color::Rgb(232, 226, 238),
+                Color::Rgb(43, 37, 58),
+                Color::Rgb(22, 20, 32),
+                Color::Rgb(40, 45, 36),
+            ),
+            (
+                ThemeName::TokyoNight,
+                Color::Rgb(26, 27, 38),
+                Color::Rgb(192, 202, 245),
+                Color::Rgb(41, 46, 66),
+                Color::Rgb(31, 35, 53),
+                Color::Rgb(45, 74, 102),
+            ),
+            (
+                ThemeName::Catppuccin,
+                Color::Rgb(30, 30, 46),
+                Color::Rgb(205, 214, 244),
+                Color::Rgb(69, 71, 90),
+                Color::Rgb(49, 50, 68),
+                Color::Rgb(69, 71, 90),
+            ),
+            (
+                ThemeName::Solarized,
+                Color::Rgb(0, 43, 54),
+                Color::Rgb(147, 161, 161),
+                Color::Rgb(7, 54, 66),
+                Color::Rgb(0, 52, 65),
+                Color::Rgb(7, 54, 66),
+            ),
+            (
+                ThemeName::Gruvbox,
+                Color::Rgb(40, 40, 40),
+                Color::Rgb(235, 219, 178),
+                Color::Rgb(60, 56, 54),
+                Color::Rgb(50, 48, 47),
+                Color::Rgb(69, 133, 136),
+            ),
+            (
+                ThemeName::GruvboxMaterial,
+                Color::Rgb(50, 48, 47),
+                Color::Rgb(235, 219, 178),
+                Color::Rgb(80, 73, 69),
+                Color::Rgb(60, 56, 54),
+                Color::Rgb(69, 133, 136),
+            ),
+            (
+                ThemeName::OneDark,
+                Color::Rgb(40, 44, 52),
+                Color::Rgb(171, 178, 191),
+                Color::Rgb(62, 68, 81),
+                Color::Rgb(44, 49, 58),
+                Color::Rgb(58, 73, 94),
+            ),
+        ];
+
+        for (name, background, foreground, selection, striped, current) in cases {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::FullColor);
+
+            assert_eq!(theme.background, background);
+            assert_eq!(theme.foreground, foreground);
+            assert_eq!(theme.selection, selection);
+            assert_eq!(theme.striped_row_style().bg, Some(striped));
+            assert_eq!(theme.current_row_style().bg, Some(current));
+        }
     }
 
     #[test]
@@ -400,6 +802,7 @@ mod tests {
             theme.metric_output_style(),
             theme.metric_cache_read_style(),
             theme.metric_cache_write_style(),
+            theme.metric_total_style(),
             theme.secondary_text_style(),
             theme.subtle_text_style(),
             theme.striped_row_style(),

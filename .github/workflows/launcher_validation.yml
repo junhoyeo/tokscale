@@ -3,44 +3,39 @@ name: Launcher Validation
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
-    paths:
+    branches: [main]
+    paths: &launcher_paths
       - "packages/cli/bin.js"
       - "packages/cli/src/**"
       - "packages/cli/tsconfig.json"
+      - "packages/cli/bunfig.toml"
       - "packages/cli/package.json"
       - "packages/tokscale/bin.js"
       - "packages/tokscale/package.json"
       - "packages/cli-*/package.json"
       - "scripts/test-package-launchers.sh"
       - ".github/workflows/launcher_validation.yml"
+      - ".npmrc"
       - "package.json"
       - "bun.lock"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "crates/**"
   pull_request:
-    branches: [main, develop]
-    paths:
-      - "packages/cli/bin.js"
-      - "packages/cli/src/**"
-      - "packages/cli/tsconfig.json"
-      - "packages/cli/package.json"
-      - "packages/tokscale/bin.js"
-      - "packages/tokscale/package.json"
-      - "packages/cli-*/package.json"
-      - "scripts/test-package-launchers.sh"
-      - ".github/workflows/launcher_validation.yml"
-      - "package.json"
-      - "bun.lock"
-      - "Cargo.toml"
-      - "Cargo.lock"
+    branches: [main]
+    paths: *launcher_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   launcher-smoke:
     name: Launcher Smoke
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

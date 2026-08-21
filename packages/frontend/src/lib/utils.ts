@@ -90,31 +90,56 @@ export function filterByClient(data: TokenContributionData, clients: ClientType[
   };
 }
 
-export function filterByModel(data: TokenContributionData, models: string[]): TokenContributionData {
-  if (models.length === 0) return data;
-
-  const modelSet = new Set(models);
-  const filteredContributions = data.contributions.map((day) => {
-    const filteredClients = day.clients.filter((c) => modelSet.has(c.modelId));
-    return recalculateDayTotals({ ...day, clients: filteredClients });
-  });
-
-  const filteredClientSet = new Set<ClientType>();
-  for (const c of filteredContributions) {
-    for (const client of c.clients) {
-      filteredClientSet.add(client.client);
-    }
-  }
-
-  return {
-    ...data,
-    contributions: recalculateIntensity(filteredContributions),
-    summary: recalculateSummary(filteredContributions, Array.from(filteredClientSet)),
-  };
-}
-
 export function filterByYear(contributions: DailyContribution[], year: string): DailyContribution[] {
   return contributions.filter((c) => c.date.startsWith(year));
+}
+
+/**
+ * Toggle a client within the client filter, honoring the "empty means all" convention.
+ *
+ * An empty `clientFilter` is the show-all sentinel: every chip renders as active. To
+ * keep the toggle in sync with that affordance, we expand an empty filter to the full
+ * `availableClients` set before toggling, so clicking a highlighted chip deselects it
+ * instead of collapsing the selection to that single client.
+ *
+ * The result is normalized back to the empty sentinel whenever the toggle would leave
+ * every available client selected, or leave none selected — both states mean "show all"
+ * elsewhere in the UI (the Clear/Show-all actions), so we avoid introducing a new
+ * "nothing selected" sentinel.
+ */
+export function toggleClientFilter(
+  client: ClientType,
+  clientFilter: ClientType[],
+  availableClients: ClientType[]
+): ClientType[] {
+  const effective = clientFilter.length === 0 ? [...availableClients] : clientFilter;
+
+  const next = effective.includes(client)
+    ? effective.filter((c) => c !== client)
+    : [...effective, client];
+
+  if (next.length === 0 || next.length === availableClients.length) {
+    return [];
+  }
+
+  return next;
+}
+
+/**
+ * Resolve the currently selected day from a date string against the live contributions.
+ *
+ * Storing the selected date (instead of a snapshot of the day object) lets the
+ * breakdown panel re-derive its data whenever the underlying contributions change
+ * (e.g. after a client filter change), so it never shows stale pre-filter totals.
+ * Returns null when no date is selected or the date is absent from the current data,
+ * which the caller uses to close the panel.
+ */
+export function resolveSelectedDay(
+  selectedDate: string | null,
+  contributions: DailyContribution[]
+): DailyContribution | null {
+  if (!selectedDate) return null;
+  return contributions.find((c) => c.date === selectedDate) ?? null;
 }
 
 function recalculateDayTotals(day: DailyContribution): DailyContribution {
@@ -204,16 +229,47 @@ export function formatTokenCount(count: number): string {
     const val = (count / 1_000_000_000_000).toFixed(3).replace(/\.?0+$/, '');
     return `${val}T`;
   }
-  if (count >= 1_000_000_000) return `${(count / 1_000_000_000).toFixed(1)}B`;
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  if (count >= 1_000_000_000) {
+    const val = count / 1_000_000_000;
+    // toFixed(1) rounds 999.95+ to "1000.0"; promote to next unit instead
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}T`
+      : `${val.toFixed(1)}B`;
+  }
+  if (count >= 1_000_000) {
+    const val = count / 1_000_000;
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}B`
+      : `${val.toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    const val = count / 1_000;
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}M`
+      : `${val.toFixed(1)}K`;
+  }
   return count.toLocaleString('en-US');
 }
 
 export const formatNumber = formatTokenCount;
 
 export function formatCurrency(amount: number): string {
-  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
+  if (amount >= 1_000_000_000) {
+    return `$${(amount / 1_000_000_000).toFixed(2)}B`;
+  }
+  if (amount >= 1_000_000) {
+    const val = amount / 1_000_000;
+    // toFixed(2) rounds 999.995+ to "1000.00"; promote to next unit instead
+    return val >= 999.995
+      ? `$${(val / 1000).toFixed(2)}B`
+      : `$${val.toFixed(2)}M`;
+  }
+  if (amount >= 1000) {
+    const val = amount / 1000;
+    return val >= 999.995
+      ? `$${(val / 1000).toFixed(2)}M`
+      : `$${val.toFixed(2)}K`;
+  }
   return `$${amount.toFixed(2)}`;
 }
 
@@ -284,17 +340,6 @@ export function calculateLongestStreak(contributions: DailyContribution[]): numb
 export function findBestDay(contributions: DailyContribution[]): DailyContribution | null {
   if (contributions.length === 0) return null;
   return contributions.reduce((best, current) => (current.totals.cost > best.totals.cost ? current : best));
-}
-
-export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result
-    ? {
-        r: parseInt(result[1], 16),
-        g: parseInt(result[2], 16),
-        b: parseInt(result[3], 16),
-      }
-    : null;
 }
 
 export function hexToNumber(hex: string): number {

@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -39,7 +41,7 @@ const mockState = vi.hoisted(() => {
     })),
     {
       raw: vi.fn(),
-    }
+    },
   );
 
   const db = {
@@ -112,7 +114,9 @@ vi.mock("@/lib/db/usernameLookup", () => {
     USERNAME_LOOKUP_LIMIT: 2,
     getSingleUsernameMatch: (rows: readonly unknown[], username: string) => {
       if (rows.length > 1) {
-        throw new AmbiguousUsernameError(`Multiple users match username ${username} case-insensitively`);
+        throw new AmbiguousUsernameError(
+          `Multiple users match username ${username} case-insensitively`,
+        );
       }
       return rows[0] ?? null;
     },
@@ -175,10 +179,16 @@ describe("user embed data", () => {
     await getUserEmbedStats("alice", "tokens");
     const tokenSqlTexts = serializeSqlCalls();
 
-    expect(tokenSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
-    expect(tokenSqlTexts.some((text) =>
-      text.includes("total_tokens DESC, CAST(total_cost AS DECIMAL(12,4)) DESC")
-    )).toBe(false);
+    expect(tokenSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(
+      true,
+    );
+    expect(
+      tokenSqlTexts.some((text) =>
+        /total_tokens DESC, CAST\(total_cost AS DECIMAL\(\d+,4\)\) DESC/.test(
+          text,
+        ),
+      ),
+    ).toBe(false);
 
     mockState.reset();
     mockState.pushAwaitedResult([
@@ -198,10 +208,38 @@ describe("user embed data", () => {
     await getUserEmbedStats("alice", "cost");
     const costSqlTexts = serializeSqlCalls();
 
-    expect(costSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
-    expect(costSqlTexts.some((text) =>
-      text.includes("CAST(total_cost AS DECIMAL(12,4)) DESC, total_tokens DESC")
-    )).toBe(false);
+    expect(costSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(
+      true,
+    );
+    expect(
+      costSqlTexts.some((text) =>
+        /CAST\(total_cost AS DECIMAL\(\d+,4\)\) DESC, total_tokens DESC/.test(
+          text,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("casts total_cost at full column precision for cost-sorted embed stats", async () => {
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        submissionCount: 1,
+        updatedAt: new Date("2026-03-12T09:00:00.000Z"),
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 2, total: 3 }]);
+
+    await getUserEmbedStats("alice", "cost");
+
+    // submissions.total_cost is decimal(18,4); narrowing the cast overflows for
+    // costs >= the narrowed ceiling and 500s the embed for that user.
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("looks up embed stats usernames case-insensitively and returns the canonical username", async () => {
@@ -225,9 +263,11 @@ describe("user embed data", () => {
     expect(stats?.user.username).toBe("ImLunaHey");
     expect(stats?.stats.rank).toBe(4);
     expect(mockState.limitCalls[0]).toBe(2);
-    expect(sqlTexts.some((text) =>
-      text.toLowerCase().includes("lower(users.username) = imlunahey")
-    )).toBe(true);
+    expect(
+      sqlTexts.some((text) =>
+        text.toLowerCase().includes("lower(users.username) = imlunahey"),
+      ),
+    ).toBe(true);
   });
 
   it("looks up embed contributions usernames case-insensitively", async () => {
@@ -239,9 +279,36 @@ describe("user embed data", () => {
 
     expect(contributions).toEqual([]);
     expect(mockState.limitCalls[0]).toBe(2);
-    expect(sqlTexts.some((text) =>
-      text.toLowerCase().includes("lower(users.username) = imlunahey")
-    )).toBe(true);
+    expect(
+      sqlTexts.some((text) =>
+        text.toLowerCase().includes("lower(users.username) = imlunahey"),
+      ),
+    ).toBe(true);
+  });
+
+  it("derives contribution intensity from max-relative tokens even when cost is zero", async () => {
+    mockState.pushAwaitedResult([{ id: "user-alice" }]);
+    const end = new Date();
+    end.setUTCHours(0, 0, 0, 0);
+    end.setUTCDate(end.getUTCDate() - 1);
+    mockState.pushAwaitedResult(
+      [1, 25, 26, 50, 51, 75, 76, 100].map((tokens, index) => ({
+        date: (() => {
+          const date = new Date(end);
+          date.setUTCDate(date.getUTCDate() - (7 - index));
+          return date.toISOString().slice(0, 10);
+        })(),
+        tokens,
+        cost: 0,
+      })),
+    );
+
+    const contributions = await getUserEmbedContributions("alice");
+
+    expect(contributions?.map(({ intensity }) => intensity)).toEqual([
+      1, 2, 2, 3, 3, 4, 4, 4,
+    ]);
+    expect(contributions?.every(({ totalCost }) => totalCost === 0)).toBe(true);
   });
 
   it("rejects ambiguous case-insensitive embed stats matches", async () => {
@@ -269,7 +336,7 @@ describe("user embed data", () => {
     ]);
 
     await expect(getUserEmbedStats("imlunahey", "tokens")).rejects.toThrow(
-      "Multiple users match username imlunahey case-insensitively"
+      "Multiple users match username imlunahey case-insensitively",
     );
     expect(mockState.limitCalls[0]).toBe(2);
   });

@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
   const getSessionFromHeader = vi.fn();
   const revalidateTag = vi.fn();
+  const revalidateUsernamePaths = vi.fn();
   const eq = vi.fn((left: unknown, right: unknown) => ({ op: "eq", left, right }));
   const and = vi.fn((...conditions: unknown[]) => ({ op: "and", conditions }));
   const returning = vi.fn(async () => updatedRows);
@@ -24,6 +25,7 @@ const mockState = vi.hoisted(() => {
     getSession,
     getSessionFromHeader,
     revalidateTag,
+    revalidateUsernamePaths,
     eq,
     and,
     db: { update },
@@ -35,6 +37,7 @@ const mockState = vi.hoisted(() => {
       getSession.mockReset();
       getSessionFromHeader.mockReset();
       revalidateTag.mockReset();
+      revalidateUsernamePaths.mockReset();
       eq.mockClear();
       and.mockClear();
       returning.mockClear();
@@ -67,6 +70,7 @@ vi.mock("@/lib/db", () => ({
 
 vi.mock("@/lib/db/usernameLookup", () => ({
   normalizeUsernameCacheKey: (username: string) => username.toLowerCase(),
+  revalidateUsernamePaths: mockState.revalidateUsernamePaths,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/settings/devices/[deviceId]/route");
@@ -148,5 +152,6 @@ describe("PATCH /api/settings/devices/[deviceId] CSRF origin checks", () => {
     });
     expect(mockState.db.update).toHaveBeenCalledWith(mockState.submittedDevices);
     expect(mockState.revalidateTag).toHaveBeenCalledWith("user:alice", "max");
+    expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
   });
 });

@@ -1,0 +1,1 @@
+ALTER TABLE "submissions" ADD COLUMN "ratchet_census_pending" integer DEFAULT 0 NOT NULL;

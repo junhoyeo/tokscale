@@ -8,7 +8,7 @@ use std::path::PathBuf;
 const API_TOKEN_ENV_VAR: &str = "TOKSCALE_API_TOKEN";
 
 fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("Could not determine home directory")
+    crate::paths::home_dir().context("Could not determine home directory")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

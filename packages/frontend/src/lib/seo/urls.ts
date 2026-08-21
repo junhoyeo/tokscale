@@ -1,0 +1,101 @@
+/**
+ * Canonical URL builders for every indexable page.
+ *
+ * Both the sitemap and each page's <link rel="canonical"> are built from these,
+ * because the two disagreeing is worse than either being absent: a sitemap URL
+ * that doesn't match the page's own canonical is a conflicting signal, and the
+ * page gets dropped rather than arbitrated.
+ *
+ * Must stay in sync with `metadataBase` in app/layout.tsx and the auth
+ * redirect/CSRF origin resolver.
+ */
+const HOSTED_ORIGIN = "https://tokscale.ai";
+const LOCAL_ORIGIN = "http://localhost:3000";
+
+/**
+ * Resolve the public http(s) origin once for metadata, sitemap, OAuth and
+ * CSRF. A path is intentionally discarded: Tokscale is deployed at an origin,
+ * not below a reverse-proxy path prefix.
+ */
+export function getConfiguredPublicOrigin(value = process.env.APP_URL): string | undefined {
+  if (!value) return undefined;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.origin;
+    }
+  } catch {
+    // Fall through to the hosted default rather than emitting unsafe redirects
+    // or invalid canonical URLs from a malformed environment value.
+  }
+
+  return undefined;
+}
+
+export function getPublicOrigin(value = process.env.APP_URL): string {
+  return getConfiguredPublicOrigin(value)
+    ?? (process.env.NODE_ENV === "development" ? LOCAL_ORIGIN : HOSTED_ORIGIN);
+}
+
+export const SITE_URL = getPublicOrigin();
+
+/**
+ * The bare origin, with no trailing slash, which is what both consumers emit
+ * verbatim: prod serves `<loc>https://tokscale.ai</loc>` in the sitemap and
+ * `rel="canonical" href="https://tokscale.ai"` on the page.
+ *
+ * Don't add a trailing slash back "for correctness" — it would desync the two.
+ * (A `next dev` server caches this route aggressively and can serve a stale
+ * `https://tokscale.ai/`; check prod, not dev, if the two ever look different.)
+ */
+export function homeUrl(): string {
+  return getPublicOrigin();
+}
+
+/**
+ * The leaderboard accepts period, sortBy, page, from/to, search and view.
+ *
+ * All of them except `view` are filters over one ranking, so they collapse onto
+ * the bare URL — `search` especially, since it spans an unbounded set of URLs
+ * that would otherwise be crawled as distinct near-duplicate pages.
+ *
+ * `view=groups` is the exception: it renders the groups browser, which is a
+ * different page that /groups permanently redirects to, so it canonicalizes to
+ * itself rather than collapsing into the user leaderboard.
+ */
+export function leaderboardUrl(view: "users" | "groups" = "users"): string {
+  return view === "groups"
+    ? `${getPublicOrigin()}/leaderboard?view=groups`
+    : `${getPublicOrigin()}/leaderboard`;
+}
+
+/**
+ * Profiles accept ?period=all|week|month. All three render the same profile
+ * over a different window, so the bare URL is canonical.
+ *
+ * `username` must be the DB's casing: /u/[username] permanently redirects any
+ * other casing, so a canonical built from the raw request param could point at
+ * a redirect.
+ */
+export function profileUrl(username: string): string {
+  return `${getPublicOrigin()}/u/${encodeURIComponent(username)}`;
+}
+
+export function groupUrl(slug: string): string {
+  return `${getPublicOrigin()}/groups/${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Static informational pages. Listed here rather than inlined so they land in
+ * the sitemap and their canonical tags through the same path as everything
+ * else — ad networks and search engines both check that these exist and are
+ * reachable, so they must not be the one set of URLs that drifts.
+ */
+export const LEGAL_PATHS = ["privacy", "terms", "contact"] as const;
+
+export type LegalPath = (typeof LEGAL_PATHS)[number];
+
+export function legalUrl(page: LegalPath): string {
+  return `${getPublicOrigin()}/${page}`;
+}

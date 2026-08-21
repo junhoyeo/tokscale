@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
@@ -33,16 +33,30 @@ pub struct DisplayNamesConfig {
 }
 
 impl TokscaleConfig {
-    fn config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".tokscale"))
+    fn load_from_path(path: &Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|content| toml::from_str(&content).ok())
+            .unwrap_or_default()
     }
 
     pub fn load() -> &'static TokscaleConfig {
         CONFIG.get_or_init(|| {
-            Self::config_path()
-                .and_then(|path| fs::read_to_string(path).ok())
-                .and_then(|content| toml::from_str(&content).ok())
-                .unwrap_or_default()
+            // Keep unit tests deterministic at the irreversible OnceLock
+            // boundary. Parser and widget-injection tests exercise disk/config
+            // behavior through explicit values without reading ambient files.
+            #[cfg(test)]
+            {
+                Self::default()
+            }
+            #[cfg(not(test))]
+            {
+                crate::paths::home_dir()
+                    .map(|home| home.join(".tokscale"))
+                    .as_deref()
+                    .map(Self::load_from_path)
+                    .unwrap_or_default()
+            }
         })
     }
 
@@ -84,4 +98,41 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
     Some(Color::Rgb(r, g, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_from_path_parses_custom_colors_and_display_names() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("tokscale.toml");
+        fs::write(
+            &path,
+            r##"[colors.providers]
+anthropic = "#123456"
+
+[display_names.clients]
+claude = "My Claude"
+"##,
+        )
+        .unwrap();
+
+        let config = TokscaleConfig::load_from_path(&path);
+        assert_eq!(
+            config.get_provider_color("Anthropic"),
+            Some(Color::Rgb(18, 52, 86))
+        );
+        assert_eq!(config.get_client_display_name("CLAUDE"), Some("My Claude"));
+    }
+
+    #[test]
+    fn load_from_path_uses_defaults_for_missing_file() {
+        let temp = TempDir::new().unwrap();
+        let config = TokscaleConfig::load_from_path(&temp.path().join("missing.toml"));
+        assert!(config.colors.providers.is_empty());
+        assert!(config.display_names.clients.is_empty());
+    }
 }

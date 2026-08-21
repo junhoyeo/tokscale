@@ -103,7 +103,105 @@ export const getPaletteNames = (): ColorPaletteName[] =>
 export const getPalette = (name: ColorPaletteName): GraphColorPalette =>
   colorPalettes[name] || colorPalettes[DEFAULT_PALETTE];
 
-export const getGradeColor = (palette: GraphColorPalette, intensity: 0 | 1 | 2 | 3 | 4): string => {
-  const grades = [palette.grade0, palette.grade1, palette.grade2, palette.grade3, palette.grade4];
+export const getGradeColor = (
+  palette: GraphColorPalette,
+  intensity: 0 | 1 | 2 | 3 | 4,
+): string => {
+  const grades = [
+    palette.grade0,
+    palette.grade1,
+    palette.grade2,
+    palette.grade3,
+    palette.grade4,
+  ];
   return grades[intensity] || palette.grade0;
 };
+
+const DARK_GRAPH_EMPTY = "#191f2b";
+const MINIMUM_ACTIVE_CONTRAST = 3;
+const MINIMUM_LUMINANCE_STEP = 0.02;
+const darkPaletteCache = new WeakMap<
+  GraphColorPalette,
+  readonly [string, string, string, string]
+>();
+
+function mixHexWithWhite(color: string, colorWeight: number): string {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match) return color;
+
+  const channels = [0, 2, 4].map((offset) =>
+    Number.parseInt(match[1].slice(offset, offset + 2), 16),
+  );
+  return `#${channels
+    .map((channel) =>
+      Math.round(channel * colorWeight + 255 * (1 - colorWeight))
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
+function relativeLuminance(color: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match) return 0;
+
+  const channels = [0, 2, 4].map((offset) =>
+    Number.parseInt(match[1].slice(offset, offset + 2), 16),
+  );
+  const linear = channels.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
+
+function contrastRatio(left: string, right: string): number {
+  const luminances = [relativeLuminance(left), relativeLuminance(right)].sort(
+    (a, b) => b - a,
+  );
+  return (luminances[0] + 0.05) / (luminances[1] + 0.05);
+}
+
+/**
+ * Convert a light-canvas graph palette into a monotonic ramp for the compact
+ * service surface. Colors stay as close as possible to their source hue while
+ * retaining 3:1 contrast and a visible luminance step between levels.
+ */
+export function getDarkGradeColors(
+  palette: GraphColorPalette,
+): readonly [string, string, string, string] {
+  const cached = darkPaletteCache.get(palette);
+  if (cached) return cached;
+
+  const bases = [
+    palette.grade4,
+    palette.grade3,
+    palette.grade2,
+    palette.grade1,
+  ];
+  let previousLuminance = Number.NEGATIVE_INFINITY;
+  const colors = bases.map((baseColor, index) => {
+    for (let percentage = 100; percentage >= 0; percentage -= 1) {
+      const candidate = mixHexWithWhite(baseColor, percentage / 100);
+      const luminance = relativeLuminance(candidate);
+      const separated =
+        index === 0 || luminance >= previousLuminance + MINIMUM_LUMINANCE_STEP;
+
+      if (
+        separated &&
+        contrastRatio(candidate, DARK_GRAPH_EMPTY) >= MINIMUM_ACTIVE_CONTRAST
+      ) {
+        previousLuminance = luminance;
+        return candidate;
+      }
+    }
+
+    previousLuminance = 1;
+    return "#ffffff";
+  }) as [string, string, string, string];
+
+  darkPaletteCache.set(palette, colors);
+  return colors;
+}

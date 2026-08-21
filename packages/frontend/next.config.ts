@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Produce a self-contained output directory for Docker / Node deployments.
+  // Vercel ignores this and uses its own file-tracing pipeline, so the
+  // production deploy is unaffected. Local `next build` will emit an
+  // additional .next/standalone directory alongside the normal output.
+  output: "standalone",
+
   // Enable styled-components SSR
   compiler: {
     styledComponents: true,

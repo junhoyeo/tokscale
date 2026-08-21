@@ -1,0 +1,1 @@
+ALTER TABLE "submissions" ADD COLUMN "cost_is_complete" boolean DEFAULT true NOT NULL;

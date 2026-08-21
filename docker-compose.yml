@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # Override all four variables together when changing credentials —
+      # compose cannot derive DATABASE_URL from POSTGRES_* via variable nesting.
+      POSTGRES_USER: ${POSTGRES_USER:-tokscale}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tokscale}
+      POSTGRES_DB: ${POSTGRES_DB:-tokscale}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Bound to loopback only — not exposed on all interfaces.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokscale} -d ${POSTGRES_DB:-tokscale}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    # Use the image built by `make docker/build` (tagged tokscale:latest).
+    # Declaring `image` here prevents compose from triggering an implicit build
+    # on `make up`, which would fail because `db` is only resolvable inside the
+    # compose network — not from the Docker build context.
+    image: tokscale:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
+      # postgres:16-alpine has no TLS configured. Production deployments using
+      # a managed database should set DATABASE_SSL=require (the default outside
+      # this Compose stack also remains require in NODE_ENV=production).
+      DATABASE_SSL: ${DATABASE_SSL:-false}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      APP_URL: ${APP_URL:-http://localhost:3333}
+      # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
+    ports:
+      - "127.0.0.1:3333:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  tui:
+    build:
+      context: .
+      dockerfile: Dockerfile.tui
+    profiles: [tui]
+    stdin_open: true
+    tty: true
+    user: "${TOKSCALE_UID:-1000}:${TOKSCALE_GID:-1000}"
+    environment:
+      HOME: /home/tokscale
+    volumes:
+      # These are the only writable mounts: the CLI's own settings and cache.
+      # `make tui` creates them as the invoking host user before Compose starts.
+      - ${HOME}/.config/tokscale:/home/tokscale/.config/tokscale
+      - ${HOME}/.cache/tokscale:/home/tokscale/.cache/tokscale
+
+volumes:
+  postgres_data:

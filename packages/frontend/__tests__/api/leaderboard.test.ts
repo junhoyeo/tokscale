@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe("GET /api/leaderboard", () => {
-  it("passes submission freshness metadata through unchanged", async () => {
+  it("returns the lean leaderboard payload", async () => {
     getLeaderboardData.mockResolvedValue({
       users: [
         {
@@ -31,14 +31,6 @@ describe("GET /api/leaderboard", () => {
           avatarUrl: null,
           totalTokens: 1200,
           totalCost: 12.5,
-          submissionCount: 2,
-          lastSubmission: "2026-01-10T10:00:00.000Z",
-          submissionFreshness: {
-            lastUpdated: "2026-01-10T10:00:00.000Z",
-            cliVersion: "1.4.2",
-            schemaVersion: 1,
-            isStale: true,
-          },
         },
       ],
       pagination: {
@@ -52,7 +44,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 1200,
         totalCost: 12.5,
-        totalSubmissions: 1,
         uniqueUsers: 1,
       },
       period: "all",
@@ -65,6 +56,9 @@ describe("GET /api/leaderboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate=300"
+    );
     // #522 added customFrom/customTo as the 6th and 7th positional args; this
     // request doesn't pass them, so they arrive as `undefined`.
     expect(getLeaderboardData).toHaveBeenCalledWith(
@@ -76,15 +70,18 @@ describe("GET /api/leaderboard", () => {
       undefined,
       undefined,
     );
-    expect(body.users[0].submissionFreshness).toEqual({
-      lastUpdated: "2026-01-10T10:00:00.000Z",
-      cliVersion: "1.4.2",
-      schemaVersion: 1,
-      isStale: true,
-    });
+    expect(Object.keys(body.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
   });
 
-  it("accepts time sort requests", async () => {
+  it("falls back to tokens sort for retired time sort links", async () => {
     getLeaderboardData.mockResolvedValue({
       users: [],
       pagination: {
@@ -98,12 +95,10 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",
-      sortBy: "time",
+      sortBy: "tokens",
     });
 
     const response = await GET(
@@ -115,7 +110,7 @@ describe("GET /api/leaderboard", () => {
       "all",
       1,
       50,
-      "time",
+      "tokens",
       "",
       undefined,
       undefined,
@@ -136,8 +131,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",
@@ -174,8 +167,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",

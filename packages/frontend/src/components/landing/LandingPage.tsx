@@ -7,6 +7,7 @@ import {
   QuickstartSection,
   WorldwideSection,
   DescriptionSection,
+  SponsorSection,
   FollowSection,
   FooterSection,
 } from "./sections";
@@ -32,6 +33,7 @@ export function LandingPage({
           topUsersByTokens={topUsersByTokens}
         />
         <DescriptionSection />
+        <SponsorSection />
         <FollowSection />
         <FooterSection />
       </PageInner>

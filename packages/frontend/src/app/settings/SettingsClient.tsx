@@ -1,11 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { KeyIcon } from "@/components/ui/Icons";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
+import { deviceDisplayLabel } from "@/lib/devices/shared";
+import { formatNumber, formatCurrency } from "@/lib/utils";
+import { formatRelativeTime } from "@/lib/format";
+import { useSettings } from "@/lib/useSettings";
+import { COMMON_TIMEZONE_GROUPS, getBrowserTimeZone } from "@/lib/timezone";
 
 interface User {
   id: string;
@@ -25,6 +30,41 @@ interface ApiToken {
 interface CreatedApiToken extends ApiToken {
   token: string;
 }
+
+// Subset of GET /api/users/[username]/devices we render here. That public
+// endpoint already aggregates usage per device, so settings reuses it with
+// the session user's username instead of adding a private listing route.
+interface SettingsDevice {
+  id: string;
+  deviceKey: string;
+  /** Resolved label (custom name or fallback) — what we render. */
+  displayName: string;
+  /** Raw user-set name (null = never renamed) — what we edit. */
+  customName: string | null;
+  lastSubmittedAt: string | null;
+  totalTokens: number;
+  totalCost: number;
+  activeDays: number;
+}
+
+// Mirror the server-side RenameBodySchema in
+// /api/settings/devices/[deviceId]/route.ts (varchar(120), no control chars).
+const DEVICE_NAME_MAX_LENGTH = 120;
+const DEVICE_NAME_CONTROL_CHARS = /\p{C}/u;
+
+function validateDeviceName(name: string): string | null {
+  if (name.length > DEVICE_NAME_MAX_LENGTH) {
+    return `Device name must be ${DEVICE_NAME_MAX_LENGTH} characters or fewer`;
+  }
+  if (DEVICE_NAME_CONTROL_CHARS.test(name)) {
+    return "Device name must not contain control characters";
+  }
+  return null;
+}
+
+// ============================================================================
+// Shared styled components
+// ============================================================================
 
 const PageWrapper = styled.div`
   min-height: 100vh;
@@ -111,6 +151,17 @@ const ActionRow = styled.div`
 
 const TextInput = styled.input`
   height: 40px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-default);
+  color: var(--color-fg-default);
+  font-size: 14px;
+`;
+
+const SelectInput = styled.select`
+  height: 40px;
+  max-width: 360px;
   padding: 0 12px;
   border-radius: 6px;
   border: 1px solid var(--color-border-default);
@@ -220,7 +271,19 @@ const TokenInfo = styled.div`
 `;
 
 const IconWrapper = styled.div`
-  color: #737373;
+  color: var(--color-fg-muted);
+`;
+
+const DeviceEditRow = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+
+  @media (max-width: 560px) {
+    grid-template-columns: 1fr;
+  }
 `;
 
 
@@ -257,6 +320,348 @@ const TokenName = styled.p`
   font-weight: 500;
 `;
 
+// ============================================================================
+// Danger Zone styled components
+// ============================================================================
+
+const DangerSection = styled(Section)`
+  border-color: rgba(248, 81, 73, 0.4);
+`;
+
+const DangerSectionTitle = styled(SectionTitle)`
+  color: #F85149;
+`;
+
+const DangerActionRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+
+  &:not(:last-child) {
+    border-bottom: 1px solid var(--color-border-default);
+  }
+`;
+
+const DangerActionInfo = styled.div`
+  flex: 1;
+  min-width: 0;
+`;
+
+const DangerActionTitle = styled.p`
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-fg-default);
+  margin-bottom: 4px;
+`;
+
+const DangerActionDescription = styled.p`
+  font-size: 13px;
+  color: var(--color-fg-muted);
+`;
+
+const DangerActionButton = styled(DangerButton)`
+  flex-shrink: 0;
+  padding: 6px 16px;
+  font-size: 13px;
+`;
+
+// ============================================================================
+// Confirmation modal styled components
+// ============================================================================
+
+const ModalOverlay = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+`;
+
+const ModalCard = styled.div`
+  background: var(--color-bg-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: 16px;
+  padding: 24px;
+  max-width: 480px;
+  width: calc(100% - 32px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+`;
+
+const ModalTitle = styled.h3`
+  font-size: 16px;
+  font-weight: 600;
+  color: #F85149;
+  margin-bottom: 12px;
+`;
+
+const ModalBody = styled.p`
+  font-size: 14px;
+  color: var(--color-fg-muted);
+  line-height: 1.5;
+  margin-bottom: 20px;
+`;
+
+const ModalBulletList = styled.ul`
+  list-style: disc;
+  padding-left: 20px;
+  margin-bottom: 20px;
+  color: var(--color-fg-muted);
+  font-size: 14px;
+  line-height: 1.6;
+`;
+
+const ModalInput = styled.input`
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-subtle);
+  color: var(--color-fg-default);
+  font-size: 14px;
+  margin-bottom: 16px;
+  outline: none;
+  box-sizing: border-box;
+  &:focus {
+    border-color: #F85149;
+    box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.2);
+  }
+`;
+
+const ModalActions = styled.div`
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+`;
+
+const CancelButton = styled.button`
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: transparent;
+  color: var(--color-fg-default);
+  cursor: pointer;
+  transition: all 150ms;
+  &:hover {
+    background: var(--color-bg-subtle);
+  }
+`;
+
+const ConfirmDangerButton = styled.button<{ $disabled?: boolean }>`
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid #F85149;
+  background: ${({ $disabled }) => ($disabled ? "transparent" : "#F85149")};
+  color: ${({ $disabled }) => ($disabled ? "rgba(248, 81, 73, 0.4)" : "#FFFFFF")};
+  cursor: ${({ $disabled }) => ($disabled ? "not-allowed" : "pointer")};
+  opacity: ${({ $disabled }) => ($disabled ? 0.5 : 1)};
+  transition: all 150ms;
+  &:hover {
+    background: ${({ $disabled }) => ($disabled ? "transparent" : "#da3633")};
+  }
+`;
+
+const StepIndicator = styled.div`
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+`;
+
+const StepDot = styled.div<{ $active: boolean }>`
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: ${({ $active }) => ($active ? "#F85149" : "var(--color-border-default)")};
+  transition: background 150ms;
+`;
+
+// ============================================================================
+// Confirmation modal component
+// ============================================================================
+
+type DangerAction = "delete-data" | "delete-account";
+
+interface ConfirmationConfig {
+  title: string;
+  steps: Array<{
+    body: React.ReactNode;
+    confirmLabel: string;
+  }>;
+  typedConfirmation: string;
+  onConfirm: () => Promise<void>;
+}
+
+const CONFIRMATION_CONFIGS: Record<DangerAction, ConfirmationConfig> = {
+  "delete-data": {
+    title: "Delete submitted data",
+    steps: [
+      {
+        body: (
+          <>
+            <ModalBody>This will permanently remove all submitted usage data from your account:</ModalBody>
+            <ModalBulletList>
+              <li>Leaderboard entries</li>
+              <li>Public profile stats</li>
+              <li>Daily usage history</li>
+            </ModalBulletList>
+            <ModalBody style={{ marginBottom: 0 }}>
+              Your account and API tokens will remain active. You can submit new data at any time.
+            </ModalBody>
+          </>
+        ),
+        confirmLabel: "I want to delete my data",
+      },
+      {
+        body: (
+          <ModalBody>
+            This action <strong>cannot be undone</strong>. All your historical
+            token usage and cost data will be permanently erased from the
+            leaderboard and your public profile.
+          </ModalBody>
+        ),
+        confirmLabel: "I understand, continue",
+      },
+    ],
+    typedConfirmation: "delete my data",
+    onConfirm: async () => {
+      const res = await fetch("/api/settings/submitted-data", { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete submitted data");
+    },
+  },
+  "delete-account": {
+    title: "Delete account",
+    steps: [
+      {
+        body: (
+          <>
+            <ModalBody>This will permanently delete your entire account and all associated data:</ModalBody>
+            <ModalBulletList>
+              <li>User profile</li>
+              <li>All submitted usage data</li>
+              <li>Leaderboard entries</li>
+              <li>API tokens and active sessions</li>
+            </ModalBulletList>
+            <ModalBody style={{ marginBottom: 0 }}>
+              You will be signed out immediately. This cannot be reversed.
+            </ModalBody>
+          </>
+        ),
+        confirmLabel: "I want to delete my account",
+      },
+      {
+        body: (
+          <ModalBody>
+            This action is <strong>permanent and irreversible</strong>. Your
+            username will become available for others to register. All your data
+            — submissions, tokens, sessions — will be wiped.
+          </ModalBody>
+        ),
+        confirmLabel: "I understand, continue",
+      },
+    ],
+    typedConfirmation: "delete my account",
+    onConfirm: async () => {
+      const res = await fetch("/api/settings/account", { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete account");
+    },
+  },
+};
+
+function DangerConfirmationModal({
+  action,
+  onClose,
+  onSuccess,
+}: {
+  action: DangerAction;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const config = CONFIRMATION_CONFIGS[action];
+  const totalSteps = config.steps.length + 1; // +1 for typed confirmation step
+  const [step, setStep] = useState(0);
+  const [typedValue, setTypedValue] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const isTypedStep = step === config.steps.length;
+  const typedMatch = typedValue.toLowerCase().trim() === config.typedConfirmation;
+
+  const handleConfirm = useCallback(async () => {
+    if (isTypedStep) {
+      if (!typedMatch || isSubmitting) return;
+      setIsSubmitting(true);
+      try {
+        await config.onConfirm();
+        onSuccess();
+      } catch {
+        alert(`Failed to ${action === "delete-data" ? "delete submitted data" : "delete account"}. Please try again.`);
+        setIsSubmitting(false);
+      }
+    } else {
+      setStep((s) => s + 1);
+    }
+  }, [isTypedStep, typedMatch, isSubmitting, config, onSuccess, action]);
+
+  return (
+    <ModalOverlay onClick={isSubmitting ? undefined : onClose}>
+      <ModalCard onClick={(e) => e.stopPropagation()}>
+        <StepIndicator>
+          {["step-1", "step-2", "step-3"].slice(0, totalSteps).map((id, i) => (
+            <StepDot key={id} $active={i <= step} />
+          ))}
+        </StepIndicator>
+
+        <ModalTitle>⚠ {config.title}</ModalTitle>
+
+        {isTypedStep ? (
+          <>
+            <ModalBody>
+              Type <strong>{config.typedConfirmation}</strong> to confirm:
+            </ModalBody>
+            <ModalInput
+              autoFocus
+              value={typedValue}
+              onChange={(e) => setTypedValue(e.target.value)}
+              placeholder={config.typedConfirmation}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && typedMatch && !isSubmitting) {
+                  handleConfirm();
+                }
+              }}
+            />
+          </>
+        ) : (
+          config.steps[step].body
+        )}
+
+        <ModalActions>
+          <CancelButton onClick={onClose} disabled={isSubmitting}>
+            Cancel
+          </CancelButton>
+          <ConfirmDangerButton
+            $disabled={isTypedStep ? !typedMatch : false}
+            disabled={(isTypedStep && !typedMatch) || isSubmitting}
+            onClick={handleConfirm}
+          >
+            {isSubmitting
+              ? "Deleting..."
+              : isTypedStep
+                ? config.steps[config.steps.length - 1].confirmLabel.replace("I understand, continue", "Delete permanently")
+                : config.steps[step].confirmLabel}
+          </ConfirmDangerButton>
+        </ModalActions>
+      </ModalCard>
+    </ModalOverlay>
+  );
+}
+
 function apiTokenListItem(token: CreatedApiToken): ApiToken {
   return {
     id: token.id,
@@ -287,15 +692,39 @@ async function fetchApiTokens(): Promise<ApiToken[]> {
   return Array.isArray(tokensData.tokens) ? tokensData.tokens : [];
 }
 
+async function fetchDevices(username: string): Promise<SettingsDevice[]> {
+  const devicesResponse = await fetch(
+    `/api/users/${encodeURIComponent(username)}/devices`
+  );
+  if (!devicesResponse.ok) return [];
+  const devicesData = await devicesResponse.json();
+  return Array.isArray(devicesData.devices) ? devicesData.devices : [];
+}
+
+// ============================================================================
+// Main component
+// ============================================================================
+
 export default function SettingsClient() {
   const router = useRouter();
+  const { timezone, setTimezone, mounted } = useSettings();
+  // Use the server-safe UTC label for the first render. The browser's zone can
+  // differ from the server's, so reading it before hydration would make the
+  // Auto option's text disagree with the SSR markup.
+  const browserTimeZone = mounted ? getBrowserTimeZone() : "UTC";
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [dangerAction, setDangerAction] = useState<DangerAction | null>(null);
   const [tokenName, setTokenName] = useState("CI token");
   const [createdToken, setCreatedToken] = useState<CreatedApiToken | null>(null);
   const [isCreatingToken, setIsCreatingToken] = useState(false);
   const [createTokenError, setCreateTokenError] = useState<string | null>(null);
+  const [devices, setDevices] = useState<SettingsDevice[]>([]);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [editingDeviceName, setEditingDeviceName] = useState("");
+  const [isSavingDeviceName, setIsSavingDeviceName] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,11 +740,17 @@ export default function SettingsClient() {
           return;
         }
 
-        const loadedTokens = await fetchApiTokens().catch(() => []);
+        const [loadedTokens, loadedDevices] = await Promise.all([
+          fetchApiTokens().catch(() => []),
+          fetchDevices(sessionData.user.username).catch(
+            () => [] as SettingsDevice[]
+          ),
+        ]);
 
         if (!cancelled) {
           setUser(sessionData.user);
           setTokens((current) => mergeApiTokenList(loadedTokens, current));
+          setDevices(loadedDevices);
           setIsLoading(false);
         }
       } catch {
@@ -347,6 +782,17 @@ export default function SettingsClient() {
     }
   };
 
+  const handleDangerSuccess = useCallback(() => {
+    if (dangerAction === "delete-account") {
+      // Account is gone — redirect to home.
+      window.location.href = "/";
+    } else {
+      // Data deleted — close modal and stay.
+      setDangerAction(null);
+      alert("Submitted data has been deleted.");
+    }
+  }, [dangerAction]);
+
   const handleCreateToken = async () => {
     setIsCreatingToken(true);
     setCreateTokenError(null);
@@ -371,6 +817,71 @@ export default function SettingsClient() {
       setCreateTokenError(error instanceof Error ? error.message : "Failed to create token");
     } finally {
       setIsCreatingToken(false);
+    }
+  };
+
+  const startEditingDevice = (device: SettingsDevice) => {
+    setEditingDeviceId(device.id);
+    setDeviceError(null);
+    // Pre-fill from the raw custom name, not the resolved display label, so
+    // an unnamed device starts empty and a custom name that happens to equal
+    // the fallback label ("Unnamed device" etc.) is preserved.
+    setEditingDeviceName(device.customName ?? "");
+  };
+
+  const cancelEditingDevice = () => {
+    setEditingDeviceId(null);
+    setEditingDeviceName("");
+    setDeviceError(null);
+  };
+
+  const handleSaveDeviceName = async (device: SettingsDevice) => {
+    const trimmed = editingDeviceName.trim();
+    const validationError = validateDeviceName(trimmed);
+    if (validationError) {
+      setDeviceError(validationError);
+      return;
+    }
+
+    setIsSavingDeviceName(true);
+    setDeviceError(null);
+
+    try {
+      const response = await fetch(`/api/settings/devices/${device.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // Empty input clears the custom name; server stores null and the
+        // display label falls back via deviceDisplayLabel.
+        body: JSON.stringify({ name: trimmed === "" ? null : trimmed }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.device) {
+        throw new Error(data.error || "Failed to rename device");
+      }
+
+      setDevices((current) =>
+        current.map((item) =>
+          item.id === device.id
+            ? {
+                ...item,
+                displayName: deviceDisplayLabel(
+                  data.device.deviceKey,
+                  data.device.displayName
+                ),
+                customName: data.device.displayName ?? null,
+              }
+            : item
+        )
+      );
+      setEditingDeviceId(null);
+      setEditingDeviceName("");
+    } catch (error) {
+      setDeviceError(
+        error instanceof Error ? error.message : "Failed to rename device"
+      );
+    } finally {
+      setIsSavingDeviceName(false);
     }
   };
 
@@ -440,6 +951,53 @@ export default function SettingsClient() {
           <InfoBanner style={{ marginTop: 16 }}>
             Profile information is synced from GitHub and cannot be edited here.
           </InfoBanner>
+        </Section>
+
+        <Section
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+        >
+          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+            Timezone
+          </SectionTitle>
+          <Description style={{ color: "var(--color-fg-muted)" }}>
+            Renders the timestamps on profile pages — &ldquo;Updated&rdquo; and
+            &ldquo;Joined&rdquo; — in the zone you pick, and is stored only in
+            this browser. It does not move usage between days: which day a
+            session counts toward is decided by the machine that scanned it,
+            from that machine&rsquo;s own clock, so the contribution graph,
+            daily totals, and the leaderboard are unaffected.
+          </Description>
+
+          <FieldLabel
+            htmlFor="timezone-select"
+            style={{ color: "var(--color-fg-default)" }}
+          >
+            Display timezone
+          </FieldLabel>
+          <SelectInput
+            id="timezone-select"
+            value={timezone}
+            onChange={(event) => setTimezone(event.target.value)}
+          >
+            <option value="auto">
+              Auto (browser) — {browserTimeZone}
+            </option>
+            {COMMON_TIMEZONE_GROUPS.map((group) => (
+              <optgroup key={group.region} label={group.region}>
+                {group.zones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone.replace(/_/g, " ")}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+            {timezone !== "auto" &&
+              !COMMON_TIMEZONE_GROUPS.some((group) =>
+                group.zones.includes(timezone),
+              ) && (
+                <option value={timezone}>{timezone.replace(/_/g, " ")}</option>
+              )}
+          </SelectInput>
         </Section>
 
         <Section
@@ -548,10 +1106,153 @@ export default function SettingsClient() {
           )}
         </Section>
 
+        <Section
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+        >
+          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+            Devices
+          </SectionTitle>
+          <Description style={{ color: "var(--color-fg-muted)" }}>
+            Machines that have submitted usage data. Rename a device to tell
+            your machines apart — the name is shown on your public profile.
+          </Description>
+
+          {deviceError && <ErrorText>{deviceError}</ErrorText>}
+
+          {devices.length === 0 ? (
+            <EmptyState style={{ color: "var(--color-fg-muted)" }}>
+              <p>No devices yet.</p>
+              <EmptyText>
+                Run{" "}
+                <CodeText
+                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
+                >
+                  bunx tokscale submit
+                </CodeText>{" "}
+                to register this machine.
+              </EmptyText>
+            </EmptyState>
+          ) : (
+            <TokenList>
+              {devices.map((device) => (
+                <TokenItem
+                  key={device.id}
+                  style={{ backgroundColor: "var(--color-bg-elevated)" }}
+                >
+                  {editingDeviceId === device.id ? (
+                    <DeviceEditRow>
+                      <TextInput
+                        aria-label="Device name"
+                        value={editingDeviceName}
+                        maxLength={DEVICE_NAME_MAX_LENGTH}
+                        placeholder="Device name (empty to reset)"
+                        autoFocus
+                        disabled={isSavingDeviceName}
+                        onChange={(event) =>
+                          setEditingDeviceName(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            handleSaveDeviceName(device);
+                          } else if (event.key === "Escape") {
+                            cancelEditingDevice();
+                          }
+                        }}
+                      />
+                      <PrimaryButton
+                        type="button"
+                        disabled={isSavingDeviceName}
+                        onClick={() => handleSaveDeviceName(device)}
+                      >
+                        {isSavingDeviceName ? "Saving..." : "Save"}
+                      </PrimaryButton>
+                      <SecondaryButton
+                        type="button"
+                        disabled={isSavingDeviceName}
+                        onClick={cancelEditingDevice}
+                      >
+                        Cancel
+                      </SecondaryButton>
+                    </DeviceEditRow>
+                  ) : (
+                    <>
+                      <TokenInfo>
+                        <div>
+                          <TokenName style={{ color: "var(--color-fg-default)" }}>
+                            {device.displayName}
+                          </TokenName>
+                          <SmallText style={{ color: "var(--color-fg-muted)" }}>
+                            {formatNumber(device.totalTokens)} tokens
+                            {" · "}
+                            {formatCurrency(device.totalCost)}
+                            {" · "}
+                            {device.activeDays} active{" "}
+                            {device.activeDays === 1 ? "day" : "days"}
+                            {" · "}
+                            Last submit {formatRelativeTime(device.lastSubmittedAt)}
+                          </SmallText>
+                        </div>
+                      </TokenInfo>
+                      <SecondaryButton
+                        type="button"
+                        onClick={() => startEditingDevice(device)}
+                      >
+                        Rename
+                      </SecondaryButton>
+                    </>
+                  )}
+                </TokenItem>
+              ))}
+            </TokenList>
+          )}
+        </Section>
+
+        <DangerSection
+          style={{ backgroundColor: "var(--color-bg-default)" }}
+        >
+          <DangerSectionTitle>
+            Danger Zone
+          </DangerSectionTitle>
+
+          <DangerActionRow>
+            <DangerActionInfo>
+              <DangerActionTitle>Delete submitted data</DangerActionTitle>
+              <DangerActionDescription>
+                Remove all leaderboard entries, profile stats, and usage
+                history. Your account and API tokens stay active.
+              </DangerActionDescription>
+            </DangerActionInfo>
+            <DangerActionButton onClick={() => setDangerAction("delete-data")}>
+              Delete data
+            </DangerActionButton>
+          </DangerActionRow>
+
+          <DangerActionRow>
+            <DangerActionInfo>
+              <DangerActionTitle>Delete account</DangerActionTitle>
+              <DangerActionDescription>
+                Permanently delete your account and all associated data. This
+                action is irreversible.
+              </DangerActionDescription>
+            </DangerActionInfo>
+            <DangerActionButton onClick={() => setDangerAction("delete-account")}>
+              Delete account
+            </DangerActionButton>
+          </DangerActionRow>
+        </DangerSection>
 
       </MainContent>
 
       <Footer />
+
+      {dangerAction && (
+        <DangerConfirmationModal
+          action={dangerAction}
+          onClose={() => setDangerAction(null)}
+          onSuccess={handleDangerSuccess}
+        />
+      )}
     </PageWrapper>
   );
 }

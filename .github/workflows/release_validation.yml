@@ -1,0 +1,69 @@
+name: Release Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &release_validation_paths
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packages/cli/package.json"
+      - "packages/tokscale/package.json"
+      - "packages/cli-*/package.json"
+      - "scripts/calculate-release-version.sh"
+      - "scripts/check-npm-release-state.sh"
+      - "scripts/check-release-workflow-safety.py"
+      - "scripts/check-version-coherence.sh"
+      - "scripts/prepare-release-provenance.sh"
+      - "scripts/publish-npm-package.sh"
+      - "scripts/generate-release-notes.ts"
+      - "scripts/post-discord-release.sh"
+      - "scripts/test-calculate-release-version.sh"
+      - "scripts/test-check-version-coherence.sh"
+      - "scripts/test-npm-release-state.sh"
+      - "scripts/test-prepare-release-provenance.sh"
+      - "scripts/test-release-package-artifacts.sh"
+      - "scripts/test-release-notes.sh"
+      - "scripts/test-release-workflow-safety.sh"
+      - ".github/workflows/build-native.yml"
+      - ".github/workflows/publish-cli.yml"
+      - ".github/workflows/release_validation.yml"
+  pull_request:
+    branches: [main]
+    paths: *release_validation_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release-validation:
+    name: Release Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Verify version coherence
+        run: bash scripts/check-version-coherence.sh
+
+      - name: Verify release workflow topology
+        run: python3 scripts/check-release-workflow-safety.py
+
+      - name: Run release helper tests
+        run: |
+          bash -n scripts/test-release-package-artifacts.sh
+          bash scripts/test-calculate-release-version.sh
+          bash scripts/test-check-version-coherence.sh
+          bash scripts/test-npm-release-state.sh
+          bash scripts/test-prepare-release-provenance.sh
+          bash scripts/test-release-notes.sh
+          bash scripts/test-release-workflow-safety.sh

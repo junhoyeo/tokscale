@@ -16,6 +16,46 @@ const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
 const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
 
+pub const DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 24 * 60;
+pub const MIN_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 15;
+pub const MAX_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
+
+/// Where the value [`Settings::load_with_origin`] returned came from.
+///
+/// Only [`SettingsOrigin::Unreadable`] carries a real obligation: the returned
+/// `Settings` is `Settings::default()` and has nothing to do with what is on
+/// disk, so writing it back replaces every setting the user had with a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsOrigin {
+    /// No settings file exists. Defaults *are* the file's contents, so writing
+    /// one loses nothing.
+    Absent,
+    /// A settings file was read and parsed. The returned value is what it says.
+    Parsed,
+    /// A settings file exists but its contents could not be recovered — invalid
+    /// JSON, a field with an incompatible type, or an I/O error that is not
+    /// "no such file". Whatever the user had is still on disk and still
+    /// unknown to us.
+    Unreadable,
+}
+
+impl SettingsOrigin {
+    /// Whether a `save()` after this load would preserve the user's data.
+    ///
+    /// False only for [`SettingsOrigin::Unreadable`], where saving would
+    /// overwrite settings we could not read with defaults we invented.
+    pub fn is_safe_to_overwrite(self) -> bool {
+        !matches!(self, Self::Unreadable)
+    }
+}
+
+/// The raw read of a settings file, before parsing.
+enum RawSettings {
+    Missing,
+    Present(String),
+    Unreadable,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ExplicitHomeConfigLayout {
     UnixDotConfig,
@@ -40,6 +80,81 @@ pub struct LightSettings {
     /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
     #[serde(default)]
     pub write_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutosubmitSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_autosubmit_interval_minutes")]
+    pub interval_minutes: u64,
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    pub clients: Vec<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub yesterday: bool,
+    #[serde(default)]
+    pub week: bool,
+    #[serde(default)]
+    pub month: bool,
+    #[serde(default)]
+    pub scheduler: Option<String>,
+    #[serde(default)]
+    pub managed_executable: Option<String>,
+    /// Version of the build that `managed_executable` was copied from.
+    ///
+    /// The copy is written only by `autosubmit enable`, so upgrading the
+    /// installed binary leaves the scheduled job on the old build. Without this
+    /// there is no way to tell a stale scheduled job from a current one, and
+    /// the drift is silent. `None` on configs written before this field
+    /// existed, and on those the version is reported as unknown rather than
+    /// assumed current.
+    #[serde(default)]
+    pub managed_executable_version: Option<String>,
+    #[serde(default)]
+    pub last_run_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for AutosubmitSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES,
+            clients: Vec::new(),
+            since: None,
+            until: None,
+            year: None,
+            today: false,
+            yesterday: false,
+            week: false,
+            month: false,
+            scheduler: None,
+            managed_executable: None,
+            managed_executable_version: None,
+            last_run_at_ms: None,
+            last_error: None,
+        }
+    }
+}
+
+impl AutosubmitSettings {
+    fn normalize(mut self) -> Self {
+        self.interval_minutes = self.interval_minutes.clamp(
+            MIN_AUTOSUBMIT_INTERVAL_MINUTES,
+            MAX_AUTOSUBMIT_INTERVAL_MINUTES,
+        );
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +199,18 @@ pub struct Settings {
     /// tab and enable its aggregation in subsequent loads.
     #[serde(default)]
     pub minutely_tab_enabled: bool,
+    #[serde(default)]
+    pub autosubmit: AutosubmitSettings,
+    /// User-defined model-name aliases folded at grouping time. Different
+    /// name-strings for one physical model (e.g. `claude-opus-4-8-cc`,
+    /// `anthropic/claude-opus-4-8`) map to a single canonical name so usage
+    /// stats do not split across rows. Keys and values are matched
+    /// case-insensitively against the normalized model name.
+    ///
+    /// `#[serde(default)]` keeps settings.json files written before the field
+    /// existed loading cleanly; an absent or empty map means no folding.
+    #[serde(default)]
+    pub model_aliases: tokscale_core::ModelAliasMap,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -117,6 +244,10 @@ fn default_native_timeout_ms() -> u64 {
     DEFAULT_NATIVE_TIMEOUT_MS
 }
 
+fn default_autosubmit_interval_minutes() -> u64 {
+    DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -129,6 +260,8 @@ impl Default for Settings {
             default_clients: Vec::new(),
             light: LightSettings::default(),
             minutely_tab_enabled: false,
+            autosubmit: AutosubmitSettings::default(),
+            model_aliases: tokscale_core::ModelAliasMap::default(),
         }
     }
 }
@@ -146,6 +279,87 @@ pub fn load_scanner_settings() -> ScannerSettings {
 
 pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> ScannerSettings {
     Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).scanner
+}
+
+/// Record this machine's IANA timezone as the device's bucketing zone, once.
+///
+/// Day keys used to be derived from `chrono::Local` on every scan, so moving
+/// machines or changing `TZ` re-split the same history across different days
+/// and the server's monotonic per-day guard turned that into permanent
+/// inflation. Pinning the zone removes the cause, but only for devices that
+/// actually have one pinned — so the CLI pins on first run rather than waiting
+/// for every user to discover a config command.
+///
+/// This is deliberately not a behaviour change on the machine that runs it: the
+/// zone written is the one `chrono::Local` would have resolved anyway, so the
+/// first scan after pinning reports exactly what it would have reported before.
+/// What changes is the *next* scan, from somewhere else.
+///
+/// Does nothing when:
+/// - a zone is already pinned — including one the user set by hand;
+/// - settings.json exists but could not be read. This is the one place in the
+///   CLI that loads settings and then unconditionally writes them back, and
+///   [`Settings::load`] answers a parse failure with `Settings::default()`. The
+///   two together would replace a hand-edited or truncated settings.json with
+///   defaults plus a timezone, destroying scanner paths, aliases, autosubmit
+///   config and UI preferences — on a plain `tokscale report`, with no prompt.
+///   A device that stays unpinned keeps a bug it already had; a device whose
+///   settings are erased cannot get them back.
+/// - the platform cannot name its zone (`TZ=+09:00`, a container with no
+///   zoneinfo). A fixed offset cannot follow DST, so pinning one would swap this
+///   bug for a smaller version of itself. Staying unpinned is the honest state.
+/// - the caller passed `--home`, which points at another machine's data
+///   directory. This machine's zone is not that device's zone, and `save()`
+///   writes to *this* machine's config path regardless, so the two would not
+///   even agree on a file.
+///
+/// A value that is present but does not name a zone the tz database knows — an
+/// empty string, a typo, a raw offset — is *not* treated as pinned, because
+/// bucketing does not treat it as pinned either: it degrades to host-local and
+/// the device keeps the exposure this function exists to close. Those are
+/// re-detected. Overwriting one is safe in a way that overwriting an unreadable
+/// file is not: the file parsed, so everything else in it survives the write,
+/// and the only value lost is one nothing could act on.
+///
+/// A failed save is ignored: the next run retries, and an unpinned device is
+/// exactly as correct as it was before this function existed.
+pub fn pin_bucket_timezone_if_unset(home_dir: &Option<String>) {
+    if home_dir.is_some() {
+        return;
+    }
+
+    let (mut settings, origin) = Settings::load_with_origin();
+    if !origin.is_safe_to_overwrite() {
+        tracing::warn!(
+            "settings.json could not be read — leaving it untouched rather than \
+             replacing it with defaults to record scanner.bucketTimezone"
+        );
+        return;
+    }
+
+    if tokscale_core::BucketTimezone::from_scanner_settings(&settings.scanner).is_pinned() {
+        return;
+    }
+
+    let Some(zone) = tokscale_core::bucket_tz::detect_local_iana_name() else {
+        tracing::debug!(
+            "could not resolve an IANA timezone name for this machine — \
+             leaving scanner.bucketTimezone unset"
+        );
+        return;
+    };
+
+    settings.scanner.bucket_timezone = Some(zone);
+    if let Err(error) = settings.save() {
+        tracing::debug!(%error, "failed to persist scanner.bucketTimezone");
+    }
+}
+
+/// Loads the user's configured model aliases, honoring a `--home` override the
+/// same way [`load_scanner_settings_for_home`] does. A missing or malformed
+/// settings.json yields an empty map (no folding); this never errors.
+pub fn load_model_aliases_for_home(home_dir: &Option<String>) -> tokscale_core::ModelAliasMap {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).model_aliases
 }
 
 /// Returns the user's configured `defaultClients` list as raw lowercase
@@ -170,6 +384,7 @@ impl Settings {
         self.native_timeout_ms = self
             .native_timeout_ms
             .clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
+        self.autosubmit = self.autosubmit.normalize();
         self
     }
 
@@ -216,9 +431,26 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        let primary = Self::config_path()
-            .ok()
-            .and_then(|path| fs::read_to_string(path).ok());
+        Self::load_with_origin().0
+    }
+
+    /// [`Settings::load`], plus where the returned value came from.
+    ///
+    /// `load()` answers "what settings should this run use", and defaults are
+    /// the right answer to that question however the read went. They are the
+    /// wrong answer to "what is safe to write back": a file that exists but
+    /// cannot be parsed still holds the user's scanner paths, aliases,
+    /// autosubmit config and UI preferences, and none of them are in the
+    /// defaults handed back. Anything that loads in order to save has to be
+    /// able to tell those two cases apart, so it can decline instead of
+    /// replacing data it never saw.
+    pub fn load_with_origin() -> (Self, SettingsOrigin) {
+        let primary = match Self::config_path() {
+            Ok(path) => Self::read_config_file(&path),
+            // Cannot even resolve where settings live. Not "absent": a save
+            // would fail the same way, so do not report this as writable.
+            Err(_) => RawSettings::Unreadable,
+        };
 
         // Transparent macOS fallback: pre-fix releases wrote settings.json under
         // `~/Library/Application Support/tokscale/`. Read it once if the new
@@ -228,16 +460,58 @@ impl Settings {
         // has explicitly pinned a config root via `TOKSCALE_CONFIG_DIR` so
         // CI sandboxes and isolated profiles stay hermetic instead of
         // silently ingesting personal settings from the legacy macOS path.
-        let raw = primary.or_else(|| {
-            if crate::paths::is_config_dir_overridden() {
-                return None;
-            }
-            Self::legacy_macos_path().and_then(|legacy| fs::read_to_string(legacy).ok())
-        });
+        //
+        // The fallback is attempted whenever the primary is not readable, not
+        // only when it is missing — that is what it did before this function
+        // reported an origin, and narrowing it would lose the legacy file to a
+        // permissions error on the new path.
+        let legacy = match primary {
+            RawSettings::Present(_) => None,
+            _ if crate::paths::is_config_dir_overridden() => None,
+            _ => Self::legacy_macos_path().map(|legacy| Self::read_config_file(&legacy)),
+        };
 
-        raw.and_then(|content| serde_json::from_str(&content).ok())
-            .map(Settings::normalize)
-            .unwrap_or_default()
+        // `save()` writes to the primary path whatever was read, so an
+        // unreadable primary stays unreadable even when the legacy file
+        // supplies the values: a write would still land on top of the file we
+        // could not see.
+        let primary_was_unreadable = matches!(primary, RawSettings::Unreadable);
+
+        let raw = match (primary, legacy) {
+            (RawSettings::Present(content), _) => RawSettings::Present(content),
+            (_, Some(RawSettings::Present(content))) => RawSettings::Present(content),
+            // A legacy file we could not *open* outranks a missing primary.
+            // (Legacy content that fails to parse is already `Present` here and
+            // is caught below.) It holds settings the user can still repair,
+            // and writing a primary would shadow it permanently: the fallback
+            // only fires while the primary is absent, so the repaired legacy
+            // file would never be read again.
+            (_, Some(RawSettings::Unreadable)) => RawSettings::Unreadable,
+            (primary, _) => primary,
+        };
+
+        match raw {
+            RawSettings::Missing => (Self::default(), SettingsOrigin::Absent),
+            RawSettings::Unreadable => (Self::default(), SettingsOrigin::Unreadable),
+            RawSettings::Present(content) => match serde_json::from_str::<Settings>(&content) {
+                Ok(settings) if primary_was_unreadable => {
+                    (settings.normalize(), SettingsOrigin::Unreadable)
+                }
+                Ok(settings) => (settings.normalize(), SettingsOrigin::Parsed),
+                Err(_) => (Self::default(), SettingsOrigin::Unreadable),
+            },
+        }
+    }
+
+    /// Read a settings file, keeping "there is no file" distinct from "there is
+    /// a file and we could not read it". `read_to_string(..).ok()` collapses
+    /// the two, and the difference is the whole point here.
+    fn read_config_file(path: &Path) -> RawSettings {
+        match fs::read_to_string(path) {
+            Ok(content) => RawSettings::Present(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RawSettings::Missing,
+            Err(_) => RawSettings::Unreadable,
+        }
     }
 
     pub fn load_for_home_override(home_dir: Option<&Path>) -> Self {
@@ -466,6 +740,57 @@ mod tests {
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed.scanner.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn settings_load_backfills_autosubmit_interval_when_missing_from_json() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(!parsed.autosubmit.enabled);
+        assert_eq!(
+            parsed.autosubmit.interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
+        assert_eq!(
+            AutosubmitSettings::default().interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
+    }
+
+    #[test]
+    fn settings_backfills_model_aliases_when_missing_from_json() {
+        // Older settings.json files predate the `modelAliases` key; they must
+        // still deserialize cleanly and default to an empty (no-op) alias map.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+    }
+
+    #[test]
+    fn settings_malformed_model_aliases_does_not_wipe_other_fields() {
+        // A malformed `modelAliases` (not an object, or non-string values) must
+        // degrade to an empty map without failing the whole settings load, so
+        // unrelated settings survive.
+        let json = r#"{
+            "colorPalette": "custom",
+            "modelAliases": ["oops", 5]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+        assert_eq!(parsed.color_palette, "custom");
     }
 
     #[test]

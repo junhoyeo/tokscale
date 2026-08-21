@@ -45,6 +45,7 @@ export function revalidateUsernamePaths(username: string): void {
   for (const variant of variants) {
     revalidatePath(`/u/${variant}`);
     revalidatePath(`/api/users/${variant}`);
+    revalidatePath(`/api/users/${variant}/devices`);
     revalidatePath(`/api/embed/${variant}/svg`);
   }
 }

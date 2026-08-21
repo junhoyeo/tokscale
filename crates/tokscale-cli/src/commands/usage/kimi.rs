@@ -58,25 +58,53 @@ struct Membership {
     level: Option<String>,
 }
 
-fn read_credentials() -> Result<Credentials> {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
-    if !path.exists() {
-        anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.");
+fn credentials_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    // 1) kimi-code (supports KIMI_CODE_HOME override). A blank export means
+    // unset, matching the scanner: `PathBuf::from("")` makes the credentials
+    // path the relative `credentials/kimi-code.json`, so Kimi drops out of the
+    // table while the CLI probes -- and would read tokens from -- whatever
+    // happens to sit under the current directory.
+    let kimi_code_home = std::env::var("KIMI_CODE_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::paths::home_dir()
+                .map(|h| h.join(".kimi-code"))
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        });
+    paths.push(kimi_code_home.join("credentials").join("kimi-code.json"));
+
+    // 2) kimi-cli
+    if let Some(home) = crate::paths::home_dir() {
+        paths.push(
+            home.join(".kimi")
+                .join("credentials")
+                .join("kimi-code.json"),
+        );
     }
-    let content = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&content)?)
+
+    paths
 }
 
-fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
+fn read_credentials() -> Result<(Credentials, std::path::PathBuf)> {
+    for path in credentials_paths() {
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            return Ok((serde_json::from_str(&content)?, path));
+        }
+    }
+    anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.")
+}
+
+fn save_credentials(
+    path: &std::path::Path,
+    access_token: &str,
+    refresh_token: &str,
+    expires_in: i64,
+) {
     let expires_at = chrono::Utc::now().timestamp() as f64 + expires_in as f64;
     let json = serde_json::json!({
         "access_token": access_token,
@@ -92,7 +120,7 @@ fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
             return;
         }
     };
-    if let Err(e) = super::helpers::atomic_write_secret(&path, content.as_bytes()) {
+    if let Err(e) = super::helpers::atomic_write_secret(path, content.as_bytes()) {
         eprintln!("warning: failed to save Kimi credentials: {e}");
     }
 }
@@ -158,15 +186,11 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
 }
 
 pub fn has_credentials() -> bool {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json")
-        .exists()
+    credentials_paths().iter().any(|p| p.exists())
 }
 
 pub fn fetch() -> Result<UsageOutput> {
-    let creds = read_credentials()?;
+    let (creds, creds_path) = read_credentials()?;
     let mut access_token = creds
         .access_token
         .clone()
@@ -190,7 +214,7 @@ pub fn fetch() -> Result<UsageOutput> {
                             (&refreshed.refresh_token, refreshed.expires_in)
                         {
                             stored_refresh_token = Some(new_rt.clone());
-                            save_credentials(&access_token, new_rt, expires_in);
+                            save_credentials(&creds_path, &access_token, new_rt, expires_in);
                         }
                     }
                 }
@@ -211,7 +235,7 @@ pub fn fetch() -> Result<UsageOutput> {
                 if let (Some(new_rt), Some(expires_in)) =
                     (&refreshed.refresh_token, refreshed.expires_in)
                 {
-                    save_credentials(&new, new_rt, expires_in);
+                    save_credentials(&creds_path, &new, new_rt, expires_in);
                 }
                 fetch_usage(&client, &new).await?
             }
@@ -238,10 +262,11 @@ pub fn fetch() -> Result<UsageOutput> {
                     };
                     if let Some(metric) = parse_quota_detail(label, detail) {
                         let key = format!(
-                            "{}:{}:{}",
+                            "{}:{}:{}:{}",
                             label,
                             metric.used_percent,
-                            metric.remaining_label.as_deref().unwrap_or("")
+                            metric.remaining_label.as_deref().unwrap_or(""),
+                            metric.resets_at.as_deref().unwrap_or("")
                         );
                         if seen.insert(key) {
                             metrics.push(metric);
@@ -255,10 +280,11 @@ pub fn fetch() -> Result<UsageOutput> {
         if let Some(ref usage) = resp.usage {
             if let Some(metric) = parse_quota_detail("Weekly", usage) {
                 let key = format!(
-                    "{}:{}:{}",
+                    "{}:{}:{}:{}",
                     "Weekly",
                     metric.used_percent,
-                    metric.remaining_label.as_deref().unwrap_or("")
+                    metric.remaining_label.as_deref().unwrap_or(""),
+                    metric.resets_at.as_deref().unwrap_or("")
                 );
                 if seen.insert(key) {
                     metrics.push(metric);
@@ -268,9 +294,123 @@ pub fn fetch() -> Result<UsageOutput> {
 
         Ok(UsageOutput {
             provider: "Kimi".into(),
+            account: None,
+            credential_source: None,
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Restores KIMI_CODE_HOME even if the test unwinds, so one failure cannot
+    /// leak an override into the rest of the suite.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// The kimi-code candidate, which `credentials_paths` always lists first.
+    fn kimi_code_candidate() -> std::path::PathBuf {
+        credentials_paths().into_iter().next().unwrap()
+    }
+
+    /// A blank KIMI_CODE_HOME -- how a shell exports an optional variable that
+    /// was never given a value -- means unset. Without this the candidate is
+    /// the relative `credentials/kimi-code.json`, so the real tokens are never
+    /// found and lookup follows the current directory instead.
+    ///
+    /// Compared against the genuinely-unset lookup rather than against a
+    /// rebuilt `<home>/.kimi-code`, so the assertion cannot drift along with
+    /// the fallback it is meant to pin.
+    #[test]
+    #[serial]
+    fn credentials_path_falls_back_when_kimi_code_home_is_blank() {
+        let unset = {
+            let _guard = EnvVarGuard::remove("KIMI_CODE_HOME");
+            kimi_code_candidate()
+        };
+        // Pinning the baseline is what stops this test from passing if the
+        // fallback expression itself changes, but it only holds where a home
+        // directory resolves: with none, `credentials_paths` intentionally
+        // yields the relative `./credentials/kimi-code.json`. Asserting the
+        // `.kimi-code` shape unconditionally would fail on a machine with no
+        // HOME while the code under test behaved exactly as documented.
+        //
+        // The blank-equals-unset assertion below needs no such guard -- both
+        // sides take the same branch whichever it is, which is the property
+        // this test actually exists to prove.
+        if crate::paths::home_dir().is_some() {
+            assert!(
+                unset.ends_with(".kimi-code/credentials/kimi-code.json"),
+                "unset lookup no longer defaults to ~/.kimi-code: {unset:?}"
+            );
+        }
+
+        for blank in ["", "   ", "\t\n"] {
+            let _guard = EnvVarGuard::set("KIMI_CODE_HOME", blank);
+
+            assert_eq!(
+                kimi_code_candidate(),
+                unset,
+                "KIMI_CODE_HOME={blank:?} must resolve exactly as if unset"
+            );
+        }
+    }
+
+    /// Only blank values are reinterpreted: a non-blank override is used
+    /// verbatim, surrounding whitespace included, because a directory may
+    /// legitimately carry it.
+    #[test]
+    #[serial]
+    fn credentials_path_honors_kimi_code_home_verbatim() {
+        for root in ["/custom/kimi-code", " /padded/kimi-code "] {
+            let _guard = EnvVarGuard::set("KIMI_CODE_HOME", root);
+
+            assert_eq!(
+                kimi_code_candidate(),
+                std::path::PathBuf::from(root)
+                    .join("credentials")
+                    .join("kimi-code.json"),
+                "KIMI_CODE_HOME={root:?} must be used as supplied"
+            );
+        }
+    }
 }

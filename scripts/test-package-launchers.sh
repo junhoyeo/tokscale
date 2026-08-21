@@ -36,11 +36,17 @@ esac
 
 PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 
+// Keep in sync with detectLibcKind() in packages/cli/src/index.ts.
 function detectLibcKind() {
   if (process.platform !== "linux") {
     return null;
   }
+
+  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  if (override === "musl") return "musl";
+  if (override === "gnu" || override === "glibc") return "gnu";
 
   const report = process.report?.getReport?.();
   if (report?.header?.glibcVersionRuntime) {
@@ -54,15 +60,45 @@ function detectLibcKind() {
     return "musl";
   }
 
+  if (report?.header?.release?.sourceUrl?.toLowerCase().includes("musl")) {
+    return "musl";
+  }
+
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
-    return output.includes("musl") ? "musl" : "gnu";
-  } catch {
-    throw new Error("Unable to determine Linux libc kind for launcher smoke tests");
+    if (output.includes("musl")) return "musl";
+    if (output.includes("glibc") || output.includes("gnu")) return "gnu";
+  } catch (error) {
+    // musl's ldd prints "musl libc" to stderr and exits non-zero on --version.
+    const combined = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}`.toLowerCase();
+    if (combined.includes("musl")) return "musl";
+    if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
+
+  // ldd missing or inconclusive: look for dynamic loaders. Either loader can
+  // coexist with the other's libc (Debian's musl package installs ld-musl-*;
+  // Alpine's gcompat installs ld-linux-*), so the distro breaks ties.
+  const loaderPresent = (prefix) => {
+    for (const dir of ["/lib", "/lib64"]) {
+      try {
+        if (readdirSync(dir).some((entry) => entry.startsWith(prefix))) {
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  };
+  const hasGnuLoader = loaderPresent("ld-linux-");
+  const hasMuslLoader = loaderPresent("ld-musl-");
+  if (hasGnuLoader !== hasMuslLoader) return hasMuslLoader ? "musl" : "gnu";
+  if (hasGnuLoader && hasMuslLoader) {
+    return existsSync("/etc/alpine-release") ? "musl" : "gnu";
+  }
+
+  return "gnu";
 }
 
 const arch = process.arch;
@@ -75,6 +111,9 @@ if (process.platform === "darwin") {
   const libc = detectLibcKind();
   if (arch === "arm64") console.log(libc === "musl" ? "cli-linux-arm64-musl" : "cli-linux-arm64-gnu");
   else if (arch === "x64") console.log(libc === "musl" ? "cli-linux-x64-musl" : "cli-linux-x64-gnu");
+  else process.exit(1);
+} else if (process.platform === "android") {
+  if (arch === "arm64") console.log("cli-android-arm64");
   else process.exit(1);
 } else {
   process.exit(1);

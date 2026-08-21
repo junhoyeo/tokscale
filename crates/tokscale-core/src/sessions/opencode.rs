@@ -3,139 +3,28 @@
 //! Parses messages from:
 //! - SQLite database (OpenCode 1.2+): ~/.local/share/opencode/opencode.db
 //! - Legacy JSON files: ~/.local/share/opencode/storage/message/
+//!
+//! The SQLite message schema — and the driver that reads it — is shared with
+//! the other clients that adopted it; see [`super::opencode_schema`]. This
+//! module keeps OpenCode's own legacy JSON file parser and its JSON-to-SQLite
+//! migration cache.
 
-use super::utils::{open_readonly_sqlite, read_file_or_none};
-use super::{
-    normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
-    UnifiedMessage,
+// The message payload type and the SQLite driver are shared with every other
+// client that adopted OpenCode's schema.
+use super::opencode_schema::{
+    parse_opencode_schema_sqlite, reported_cost, set_workspace_from_root, OpenCodeSchemaConfig,
+    OpenCodeSchemaMessage as OpenCodeMessage,
 };
-use crate::TokenBreakdown;
+use super::utils::read_file_or_none;
+use super::{normalize_opencode_agent_name, UnifiedMessage};
+use crate::{provider_identity, TokenBreakdown};
 #[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
-/// OpenCode message structure (from JSON files and SQLite data column)
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct OpenCodeMessage {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(rename = "sessionID", default)]
-    pub session_id: Option<String>,
-    pub role: String,
-    #[serde(rename = "modelID")]
-    pub model_id: Option<String>,
-    #[serde(rename = "providerID")]
-    pub provider_id: Option<String>,
-    pub cost: Option<f64>,
-    pub tokens: Option<OpenCodeTokens>,
-    pub time: OpenCodeTime,
-    pub agent: Option<String>,
-    pub mode: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_opencode_path")]
-    pub path: Option<OpenCodePath>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OpenCodePath {
-    pub root: Option<String>,
-}
-
-fn deserialize_opencode_path<'de, D>(deserializer: D) -> Result<Option<OpenCodePath>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    let root = value
-        .get("root")
-        .and_then(|root| root.as_str())
-        .map(str::to_string);
-
-    Ok(Some(OpenCodePath { root }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OpenCodeTokens {
-    pub input: i64,
-    pub output: i64,
-    pub reasoning: Option<i64>,
-    pub cache: OpenCodeCache,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OpenCodeCache {
-    pub read: i64,
-    pub write: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct OpenCodeTime {
-    pub created: f64, // Unix timestamp in milliseconds (as float)
-    pub completed: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OpenCodeSqliteFingerprint {
-    created_bits: u64,
-    completed_bits: Option<u64>,
-    model_id: String,
-    provider_id: String,
-    input: i64,
-    output: i64,
-    reasoning: i64,
-    cache_read: i64,
-    cache_write: i64,
-    cost_bits: u64,
-    agent: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct OpenCodeSqliteDedupState {
-    has_embedded_message_id: bool,
-    has_workspace_conflict: bool,
-}
-
-fn workspace_from_root(root: Option<&str>) -> (Option<String>, Option<String>) {
-    let workspace_key = root.and_then(normalize_workspace_key);
-    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-    (workspace_key, workspace_label)
-}
-
-fn set_workspace_from_root(message: &mut UnifiedMessage, root: Option<&str>) {
-    let (workspace_key, workspace_label) = workspace_from_root(root);
-    message.set_workspace(workspace_key, workspace_label);
-}
-
-fn merge_duplicate_workspace(
-    message: &mut UnifiedMessage,
-    state: &mut OpenCodeSqliteDedupState,
-    root: Option<&str>,
-) {
-    if state.has_workspace_conflict {
-        return;
-    }
-
-    let (candidate_key, candidate_label) = workspace_from_root(root);
-    match (message.workspace_key.as_deref(), candidate_key) {
-        (None, Some(key)) => message.set_workspace(Some(key), candidate_label),
-        (Some(existing), Some(candidate)) if existing != candidate => {
-            state.has_workspace_conflict = true;
-            message.set_workspace(None, None);
-        }
-        _ => {}
-    }
-}
-
-fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
-    let duration = time.completed? - time.created;
-    if duration.is_finite() && duration > 0.0 {
-        Some(duration as i64)
-    } else {
-        None
-    }
+pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    parse_opencode_schema_sqlite(db_path, OpenCodeSchemaConfig::opencode())
 }
 
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
@@ -144,7 +33,13 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 
     let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).ok()?;
 
-    if msg.role != "assistant" {
+    // OpenCode JSON files (v1) always carry an explicit role, so require it to
+    // be "assistant" here. Missing-role acceptance (is_assistant) is reserved
+    // for the v2 `session_message` SQLite path, whose SQL already filters
+    // `type = 'assistant'`; applying it to files would count a role-less or
+    // malformed file as assistant usage (previously it was skipped when the
+    // required `role` field failed to deserialize).
+    if msg.role.as_deref() != Some("assistant") {
         return None;
     }
 
@@ -153,8 +48,20 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
         .as_ref()
         .and_then(|path| path.root.as_deref())
         .map(str::to_string);
+    // Resolve model + provider before moving any fields out of `msg`, since
+    // both borrow the whole struct to fall back onto the nested `model` object.
+    let model_id = msg.resolve_model_id()?;
+    let provider_id = msg
+        .resolve_provider_id()
+        .unwrap_or_else(|| "unknown".to_string());
+    let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
+
     let tokens = msg.tokens?;
-    let model_id = msg.model_id?;
+    // Legacy JSON files carry a complete `cache` object; a missing or partial
+    // one has always dropped the message rather than counting it as zero.
+    let cache = tokens.cache?;
+    let (cache_read, cache_write) = (cache.read?, cache.write?);
+    let time = msg.time?;
     let agent_or_mode = msg.mode.or(msg.agent);
     let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
 
@@ -166,173 +73,39 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
     });
+    let cost = reported_cost(msg.cost).unwrap_or(0.0);
 
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
         model_id,
-        msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
+        provider_id,
         session_id,
-        msg.time.created as i64,
+        time.created as i64,
         TokenBreakdown {
             input: tokens.input.max(0),
             output: tokens.output.max(0),
-            cache_read: tokens.cache.read.max(0),
-            cache_write: tokens.cache.write.max(0),
+            cache_read: cache_read.max(0),
+            cache_write: cache_write.max(0),
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         },
-        msg.cost.unwrap_or(0.0).max(0.0),
+        cost,
         agent,
     );
-    unified.duration_ms = opencode_duration_ms(&msg.time);
+    unified.duration_ms = time.completed.and_then(|completed| {
+        let duration = completed - time.created;
+        (duration.is_finite() && duration > 0.0).then_some(duration as i64)
+    });
     unified.dedup_key = dedup_key;
     set_workspace_from_root(&mut unified, workspace_root.as_deref());
-    Some(unified)
-}
-
-pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
-        return Vec::new();
-    };
-
-    let modern_query = r#"
-        SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root
-        FROM message m
-        LEFT JOIN session s ON s.id = m.session_id
-        WHERE json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(m.data, '$.tokens') IS NOT NULL
-        ORDER BY m.id, m.session_id
-    "#;
-
-    let legacy_query = r#"
-        SELECT m.id, m.session_id, m.data, NULL AS workspace_root
-        FROM message m
-        WHERE json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(m.data, '$.tokens') IS NOT NULL
-        ORDER BY m.id, m.session_id
-    "#;
-
-    let mut stmt = match conn
-        .prepare(modern_query)
-        .or_else(|_| conn.prepare(legacy_query))
-    {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let session_id: String = row.get(1)?;
-        let data_json: String = row.get(2)?;
-        let workspace_root: Option<String> = row.get(3)?;
-        Ok((id, session_id, data_json, workspace_root))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut messages: Vec<UnifiedMessage> = Vec::new();
-    let mut fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize> = HashMap::new();
-    let mut dedup_states: Vec<OpenCodeSqliteDedupState> = Vec::new();
-
-    for row_result in rows {
-        let (row_id, session_id, data_json, row_workspace_root) = match row_result {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        let mut bytes = data_json.into_bytes();
-        let msg: OpenCodeMessage = match simd_json::from_slice(&mut bytes) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        if msg.role != "assistant" {
-            continue;
-        }
-
-        let message_id = msg.id.clone();
-        let embedded_workspace_root = msg
-            .path
-            .as_ref()
-            .and_then(|path| path.root.as_deref())
-            .map(str::to_string);
-
-        let tokens = match msg.tokens {
-            Some(t) => t,
-            None => continue,
-        };
-
-        let model_id = match msg.model_id {
-            Some(m) => m,
-            None => continue,
-        };
-
-        let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
-        let agent_or_mode = msg.mode.or(msg.agent);
-        let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
-        let input = tokens.input.max(0);
-        let output = tokens.output.max(0);
-        let reasoning = tokens.reasoning.unwrap_or(0).max(0);
-        let cache_read = tokens.cache.read.max(0);
-        let cache_write = tokens.cache.write.max(0);
-        let cost = msg.cost.unwrap_or(0.0).max(0.0);
-        let dedup_key = message_id.clone().unwrap_or(row_id);
-        let fingerprint = OpenCodeSqliteFingerprint {
-            created_bits: msg.time.created.to_bits(),
-            completed_bits: msg.time.completed.map(f64::to_bits),
-            model_id: model_id.clone(),
-            provider_id: provider_id.clone(),
-            input,
-            output,
-            reasoning,
-            cache_read,
-            cache_write,
-            cost_bits: cost.to_bits(),
-            agent: agent.clone(),
-        };
-
-        let mut unified = UnifiedMessage::new_with_agent(
-            "opencode",
-            model_id,
-            provider_id,
-            session_id,
-            msg.time.created as i64,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-            },
-            cost,
-            agent,
-        );
-        unified.duration_ms = opencode_duration_ms(&msg.time);
-        unified.dedup_key = Some(dedup_key);
-        let workspace_root = row_workspace_root
-            .as_deref()
-            .or(embedded_workspace_root.as_deref());
-        set_workspace_from_root(&mut unified, workspace_root);
-
-        if let Some(index) = fingerprint_indices.get(&fingerprint).copied() {
-            let dedup_state = &mut dedup_states[index];
-            if message_id.is_some() && !dedup_state.has_embedded_message_id {
-                dedup_state.has_embedded_message_id = true;
-                messages[index].dedup_key = unified.dedup_key;
-            }
-            merge_duplicate_workspace(&mut messages[index], dedup_state, workspace_root);
-            continue;
-        }
-
-        dedup_states.push(OpenCodeSqliteDedupState {
-            has_embedded_message_id: message_id.is_some(),
-            has_workspace_conflict: false,
-        });
-        fingerprint_indices.insert(fingerprint, messages.len());
-        messages.push(unified);
+    // OpenCode computes per-message cost at request time from its own pricing
+    // data (models.dev), so a positive `cost` is authoritative and must survive
+    // tokscale's LiteLLM repricing pass. A zero cost usually means OpenCode
+    // itself had no pricing for the model — leave it `Unknown` so
+    // `apply_pricing_if_available` can still estimate.
+    if unified.cost > 0.0 {
+        unified.mark_provider_reported_cost();
     }
-
-    messages
+    Some(unified)
 }
 
 // =============================================================================
@@ -455,21 +228,7 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, previous) in self.0.drain(..) {
-                unsafe {
-                    match previous {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
-    }
+    use crate::paths::test_env::EnvGuard;
 
     fn create_opencode_sqlite_db(db_path: &Path) -> Connection {
         let conn = Connection::open(db_path).unwrap();
@@ -482,6 +241,372 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Build a database shaped like OpenCode v2 (`opencode-next.db`): an empty
+    /// `message` table plus the `session_message` + `session` tables that hold
+    /// the real per-message data. Mirrors the columns tokscale actually reads.
+    fn create_opencode_v2_sqlite_db(db_path: &Path) -> Connection {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                title TEXT
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Build a database shaped like current OpenCode v2: `session_v2` carries
+    /// metadata while `session_message` holds the assistant usage payloads.
+    fn create_opencode_session_v2_sqlite_db(db_path: &Path) -> Connection {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                title TEXT
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A representative v2 assistant payload: no `role` field, model + provider
+    /// nested under `$.model`, integer timestamps.
+    const V2_ASSISTANT_DATA: &str = r#"{
+        "time": { "created": 1783882279705, "completed": 1783882279943 },
+        "agent": "build",
+        "model": { "id": "claude-sonnet-4", "providerID": "anthropic", "variant": "default" },
+        "content": [],
+        "finish": "stop",
+        "cost": 0.0123,
+        "tokens": {
+            "input": 5519,
+            "output": 20,
+            "reasoning": 23,
+            "cache": { "read": 100, "write": 50 }
+        }
+    }"#;
+
+    #[test]
+    fn test_deserialize_v2_message_resolves_nested_model() {
+        let mut bytes = V2_ASSISTANT_DATA.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).unwrap();
+
+        assert_eq!(msg.role, None, "v2 payloads carry no role field");
+        assert!(msg.is_assistant(), "missing role defaults to assistant");
+        assert_eq!(msg.resolve_model_id().as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(msg.resolve_provider_id().as_deref(), Some("anthropic"));
+        assert_eq!(msg.agent.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn test_top_level_model_id_takes_precedence_over_nested() {
+        let json = r#"{
+            "role": "assistant",
+            "modelID": "top-level-model",
+            "providerID": "top-level-provider",
+            "model": { "id": "nested-model", "providerID": "nested-provider" },
+            "tokens": { "input": 1, "output": 1, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).unwrap();
+
+        assert_eq!(msg.resolve_model_id().as_deref(), Some("top-level-model"));
+        assert_eq!(
+            msg.resolve_provider_id().as_deref(),
+            Some("top-level-provider")
+        );
+    }
+
+    #[test]
+    fn test_parse_v2_session_message_reads_tokens_and_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        conn.execute(
+            "INSERT INTO session (id, directory) VALUES (?1, ?2)",
+            rusqlite::params!["ses_v2", "/Users/alice/opencode-v2-repo"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_v2_001", "ses_v2", "assistant", V2_ASSISTANT_DATA],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1, "v2 assistant row should be parsed");
+        let msg = &messages[0];
+        assert_eq!(msg.model_id, "claude-sonnet-4");
+        assert_eq!(msg.provider_id, "anthropic");
+        assert_eq!(msg.tokens.input, 5519);
+        assert_eq!(msg.tokens.output, 20);
+        assert_eq!(msg.tokens.reasoning, 23);
+        assert_eq!(msg.tokens.cache_read, 100);
+        assert_eq!(msg.tokens.cache_write, 50);
+        assert_eq!(msg.duration_ms, Some(238));
+        assert_eq!(
+            msg.workspace_key.as_deref(),
+            Some("/Users/alice/opencode-v2-repo"),
+            "workspace should come from session.directory"
+        );
+        assert_eq!(msg.workspace_label.as_deref(), Some("opencode-v2-repo"));
+        assert_eq!(
+            msg.dedup_key.as_deref(),
+            Some("msg_v2_001"),
+            "v2 dedup_key falls back to the session_message row id"
+        );
+        assert_eq!(
+            msg.cost_source,
+            crate::sessions::CostSource::ProviderReported
+        );
+    }
+    #[test]
+    fn test_parse_v2_session_v2_message_reads_tokens_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_opencode_session_v2_sqlite_db(&db_path);
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, title) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ses_current_v2",
+                "/Users/alice/current-opencode-repo",
+                "Current OpenCode session"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "msg_current_v2",
+                "ses_current_v2",
+                "assistant",
+                V2_ASSISTANT_DATA
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1, "current session_v2 rows should parse");
+        let msg = &messages[0];
+        assert_eq!(
+            msg.workspace_key.as_deref(),
+            Some("/Users/alice/current-opencode-repo")
+        );
+        assert_eq!(msg.workspace_label.as_deref(), Some("current-opencode-repo"));
+        assert_eq!(msg.session_title.as_deref(), Some("Current OpenCode session"));
+        assert_eq!(msg.dedup_key.as_deref(), Some("msg_current_v2"));
+    }
+
+    #[test]
+    fn test_parse_v2_session_message_without_metadata_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "msg_without_metadata",
+                "ses_without_metadata",
+                "assistant",
+                V2_ASSISTANT_DATA
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1, "usage should parse without session metadata");
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].session_title, None);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("msg_without_metadata")
+        );
+    }
+
+    #[test]
+    fn test_parse_v2_skips_non_assistant_and_tokenless_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        let user_data = r#"{ "time": { "created": 1783882279705 }, "content": [] }"#;
+        let tokenless = r#"{ "time": { "created": 1783882279705 }, "model": { "id": "m", "providerID": "p" } }"#;
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_ok", "ses_v2", "assistant", V2_ASSISTANT_DATA],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_user", "ses_v2", "user", user_data],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_synthetic", "ses_v2", "synthetic", V2_ASSISTANT_DATA],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_no_tokens", "ses_v2", "assistant", tokenless],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            1,
+            "only the assistant row with tokens should parse"
+        );
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("msg_ok"));
+    }
+
+    #[test]
+    fn test_parse_v2_negative_tokens_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        let negative = r#"{
+            "time": { "created": 1783882279705 },
+            "model": { "id": "claude-sonnet-4", "providerID": "anthropic" },
+            "cost": -1.0,
+            "tokens": { "input": -100, "output": -50, "reasoning": -25, "cache": { "read": -200, "write": -10 } }
+        }"#;
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_neg", "ses_v2", "assistant", negative],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.tokens.input, 0);
+        assert_eq!(msg.tokens.output, 0);
+        assert_eq!(msg.tokens.reasoning, 0);
+        assert_eq!(msg.tokens.cache_read, 0);
+        assert_eq!(msg.tokens.cache_write, 0);
+        assert!(msg.cost >= 0.0);
+    }
+
+    #[test]
+    fn test_parse_v2_deduplicates_forked_session_message_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        // Same payload copied into a forked session must collapse to one entry.
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["root_row", "root_session", "assistant", V2_ASSISTANT_DATA],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["fork_row", "fork_session", "assistant", V2_ASSISTANT_DATA],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            1,
+            "forked copies of the same assistant turn collapse inside v2 parsing"
+        );
+    }
+
+    #[test]
+    fn test_distinct_embedded_ids_are_not_merged_despite_fingerprint_collision() {
+        // Two genuinely different assistant messages can share every fingerprint
+        // field (timestamp, model, tokens, cost, agent). When both carry an
+        // embedded `$.id` and the ids DIFFER, they are distinct messages -- not
+        // fork copies -- and must be kept separate rather than collapsed.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+
+        let payload = |id: &str| {
+            format!(
+                r#"{{
+                    "id": "{id}",
+                    "time": {{ "created": 1783882279705, "completed": 1783882279943 }},
+                    "agent": "build",
+                    "model": {{ "id": "claude-sonnet-4", "providerID": "anthropic" }},
+                    "cost": 0.0123,
+                    "tokens": {{ "input": 10, "output": 5, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }}
+                }}"#
+            )
+        };
+
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_a", "ses_v2", "assistant", payload("msg_a")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_b", "ses_v2", "assistant", payload("msg_b")],
+        )
+        .unwrap();
+        // A true fork of msg_a (same embedded id, different session/row) must
+        // still collapse into msg_a rather than becoming a third entry.
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_a_fork", "fork_session", "assistant", payload("msg_a")],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut dedup_keys: Vec<String> = parse_opencode_sqlite(&db_path)
+            .into_iter()
+            .filter_map(|m| m.dedup_key)
+            .collect();
+        dedup_keys.sort();
+        assert_eq!(
+            dedup_keys,
+            vec!["msg_a".to_string(), "msg_b".to_string()],
+            "distinct embedded ids stay separate; a same-id fork collapses"
+        );
     }
 
     #[test]
@@ -584,6 +709,42 @@ mod tests {
             msg.cost >= 0.0,
             "Negative cost should be clamped to 0.0, got {}",
             msg.cost
+        );
+    }
+
+    #[test]
+    fn test_parse_opencode_file_requires_explicit_assistant_role() {
+        use std::io::Write;
+        // Regression: making `role` optional for the v2 SQLite path must NOT
+        // loosen file parsing. A file without a `role` (or a non-assistant one)
+        // is not assistant usage and must be skipped -- the missing-role =>
+        // assistant shortcut applies only to the type-filtered session_message
+        // SQLite query, never to JSON files.
+        let role_less = r#"{
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 10, "output": 5, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let mut f1 = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        f1.write_all(role_less.as_bytes()).unwrap();
+        assert!(
+            parse_opencode_file(f1.path()).is_none(),
+            "a role-less OpenCode JSON file must not be counted as assistant usage"
+        );
+
+        let user_role = r#"{
+            "role": "user",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 10, "output": 5, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let mut f2 = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        f2.write_all(user_role.as_bytes()).unwrap();
+        assert!(
+            parse_opencode_file(f2.path()).is_none(),
+            "a non-assistant OpenCode JSON file must be skipped"
         );
     }
 
@@ -743,6 +904,131 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_opencode_file_marks_positive_cost_as_provider_reported() {
+        use std::io::Write;
+        let json = r#"{
+            "id": "msg_cost_001",
+            "sessionID": "ses_cost",
+            "role": "assistant",
+            "modelID": "z-ai/glm-4.6",
+            "providerID": "openrouter",
+            "cost": 0.0025158,
+            "tokens": {
+                "input": 2675,
+                "output": 28,
+                "reasoning": 1,
+                "cache": { "read": 7700, "write": 0 }
+            },
+            "time": { "created": 1765915142201.0 }
+        }"#;
+
+        let mut temp_file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        temp_file.write_all(json.as_bytes()).unwrap();
+
+        let msg = parse_opencode_file(temp_file.path()).expect("Should parse");
+        assert_eq!(
+            msg.cost_source,
+            crate::sessions::CostSource::ProviderReported,
+            "positive embedded cost must survive the LiteLLM repricing pass"
+        );
+        assert!((msg.cost - 0.0025158).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_parse_opencode_file_keeps_zero_cost_unknown_for_estimation() {
+        use std::io::Write;
+        let json = r#"{
+            "id": "msg_cost_002",
+            "sessionID": "ses_cost",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.0,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        let mut temp_file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        temp_file.write_all(json.as_bytes()).unwrap();
+
+        let msg = parse_opencode_file(temp_file.path()).expect("Should parse");
+        assert_eq!(
+            msg.cost_source,
+            crate::sessions::CostSource::Unknown,
+            "zero cost means OpenCode had no pricing — leave repricing enabled"
+        );
+    }
+
+    #[test]
+    fn test_parse_opencode_sqlite_marks_positive_cost_as_provider_reported() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test_opencode_cost.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let costed = r#"{
+            "role": "assistant",
+            "modelID": "z-ai/glm-4.6",
+            "providerID": "openrouter",
+            "cost": 0.0025158,
+            "tokens": {
+                "input": 2675,
+                "output": 28,
+                "reasoning": 1,
+                "cache": { "read": 7700, "write": 0 }
+            },
+            "time": { "created": 1765915142201.0 }
+        }"#;
+        let free = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.0,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_costed", "ses_cost", costed],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_free", "ses_cost", free],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 2);
+
+        let costed_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("msg_costed"))
+            .unwrap();
+        assert_eq!(
+            costed_msg.cost_source,
+            crate::sessions::CostSource::ProviderReported
+        );
+
+        let free_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("msg_free"))
+            .unwrap();
+        assert_eq!(free_msg.cost_source, crate::sessions::CostSource::Unknown);
+    }
+
+    #[test]
     fn test_parse_opencode_file_uses_explicit_path_root_as_workspace() {
         let json = r#"{
             "id": "msg_workspace_001",
@@ -810,7 +1096,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL
+                directory TEXT NOT NULL,
+                title TEXT
             );",
         )
         .unwrap();
@@ -904,7 +1191,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL
+                directory TEXT NOT NULL,
+                title TEXT
             );",
         )
         .unwrap();
@@ -1437,23 +1725,12 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migration_record_falls_back_to_legacy_path() {
-        use std::env;
-
         let temp_home = tempfile::tempdir().unwrap();
         let temp_xdg_cache = tempfile::tempdir().unwrap();
-        let prev_home = env::var_os("HOME");
-        let prev_xdg_cache = env::var_os("XDG_CACHE_HOME");
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let _guard = EnvGuard(vec![
-            ("TOKSCALE_CONFIG_DIR", prev_override),
-            ("XDG_CACHE_HOME", prev_xdg_cache),
-            ("HOME", prev_home),
-        ]);
-        unsafe {
-            env::set_var("HOME", temp_home.path());
-            env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
+        let mut guard = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_CACHE_HOME", "HOME"]);
+        guard.set("HOME", temp_home.path());
+        guard.set("XDG_CACHE_HOME", temp_xdg_cache.path());
+        guard.remove("TOKSCALE_CONFIG_DIR");
 
         let legacy_path = crate::paths::legacy_dirs_cache_dir()
             .unwrap()

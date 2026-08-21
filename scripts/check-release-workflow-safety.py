@@ -8,8 +8,17 @@ import sys
 ROOT = pathlib.Path.cwd()
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
+CLI_PACKAGE_MANIFEST = ROOT / "packages/cli/package.json"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
-COMMON_BUILD_FIELDS = ("host", "target", "build", "strip", "bin_name")
+REQUIRED_BUILD_FIELDS = (
+    "host",
+    "target",
+    "package_dir",
+    "artifact_name",
+    "build",
+    "strip",
+    "bin_name",
+)
 TARGET_PACKAGES = {
     "x86_64-apple-darwin": "cli-darwin-x64",
     "aarch64-apple-darwin": "cli-darwin-arm64",
@@ -19,6 +28,7 @@ TARGET_PACKAGES = {
     "aarch64-unknown-linux-musl": "cli-linux-arm64-musl",
     "x86_64-pc-windows-msvc": "cli-win32-x64-msvc",
     "aarch64-pc-windows-msvc": "cli-win32-arm64-msvc",
+    "aarch64-linux-android": "cli-android-arm64",
 }
 
 
@@ -33,8 +43,32 @@ def read_lines(path: pathlib.Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
+def strip_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if quote == "'":
+            if char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.rstrip()
+
+
 def strip_yaml_scalar(value: str) -> str:
-    value = value.strip()
+    value = strip_yaml_comment(value).strip()
     if value in {'""', "''"}:
         return ""
     if (value.startswith('"') and value.endswith('"')) or (
@@ -42,6 +76,92 @@ def strip_yaml_scalar(value: str) -> str:
     ):
         return value[1:-1]
     return value
+
+
+def decode_yaml_double_quoted(value: str) -> str:
+    escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "v": "\v",
+        "f": "\f",
+        "r": "\r",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    hex_widths = {"x": 2, "u": 4, "U": 8}
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            decoded.append(value[index])
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(value):
+            raise ValueError("unterminated YAML escape")
+        escape = value[index]
+        if escape in escapes:
+            decoded.append(escapes[escape])
+            index += 1
+            continue
+        if escape not in hex_widths:
+            raise ValueError(f"unsupported YAML escape: \\{escape}")
+
+        width = hex_widths[escape]
+        start = index + 1
+        end = start + width
+        digits = value[start:end]
+        if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+            raise ValueError(f"invalid YAML escape: \\{escape}{digits}")
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError(f"invalid YAML codepoint: {codepoint:#x}")
+        decoded.append(chr(codepoint))
+        index = end
+
+    return "".join(decoded)
+
+
+def yaml_mapping_entry(line: str, indent: int) -> tuple[str, str] | None:
+    content = strip_yaml_comment(line)
+    match = re.match(
+        rf"\s{{{indent}}}(?:([A-Za-z_][A-Za-z0-9_-]*)|\"([^\"]+)\"|'([^']+)'):\s*(.*)$",
+        content,
+    )
+    if not match:
+        return None
+    bare_key, double_quoted_key, single_quoted_key = match.groups()[:3]
+    if double_quoted_key is not None:
+        try:
+            key = decode_yaml_double_quoted(double_quoted_key)
+        except ValueError:
+            return None
+    else:
+        key = bare_key if bare_key is not None else single_quoted_key
+    if key is None:
+        return None
+    return key, strip_yaml_scalar(match.group(4))
+
+
+def mapping_scalars(lines: list[str], indent: int) -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    for line in lines:
+        entry = yaml_mapping_entry(line, indent)
+        if entry:
+            key, value = entry
+            mappings[key] = value
+    return mappings
 
 
 def top_level_env(lines: list[str]) -> dict[str, str]:
@@ -56,6 +176,29 @@ def top_level_env(lines: list[str]) -> dict[str, str]:
                     env[match.group(1)] = strip_yaml_scalar(match.group(2))
             return env
     return env
+
+
+def mapping_block(lines: list[str], key: str, indent: int) -> list[str]:
+    header = f"{' ' * indent}{key}:"
+    start = None
+    for index, line in enumerate(lines):
+        if strip_yaml_comment(line) == header:
+            start = index + 1
+            break
+    if start is None:
+        return []
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        line = lines[index]
+        content = strip_yaml_comment(line)
+        if not content.strip():
+            continue
+        line_indent = len(content) - len(content.lstrip(" "))
+        if line_indent <= indent:
+            end = index
+            break
+    return lines[start:end]
 
 
 def job_block(lines: list[str], job_name: str) -> list[str]:
@@ -137,57 +280,266 @@ def package_manifest_name(package_dir: str) -> str:
     return name
 
 
+def cli_platform_package_dirs() -> set[str]:
+    if not CLI_PACKAGE_MANIFEST.exists():
+        fail(f"Missing CLI package manifest: {CLI_PACKAGE_MANIFEST}")
+    manifest = json.loads(CLI_PACKAGE_MANIFEST.read_text(encoding="utf-8"))
+    optional_dependencies = manifest.get("optionalDependencies")
+    if not isinstance(optional_dependencies, dict):
+        fail(f"{CLI_PACKAGE_MANIFEST} missing optionalDependencies")
+    prefix = "@tokscale/"
+    return {
+        package_name.removeprefix(prefix)
+        for package_name in optional_dependencies
+        if package_name.startswith(f"{prefix}cli-")
+    }
+
+
+def block_contains(block: list[str], needle: str) -> bool:
+    return any(needle in line for line in uncommented_lines(block))
+
+
+def uncommented_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if not line.lstrip().startswith("#")]
+
+
+def named_step_block(job_lines: list[str], step_name: str) -> list[str]:
+    lines = uncommented_lines(job_lines)
+    for index, line in enumerate(lines):
+        match = re.match(r"(\s*)-\s+name:\s*(.+?)\s*$", line)
+        if not match or strip_yaml_scalar(match.group(2)) != step_name:
+            continue
+
+        step_indent = len(match.group(1))
+        end = len(lines)
+        for child_index in range(index + 1, len(lines)):
+            child = strip_yaml_comment(lines[child_index])
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip(" "))
+            if child_indent < step_indent or (
+                child_indent == step_indent and re.match(r"\s*-\s+", child)
+            ):
+                end = child_index
+                break
+        return lines[index:end]
+
+    return []
+
+
+def step_run_block(step_lines: list[str]) -> list[str]:
+    for index, line in enumerate(step_lines):
+        match = re.match(r"(\s*)run:\s*[|>][-+]?\s*$", strip_yaml_comment(line))
+        if not match:
+            continue
+
+        run_indent = len(match.group(1))
+        run_lines: list[str] = []
+        for child in step_lines[index + 1 :]:
+            content = strip_yaml_comment(child)
+            if not content.strip():
+                continue
+            child_indent = len(content) - len(content.lstrip(" "))
+            if child_indent <= run_indent:
+                break
+            run_lines.append(content.strip())
+        return run_lines
+
+    return []
+
+
+def step_has_property(step_lines: list[str], property_name: str) -> bool:
+    if not step_lines:
+        return False
+    match = re.match(r"(\s*)-\s+", step_lines[0])
+    if not match:
+        return False
+    property_indent = len(match.group(1)) + 2
+    return any(
+        (entry := yaml_mapping_entry(line, property_indent)) is not None
+        and entry[0] == property_name
+        for line in uncommented_lines(step_lines[1:])
+    )
+
+
+def yaml_list_scalars(lines: list[str]) -> set[str]:
+    values: set[str] = set()
+    for line in lines:
+        item = strip_yaml_comment(line).strip()
+        if item.startswith("- "):
+            values.add(strip_yaml_scalar(item[2:]))
+    return values
+
+
+def parse_needs(block: list[str]) -> set[str]:
+    lines = uncommented_lines(block)
+    for index, line in enumerate(lines):
+        match = re.match(r"(\s*)needs:\s*(.*)$", line)
+        if not match:
+            continue
+
+        needs_indent = len(match.group(1))
+        value = match.group(2).strip()
+        if value:
+            value = strip_yaml_scalar(value)
+            if value.startswith("[") and value.endswith("]"):
+                return {
+                    strip_yaml_scalar(item)
+                    for item in value[1:-1].split(",")
+                    if strip_yaml_scalar(item)
+                }
+            return {value}
+
+        needs: set[str] = set()
+        for child in lines[index + 1 :]:
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip(" "))
+            if child_indent <= needs_indent:
+                break
+            item_match = re.match(r"\s*-\s*(.+?)\s*$", child)
+            if item_match:
+                needs.add(strip_yaml_scalar(item_match.group(1)))
+        return needs
+
+    return set()
+
+
 def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
     errors: list[str] = []
 
-    publish_env = top_level_env(publish_lines)
+    publish_bump = uncommented_lines(job_block(publish_lines, "bump-versions"))
+    default_branch_step = named_step_block(publish_bump, "Require the default branch")
+    default_branch_env = {
+        "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+        "RELEASE_REF_NAME": "${{ github.ref_name }}",
+        "RELEASE_REF_TYPE": "${{ github.ref_type }}",
+    }
+    default_branch_env_block = mapping_block(default_branch_step, "env", 8)
+    default_branch_env_values = mapping_scalars(default_branch_env_block, 10)
+    default_branch_run = step_run_block(default_branch_step)
+    guard = 'if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then'
+    try:
+        guard_index = default_branch_run.index(guard)
+        fi_index = default_branch_run.index("fi", guard_index + 1)
+        exit_index = default_branch_run.index("exit 1", guard_index + 1, fi_index)
+        gate_aborts = guard_index == 0 and guard_index < exit_index < fi_index
+    except ValueError:
+        gate_aborts = False
+    if (
+        not all(
+            default_branch_env_values.get(key) == value
+            for key, value in default_branch_env.items()
+        )
+        or step_has_property(default_branch_step, "if")
+        or step_has_property(default_branch_step, "continue-on-error")
+        or not gate_aborts
+    ):
+        errors.append("publish workflow must reject non-default branch dispatches")
+
     native_env = top_level_env(native_lines)
     for key in REQUIRED_ENV_KEYS:
-        publish_has_key = key in publish_env
-        native_has_key = key in native_env
-        if not publish_has_key:
-            errors.append(f"publish workflow missing required env {key}")
-        if not native_has_key:
+        if key not in native_env:
             errors.append(f"build-native workflow missing required env {key}")
-        if (
-            publish_has_key
-            and native_has_key
-            and publish_env.get(key) != native_env.get(key)
-        ):
-            errors.append(
-                f"env {key} differs: publish={publish_env.get(key)!r}, build-native={native_env.get(key)!r}"
-            )
 
-    publish_build = by_target(matrix_settings(publish_lines, "build-cli-binary"), "publish build")
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
 
-    if list(publish_build) != list(native_build):
+    cli_package_dirs = cli_platform_package_dirs()
+    mapped_package_dirs = set(TARGET_PACKAGES.values())
+    unmapped_package_dirs = cli_package_dirs - mapped_package_dirs
+    if unmapped_package_dirs:
         errors.append(
-            f"build matrix targets differ: publish={list(publish_build)}, build-native={list(native_build)}"
+            f"CLI optionalDependencies have unmapped platform packages: {sorted(unmapped_package_dirs)}"
         )
 
-    for target, publish_entry in publish_build.items():
-        native_entry = native_build.get(target)
-        if native_entry is None:
-            continue
-        for field in COMMON_BUILD_FIELDS:
-            if publish_entry.get(field, "") != native_entry.get(field, ""):
-                errors.append(
-                    f"build matrix {target} field {field} differs: publish={publish_entry.get(field)!r}, build-native={native_entry.get(field)!r}"
-                )
+    expected_targets = {
+        target
+        for target, package_dir in TARGET_PACKAGES.items()
+        if package_dir in cli_package_dirs
+    }
+    missing_targets = expected_targets - set(native_build)
+    unknown_targets = set(native_build) - expected_targets
+    if missing_targets:
+        errors.append(
+            f"canonical build matrix is missing targets: {sorted(missing_targets)}"
+        )
+    if unknown_targets:
+        errors.append(
+            f"canonical build matrix has unknown targets: {sorted(unknown_targets)}"
+        )
 
-        expected_package_dir = TARGET_PACKAGES.get(target)
-        if publish_entry.get("package_dir") != expected_package_dir:
+    for target, native_entry in native_build.items():
+        missing_fields = [field for field in REQUIRED_BUILD_FIELDS if field not in native_entry]
+        if missing_fields:
             errors.append(
-                f"build matrix {target} package_dir drift: expected {expected_package_dir}, found {publish_entry.get('package_dir')}"
+                f"canonical build matrix {target} missing fields: {missing_fields}"
+            )
+        expected_package_dir = TARGET_PACKAGES.get(target)
+        if native_entry.get("package_dir") != expected_package_dir:
+            errors.append(
+                f"build matrix {target} package_dir drift: expected {expected_package_dir}, found {native_entry.get('package_dir')}"
             )
         expected_artifact = f"cli-binary-{target}"
-        if publish_entry.get("artifact_name") != expected_artifact:
+        if native_entry.get("artifact_name") != expected_artifact:
             errors.append(
-                f"build matrix {target} artifact drift: expected {expected_artifact}, found {publish_entry.get('artifact_name')}"
+                f"build matrix {target} artifact drift: expected {expected_artifact}, found {native_entry.get('artifact_name')}"
             )
+
+    native_on_block = mapping_block(native_lines, "on", 0)
+    native_workflow_call_block = mapping_block(native_on_block, "workflow_call", 2)
+    native_pull_request_block = mapping_block(native_on_block, "pull_request", 2)
+    native_pull_request_paths = mapping_block(native_pull_request_block, "paths", 4)
+    native_build_uncommented = uncommented_lines(job_block(native_lines, "build"))
+    if not native_workflow_call_block:
+        errors.append("build-native workflow must expose workflow_call")
+    if "packages/cli/package.json" not in yaml_list_scalars(
+        native_pull_request_paths
+    ):
+        errors.append("build-native workflow must run for CLI package manifest changes")
+    if not any(
+        "bumped-manifests:" in line
+        for line in uncommented_lines(native_workflow_call_block)
+    ):
+        errors.append("build-native workflow must accept bumped-manifests input")
+    if not any(
+        "name: ${{ inputs.bumped-manifests }}" in line
+        for line in native_build_uncommented
+    ):
+        errors.append("build-native workflow must download the bumped-manifests input")
+    if "aarch64-linux-android" in native_build:
+        android_runner = "\n".join(
+            [
+                "      - name: Setup Android cross toolchain",
+                "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+                "        uses: taiki-e/setup-cross-toolchain-action@v1",
+                "        with:",
+                "          target: aarch64-linux-android",
+                "          runner: qemu-user",
+            ]
+        )
+        if android_runner not in "\n".join(native_build_uncommented):
+            errors.append("build-native workflow must configure the Android QEMU runner")
+        android_smoke = "\n".join(
+            [
+                "      - name: Smoke Android binary",
+                "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+                "        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version",
+            ]
+        )
+        if android_smoke not in "\n".join(native_build_uncommented):
+            errors.append("build-native workflow must execute the Android binary smoke")
+
+    publish_build_block = job_block(publish_lines, "build-cli-binary")
+    if not block_contains(
+        publish_build_block, "uses: ./.github/workflows/build-native.yml"
+    ):
+        errors.append("publish build must call the canonical build-native workflow")
+    if "bump-versions" not in parse_needs(publish_build_block):
+        errors.append("publish build must depend on bump-versions")
+    if not block_contains(publish_build_block, "bumped-manifests: bumped-manifests"):
+        errors.append("publish build must pass the bumped-manifests artifact")
 
     publish_platform = matrix_settings(publish_lines, "publish-platform-packages")
     platform_by_dir: dict[str, dict[str, str]] = {}
@@ -202,7 +554,7 @@ def main() -> None:
         platform_by_dir[package_dir] = entry
 
     expected_package_dirs = {
-        entry["package_dir"] for entry in publish_build.values() if entry.get("package_dir")
+        entry["package_dir"] for entry in native_build.values() if entry.get("package_dir")
     }
     if set(platform_by_dir) != expected_package_dirs:
         errors.append(
@@ -210,7 +562,7 @@ def main() -> None:
         )
 
     build_by_package_dir = {
-        entry["package_dir"]: entry for entry in publish_build.values() if entry.get("package_dir")
+        entry["package_dir"]: entry for entry in native_build.values() if entry.get("package_dir")
     }
     for package_dir, platform_entry in platform_by_dir.items():
         build_entry = build_by_package_dir.get(package_dir)
@@ -229,6 +581,22 @@ def main() -> None:
             errors.append(
                 f"publish platform binary drift for {package_dir}: expected {build_entry.get('bin_name')}, found {platform_entry.get('binary_name')}"
             )
+
+    try:
+        smoke_block = job_block(publish_lines, "smoke-release-artifacts")
+    except SystemExit:
+        smoke_block = []
+        errors.append("publish workflow missing smoke-release-artifacts job")
+
+    if smoke_block:
+        if not block_contains(smoke_block, "pattern: cli-binary-*"):
+            errors.append("smoke-release-artifacts job must download cli-binary-* artifacts")
+        if not block_contains(smoke_block, "scripts/test-release-package-artifacts.sh"):
+            errors.append("smoke-release-artifacts job must run scripts/test-release-package-artifacts.sh")
+
+    prepare_block = job_block(publish_lines, "prepare-release-provenance")
+    if "smoke-release-artifacts" not in parse_needs(prepare_block):
+        errors.append("prepare-release-provenance must depend on smoke-release-artifacts")
 
     if errors:
         raise SystemExit("Release workflow safety check failed:\n- " + "\n- ".join(errors))

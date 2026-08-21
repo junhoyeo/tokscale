@@ -1,14 +1,18 @@
 mod app;
 mod cache;
 pub mod client_ui;
+pub(crate) mod codex_login;
 mod colors;
 pub mod config;
 pub mod data;
 mod event;
 mod export;
+mod keymap;
+pub(crate) mod privacy;
+pub mod remote;
 pub mod settings;
 mod themes;
-mod ui;
+pub(crate) mod ui;
 
 pub use app::{App, Tab, TuiConfig};
 pub use cache::{
@@ -80,6 +84,7 @@ pub fn run(
     until: Option<String>,
     year: Option<String>,
     initial_tab: Option<Tab>,
+    worktree_rollup: tokscale_core::WorktreeRollup,
 ) -> Result<()> {
     if debug {
         let _ = tracing_subscriber::fmt()
@@ -96,6 +101,7 @@ pub fn run(
         until: until.clone(),
         year: year.clone(),
         initial_tab,
+        worktree_rollup,
     };
 
     // Build the unified filter set used by the cache key, the App
@@ -142,6 +148,13 @@ pub fn run(
         return Err(e.into());
     }
 
+    // From here on the TUI owns raw mode and the alternate screen for its
+    // whole run. Background diagnostics (e.g. cache save warnings) must not
+    // write raw stdio while this is set, or they corrupt the rendered
+    // display instead of being visible as a log line. Cleared in both
+    // `restore_terminal` and `restore_terminal_best_effort` below.
+    tokscale_core::tui_signal::set_tui_active(true);
+
     let backend = CrosstermBackend::new(stdout);
     let terminal_result = Terminal::new(backend);
     let mut terminal = match terminal_result {
@@ -159,6 +172,11 @@ pub fn run(
             return Err(e);
         }
     };
+
+    // Cache-first load of server-side aggregated multi-device stats. The
+    // background refresh (when the cache is stale or missing) is driven by
+    // App::on_tick, and every failure path degrades silently to local-only.
+    app.init_remote_stats();
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
 
@@ -214,6 +232,10 @@ pub fn run(
         &sigcont_flag,
     );
 
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
+
     restore_terminal(&mut terminal);
 
     result
@@ -227,6 +249,9 @@ fn restore_terminal_best_effort() {
         SetTitle("")
     );
     let _ = disable_raw_mode();
+    // Flush diagnostics that were deferred while the TUI owned raw mode only
+    // after normal stderr is visible again.
+    tokscale_core::tui_signal::set_tui_active(false);
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
@@ -238,6 +263,9 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         SetTitle("")
     );
     let _ = terminal.show_cursor();
+    // set_tui_active(false) drains deferred stderr, so it must be the last
+    // restoration step rather than writing into the alternate screen.
+    tokscale_core::tui_signal::set_tui_active(false);
 }
 
 fn run_loop_with_background(
@@ -301,12 +329,19 @@ fn run_loop_with_background(
             let group_by = app.group_by.borrow().clone();
             let report_scope = background_cache_scope(&since, &until, &year);
             let minutely_enabled = app.settings.minutely_tab_enabled;
+            let worktree_rollup = app.worktree_rollup;
 
             thread::spawn(move || {
-                let loader = background_data_loader(since, until, year, minutely_enabled);
+                let loader = background_data_loader(since, until, year, minutely_enabled)
+                    .with_worktree_rollup(worktree_rollup);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                    // Rolled-up rows are a different aggregation of the same
+                    // messages, so caching them under the plain workspace scope
+                    // would serve merged rows to a later un-merged view.
+                    if worktree_rollup == tokscale_core::WorktreeRollup::Separate {
+                        save_cached_data(data, &enabled_clients, &group_by, &report_scope);
+                    }
                 }
                 let _ = tx.send(result);
             });
@@ -359,6 +394,7 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Crush,
         ClientId::Hermes,
         ClientId::Codebuff,
+        ClientId::Freebuff,
     ];
 
     let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;

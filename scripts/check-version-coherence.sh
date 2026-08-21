@@ -65,6 +65,7 @@ required_platform_names = {
     "@tokscale/cli-linux-x64-musl",
     "@tokscale/cli-win32-arm64-msvc",
     "@tokscale/cli-win32-x64-msvc",
+    "@tokscale/cli-android-arm64",
 }
 
 def expect_equal(label: str, actual: str, expected: str) -> None:

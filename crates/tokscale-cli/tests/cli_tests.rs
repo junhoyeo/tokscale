@@ -8,21 +8,93 @@ use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
 
+fn write_canonical_pricing_cache_files(
+    base: &Path,
+    litellm_payload: &str,
+    openrouter_payload: &str,
+    models_dev_payload: &str,
+) {
+    let dir = base.join(".config/tokscale/cache");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("pricing-litellm.json"), litellm_payload).unwrap();
+    fs::write(dir.join("pricing-openrouter.json"), openrouter_payload).unwrap();
+    fs::write(dir.join("pricing-models-dev.json"), models_dev_payload).unwrap();
+}
+
 fn prime_pricing_cache(base: &Path) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time before unix epoch")
         .as_secs();
     let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
+    let models_dev_payload = format!(
+        r#"{{"timestamp":{},"data":{{"fixture/unused-model":{{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}}}}}"#,
+        now
+    );
+    write_canonical_pricing_cache_files(base, &payload, &payload, &models_dev_payload);
+}
 
-    for dir in [
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-        base.join(".config/tokscale/cache"),
+// @keep: the sentinel models.dev row in prime_pricing_cache marks the dataset
+// as loaded without pricing any model used by the generic report fixtures.
+/// Prime the cache with an actual priced model for submission tests.
+///
+/// The generic fixture deliberately has no matching published model, so tests
+/// that need "pricing loaded fine, it just does not cover *this* model" must
+/// prime a non-empty dataset with this helper.
+fn prime_pricing_cache_with_a_priced_model(base: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let payload = format!(
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001,"cache_read_input_token_cost":0.00000125,"cache_creation_input_token_cost":0.000003125}}}}}}"#,
+        now
+    );
+
+    write_canonical_pricing_cache_files(base, &payload, &payload, &payload);
+}
+
+/// Prime a deterministic canonical Sonnet catalog for offline pricing command tests.
+fn prime_canonical_sonnet_pricing_cache(base: &Path, model: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let pricing = serde_json::json!({
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015,
+        "cache_read_input_token_cost": 0.0000003,
+        "cache_creation_input_token_cost": 0.00000375,
+    });
+    let payload = serde_json::to_string(&serde_json::json!({
+        "timestamp": now,
+        "data": serde_json::Map::from_iter([(model.to_owned(), pricing.clone())]),
+    }))
+    .unwrap();
+    let models_dev_payload = serde_json::to_string(&serde_json::json!({
+        "timestamp": now,
+        "data": serde_json::Map::from_iter([(format!("anthropic/{model}"), pricing)]),
+    }))
+    .unwrap();
+    write_canonical_pricing_cache_files(base, &payload, &payload, &models_dev_payload);
+}
+
+#[test]
+fn prime_canonical_sonnet_pricing_cache_escapes_arbitrary_model_names() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let model = "claude-\"quoted\\model\nnext-line";
+
+    prime_canonical_sonnet_pricing_cache(tmp.path(), model);
+
+    let cache_dir = tmp.path().join(".config/tokscale/cache");
+    for (file, expected_model) in [
+        ("pricing-litellm.json", model.to_owned()),
+        ("pricing-openrouter.json", model.to_owned()),
+        ("pricing-models-dev.json", format!("anthropic/{model}")),
     ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
-        fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(cache_dir.join(file)).unwrap()).unwrap();
+        assert!(payload["data"].get(&expected_model).is_some());
     }
 }
 
@@ -37,6 +109,7 @@ fn prime_override_pricing_cache(config_dir: &Path) {
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(cache_dir.join("pricing-litellm.json"), &payload).unwrap();
     fs::write(cache_dir.join("pricing-openrouter.json"), &payload).unwrap();
+    fs::write(cache_dir.join("pricing-models-dev.json"), &payload).unwrap();
 }
 
 /// Create a temporary directory with minimal OpenCode fixture data.
@@ -121,45 +194,64 @@ fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
 }
 
+/// Put a stand-in `codex` on PATH for the three `headless_capture_*` tests.
+///
+/// The stand-in is `src/bin/fake_codex.rs`, built by cargo as a real binary for
+/// whatever platform the tests are running on, and copied here under the name
+/// `run_capture_command` looks for. `CARGO_BIN_EXE_<name>` is set by cargo for
+/// every binary in this package when it compiles this package's integration
+/// tests, so the helper is guaranteed to exist and there is no target directory
+/// to guess at.
+///
+/// It used to be a `#!/bin/sh` script written at test time, which is why these
+/// tests could not run on Windows: there is no shebang there, and
+/// `Command::new("codex")` resolves a bare program name by appending `.exe`
+/// only — an extensionless `codex` is never even probed, so the child reported
+/// `Failed to spawn 'codex': program not found`. That was the fixture failing,
+/// not the feature.
+///
+/// The extension matters, so it is chosen per platform rather than assumed.
+/// `std::fs::copy` carries the source's mode on Unix, which is why there is no
+/// longer an explicit chmod.
 fn create_fake_codex_bin() -> TempDir {
     let tmp = TempDir::new().expect("failed to create fake codex dir");
-    let codex_path = tmp.path().join("codex");
-    fs::write(
-        &codex_path,
-        r#"#!/bin/sh
-case "$TOKSCALE_FAKE_CODEX_MODE" in
-  success)
-    printf 'captured ok'
-    exit 0
-    ;;
-  fail)
-    printf 'captured fail'
-    exit 17
-    ;;
-  slow)
-    exec sleep 20
-    ;;
-  *)
-    echo "unknown TOKSCALE_FAKE_CODEX_MODE" >&2
-    exit 2
-    ;;
-esac
-"#,
-    )
-    .unwrap();
+    let codex_path = tmp
+        .path()
+        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&codex_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&codex_path, permissions).unwrap();
-    }
+    fs::copy(Path::new(env!("CARGO_BIN_EXE_fake_codex")), &codex_path)
+        .expect("failed to install the fake codex onto PATH");
 
     tmp
 }
 
-fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
+fn create_fake_mcode_bin() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create fake mcode dir");
+    let mcode_path = tmp
+        .path()
+        .join(if cfg!(windows) { "mcode.exe" } else { "mcode" });
+
+    fs::copy(Path::new(env!("CARGO_BIN_EXE_fake_codex")), &mcode_path)
+        .expect("failed to install the fake mcode onto PATH");
+
+    tmp
+}
+
+/// Build the `tokscale headless codex` invocation for one `headless_capture_*`
+/// test.
+///
+/// `timeout_ms` is the parent's `TOKSCALE_NATIVE_TIMEOUT_MS` and is per-test on
+/// purpose: the two `fast` tests and the `slow` test need the parent's deadline
+/// on opposite sides of the child's runtime, so a single shared constant cannot
+/// serve both. It is passed through `Settings::get_native_timeout`, which clamps
+/// to `[5_000, 3_600_000]` ms — keep any value here inside that range or the
+/// test will silently run against a different deadline than it asserts on.
+fn headless_capture_command(
+    fake_bin: &Path,
+    output_path: &Path,
+    mode: &str,
+    timeout_ms: u64,
+) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     let path = std::env::var_os("PATH").unwrap_or_default();
     let joined_path = std::env::join_paths(
@@ -169,7 +261,7 @@ fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> 
 
     cmd.env("HOME", fake_bin)
         .env("TOKSCALE_FAKE_CODEX_MODE", mode)
-        .env("TOKSCALE_NATIVE_TIMEOUT_MS", "10000")
+        .env("TOKSCALE_NATIVE_TIMEOUT_MS", timeout_ms.to_string())
         .env("PATH", joined_path)
         .args([
             "headless",
@@ -183,18 +275,84 @@ fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> 
 }
 
 #[test]
+fn headless_capture_mcode_injects_stream_json_after_exec() {
+    let fake_bin = create_fake_mcode_bin();
+    let output_dir = TempDir::new().expect("failed to create output dir");
+    let output_path = output_dir.path().join("mcode.jsonl");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(fake_bin.path().to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("tokscale")
+        .env("HOME", fake_bin.path())
+        .env("TOKSCALE_FAKE_CODEX_MODE", "args")
+        .env("PATH", joined_path)
+        .args([
+            "headless",
+            "--output",
+            output_path.to_str().unwrap(),
+            "mcode",
+            "exec",
+            "review this change",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "exec\n--output-format\nstream-json\nreview this change"
+    );
+}
+
+/// The parent deadline the two `fast` tests give `tokscale`, and the elapsed
+/// bound they assert against it.
+///
+/// These tests time a whole `tokscale` process spawn, so the measurement always
+/// includes startup, and the useful question is not "how tight can the bound be"
+/// but "is the gap between the two outcomes bigger than the noise". The two
+/// outcomes are: the parent notices its child already exited and returns at once,
+/// or it wrongly sits on its deadline. So the gap *is* the timeout, and the bound
+/// only has to land somewhere inside it.
+///
+/// With the previous constants — a 10s deadline and an 8s bound — the gap was 10s
+/// and the noise was larger than that. All three of these tests failed on the
+/// `windows-latest` leg of run 31196968982 (job 93170461116) with correct
+/// behaviour and wrong timings: `fast failure waited too long: 11.0576809s` and
+/// `fast success waited too long: 11.16815s`, i.e. startup alone exceeded the
+/// very interval the assertion exists to detect. No value between 0 and 10s could
+/// have separated the two outcomes there, which is why the bound was not simply
+/// raised again — see the `slow` test below for the previous attempt at that.
+///
+/// A 60s deadline with a 30s bound sits in the middle of a 60s gap: 27s of
+/// headroom above a healthy run, which costs ~3.2s locally, and 30s below the
+/// failure mode. A parent that waits for its deadline takes at least 60s and
+/// fails; runner slowness would have to add ~27s to produce a false red.
+/// The cost is that a genuinely hung parent now takes up to 60s to be reported
+/// instead of 10s, which is the right trade against a gate that blocks unrelated
+/// changes.
+const HEADLESS_FAST_TIMEOUT_MS: u64 = 60_000;
+const HEADLESS_FAST_MAX_ELAPSED: Duration = Duration::from_secs(30);
+
+#[test]
 fn headless_capture_fast_success_does_not_wait_for_timeout() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("success.jsonl");
 
     let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "success")
-        .assert()
-        .success();
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "success",
+        HEADLESS_FAST_TIMEOUT_MS,
+    )
+    .assert()
+    .success();
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed < Duration::from_secs(8),
+        elapsed < HEADLESS_FAST_MAX_ELAPSED,
         "fast success waited too long: {elapsed:?}"
     );
     assert_eq!(fs::read_to_string(output_path).unwrap(), "captured ok");
@@ -206,18 +364,37 @@ fn headless_capture_fast_nonzero_preserves_exit_code() {
     let output_path = fake_bin.path().join("fail.jsonl");
 
     let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "fail")
-        .assert()
-        .failure()
-        .code(17);
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "fail",
+        HEADLESS_FAST_TIMEOUT_MS,
+    )
+    .assert()
+    .failure()
+    .code(17);
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed < Duration::from_secs(8),
+        elapsed < HEADLESS_FAST_MAX_ELAPSED,
         "fast failure waited too long: {elapsed:?}"
     );
     assert_eq!(fs::read_to_string(output_path).unwrap(), "captured fail");
 }
+
+/// The parent deadline for the `slow` test, and the window the elapsed time has
+/// to land in. Kept deliberately far from `FAKE_CODEX_SLOW_SLEEP_SECS`, which is
+/// the child's own sleep in `src/bin/fake_codex.rs`.
+///
+/// This window answers "did the *parent* end this run", not "did it end it on
+/// time". `headless_capture_timeout_fires_near_its_deadline` below answers the
+/// second question, because this window deliberately cannot: it is 50s wide
+/// above the deadline, so a regression that stretched the effective deadline to
+/// 50s would still kill the 120s child, still report 124, and still land inside
+/// it. The two assertions are complementary and both are needed.
+const HEADLESS_SLOW_TIMEOUT_MS: u64 = 10_000;
+const HEADLESS_SLOW_MIN_ELAPSED: Duration = Duration::from_secs(10);
+const HEADLESS_SLOW_MAX_ELAPSED: Duration = Duration::from_secs(60);
 
 #[test]
 fn headless_capture_slow_command_times_out() {
@@ -225,15 +402,228 @@ fn headless_capture_slow_command_times_out() {
     let output_path = fake_bin.path().join("slow.jsonl");
 
     let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "slow")
-        .assert()
-        .failure()
-        .code(124);
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "slow",
+        HEADLESS_SLOW_TIMEOUT_MS,
+    )
+    .assert()
+    .failure()
+    .code(124);
     let elapsed = started.elapsed();
 
+    // The discriminating fact is that the *parent's* 10s timeout ended this run,
+    // not the child's own sleep. The lower bound proves the parent waited for
+    // its deadline instead of failing early; the upper bound proves it did not
+    // simply outlive the child.
+    //
+    // The upper bound is therefore set against the child's sleep, not against a
+    // teardown budget. It has been wrong twice, in the same way both times:
+    //
+    //   - 14s left only 4s for everything outside the deadline — `tokscale`'s own
+    //     process startup, `child.kill()`, `child.wait()` and joining the stdout
+    //     pump — and on a Windows runner startup alone can consume most of that.
+    //     It failed at 14.83s in CI (job 92167428621) while still killing the
+    //     child correctly, so the bound was measuring runner speed rather than
+    //     the behaviour this test is named for.
+    //   - 18s, its replacement, kept a 2s margin below the child's then-20s sleep
+    //     and failed at 21.17s in CI (run 31196968982, job 93170461116) — past the
+    //     child's sleep entirely. At that point the bound could no longer separate
+    //     "the parent killed the child at its deadline" from "the parent outlived
+    //     the child", which is the one thing it exists to do, so raising it to 22s
+    //     would have kept the test green while making it vacuous.
+    //
+    // Both failures came from squeezing the bound into a narrow gap between the
+    // deadline and the child's sleep. The fix is to widen that gap instead: the
+    // child now sleeps `FAKE_CODEX_SLOW_SLEEP_SECS` (120s) against the parent's
+    // 10s deadline, so the two outcomes are 110s apart and the 60s bound has 50s
+    // of headroom above the deadline and 60s below the child's sleep. A parent
+    // that outlived the child cannot finish before 120s, and the ~11s of runner
+    // startup that broke the 18s bound is a fifth of the headroom here.
+    //
+    // The lower bound stays at the parent's own deadline. It is exact by
+    // construction: the child cannot exit on its own before then, so anything
+    // faster means the parent gave up early.
+    //
+    // Note this test cannot catch #1049: the stand-in spawns nothing, so its pipe
+    // closes the moment it is killed, and the unbounded `output_handle.join()`
+    // after the kill is never exercised. Widening the gap does not hide that —
+    // it was never covered.
     assert!(
-        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(14),
+        elapsed >= HEADLESS_SLOW_MIN_ELAPSED && elapsed < HEADLESS_SLOW_MAX_ELAPSED,
         "slow command timeout duration was unexpected: {elapsed:?}"
+    );
+}
+
+/// How far the measured deadline may sit from the configured one in
+/// `headless_capture_timeout_fires_near_its_deadline`.
+///
+/// See that test for why five seconds against a ten second deadline is both
+/// generous and meaningful.
+const HEADLESS_DEADLINE_TOLERANCE: Duration = Duration::from_secs(5);
+
+/// Time one `headless capture` run of `mode` under `timeout_ms`, asserting the
+/// outcome the mode is defined to produce, and return how long it took.
+///
+/// Shared by `headless_capture_timeout_fires_near_its_deadline` so its baseline
+/// and its timed-out run differ in exactly one thing — the deadline — and every
+/// other cost is measured the same way on both sides of the subtraction.
+fn time_headless_capture(fake_bin: &Path, label: &str, mode: &str, timeout_ms: u64) -> Duration {
+    let output_path = fake_bin.join(format!("{label}.jsonl"));
+    let started = Instant::now();
+    let assertion = headless_capture_command(fake_bin, &output_path, mode, timeout_ms).assert();
+    match mode {
+        "success" => {
+            assertion.success();
+        }
+        "slow" => {
+            assertion.failure().code(124);
+        }
+        other => panic!("time_headless_capture does not know mode {other:?}"),
+    }
+    let elapsed = started.elapsed();
+    if mode == "success" {
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "captured ok");
+    }
+    elapsed
+}
+
+#[test]
+fn headless_capture_timeout_fires_near_its_deadline() {
+    // `headless_capture_slow_command_times_out` proves the parent killed the
+    // child rather than outliving it. It cannot prove the parent killed it *at
+    // the deadline it was given*: its window is `[10s, 60s)`, so a regression
+    // that stretched the effective deadline to 50s would still kill the 120s
+    // child, still report 124, and still land inside that window. This test pins
+    // the deadline itself.
+    //
+    // It does so by subtracting two runs instead of bounding one. Everything a
+    // run pays outside the deadline — `tokscale`'s process spawn, dynamic
+    // linking, argument parsing, settings load, spawning and reaping the
+    // stand-in on PATH — is paid by a fast run and a timed-out run alike, so it
+    // cancels. What is left is the wait on the deadline.
+    //
+    // The numbers from the CI failure that forced the previous bound open (run
+    // 31196968982, job 93170461116) show how completely it cancels. Against a
+    // configured 10s deadline:
+    //
+    //     fast_success 11.16815s    fast_fail 11.0576809s    slow 21.173129s
+    //     slow - fast_success = 10.0050s
+    //     slow - fast_fail    = 10.1154s
+    //
+    // Every absolute number there is ~11s of runner overhead away from anything
+    // a fixed threshold could use — that overhead alone is longer than the
+    // deadline being measured, which is why no absolute bound survived. The
+    // differences recover the deadline to within 0.12s, on the very runner that
+    // was too slow for a bound of any width. The ~11s of startup noise is not
+    // something this assertion tolerates; it is something it subtracts away.
+    let fake_bin = create_fake_codex_bin();
+
+    // The overhead is only common-mode once it is in steady state, and the first
+    // run of the test binary is not. Measured locally: the first `tokscale`
+    // spawn in this test costs 3.5-6.1s (paging in a debug binary, linking,
+    // first execution of the freshly copied stand-in), and every spawn after it
+    // costs ~45ms. Subtracting a cold baseline from a warm timed-out run charges
+    // that one-off to the deadline and understates it — an early draft of this
+    // test failed exactly that way, reporting a 3.96s deadline for a 10s
+    // configured one because its single baseline happened to cost 6.09s.
+    //
+    // So the baseline is the minimum of two samples rather than one sample. The
+    // noise here is one-sided — nothing can make a run finish faster than the
+    // work it has to do, only slower — so the smallest sample is the best
+    // estimate of the floor, and one unlucky sample no longer moves it. The
+    // symmetric risk, a one-off landing on the timed-out run instead, is what
+    // the tolerance below is sized for.
+    let baseline = time_headless_capture(
+        fake_bin.path(),
+        "deadline-baseline-a",
+        "success",
+        HEADLESS_FAST_TIMEOUT_MS,
+    )
+    .min(time_headless_capture(
+        fake_bin.path(),
+        "deadline-baseline-b",
+        "success",
+        HEADLESS_FAST_TIMEOUT_MS,
+    ));
+
+    let configured_deadline = Duration::from_millis(HEADLESS_SLOW_TIMEOUT_MS);
+
+    // Five seconds against a ten second deadline, i.e. an accepted band of
+    // `[5s, 15s]`.
+    //
+    // Generous: the largest residual ever measured is the 0.12s above, on a
+    // `windows-latest` runner loaded enough to fail three tests at once, and a
+    // warm local run lands within ~50ms. Five seconds is roughly forty times the
+    // worst of those, so this is not the next bound that gets widened.
+    //
+    // Meaningful: it still fails loudly for the case the coarse window misses.
+    // An effective deadline of 50s lands 35s outside the band; so does 2x; so
+    // does anything past 1.5x. Five seconds is the largest tolerance that keeps
+    // "the deadline is half again as long as it was configured to be" a red
+    // test. It catches the opposite regression too — a deadline collapsing
+    // toward zero — which the `[10s, 60s)` lower bound only appears to catch
+    // because startup pads the measurement past 10s on its own.
+    //
+    // Widening this is a change of meaning, not of margin: the check is worth
+    // having only while `configured * 1.5` stays outside the band.
+    let low = configured_deadline.saturating_sub(HEADLESS_DEADLINE_TOLERANCE);
+    let high = configured_deadline + HEADLESS_DEADLINE_TOLERANCE;
+
+    // The timed-out run: the same overhead, plus one wait on
+    // `HEADLESS_SLOW_TIMEOUT_MS`. Run adjacent in time to the baseline on the
+    // same machine, so the overhead the subtraction removes is the overhead that
+    // was actually paid.
+    //
+    // The one-sided-noise argument that makes the baseline a minimum of two
+    // samples applies to this side too, and this is the side that drives the
+    // upper bound: a scheduling hit worth more than the tolerance would report a
+    // deadline longer than the one that actually fired. So this side is a
+    // minimum of samples as well — it is just sampled lazily, because each
+    // sample costs a full `HEADLESS_SLOW_TIMEOUT_MS` and the baseline's cost
+    // ~45ms once warm. The second sample is taken only when the first disagrees
+    // with the configured deadline, so the steady-state cost stays one wait.
+    //
+    // Sampling lazily cannot hide a regression. A second sample is taken only
+    // when the test is already failing, and a minimum can only move the estimate
+    // down, so the retry can rescue a spike that inflated the measurement and
+    // nothing else: a deadline that really is 5x too long measures ~50s twice
+    // and still fails.
+    //
+    // That the minimum only moves down is also why the resample is conditioned
+    // on the upper bound alone. A measurement below `low` — a deadline that
+    // fired early, or a baseline that padded the run — cannot be moved back up
+    // into the band by a minimum, so resampling it would spend another full
+    // `HEADLESS_SLOW_TIMEOUT_MS` to reach the failure it had already reached.
+    // The too-short case fails on the first sample.
+    //
+    // `saturating_sub` rather than `-`: a baseline longer than the timed-out run
+    // means the deadline was not waited on at all, which is a failure to report,
+    // not a subtraction overflow to panic on.
+    let mut slow = time_headless_capture(
+        fake_bin.path(),
+        "deadline-slow",
+        "slow",
+        HEADLESS_SLOW_TIMEOUT_MS,
+    );
+    let mut measured_deadline = slow.saturating_sub(baseline);
+    if measured_deadline > high {
+        slow = slow.min(time_headless_capture(
+            fake_bin.path(),
+            "deadline-slow-resample",
+            "slow",
+            HEADLESS_SLOW_TIMEOUT_MS,
+        ));
+        measured_deadline = slow.saturating_sub(baseline);
+    }
+
+    assert!(
+        measured_deadline >= low && measured_deadline <= high,
+        "timeout did not fire near its configured deadline: \
+         configured {configured_deadline:?}, measured {measured_deadline:?} \
+         (timed-out run {slow:?} - baseline run {baseline:?}), \
+         accepted {low:?}..={high:?}"
     );
 }
 
@@ -251,6 +641,7 @@ fn create_empty_fixture_dir() -> TempDir {
     tmp
 }
 
+#[cfg(unix)]
 fn create_timezone_boundary_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -296,6 +687,38 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     fs::write(session.join("msg_b.json"), msg_b).unwrap();
 
     tmp
+}
+
+#[cfg(unix)]
+fn create_positive_utc_offset_submit_fixture_dir() -> (TempDir, String) {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let utc_today = chrono::Utc::now().date_naive();
+    let utc_noon = utc_today.and_hms_opt(12, 0, 0).unwrap().and_utc();
+    let local_date = utc_today.succ_opt().unwrap().format("%Y-%m-%d").to_string();
+    let session = base.join(".local/share/opencode/storage/message/session1");
+    fs::create_dir_all(&session).unwrap();
+
+    let message = serde_json::json!({
+        "id": "msg_ahead_of_utc",
+        "sessionID": "session1",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "cost": 0.02,
+        "tokens": {
+            "input": 1000,
+            "output": 500,
+            "reasoning": 0,
+            "cache": { "read": 200, "write": 50 }
+        },
+        "time": { "created": utc_noon.timestamp_millis() as f64 }
+    });
+    fs::write(session.join("msg_ahead_of_utc.json"), message.to_string()).unwrap();
+
+    (tmp, local_date)
 }
 
 fn create_qwen_workspace_fixture_dir() -> TempDir {
@@ -434,14 +857,51 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
     tmp
 }
 
-/// Build a Command pointing HOME at the given temp dir, with --no-spinner and --opencode flags.
+/// Build a Command pointing HOME and the XDG dirs at the given temp dir for
+/// hermetic test runs (no flags are added; callers append their own).
+/// The config root every `cmd_with_home` fixture writes into, and the value
+/// the child is told to use.
+///
+/// `HOME` plus the `XDG_*` vars locate the config dir on Unix and reach nothing
+/// on Windows: `paths::get_config_dir` resolves the Windows root through
+/// `dirs::config_dir()`, a `SHGetKnownFolderPath` call no environment variable
+/// redirects. The child therefore read the *runner's* real
+/// `%APPDATA%\tokscale\` — so a fixture's settings.json was never seen (model
+/// aliases went unfolded, `scanner.extraScanPaths` came back null, auto-pinning
+/// had nothing to pin into) and the pricing cache the fixture primed with an
+/// empty catalog was replaced by whatever real prices happened to be on the
+/// machine.
+///
+/// `TOKSCALE_CONFIG_DIR` is the one override consulted first on every platform,
+/// and on Unix it names the directory the `XDG_CONFIG_HOME` pin already
+/// produced, so nothing moves there. Setting it also means these runs no longer
+/// depend on the legacy macOS settings fallback, which is correct for a
+/// hermetic fixture: `paths.rs` documents the override as meaning exactly "do
+/// not ingest anything from outside this root".
+fn sandbox_config_dir(tmp: &Path) -> std::path::PathBuf {
+    tmp.join(".config").join("tokscale")
+}
+
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
+        // `pricing` intentionally bypasses TOKSCALE_PRICING_CACHE_ONLY; the
+        // loopback proxies below are the offline guarantee for every command.
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+        // Keep cache-only fixtures offline even if a future code path ignores
+        // the cache-only switch or a developer has proxy variables configured.
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .env("http_proxy", "http://127.0.0.1:9")
+        .env("https_proxy", "http://127.0.0.1:9")
+        .env("all_proxy", "http://127.0.0.1:9")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         // Clear scan-path overrides inherited from the dev's shell, otherwise a
         // developer who exports e.g. TOKSCALE_EXTRA_DIRS=~/.codex/sessions (for
         // codefuse mirror tracking) makes the scanner read real session data
@@ -449,12 +909,16 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env_remove("TOKSCALE_EXTRA_DIRS")
         .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
         .env_remove("HERMES_HOME")
-        .env_remove("TOKSCALE_CONFIG_DIR");
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .env_remove("PRIME_AGENT_SESSION_DIR")
+        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+        .env_remove("DSH_HOME");
     cmd
 }
 
@@ -463,7 +927,8 @@ fn cmd_with_conflicting_env(tmp: &Path) -> Command {
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
-        .env("XDG_CACHE_HOME", tmp.join(".cache"));
+        .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp));
     cmd
 }
 
@@ -478,19 +943,28 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
+        .env("http_proxy", "http://127.0.0.1:9")
+        .env("https_proxy", "http://127.0.0.1:9")
+        .env("all_proxy", "http://127.0.0.1:9")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         // Clear scan-path overrides (mirrors cmd_with_home)
         .env_remove("TOKSCALE_EXTRA_DIRS")
         .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
         .env_remove("HERMES_HOME")
-        .env_remove("TOKSCALE_CONFIG_DIR");
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .env_remove("PRIME_AGENT_SESSION_DIR")
+        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
     cmd
 }
 
@@ -501,23 +975,87 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
-    // Seed all three locations so the test exercises the same fallback
-    // chain the binary uses post-#470: canonical
-    // <config_dir>/cache/, then legacy dirs::cache_dir()/tokscale, then
-    // ~/.cache/tokscale. Without the canonical path seeded, CI runners
-    // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
-    // some Linux runners with XDG_CACHE_HOME set globally) miss the
-    // pricing cache entirely and the report falls back to embedded
-    // source costs.
-    for dir in [
-        base.join(".config/tokscale/cache"),
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
-        fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
-    }
+    write_canonical_pricing_cache_files(base, &litellm, &openrouter, &litellm);
+}
+
+/// Add an assistant message with NO embedded cost to the OpenCode fixture.
+///
+/// Provider-reported OpenCode costs are preserved verbatim (never repriced),
+/// so the stale-pricing-cache tests need an uncosted message to prove the
+/// cache is actually consulted: 1000 input * 0.0000025 + 400 output *
+/// 0.00001 = 0.0065 on top of the 0.10 embedded total.
+fn add_uncosted_opencode_message(base: &Path) {
+    let session2 = base.join(".local/share/opencode/storage/message/session2");
+    fs::create_dir_all(&session2).unwrap();
+
+    // Same hour as msg_c (2025-01-10 12:01 UTC) so hourly bucket counts hold
+    let msg_d = r#"{
+        "id": "msg_d",
+        "sessionID": "session2",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "tokens": {
+            "input": 1000,
+            "output": 400,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1736510460000.0 }
+    }"#;
+    fs::write(session2.join("msg_d.json"), msg_d).unwrap();
+}
+
+/// Add an assistant message whose usage is entirely zero (tokens, cost, no
+/// duration) in its own month/hour, for `--hide-zero` tests. Uses a distinct
+/// model and a 2023-03-15 timestamp so it forms an all-zero row in the
+/// models, monthly, and hourly reports without touching other buckets.
+fn add_zero_usage_opencode_message(base: &Path) {
+    let session3 = base.join(".local/share/opencode/storage/message/session3");
+    fs::create_dir_all(&session3).unwrap();
+
+    // 2023-03-15 12:00:00 UTC = 1678881600000 ms
+    let msg_z = r#"{
+        "id": "msg_z",
+        "sessionID": "session3",
+        "role": "assistant",
+        "modelID": "zero-model",
+        "providerID": "openai",
+        "cost": 0.0,
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1678881600000.0 }
+    }"#;
+    fs::write(session3.join("msg_z.json"), msg_z).unwrap();
+}
+
+/// Add a month whose only non-zero token bucket is reasoning. This catches
+/// callers that accidentally fall back to the original MonthlyUsage shape.
+fn add_reasoning_only_opencode_message(base: &Path) {
+    let session = base.join(".local/share/opencode/storage/message/reasoning-session");
+    fs::create_dir_all(&session).unwrap();
+
+    // 2026-02-15 12:00:00 UTC = 1771156800000 ms
+    let message = r#"{
+        "id": "reasoning-msg",
+        "sessionID": "reasoning-session",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "cost": 0.0321,
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 321,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1771156800000.0 }
+    }"#;
+    fs::write(session.join("reasoning-msg.json"), message).unwrap();
 }
 
 fn write_fireworks_pricing_cache(base: &Path) {
@@ -544,23 +1082,14 @@ fn write_fireworks_pricing_cache(base: &Path) {
         }
     });
 
-    for dir in [
-        base.join(".config/tokscale/cache"),
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("pricing-litellm.json"),
-            serde_json::to_vec(&litellm).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("pricing-openrouter.json"),
-            serde_json::to_vec(&openrouter).unwrap(),
-        )
-        .unwrap();
-    }
+    let litellm_payload = serde_json::to_string(&litellm).unwrap();
+    let openrouter_payload = serde_json::to_string(&openrouter).unwrap();
+    write_canonical_pricing_cache_files(
+        base,
+        &litellm_payload,
+        &openrouter_payload,
+        &litellm_payload,
+    );
 }
 
 fn write_fake_credentials(base: &Path) {
@@ -574,20 +1103,104 @@ fn write_fake_credentials(base: &Path) {
 }
 
 fn write_settings_json(base: &Path, body: &str) {
-    let path = settings_json_path(base);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, body).unwrap();
+    write_settings_json_at(settings_json_path(base), body);
 }
 
-fn settings_json_path(base: &Path) -> std::path::PathBuf {
-    if cfg!(target_os = "windows") {
+/// Settings for a run that passes `--home <base>` rather than inheriting the
+/// sandbox config dir.
+///
+/// An explicit `--home` bypasses `TOKSCALE_CONFIG_DIR` entirely:
+/// `Settings::load_for_home_override` reads
+/// `ExplicitHomeConfigLayout::current()` under the given home, which is
+/// `.config/tokscale` on Unix and `AppData\Roaming\tokscale` on Windows. That
+/// branch is real product behavior, unlike the one [`settings_json_path`] used
+/// to carry, so this mirrors it.
+fn write_explicit_home_settings_json(base: &Path, body: &str) {
+    let path = if cfg!(target_os = "windows") {
         base.join("AppData")
             .join("Roaming")
             .join("tokscale")
             .join("settings.json")
     } else {
         base.join(".config").join("tokscale").join("settings.json")
+    };
+    write_settings_json_at(path, body);
+}
+
+fn write_settings_json_at(path: std::path::PathBuf, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+/// One path on every platform: the child is given `TOKSCALE_CONFIG_DIR`, so
+/// where it looks no longer depends on the OS. The Windows arm this replaces
+/// mirrored the real `%APPDATA%` layout under the fixture home, which the child
+/// never consulted — `dirs::config_dir()` reads the known folder, not `HOME` —
+/// so the fixture and the reader disagreed and every settings-driven assertion
+/// on Windows saw an absent file.
+fn settings_json_path(base: &Path) -> std::path::PathBuf {
+    sandbox_config_dir(base).join("settings.json")
+}
+
+/// A scan path spelled the way the binary spells it.
+///
+/// `tokscale clients --json` emits every client's scan root with native
+/// separators throughout: the root half comes from the platform (`C:\Users\me`
+/// on Windows), and the relative half is pushed component-by-component so no
+/// forward slash survives from the `/`-joined client-table literal. An
+/// expectation built with `Path::join` would disagree on the relative half's
+/// separators (`...\.codex/sessions` against the emitted
+/// `...\.codex\sessions`), because `join` only normalizes the junction.
+/// Changing the emitter means changing this helper in the same commit (#1048).
+fn client_scan_path(home: &Path, relative: &str) -> String {
+    let mut path = home.to_path_buf();
+    for component in Path::new(relative).components() {
+        path.push(component.as_os_str());
     }
+    path.to_string_lossy().into_owned()
+}
+
+/// Writes a minimal clawdboard account export to `<dir>/export.json` and
+/// returns its path, for exercising `tokscale import`.
+fn write_clawdboard_export_fixture(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("export.json");
+    fs::write(
+        &path,
+        r#"{
+          "dailyAggregates": [
+            {
+              "date": "2026-05-11",
+              "source": "codex",
+              "machineId": "m1",
+              "inputTokens": 100,
+              "outputTokens": 50,
+              "cacheCreationTokens": 0,
+              "cacheReadTokens": 10,
+              "totalCost": "0.50",
+              "modelsUsed": ["gpt-5.5"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.5", "cost": 0.5, "inputTokens": 100,
+                  "outputTokens": 50, "cacheReadTokens": 10, "cacheCreationTokens": 0 }
+              ]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+    path
+}
+
+/// Writes a `.claude/.mcp.json` under `home` declaring a locally configured
+/// MCP server, so tests can verify that data derived purely from an
+/// external export (e.g. `tokscale import`) does not leak it.
+fn write_local_mcp_config(home: &Path) {
+    let dir = home.join(".claude");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(".mcp.json"),
+        r#"{"mcpServers":{"local-only-test-server":{"command":"echo"}}}"#,
+    )
+    .unwrap();
 }
 
 fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, output: i64) {
@@ -615,6 +1228,189 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
     fs::write(
         dir.join(name),
         format!("{}\n{}\n", turn_context, token_count),
+    )
+    .unwrap();
+}
+
+/// The V1 Cherry Studio transcript root under a sandboxed home, spelled the
+/// way `PathRoot::AppData` resolves it per platform.
+///
+/// Built component-by-component rather than from a single `/`-joined literal:
+/// `Path::join` only normalizes the junction, so a `"AppData/Roaming/..."`
+/// literal keeps its own forward slashes on Windows and the fixture would not
+/// exercise the real `AppData\Roaming\CherryStudio\.claude\projects`
+/// layout the scanner walks (#1048).
+fn cherrystudio_projects_root(base: &Path) -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    let relative = "AppData/Roaming/CherryStudio/.claude/projects";
+    #[cfg(target_os = "macos")]
+    let relative = "Library/Application Support/CherryStudio/.claude/projects";
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let relative = ".config/CherryStudio/.claude/projects";
+
+    let mut path = base.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
+    }
+    path
+}
+
+/// Four snapshots of one streamed Cherry Studio API call. The final snapshot
+/// connects the UUID-only, message-only, and request-only partial records and
+/// carries the final streamed output count.
+fn write_cherrystudio_connected_alias_transcript(base: &Path) {
+    let path = cherrystudio_projects_root(base)
+        .join("workspace")
+        .join("session.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        concat!(
+            r#"{"type":"assistant","uuid":"u","message":{"model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"m","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","requestId":"r","message":{"model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"u","requestId":"r","message":{"id":"m","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":300}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A historical Cherry Studio call followed by a timestamp-less streamed
+/// replay. The replay grows output usage but must not take the transcript mtime
+/// as the call timestamp when its component has a valid event timestamp.
+fn write_cherrystudio_historical_replay_without_timestamp(base: &Path) {
+    let path = cherrystudio_projects_root(base)
+        .join("workspace")
+        .join("historical.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        concat!(
+            r#"{"type":"assistant","requestId":"historical-request","timestamp":"2024-01-02T03:04:05.000Z","message":{"id":"historical-message","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","requestId":"historical-request","message":{"id":"historical-message","model":"deepseek-v4-pro","usage":{"input_tokens":100,"output_tokens":300}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// The DSH transcript root under a sandboxed home: `<home>/.dsh/sessions`.
+///
+/// DSH keeps all user data under one root, resolved as an explicit config
+/// path, then `$DSH_HOME`, then `~/.dsh` (`util/home-paths`, `resolveDshHome`);
+/// the shipped base composition pins the session store to `sessions` beneath
+/// it. `cmd_with_home` clears `DSH_HOME` so this test reads the sandbox.
+fn dsh_sessions_root(base: &Path) -> std::path::PathBuf {
+    base.join(".dsh").join("sessions")
+}
+
+/// One zstd DSH transcript with a reasoning-bearing call, written to
+/// `<home>/.dsh/sessions/<encoded-cwd>/<session-id>/session.jsonl.zstd`.
+///
+/// Usage numbers are the committed vendor pair from
+/// `examples/acp-agent/tests/snapshots/subagent-fork-in-process`.
+fn write_dsh_zstd_session(base: &Path) {
+    let dir = dsh_sessions_root(base)
+        .join("-tmp-dsh-workspace")
+        .join("96cf59c9-b347-48b9-b234-a5200913ad05");
+    fs::create_dir_all(&dir).unwrap();
+    let payload = concat!(
+        r#"{"type":"session","version":0,"id":"96cf59c9-b347-48b9-b234-a5200913ad05","createdAt":1783352134832,"cwd":"/tmp/dsh-workspace","delegationDepth":0}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "
+"
+    );
+    fs::write(
+        dir.join("session.jsonl.zstd"),
+        zstd::encode_all(payload.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A DSH fork pair: the parent transcript plus the child whose seeded prefix
+/// repeats the parent's seq-39 call verbatim under a different session id.
+fn write_dsh_fork_pair(base: &Path) {
+    write_dsh_zstd_session(base);
+
+    let dir = dsh_sessions_root(base)
+        .join("-tmp-dsh-workspace")
+        .join("ada8966c-9fa3-441b-8721-37ff1e795e6a");
+    fs::create_dir_all(&dir).unwrap();
+    let payload = concat!(
+        r#"{"type":"session","version":0,"id":"ada8966c-9fa3-441b-8721-37ff1e795e6a","createdAt":1783352137161,"cwd":"/tmp/dsh-workspace","parentSession":"96cf59c9-b347-48b9-b234-a5200913ad05","seedLength":42,"origin":"subagent","delegationDepth":1}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "
+",
+        r#"{"type":"assistant/message","seq":96,"time":1786358035361,"data":{"turn":2,"message":{"id":"cdc56e00-c648-4669-92b2-7299e41cb743","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":97,"outputTokens":39,"cacheReadTokens":2816,"reasoningTokens":34}}}"#,
+        "
+"
+    );
+    fs::write(
+        dir.join("session.jsonl.zstd"),
+        zstd::encode_all(payload.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A DSH transcript pair whose child header carries no `seedLength`, so only
+/// the per-call `message.id` marks the seeded rows as the parent's work.
+fn write_dsh_seeded_pair_without_seed_length(base: &Path) {
+    let row = concat!(
+        r#"{"type":"assistant/message","seq":39,"time":1785730448979,"data":{"turn":1,"message":{"id":"7ac2e3d7-d558-4b24-b71e-40fc2f42216d","source":{"kind":"model","provider":"deepseek","model":"deepseek-reasoner"}},"usage":{"inputTokens":2885,"outputTokens":25,"cacheReadTokens":0,"reasoningTokens":23}}}"#,
+        "\n"
+    );
+
+    for (session_id, header) in [
+        (
+            "96cf59c9-b347-48b9-b234-a5200913ad05",
+            concat!(
+                r#"{"type":"session","version":0,"id":"96cf59c9-b347-48b9-b234-a5200913ad05","createdAt":1783352134832,"cwd":"/tmp/dsh-workspace"}"#,
+                "\n"
+            ),
+        ),
+        (
+            "ada8966c-9fa3-441b-8721-37ff1e795e6a",
+            concat!(
+                r#"{"type":"session","version":0,"id":"ada8966c-9fa3-441b-8721-37ff1e795e6a","createdAt":1783352137161,"cwd":"/tmp/dsh-workspace","parentSession":"96cf59c9-b347-48b9-b234-a5200913ad05"}"#,
+                "\n"
+            ),
+        ),
+    ] {
+        let dir = dsh_sessions_root(base)
+            .join("-tmp-dsh-workspace")
+            .join(session_id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session.jsonl.zstd"),
+            zstd::encode_all(format!("{header}{row}").as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn write_jcode_session(base: &Path) {
+    let sessions_dir = base.join(".jcode/sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(
+        sessions_dir.join("session_cli_fixture.json"),
+        r#"{
+  "id":"session_cli_fixture",
+  "provider_key":"cliproxyapi",
+  "model":"jcode-cli-model",
+  "working_dir":"/work/cli-fixture",
+  "messages":[
+    {"id":"assistant_1","role":"assistant","timestamp":"2026-01-01T00:00:01Z","token_usage":{"input_tokens":1000,"output_tokens":250,"cache_read_input_tokens":400,"cache_creation_input_tokens":50,"reasoning_output_tokens":25}}
+  ]
+}"#,
     )
     .unwrap();
 }
@@ -720,6 +1516,29 @@ fn test_clients_command_help() {
 }
 
 #[test]
+fn test_codex_command_help() {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.arg("codex")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Codex account integration commands",
+        ));
+}
+
+#[test]
+fn test_codex_activity_command_help() {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.args(["codex", "activity", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "opt-in Codex account-activity snapshot",
+        ));
+}
+
+#[test]
 fn test_graph_command_help() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("graph")
@@ -727,6 +1546,65 @@ fn test_graph_command_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Export contribution graph data"));
+}
+
+#[test]
+fn test_import_stdout_is_pure_json() {
+    // `tokscale import export.json > out.json` must produce a valid JSON
+    // file: no human-readable banners/summaries/warnings on stdout, only
+    // the serialized payload (matching how `tokscale graph` behaves).
+    let home = TempDir::new().unwrap();
+    let export_path = write_clawdboard_export_fixture(home.path());
+
+    let output = cmd_with_home(home.path())
+        .args(["import", export_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout was not pure JSON: {e}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert!(json["summary"]["totalTokens"].as_i64().unwrap() > 0);
+
+    // The human-readable banner belongs on stderr, not stdout.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Import Usage Data"));
+}
+
+#[test]
+fn test_import_does_not_leak_local_mcp_servers() {
+    // Reusing the graph/submit converter must not embed the local
+    // machine's configured MCP server names into data derived purely from
+    // a third-party clawdboard export.
+    let home = TempDir::new().unwrap();
+    write_local_mcp_config(home.path());
+    let export_path = write_clawdboard_export_fixture(home.path());
+
+    let output = cmd_with_home(home.path())
+        .args(["import", export_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json.get("mcpServers").is_none() || json["mcpServers"].is_null(),
+        "import output should not carry mcpServers: {json}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("local-only-test-server"));
 }
 
 #[test]
@@ -792,23 +1670,32 @@ fn test_invalid_subcommand() {
 }
 
 #[test]
+fn test_codex_accounts_empty_json() {
+    let tmp = TempDir::new().expect("failed to create temp home");
+    let mut cmd = cmd_with_home(tmp.path());
+    cmd.args(["codex", "accounts", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""accounts": []"#));
+}
+
+#[test]
 fn test_pricing_command_missing_model() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("pricing").assert().failure();
+    let tmp = TempDir::new().expect("failed to create temp home");
+    cmd_with_home(tmp.path()).arg("pricing").assert().failure();
 }
 
 #[test]
 fn test_headless_command_missing_client() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("headless").assert().failure();
+    let tmp = TempDir::new().expect("failed to create temp home");
+    cmd_with_home(tmp.path()).arg("headless").assert().failure();
 }
 
 #[test]
 fn test_headless_command_invalid_client() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("headless")
-        .arg("invalid-client")
-        .arg("test")
+    let tmp = TempDir::new().expect("failed to create temp home");
+    cmd_with_home(tmp.path())
+        .args(["headless", "invalid-client", "test"])
         .assert()
         .failure();
 }
@@ -819,7 +1706,7 @@ fn test_models_with_invalid_date_format() {
     cmd_with_home(tmp.path())
         .arg("models")
         .arg("--light")
-        .arg("--opencode")
+        .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--since")
         .arg("invalid-date")
@@ -833,7 +1720,7 @@ fn test_models_with_invalid_year() {
     cmd_with_home(tmp.path())
         .arg("models")
         .arg("--light")
-        .arg("--opencode")
+        .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--year")
         .arg("not-a-year")
@@ -863,7 +1750,7 @@ fn test_global_debug_flag() {
 fn test_models_with_since_until_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2024-06-01", "--until", "2024-06-30"])
         .assert()
         .success()
@@ -875,7 +1762,7 @@ fn test_models_with_since_until_filter() {
 fn test_models_with_year_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .assert()
         .success()
@@ -887,7 +1774,7 @@ fn test_models_with_year_filter() {
 fn test_monthly_with_date_filters() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2025-01-01", "--until", "2025-12-31"])
         .assert()
         .success()
@@ -903,7 +1790,8 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
         .args([
             "models",
             "--json",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -933,7 +1821,8 @@ fn test_monthly_home_override_ignores_conflicting_xdg_env() {
         .args([
             "monthly",
             "--json",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -963,7 +1852,8 @@ fn test_graph_home_override_ignores_conflicting_xdg_env() {
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .args([
             "graph",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -993,7 +1883,8 @@ fn test_models_home_override_ignores_conflicting_codex_home_env() {
         .args([
             "models",
             "--json",
-            "--codex",
+            "--client",
+            "codex",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1066,7 +1957,7 @@ fn test_clients_home_override_uses_explicit_home_for_json() {
         .unwrap();
     assert_eq!(
         codex["sessionsPath"],
-        serde_json::json!(real_home.path().join(".codex/sessions"))
+        serde_json::json!(client_scan_path(real_home.path(), ".codex/sessions"))
     );
     assert_eq!(codex["messageCount"].as_i64().unwrap(), 2);
 }
@@ -1112,7 +2003,7 @@ fn test_clients_home_override_ignores_copilot_exporter_env() {
 fn test_models_with_since_only() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2025-01-01"])
         .assert()
         .success()
@@ -1124,7 +2015,7 @@ fn test_models_with_since_only() {
 fn test_models_with_until_only() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--until", "2024-12-31"])
         .assert()
         .success()
@@ -1136,7 +2027,7 @@ fn test_models_with_until_only() {
 fn test_models_with_no_matching_date() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2099-01-01", "--until", "2099-12-31"])
         .output()
         .unwrap();
@@ -1149,12 +2040,15 @@ fn test_models_with_no_matching_date() {
     );
 }
 
+/// Unix-only: the premise is a host in `America/Los_Angeles`, and `TZ` does not
+/// move `chrono::Local` on Windows. See `graph_day_buckets` for the full note.
 #[test]
+#[cfg(unix)]
 fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
     let tmp = create_timezone_boundary_fixture_dir();
     let output = cmd_with_home(tmp.path())
         .env("TZ", "America/Los_Angeles")
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2026-03-02", "--until", "2026-03-02"])
         .output()
         .unwrap();
@@ -1180,7 +2074,7 @@ fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
 fn test_graph_with_year_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .output()
         .unwrap();
@@ -1203,7 +2097,7 @@ fn test_graph_with_year_filter() {
 fn test_models_with_client_filter_opencode() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1218,9 +2112,346 @@ fn test_models_with_client_filter_opencode() {
 fn test_models_with_client_filter_multiple() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--claude", "--no-spinner"])
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "opencode",
+            "--client",
+            "claude",
+            "--no-spinner",
+        ])
         .assert()
         .success();
+}
+
+#[test]
+fn test_models_with_client_filter_jcode() {
+    let tmp = create_empty_fixture_dir();
+    write_jcode_session(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "jcode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["client"].as_str().unwrap(), "jcode");
+    assert_eq!(entry["provider"].as_str().unwrap(), "cliproxyapi");
+    assert_eq!(entry["model"].as_str().unwrap(), "jcode-cli-model");
+    assert_eq!(entry["input"].as_i64().unwrap(), 1000);
+    assert_eq!(entry["cacheRead"].as_i64().unwrap(), 400);
+    assert_eq!(entry["cacheWrite"].as_i64().unwrap(), 50);
+    assert_eq!(entry["output"].as_i64().unwrap(), 250);
+    assert_eq!(entry["reasoning"].as_i64().unwrap(), 25);
+}
+
+#[test]
+fn test_mcode_headless_stream_counts_identically_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    let stream_dir = tmp.path().join(".config/tokscale/headless/mcode");
+    fs::create_dir_all(&stream_dir).unwrap();
+    fs::write(
+        stream_dir.join("run.jsonl"),
+        concat!(
+            r#"{"type":"message","message":{"turnId":"turn-1","role":"assistant","timestamp":1786800000000,"usage":{"inputTokens":1000,"outputTokens":250,"cacheReadTokens":400,"cacheWriteTokens":50}}}"#,
+            "\n",
+            r#"{"schemaVersion":1,"type":"exec.result","sessionId":"session-1","turnId":"turn-1","status":"succeeded","model":{"providerId":"minimax","modelId":"MiniMax-M2.5","variant":"fast"},"durationMs":10}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "mcode", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{pass} cache pass");
+        let entry = &entries[0];
+        assert_eq!(entry["client"].as_str(), Some("mcode"), "{pass} cache pass");
+        assert_eq!(
+            entry["provider"].as_str(),
+            Some("minimax"),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            entry["model"].as_str(),
+            Some("minimax-m2.5"),
+            "{pass} cache pass"
+        );
+        assert_eq!(entry["input"].as_i64(), Some(1000), "{pass} cache pass");
+        assert_eq!(entry["output"].as_i64(), Some(250), "{pass} cache pass");
+        assert_eq!(entry["cacheRead"].as_i64(), Some(400), "{pass} cache pass");
+        assert_eq!(entry["cacheWrite"].as_i64(), Some(50), "{pass} cache pass");
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+    }
+}
+
+/// The Windows regression guard for the two tests below.
+///
+/// Both of them assert on parsed totals, so when discovery silently reads the
+/// wrong root they fail as `Some(0)` vs `Some(1)` with nothing pointing at the
+/// path. `PathRoot::AppData` used to resolve to the `FOLDERID_RoamingAppData`
+/// known folder under env roots, which no environment variable can redirect,
+/// so on Windows the scan walked the live profile instead of this sandbox and
+/// the fixture was never seen. Assert the emitted scan root directly.
+#[test]
+fn test_clients_json_cherrystudio_scan_root_stays_inside_the_sandboxed_home() {
+    let tmp = create_empty_fixture_dir();
+    write_cherrystudio_connected_alias_transcript(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cherry = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "cherrystudio")
+        .expect("cherrystudio must appear in `clients --json`");
+
+    assert_eq!(
+        cherry["sessionsPath"],
+        serde_json::json!(cherrystudio_projects_root(tmp.path()).to_string_lossy()),
+        "Cherry Studio's scan root must follow the sandboxed home, not the machine's app-data folder"
+    );
+}
+
+/// DSH resolves its root from `$DSH_HOME` with a `~/.dsh` fallback, so a
+/// sandboxed `HOME` must move the scan root with it. Asserting the emitted
+/// path directly keeps a discovery regression from surfacing as a bare
+/// `Some(0)` vs `Some(1)` totals mismatch in the tests below.
+#[test]
+fn test_clients_json_dsh_scan_root_stays_inside_the_sandboxed_home() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_zstd_session(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let dsh = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "dsh")
+        .expect("dsh must appear in `clients --json`");
+
+    assert_eq!(
+        dsh["sessionsPath"],
+        serde_json::json!(dsh_sessions_root(tmp.path()).to_string_lossy()),
+        "DSH's scan root must follow the sandboxed home, not the machine's ~/.dsh"
+    );
+}
+
+/// The zstd lane's cache parity guard.
+///
+/// The first pass decodes the transcript and writes the source cache; the
+/// second serves it warm. Both must report the same reasoning-corrected
+/// buckets — `reasoningTokens` is a subset of `outputTokens`, so 25 output
+/// tokens with 23 reasoning tokens leave 2 in the additive output bucket.
+#[test]
+fn test_dsh_zstd_transcript_counts_identically_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_zstd_session(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{pass} cache pass");
+        let entry = &entries[0];
+        assert_eq!(entry["client"].as_str(), Some("dsh"), "{pass} cache pass");
+        assert_eq!(
+            entry["provider"].as_str(),
+            Some("deepseek"),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            entry["model"].as_str(),
+            Some("deepseek-reasoner"),
+            "{pass} cache pass"
+        );
+        assert_eq!(entry["input"].as_i64(), Some(2885), "{pass} cache pass");
+        assert_eq!(entry["output"].as_i64(), Some(2), "{pass} cache pass");
+        assert_eq!(entry["reasoning"].as_i64(), Some(23), "{pass} cache pass");
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+    }
+}
+
+/// A forked DSH session copies the parent's completed prefix into the child
+/// transcript verbatim, so the pair must still bill the seeded call once.
+#[test]
+fn test_dsh_forked_session_counts_the_seeded_prefix_once_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_fork_pair(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        // Two distinct calls: the parent's seq-39 message and the child's own
+        // seq-96 message. The child's copy of seq 39 is the parent's work.
+        assert_eq!(json["totalMessages"].as_i64(), Some(2), "{pass} cache pass");
+        assert_eq!(
+            json["totalInput"].as_i64(),
+            Some(2885 + 97),
+            "{pass} cache pass"
+        );
+        assert_eq!(
+            json["totalOutput"].as_i64(),
+            Some(2 + 5),
+            "{pass} cache pass"
+        );
+    }
+}
+
+/// The lane's cross-file dedup pass, isolated from the seq boundary.
+///
+/// Without `seedLength` in the header the parser cannot tell a seeded row from
+/// an owned one, so the duplicate is only collapsed by the per-call
+/// `message.id` dedup key, cold and warm alike.
+#[test]
+fn test_dsh_repeated_message_ids_across_transcripts_count_once_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_dsh_seeded_pair_without_seed_length(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "dsh", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(2885), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(2), "{pass} cache pass");
+    }
+}
+
+#[test]
+fn test_cherrystudio_connected_aliases_count_once_cold_and_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    write_cherrystudio_connected_alias_transcript(tmp.path());
+
+    // The first invocation parses the transcript and writes the source cache;
+    // the second reads that cache. Both must retain the parser's one-call
+    // contribution rather than reviving the three partial snapshots.
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "models",
+                "--json",
+                "--client",
+                "cherrystudio",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(100), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(300), "{pass} cache pass");
+    }
+}
+
+#[test]
+fn test_cherrystudio_historical_timestamp_survives_timestampless_replay_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    write_cherrystudio_historical_replay_without_timestamp(tmp.path());
+
+    // The first pass parses the source; the second reads its cache. Neither
+    // may promote the historical call into today because a later replay lacks
+    // an event timestamp. The replay's cumulative output still contributes.
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "models",
+                "--json",
+                "--today",
+                "--client",
+                "cherrystudio",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(0), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(0), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(0), "{pass} cache pass");
+    }
+
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "cherrystudio",
+            "--no-spinner",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "totals report failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1));
+    assert_eq!(json["totalInput"].as_i64(), Some(100));
+    assert_eq!(json["totalOutput"].as_i64(), Some(300));
 }
 
 fn assert_cursor_setup_warning(json: &serde_json::Value) {
@@ -1489,6 +2720,26 @@ fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .stderr(predicate::str::contains("tokscale cursor login"));
 }
 
+/// Unix-only: the fixture's expected date is UTC+1 day, which only holds if the
+/// child really runs in `Pacific/Kiritimati`. `TZ` does not move
+/// `chrono::Local` on Windows — see the note on `graph_day_buckets`.
+#[test]
+#[cfg(unix)]
+fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
+    let (tmp, expected_local_date) = create_positive_utc_offset_submit_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .env("TZ", "Pacific/Kiritimati")
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["submit", "--client", "opencode", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Date range: {expected_local_date} to {expected_local_date}"
+        )))
+        .stdout(predicate::str::contains("Total tokens: 1,750"));
+}
+
 #[test]
 fn test_models_with_all_client_flags() {
     let tmp = create_temp_fixture_dir();
@@ -1497,15 +2748,24 @@ fn test_models_with_all_client_flags() {
             "models",
             "--json",
             "--no-spinner",
-            "--opencode",
-            "--claude",
-            "--codex",
-            "--gemini",
-            "--cursor",
-            "--amp",
-            "--droid",
-            "--openclaw",
-            "--pi",
+            "--client",
+            "opencode",
+            "--client",
+            "claude",
+            "--client",
+            "codex",
+            "--client",
+            "gemini",
+            "--client",
+            "cursor",
+            "--client",
+            "amp",
+            "--client",
+            "droid",
+            "--client",
+            "openclaw",
+            "--client",
+            "pi",
         ])
         .assert()
         .success();
@@ -1515,7 +2775,7 @@ fn test_models_with_all_client_flags() {
 fn test_models_client_and_date_combined() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2025"])
         .assert()
         .success()
@@ -1529,7 +2789,7 @@ fn test_models_client_and_date_combined() {
 fn test_models_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1582,7 +2842,7 @@ fn test_models_json_output() {
 fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1608,7 +2868,7 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
 fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1634,7 +2894,7 @@ fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
 fn test_graph_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1659,7 +2919,7 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
 fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1696,9 +2956,10 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
 fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1710,7 +2971,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1719,9 +2980,10 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
 fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1733,7 +2995,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1742,9 +3004,10 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
 fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1756,7 +3019,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1765,9 +3028,10 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
 fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1784,27 +3048,136 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
             .iter()
             .map(|entry| entry["input"].as_i64().unwrap())
             .sum::<i64>(),
-        2400
+        3400
     );
     assert_eq!(
         entries
             .iter()
             .map(|entry| entry["output"].as_i64().unwrap())
             .sum::<i64>(),
-        1000
+        1400
     );
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
+}
+
+#[test]
+fn test_empty_report_total_cost_is_positive_zero() {
+    // f64's Sum identity is -0.0; without normalization an empty report
+    // serializes as "totalCost": -0.0.
+    let tmp = TempDir::new().unwrap();
+    for subcmd in ["models", "monthly", "hourly"] {
+        let output = offline_cmd_with_home(tmp.path())
+            .args([subcmd, "--json", "--client", "crush", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{subcmd} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("-0.0"),
+            "{subcmd} JSON contains negative zero: {stdout}"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let total_cost = json["totalCost"].as_f64().unwrap();
+        assert_eq!(total_cost, 0.0, "{subcmd} totalCost should be zero");
+        assert!(
+            total_cost.is_sign_positive(),
+            "{subcmd} totalCost serialized as -0.0"
+        );
+    }
+}
+
+#[test]
+fn test_hide_zero_drops_all_zero_entries_but_keeps_totals() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    add_zero_usage_opencode_message(tmp.path());
+    add_reasoning_only_opencode_message(tmp.path());
+
+    let run = |args: &[&str]| -> serde_json::Value {
+        let output = offline_cmd_with_home(tmp.path())
+            .args(args)
+            .args(["--json", "--client", "opencode", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // models: the all-zero (opencode, zero-model) row disappears with the flag
+    let full = run(&["models"]);
+    let filtered = run(&["models", "--hide-zero"]);
+    let has_zero_model = |json: &serde_json::Value| {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["model"] == "zero-model")
+    };
+    assert!(has_zero_model(&full), "zero row must show without the flag");
+    assert!(!has_zero_model(&filtered), "--hide-zero must drop the row");
+    assert!(filtered["entries"].as_array().unwrap().iter().all(|e| {
+        e["input"].as_i64().unwrap() != 0
+            || e["output"].as_i64().unwrap() != 0
+            || e["cost"].as_f64().unwrap() != 0.0
+    }));
+    // totals are display-independent: hidden rows still count
+    assert_eq!(full["totalMessages"], filtered["totalMessages"]);
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
+
+    // monthly: the all-zero 2023-03 bucket disappears with the flag
+    let full = run(&["monthly"]);
+    let filtered = run(&["monthly", "--hide-zero"]);
+    let months = |json: &serde_json::Value| -> Vec<String> {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["month"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(months(&full).contains(&"2023-03".to_string()));
+    assert!(!months(&filtered).contains(&"2023-03".to_string()));
+    assert!(
+        months(&filtered).contains(&"2026-02".to_string()),
+        "--hide-zero must retain a reasoning-only month"
+    );
+    let reasoning_month = filtered["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["month"] == "2026-02")
+        .unwrap();
+    assert_eq!(reasoning_month["reasoning"], 321);
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
+
+    // hourly: exactly one all-zero hour bucket disappears with the flag
+    let full = run(&["hourly"]);
+    let filtered = run(&["hourly", "--hide-zero"]);
+    assert_eq!(
+        full["entries"].as_array().unwrap().len(),
+        filtered["entries"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
 }
 
 #[test]
 fn test_models_json_total_consistency() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1830,7 +3203,7 @@ fn test_models_json_total_consistency() {
 fn test_monthly_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1855,8 +3228,46 @@ fn test_monthly_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(first.get("reasoning").is_some());
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
+}
+
+#[test]
+fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
+    let tmp = create_temp_fixture_dir();
+    add_reasoning_only_opencode_message(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "monthly JSON failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reasoning_month = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["month"] == "2026-02")
+        .expect("reasoning-only month must be retained");
+    assert_eq!(reasoning_month["input"], 0);
+    assert_eq!(reasoning_month["output"], 0);
+    assert_eq!(reasoning_month["cacheRead"], 0);
+    assert_eq!(reasoning_month["cacheWrite"], 0);
+    assert_eq!(reasoning_month["reasoning"], 321);
+
+    cmd_with_home(tmp.path())
+        .args(["monthly", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026-02"))
+        // With no input/output/cache tokens, this finite Cost/1M value proves
+        // the table's token total includes the 321 reasoning tokens.
+        .stdout(predicate::str::contains("$100.00/M"));
 }
 
 #[test]
@@ -1872,7 +3283,7 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
         210,
         40,
     );
-    write_settings_json(
+    write_explicit_home_settings_json(
         real_home.path(),
         &format!(
             r#"{{
@@ -1892,7 +3303,8 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
         .args([
             "hourly",
             "--json",
-            "--codex",
+            "--client",
+            "codex",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1917,7 +3329,7 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
 fn test_monthly_json_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .output()
         .unwrap();
@@ -1938,7 +3350,7 @@ fn test_monthly_json_with_client_filter() {
 fn test_graph_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1957,7 +3369,7 @@ fn test_graph_json_output() {
 fn test_graph_json_has_meta() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1975,7 +3387,7 @@ fn test_graph_json_has_meta() {
 fn test_graph_json_has_summary() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2007,7 +3419,7 @@ fn test_graph_json_has_summary() {
 fn test_models_group_by_default() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2019,7 +3431,7 @@ fn test_models_group_by_default() {
 fn test_models_group_by_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -2044,7 +3456,7 @@ fn test_models_group_by_model() {
 fn test_models_group_by_client_provider_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "client,provider,model"])
         .output()
         .unwrap();
@@ -2064,7 +3476,7 @@ fn test_models_group_by_client_provider_model() {
 fn test_models_json_with_group_by_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -2091,11 +3503,250 @@ fn test_models_json_with_group_by_model() {
     }
 }
 
+/// Adds a third OpenCode session whose single message reports the same physical
+/// model as session 1 (claude sonnet 4) under a channel-variant name string
+/// (`claude-sonnet-4-cc`), so model-alias folding can be exercised end to end.
+fn add_alias_variant_message(tmp: &Path) {
+    let session3 = tmp.join(".local/share/opencode/storage/message/session3");
+    fs::create_dir_all(&session3).unwrap();
+    let msg = r#"{
+        "id": "msg_d",
+        "sessionID": "session3",
+        "role": "assistant",
+        "modelID": "claude-sonnet-4-cc",
+        "providerID": "anthropic",
+        "cost": 0.04,
+        "tokens": {
+            "input": 400,
+            "output": 100,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1718460000000.0, "completed": 1718460002000.0 }
+    }"#;
+    fs::write(session3.join("msg_d.json"), msg).unwrap();
+}
+
+/// Writes a tokscale `settings.json` with the given `modelAliases` object into
+/// the sandbox config dir `cmd_with_home` points the child at.
+fn write_model_aliases(tmp: &Path, aliases_json: &str) {
+    write_settings_json(tmp, &format!(r#"{{"modelAliases": {aliases_json}}}"#));
+}
+
+fn models_by_name(tmp: &Path) -> serde_json::Value {
+    let output = cmd_with_home(tmp)
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .args(["--group-by", "model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn test_models_alias_folds_variants_into_one_row() {
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    let json = models_by_name(tmp.path());
+    let entries = json["entries"].as_array().unwrap();
+    let models: Vec<&str> = entries
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+
+    // The -cc variant folded into the canonical model: exactly one
+    // claude-sonnet-4 row and no claude-sonnet-4-cc row.
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "expected folded model, got {models:?}"
+    );
+    assert!(
+        !models.contains(&"claude-sonnet-4-cc"),
+        "variant should have folded away, got {models:?}"
+    );
+
+    // The variant's tokens merged INTO the canonical row — the fold-sensitive
+    // check: session1 (input 1000 + 800) plus the folded -cc variant (400) =
+    // 2200. A no-op fold would leave this row at 1800 and emit a separate
+    // claude-sonnet-4-cc row instead.
+    let folded = entries
+        .iter()
+        .find(|e| e["model"] == "claude-sonnet-4")
+        .unwrap();
+    assert_eq!(
+        folded["input"].as_i64().unwrap(),
+        2200,
+        "folded row must include the variant's tokens, got {folded:?}"
+    );
+    assert!(
+        folded.get("mergedClients").is_some(),
+        "folded entry should retain mergedClients"
+    );
+
+    // Per-entry sums still reconcile with report totals — the fold must not
+    // double-count or drop tokens.
+    let sum_input: i64 = entries.iter().map(|e| e["input"].as_i64().unwrap()).sum();
+    assert_eq!(sum_input, json["totalInput"].as_i64().unwrap());
+}
+
+#[test]
+fn test_models_alias_folds_in_monthly_report() {
+    // The fold happens inside normalize_model_for_grouping, so it must apply at
+    // every grouping call site, not only the models report. Prove it on the
+    // monthly report (a distinct call site) too.
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    let output = cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let models: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["models"].as_array().unwrap())
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "monthly models should include the canonical name, got {models:?}"
+    );
+    assert!(
+        !models.contains(&"claude-sonnet-4-cc"),
+        "monthly report must fold the -cc variant too, got {models:?}"
+    );
+}
+
+#[test]
+fn test_models_alias_absent_is_noop() {
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    // No settings.json / no modelAliases configured.
+
+    let json = models_by_name(tmp.path());
+    let models: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+
+    // Without aliases the variant stays a separate row (opt-in default off).
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "expected base model, got {models:?}"
+    );
+    assert!(
+        models.contains(&"claude-sonnet-4-cc"),
+        "variant should remain separate without aliases, got {models:?}"
+    );
+}
+
+#[test]
+fn test_models_alias_totals_unchanged() {
+    // Folding relabels/merges buckets whose costs were already computed
+    // per-message, so grand totals must be identical with and without aliases.
+    let without = create_temp_fixture_dir();
+    add_alias_variant_message(without.path());
+    let base = models_by_name(without.path());
+
+    let with = create_temp_fixture_dir();
+    add_alias_variant_message(with.path());
+    write_model_aliases(with.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+    let aliased = models_by_name(with.path());
+
+    assert_eq!(
+        base["totalInput"].as_i64(),
+        aliased["totalInput"].as_i64(),
+        "totalInput must be unchanged by aliasing"
+    );
+    assert_eq!(
+        base["totalOutput"].as_i64(),
+        aliased["totalOutput"].as_i64(),
+        "totalOutput must be unchanged by aliasing"
+    );
+    let base_cost = base["totalCost"].as_f64().unwrap();
+    let aliased_cost = aliased["totalCost"].as_f64().unwrap();
+    assert!(
+        (base_cost - aliased_cost).abs() < 1e-9,
+        "totalCost must be unchanged by aliasing: {base_cost} vs {aliased_cost}"
+    );
+}
+
+#[test]
+fn test_alias_folds_local_report_but_not_submitted_payload() {
+    // Finding B: a machine-local `modelAliases` config must fold ONLY local
+    // presentation/grouping. The model identity that leaves the machine
+    // (submit/upload/export payload) must stay raw, or a per-device alias config
+    // would rewrite and fragment uploaded history across a user's machines. The
+    // `graph` command emits the exact byte shape that `submit` POSTs, so it is
+    // the faithful stand-in for the submitted payload.
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    // Local models report: the alias DOES fold (canonical name only, no variant).
+    let models = models_by_name(tmp.path());
+    let displayed: Vec<&str> = models["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+    assert!(
+        displayed.contains(&"claude-sonnet-4"),
+        "local report must show the canonical name, got {displayed:?}"
+    );
+    assert!(
+        !displayed.contains(&"claude-sonnet-4-cc"),
+        "local report must fold the -cc variant away, got {displayed:?}"
+    );
+
+    // Submit/export payload (`graph` prints the submit shape to stdout): the raw
+    // variant MUST survive unfolded, both in the models summary and per-day.
+    let output = cmd_with_home(tmp.path())
+        .args(["graph", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "graph command failed: {output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let submitted_models: Vec<&str> = payload["summary"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(
+        submitted_models.contains(&"claude-sonnet-4-cc"),
+        "submitted payload must keep the RAW model id (alias must not leak), got {submitted_models:?}"
+    );
+
+    let per_contribution_models: Vec<&str> = payload["contributions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["clients"].as_array().unwrap())
+        .map(|s| s["modelId"].as_str().unwrap())
+        .collect();
+    assert!(
+        per_contribution_models.contains(&"claude-sonnet-4-cc"),
+        "submitted per-day contributions must carry the RAW model id, got {per_contribution_models:?}"
+    );
+}
+
 #[test]
 fn test_models_group_by_session_emits_session_id_per_entry() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "session,model"])
         .output()
         .unwrap();
@@ -2138,7 +3789,7 @@ fn test_models_group_by_session_emits_session_id_per_entry() {
 fn test_models_group_by_client_session_includes_client_and_session() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "client,session,model"])
         .output()
         .unwrap();
@@ -2159,7 +3810,7 @@ fn test_models_group_by_client_session_includes_client_and_session() {
 fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clients() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2190,7 +3841,7 @@ fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clie
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
     let tmp = create_qwen_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--qwen", "--no-spinner"])
+        .args(["models", "--json", "--client", "qwen", "--no-spinner"])
         .args(["--group-by", "workspace-model"])
         .output()
         .unwrap();
@@ -2215,7 +3866,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
     let tmp = create_codex_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--codex", "--no-spinner"])
+        .args(["models", "--json", "--client", "codex", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2240,7 +3891,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode() {
     let tmp = create_opencode_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2265,18 +3916,28 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
 
 #[test]
 fn test_pricing_command_success() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_canonical_sonnet_pricing_cache(tmp.path(), "claude-sonnet-4-20250514");
+    let mut cmd = cmd_with_home(tmp.path());
     cmd.args(["pricing", "claude-sonnet-4-20250514", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Pricing for"))
-        .stdout(predicate::str::contains("Input"))
-        .stdout(predicate::str::contains("Output"));
+        .stdout(predicate::str::contains("Pricing for:"))
+        .stdout(predicate::str::contains(
+            "Matched key: claude-sonnet-4-20250514",
+        ))
+        .stdout(predicate::str::contains("Source: LiteLLM"))
+        .stdout(predicate::str::contains("Resolution:"))
+        .stdout(predicate::str::contains("submission-safe"))
+        .stdout(predicate::str::contains("Input:  $3.00 / 1M tokens"))
+        .stdout(predicate::str::contains("Output: $15.00 / 1M tokens"));
 }
 
 #[test]
 fn test_pricing_command_json() {
-    let output = cargo_bin_cmd!("tokscale")
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_canonical_sonnet_pricing_cache(tmp.path(), "claude-sonnet-4-20250514");
+    let output = cmd_with_home(tmp.path())
         .args([
             "pricing",
             "claude-sonnet-4-20250514",
@@ -2290,16 +3951,29 @@ fn test_pricing_command_json() {
     assert!(json.get("modelId").is_some(), "Missing modelId");
     assert!(json.get("matchedKey").is_some(), "Missing matchedKey");
     assert!(json.get("source").is_some(), "Missing source");
+    assert!(json.get("resolution").is_some(), "Missing resolution");
     assert!(json.get("pricing").is_some(), "Missing pricing");
 
+    assert_eq!(json["modelId"], "claude-sonnet-4-20250514");
+    assert_eq!(json["matchedKey"], "claude-sonnet-4-20250514");
+    assert_eq!(json["source"], "LiteLLM");
+    let resolution = &json["resolution"];
+    assert!(resolution.get("kind").is_some());
+    assert!(resolution.get("candidateCount").is_some());
+    assert_eq!(resolution["submissionSafe"].as_bool(), Some(true));
+
     let pricing = &json["pricing"];
-    assert!(pricing.get("inputCostPerToken").is_some());
-    assert!(pricing.get("outputCostPerToken").is_some());
+    assert_eq!(pricing["inputCostPerToken"], 0.000003);
+    assert_eq!(pricing["outputCostPerToken"], 0.000015);
+    assert_eq!(pricing["cacheReadInputTokenCost"], 0.0000003);
+    assert_eq!(pricing["cacheCreationInputTokenCost"], 0.00000375);
 }
 
 #[test]
 fn test_pricing_command_with_provider() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_canonical_sonnet_pricing_cache(tmp.path(), "claude-sonnet-4-20250514");
+    let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
         "claude-sonnet-4-20250514",
@@ -2308,21 +3982,28 @@ fn test_pricing_command_with_provider() {
         "--no-spinner",
     ])
     .assert()
-    .success();
+    .success()
+    .stdout(predicate::str::contains(
+        "Matched key: claude-sonnet-4-20250514",
+    ))
+    .stdout(predicate::str::contains("Source: LiteLLM"))
+    .stdout(predicate::str::contains("Input:  $3.00 / 1M tokens"))
+    .stdout(predicate::str::contains("Output: $15.00 / 1M tokens"));
 }
 
 #[test]
 fn test_pricing_command_invalid_provider() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.args([
-        "pricing",
-        "claude-sonnet-4-20250514",
-        "--provider",
-        "invalid-provider",
-        "--no-spinner",
-    ])
-    .assert()
-    .failure();
+    let tmp = TempDir::new().expect("failed to create temp home");
+    cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "claude-sonnet-4-20250514",
+            "--provider",
+            "invalid-provider",
+            "--no-spinner",
+        ])
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2424,7 +4105,7 @@ fn test_clients_json_includes_claude_transcripts_path() {
 
     assert_eq!(
         claude["additionalPaths"][0]["path"],
-        serde_json::json!(tmp.path().join(".claude/transcripts"))
+        serde_json::json!(client_scan_path(tmp.path(), ".claude/transcripts"))
     );
     assert_eq!(claude["additionalPaths"][0]["exists"], true);
 }
@@ -2434,13 +4115,18 @@ fn test_clients_command_includes_claude_transcripts_text() {
     let tmp = create_empty_fixture_dir();
     fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
 
+    // The transcripts path is spelled with native separators (#1048): on
+    // Windows the `~` root renders with backslashes throughout.
+    #[cfg(windows)]
+    let expected = "additional: ~\\.claude\\transcripts ✓";
+    #[cfg(not(windows))]
+    let expected = "additional: ~/.claude/transcripts ✓";
+
     cmd_with_home(tmp.path())
         .arg("clients")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "additional: ~/.claude/transcripts ✓",
-        ));
+        .stdout(predicate::str::contains(expected));
 }
 
 #[test]
@@ -2471,6 +4157,153 @@ fn test_clients_json_includes_claude_desktop_diagnostic() {
                 .unwrap()
                 .contains("Claude Desktop app data was detected")
     }));
+}
+
+#[test]
+fn test_clients_json_finds_stats_cache_under_claude_config_dir() {
+    let home = create_empty_fixture_dir();
+    let default_cache = home.path().join(".claude/stats-cache.json");
+    fs::create_dir_all(default_cache.parent().unwrap()).unwrap();
+    fs::write(&default_cache, "{}").unwrap();
+
+    let claude_config_dir = TempDir::new().expect("failed to create Claude config dir");
+    let configured_cache = claude_config_dir.path().join("stats-cache.json");
+    fs::write(&configured_cache, "{}").unwrap();
+
+    let output = cmd_with_home(home.path())
+        .env("CLAUDE_CONFIG_DIR", claude_config_dir.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let stats_cache = claude["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "claude_stats_cache_not_imported")
+        .expect("configured stats-cache.json should produce a diagnostic");
+
+    assert_eq!(
+        stats_cache["paths"][0]["path"],
+        configured_cache.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn test_clients_home_override_ignores_claude_config_dir_for_stats_cache() {
+    let explicit_home = create_empty_fixture_dir();
+    let expected_cache = explicit_home
+        .path()
+        .join(".claude")
+        .join("stats-cache.json");
+    fs::create_dir_all(expected_cache.parent().unwrap()).unwrap();
+    fs::write(&expected_cache, "{}").unwrap();
+
+    let process_home = TempDir::new().expect("failed to create process home");
+    let conflicting_claude_dir = TempDir::new().expect("failed to create Claude config dir");
+    fs::write(conflicting_claude_dir.path().join("stats-cache.json"), "{}").unwrap();
+
+    let output = cmd_with_conflicting_env(process_home.path())
+        .env("CLAUDE_CONFIG_DIR", conflicting_claude_dir.path())
+        .args([
+            "clients",
+            "--json",
+            "--home",
+            explicit_home.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let stats_cache = claude["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "claude_stats_cache_not_imported")
+        .expect("the --home stats-cache.json should produce a diagnostic");
+
+    assert_eq!(
+        stats_cache["paths"][0]["path"],
+        expected_cache.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn test_clients_home_override_ignores_conflicting_claude_config_dir_env() {
+    let real_home = create_empty_fixture_dir();
+    fs::create_dir_all(real_home.path().join("Library/Application Support/Claude")).unwrap();
+    let conflicting_home = TempDir::new().expect("failed to create temp dir");
+    let conflicting_claude_dir = TempDir::new().expect("failed to create temp dir");
+
+    let output = cmd_with_conflicting_env(conflicting_home.path())
+        .env("CLAUDE_CONFIG_DIR", conflicting_claude_dir.path())
+        .args([
+            "clients",
+            "--json",
+            "--home",
+            real_home.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let diagnostics = claude["diagnostics"].as_array().unwrap();
+    let desktop_diagnostic = diagnostics
+        .iter()
+        .find(|item| item["code"] == "claude_desktop_not_scanned")
+        .expect("claude_desktop_not_scanned diagnostic should be present");
+    let paths = desktop_diagnostic["paths"].as_array().unwrap();
+
+    for label in ["claudeCodeProjects", "claudeCodeTranscripts"] {
+        let path = paths
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap_or_else(|| panic!("expected a {label} diagnostic path"))["path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            path.starts_with(real_home.path().to_str().unwrap()),
+            "{label} should stay under the --home override, got {path}"
+        );
+        assert!(
+            !path.contains(conflicting_claude_dir.path().to_str().unwrap()),
+            "{label} must not follow CLAUDE_CONFIG_DIR when --home is explicit, got {path}"
+        );
+    }
 }
 
 #[test]
@@ -2624,7 +4457,7 @@ fn test_clients_command_includes_settings_extra_paths_text() {
 fn test_models_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"))
@@ -2635,17 +4468,46 @@ fn test_models_light_output() {
 fn test_monthly_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["monthly", "--light", "--opencode", "--no-spinner"])
+        .args(["monthly", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Monthly Token Usage Report"));
 }
 
 #[test]
+fn test_monthly_light_title_uses_pinned_bucket_month() {
+    let tmp = create_temp_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{"scanner":{"bucketTimezone":"Pacific/Kiritimati"}}"#,
+    );
+    let expected_month =
+        tokscale_core::BucketTimezone::from_pinned_name(Some("Pacific/Kiritimati"))
+            .today()
+            .format("%B %Y")
+            .to_string();
+
+    cmd_with_home(tmp.path())
+        .args([
+            "monthly",
+            "--light",
+            "--client",
+            "opencode",
+            "--no-spinner",
+            "--month",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Monthly Token Usage Report ({expected_month})"
+        )));
+}
+
+#[test]
 fn test_models_light_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .assert()
         .success()
@@ -2661,7 +4523,8 @@ fn test_models_benchmark_flag() {
         .args([
             "models",
             "--light",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--benchmark",
         ])
@@ -2677,7 +4540,8 @@ fn test_monthly_benchmark_flag() {
         .args([
             "monthly",
             "--light",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--benchmark",
         ])
@@ -2692,7 +4556,7 @@ fn test_monthly_benchmark_flag() {
 fn test_models_empty_fixture() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2710,7 +4574,7 @@ fn test_models_empty_fixture() {
 fn test_graph_empty_contributions() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2728,7 +4592,7 @@ fn test_graph_empty_contributions() {
 fn test_models_no_spinner_flag() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
 }
@@ -2737,7 +4601,7 @@ fn test_models_no_spinner_flag() {
 fn test_graph_no_spinner_flag() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
 }
@@ -2748,7 +4612,7 @@ fn test_graph_no_spinner_flag() {
 fn test_graph_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2773,7 +4637,7 @@ fn test_graph_output_to_file() {
     let tmp = create_temp_fixture_dir();
     let output_file = tmp.path().join("graph-output.json");
     cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--output", output_file.to_str().unwrap()])
         .assert()
         .success();
@@ -2790,7 +4654,7 @@ fn test_graph_output_to_file() {
 fn test_root_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2803,7 +4667,7 @@ fn test_root_json_output() {
 fn test_root_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["--light", "--opencode", "--no-spinner"])
+        .args(["--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"));
@@ -2817,7 +4681,13 @@ fn light_with_write_cache_writes_to_canonical_path() {
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_CONFIG_DIR", &config_dir)
-        .args(["--light", "--opencode", "--write-cache", "--no-spinner"])
+        .args([
+            "--light",
+            "--client",
+            "opencode",
+            "--write-cache",
+            "--no-spinner",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"));
@@ -2832,7 +4702,7 @@ fn light_with_write_cache_writes_to_canonical_path() {
 fn test_root_with_date_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2025"])
         .assert()
         .success()
@@ -2843,7 +4713,7 @@ fn test_root_with_date_filter() {
 fn test_root_with_group_by() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -2853,27 +4723,1045 @@ fn test_root_with_group_by() {
 }
 
 #[test]
+fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
+    let tmp = create_temp_fixture_dir();
+    // Healthy pricing that does not happen to cover the unpriced model below.
+    // Without this the fixture holds no pricing at all, which is a different
+    // (fatal) condition — see test_submit_offline_without_pricing_cache_fails.
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    fs::write(
+        unpriced_dir.join("unpriced.json"),
+        r#"{
+            "id": "unpriced",
+            "sessionID": "unpriced",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model",
+            "providerID": "unknown-provider",
+            "cost": 0,
+            "tokens": { "input": 1, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "one unpriced model should not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "excluded 1 unpriced unknown_provider/genuinely-unpriced-model message(s) (1 tokens)"
+        ),
+        "the excluded model must be named: {stdout}"
+    );
+    assert!(
+        stdout.contains("Remaining priced usage will be submitted."),
+        "the warning must say covered usage remains: {stdout}"
+    );
+    assert!(
+        stdout.contains("Dry run - not submitting data."),
+        "dry-run must complete without submitting: {stdout}"
+    );
+}
+
+/// Regression: a cold cache with no network must not look like "no usage".
+///
+/// Every fetchable upstream is unreachable here and nothing is cached, so the
+/// pricing service loads empty and covers nothing. Excluding on that basis would
+/// consume the whole batch and exit 0 reporting no usage to submit, which is
+/// indistinguishable from an empty history and reads as success to autosubmit.
+#[test]
 fn test_submit_offline_without_pricing_cache_fails() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_fake_credentials(tmp.path());
+    // Cost 0 keeps these messages non-authoritative, so they depend on pricing.
+    // The stock fixture's messages carry a positive OpenCode cost, which is
+    // provider-reported and would bypass pricing entirely.
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/needs-pricing");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    fs::write(
+        unpriced_dir.join("needs-pricing.json"),
+        r#"{
+            "id": "needs-pricing",
+            "sessionID": "needs-pricing",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4-20250514",
+            "providerID": "anthropic",
+            "cost": 0,
+            "tokens": { "input": 1000, "output": 500, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["submit", "--opencode", "--dry-run"])
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
         .output()
         .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "submit should fail when pricing is unavailable; stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    // Verify failure is from pricing fetch, not from auth or argument errors
-    assert!(
-        !stderr.contains("Not logged in"),
-        "submit failed due to auth, not pricing: {stderr}"
+        "a total pricing outage must fail loudly, not report an empty submission;\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("error") || stderr.contains("Error"),
-        "stderr should contain a pricing/network error: {stderr}"
+        stderr.contains("pricing data is unavailable for submission"),
+        "the failure must name the pricing outage: {stderr}"
+    );
+    assert!(
+        !stdout.contains("No usage data found to submit."),
+        "usage exists; it must not be reported as absent: {stdout}"
+    );
+}
+
+#[test]
+fn test_submit_excluding_only_generic_gemini_usage_does_not_promise_submission() {
+    let tmp = create_empty_fixture_dir();
+    let message_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/gemini-default");
+    fs::create_dir_all(&message_dir).unwrap();
+    fs::write(
+        message_dir.join("gemini-default.json"),
+        r#"{
+            "id": "gemini-default",
+            "sessionID": "gemini-default",
+            "role": "assistant",
+            "modelID": "gemini-default",
+            "providerID": "google",
+            "tokens": { "input": 1, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["submit", "--client", "opencode", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "excluded 1 unpriced google/gemini-default message(s) (1 tokens)",
+        ))
+        .stdout(predicate::str::contains("Remaining priced usage will be submitted.").not())
+        .stdout(predicate::str::contains("No usage data found to submit."));
+}
+// ── gjc client filter tests ────────────────────────────────────────────────
+
+/// Write a gjc session JSONL file at
+/// <home>/.gjc/agent/sessions/<slug>/sess.jsonl
+/// with one assistant message: model claude-sonnet-4, provider anthropic,
+/// input 1000 / output 500, usage.cost.total 0.5.
+fn write_gjc_session_fixture(base: &Path) {
+    let session_dir = base.join(".gjc/agent/sessions/test-project");
+    fs::create_dir_all(&session_dir).unwrap();
+    let jsonl = concat!(
+        r#"{"type":"session","id":"gjc_e2e_session","timestamp":"2025-06-15T12:00:00.000Z","cwd":"/work/test-project"}"#,
+        "\n",
+        r#"{"type":"message","id":"gjc_e2e_msg_1","parentId":null,"timestamp":"2025-06-15T12:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","api":"anthropic","timestamp":1750082401000,"usage":{"input":1000,"output":500,"cacheRead":0,"cacheWrite":0,"totalTokens":1500,"cost":{"input":0.3,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.5}}}}"#,
+        "\n"
+    );
+    fs::write(session_dir.join("sess.jsonl"), jsonl).unwrap();
+}
+
+/// Build a Command that uses HOME=tmp AND removes gjc-related env overrides
+/// so the scanner uses only the home-derived ~/.gjc/agent/sessions path.
+fn gjc_cmd_with_home(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    cmd.env_remove("GJC_CODING_AGENT_DIR")
+        .env_remove("GJC_CONFIG_DIR")
+        .env_remove("PI_CONFIG_DIR");
+    cmd
+}
+
+#[test]
+fn test_models_with_client_filter_gjc() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+
+    assert!(
+        !entries.is_empty(),
+        "expected gjc entries but got none; full JSON: {json}"
+    );
+
+    // Every returned entry must be from the gjc client.
+    for entry in entries {
+        assert_eq!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "unexpected client in entry: {entry}"
+        );
+    }
+
+    // The fixture model claude-sonnet-4 must appear.
+    let has_sonnet = entries.iter().any(|e| {
+        e["model"]
+            .as_str()
+            .unwrap_or("")
+            .contains("claude-sonnet-4")
+    });
+    assert!(
+        has_sonnet,
+        "expected claude-sonnet-4 in gjc entries; got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_empty_is_clean() {
+    // No gjc fixture data on disk — command must still exit successfully
+    // and return an empty (zero-entry) result without panicking.
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed with no gjc data; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert!(
+        entries.is_empty(),
+        "expected zero entries for empty gjc fixture, got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_isolation() {
+    // Write gjc fixture, then query with --client claude (NOT gjc).
+    // The gjc model must NOT appear in the output (filter isolation).
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "claude", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+
+    // No gjc entry should leak through when filtering for claude.
+    for entry in entries {
+        assert_ne!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "gjc entry leaked into --client claude output: {entry}"
+        );
+    }
+}
+
+#[test]
+fn report_no_summarize_json_empty_home_emits_valid_json_without_panic() {
+    // Smoke test for the non-LLM `report` path: against an empty home it must
+    // exit 0, never panic (UTF-8 truncation / NaN sort / div-by-zero guards),
+    // and emit a parseable JSON array of entries.
+    let tmp = create_empty_fixture_dir();
+
+    let output = cmd_with_home(tmp.path())
+        .arg("report")
+        .arg("--no-summarize")
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "report --no-summarize --json failed against empty home; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("report --json must emit valid JSON");
+    let entries = json
+        .as_array()
+        .expect("report --json output must be a JSON array of entries");
+    assert!(
+        entries.is_empty(),
+        "expected zero entries for empty home, got: {entries:?}"
+    );
+}
+
+/// A session whose two turns land on different calendar days depending on the
+/// zone reading them. Chosen so all three zones used below disagree:
+///
+/// | zone                  | 11:30Z     | 18:00Z     | day buckets              |
+/// |-----------------------|------------|------------|--------------------------|
+/// | `America/Los_Angeles` | 03-02 03:30| 03-02 10:00| `{03-02: 2}`             |
+/// | `Asia/Seoul`          | 03-02 20:30| 03-03 03:00| `{03-02: 1, 03-03: 1}`   |
+/// | `Pacific/Kiritimati`  | 03-03 01:30| 03-03 08:00| `{03-03: 2}`             |
+///
+/// Three distinct shapes means a test can tell which zone actually did the
+/// bucketing, rather than only that two runs happened to agree.
+fn create_bucket_timezone_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let session = base.join(".local/share/opencode/storage/message/session1");
+    fs::create_dir_all(&session).unwrap();
+
+    for (id, created_ms) in [
+        ("msg_a", 1_772_451_000_000i64),
+        ("msg_b", 1_772_474_400_000),
+    ] {
+        let msg = format!(
+            r#"{{
+                "id": "{id}",
+                "sessionID": "session1",
+                "role": "assistant",
+                "modelID": "claude-sonnet-4-20250514",
+                "providerID": "anthropic",
+                "cost": 0.05,
+                "tokens": {{
+                    "input": 1000,
+                    "output": 500,
+                    "reasoning": 0,
+                    "cache": {{ "read": 200, "write": 50 }}
+                }},
+                "time": {{ "created": {created_ms}.0 }}
+            }}"#
+        );
+        fs::write(session.join(format!("{id}.json")), msg).unwrap();
+    }
+
+    tmp
+}
+
+fn pin_bucket_timezone(base: &Path, zone: &str) {
+    pin_bucket_timezone_field(base, &format!(r#""{zone}""#));
+}
+
+/// [`pin_bucket_timezone`] with the raw JSON value, so a test can write `null`
+/// as well as a string.
+fn pin_bucket_timezone_field(base: &Path, json_value: &str) {
+    write_settings_json(
+        base,
+        &format!(r#"{{ "scanner": {{ "bucketTimezone": {json_value} }} }}"#),
+    );
+}
+
+/// Day buckets that actually carry messages, as `(date, message_count)`.
+/// The graph zero-fills a calendar, so the empty days carry no signal.
+///
+/// # Why the `TZ`-driven tests below are unix-only
+///
+/// `TZ` is the instrument these tests pose their question with, and it is a
+/// POSIX instrument. `chrono::Local` honors it on Unix; on Windows `Local`
+/// reads `GetTimeZoneInformation` — the machine's own zone, which no
+/// environment variable overrides. A test whose premise is "run this from Los
+/// Angeles, then from Seoul" therefore runs twice from the runner's own zone
+/// on Windows and asserts against buckets the host never produced. Concretely:
+/// this fixture's two messages sit at 2026-03-02T11:30Z and 2026-03-02T18:00Z,
+/// so a UTC runner buckets both into `2026-03-02` while the expectation is
+/// Seoul's `03-02`/`03-03` split.
+///
+/// That is a statement about the instrument, and only about the instrument. It
+/// is *not* a claim that the product was fine on Windows. It was not:
+/// `detect_local_iana_name` declining to pin while a foreign `TZ` was set was
+/// a real bug — the device never pinned, on any run, for as long as the
+/// variable stayed set, and so kept the rescan-splits-history behaviour that
+/// pinning exists to remove. It is fixed in `bucket_tz::tz_env_zone`, which no
+/// longer offers `TZ` as the pin candidate on the platform where
+/// `chrono::Local` does not read it.
+///
+/// That fix does not hand these tests their instrument back. `TZ` still cannot
+/// move the zone the child buckets in on Windows, so these tests still cannot
+/// place the child anywhere, and they stay gated. What the fix restored is
+/// covered directly by the unit test
+/// `bucket_tz::tests::a_foreign_tz_does_not_make_a_windows_host_unpinnable`,
+/// which asserts the pinning behaviour itself rather than through `TZ`.
+///
+/// Tests that pin a zone through settings.json rather than through `TZ` stay
+/// on every platform: the pin outranks the host, which is the whole claim.
+fn graph_day_buckets(base: &Path, timezone: &str) -> Vec<(String, i64)> {
+    let output = cmd_with_home(base)
+        .env("TZ", timezone)
+        .args(["graph", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut buckets: Vec<(String, i64)> = json["contributions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| {
+            let messages = c["totals"]["messages"].as_i64().unwrap_or(0);
+            (messages > 0).then(|| (c["date"].as_str().unwrap().to_string(), messages))
+        })
+        .collect();
+    buckets.sort();
+    buckets
+}
+
+/// The regression this whole feature exists for.
+///
+/// Day keys used to be derived from `chrono::Local` on every scan, so
+/// rescanning the same unchanged history from another timezone re-split it
+/// across days. The server's monotonic per-day guard then kept the stale value
+/// on one day and accepted the new one on its neighbour, and the device's total
+/// was inflated permanently with no way to walk it back.
+///
+/// With a zone pinned, the same bytes produce the same day keys no matter what
+/// `TZ` says — and specifically the *pinned* zone's keys, not either host's.
+#[test]
+fn test_pinned_bucket_timezone_survives_a_host_timezone_change() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    pin_bucket_timezone(tmp.path(), "Pacific/Kiritimati");
+
+    let from_los_angeles = graph_day_buckets(tmp.path(), "America/Los_Angeles");
+    let from_seoul = graph_day_buckets(tmp.path(), "Asia/Seoul");
+
+    assert_eq!(
+        from_los_angeles, from_seoul,
+        "a pinned zone must key the same history the same way from any host timezone"
+    );
+    // Not just equal to each other — equal to what the pinned zone says.
+    // Los Angeles would report {03-02: 2} and Seoul {03-02: 1, 03-03: 1}, so
+    // agreeing on {03-03: 2} can only come from Pacific/Kiritimati.
+    assert_eq!(
+        from_los_angeles,
+        vec![("2026-03-03".to_string(), 2)],
+        "buckets must follow the pinned zone, not either host"
+    );
+}
+
+/// The other half of the contract: a device that has never pinned reports
+/// exactly what it reported before this change — day keys follow the machine.
+///
+/// Separate homes because the first run on a home pins it; this asserts the
+/// unpinned/first-scan semantics, which are the ones that must not move.
+#[test]
+#[cfg(unix)]
+fn test_unpinned_first_scan_still_buckets_by_the_host_timezone() {
+    let los_angeles = create_bucket_timezone_fixture_dir();
+    let seoul = create_bucket_timezone_fixture_dir();
+
+    assert_eq!(
+        graph_day_buckets(los_angeles.path(), "America/Los_Angeles"),
+        vec![("2026-03-02".to_string(), 2)],
+        "an unpinned device must bucket by its own timezone, unchanged"
+    );
+    assert_eq!(
+        graph_day_buckets(seoul.path(), "Asia/Seoul"),
+        vec![("2026-03-02".to_string(), 1), ("2026-03-03".to_string(), 1)],
+        "an unpinned device must bucket by its own timezone, unchanged"
+    );
+}
+
+/// The first run records the zone, and recording it changes nothing about what
+/// that run reports. If pinning moved the numbers on the machine doing the
+/// pinning, every user would see a one-off jump on upgrade.
+///
+/// This is the integration witness to the Windows bug fixed in
+/// `bucket_tz::tz_env_zone`, and it stays unix-only anyway. Both of its
+/// assertions are addressed to a zone this test cannot put a Windows child in:
+/// the buckets it expects are Seoul's, and the zone it expects on disk is
+/// `Asia/Seoul`, whereas a fixed Windows host pins the Win32 zone it is
+/// actually in (`Etc/UTC` on the runner) and buckets accordingly. Passing there
+/// would require `TZ` to move `chrono::Local`, which is the one thing Windows
+/// does not do. See [`graph_day_buckets`].
+#[test]
+#[cfg(unix)]
+fn test_first_run_pins_the_host_timezone_without_changing_its_own_output() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    let settings_path = settings_json_path(tmp.path());
+    assert!(!settings_path.exists(), "fixture must start unpinned");
+
+    let buckets = graph_day_buckets(tmp.path(), "Asia/Seoul");
+    assert_eq!(
+        buckets,
+        vec![("2026-03-02".to_string(), 1), ("2026-03-03".to_string(), 1)],
+        "the run that pins must report what it would have reported unpinned"
+    );
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(
+        settings["scanner"]["bucketTimezone"].as_str(),
+        Some("Asia/Seoul"),
+        "the first run must record the zone it bucketed into"
+    );
+
+    // And the recorded zone is what the *next* run uses, even from elsewhere.
+    assert_eq!(
+        graph_day_buckets(tmp.path(), "America/Los_Angeles"),
+        buckets,
+        "the recorded zone must survive a host timezone change"
+    );
+}
+
+#[test]
+fn test_config_rejects_rekeying_or_unsetting_an_established_timezone() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    pin_bucket_timezone(tmp.path(), "America/Los_Angeles");
+
+    cmd_with_home(tmp.path())
+        .args(["config", "set", "timezone", "Pacific/Kiritimati"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "historical submitted day rows are monotonic",
+        ));
+
+    cmd_with_home(tmp.path())
+        .args(["config", "set", "timezone", "auto"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "server resync/replacement transition",
+        ));
+
+    cmd_with_home(tmp.path())
+        .args(["config", "unset", "timezone"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "historical submitted day rows are monotonic",
+        ));
+
+    cmd_with_home(tmp.path())
+        .args(["config", "set", "timezone", "America/Los_Angeles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(unchanged)"));
+}
+
+#[test]
+fn test_config_can_recover_an_invalid_or_unpinned_timezone() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    let config_dir = tmp.path().join(".config/tokscale");
+    pin_bucket_timezone(tmp.path(), "Mars/Olympus_Mons");
+
+    cmd_with_home(tmp.path())
+        // macOS resolves its config root from the account home, not `HOME`.
+        // Pin the command to this fixture so a prior test cannot auto-pin a
+        // shared profile before this invalid value is read.
+        .env("TOKSCALE_CONFIG_DIR", &config_dir)
+        .args(["config", "set", "timezone", "Asia/Seoul"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_config_set_can_initialize_or_recover_a_timezone_before_auto_pinning() {
+    for existing in [None, Some("Mars/Olympus_Mons")] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        let config_dir = tmp.path().join(".config/tokscale");
+        if let Some(existing) = existing {
+            pin_bucket_timezone(tmp.path(), existing);
+        }
+
+        cmd_with_home(tmp.path())
+            .env("TOKSCALE_CONFIG_DIR", &config_dir)
+            .args(["config", "set", "timezone", "Asia/Seoul"])
+            .assert()
+            .success();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["scanner"]["bucketTimezone"].as_str(),
+            Some("Asia/Seoul"),
+            "config set must operate on a {existing:?} value before startup auto-pinning"
+        );
+    }
+}
+
+#[test]
+fn test_config_set_auto_can_initialize_or_recover_before_auto_pinning() {
+    for existing in [None, Some("Mars/Olympus_Mons")] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        let config_dir = tmp.path().join(".config/tokscale");
+        if let Some(existing) = existing {
+            pin_bucket_timezone(tmp.path(), existing);
+        }
+
+        cmd_with_home(tmp.path())
+            .env("TOKSCALE_CONFIG_DIR", &config_dir)
+            .args(["config", "set", "timezone", "auto"])
+            .assert()
+            .success();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(
+            settings["scanner"]["bucketTimezone"].is_string(),
+            "config set auto must write a detected timezone for a {existing:?} value"
+        );
+    }
+}
+
+#[test]
+fn test_config_unset_can_initialize_or_recover_a_timezone_before_auto_pinning() {
+    for existing in [None, Some("Mars/Olympus_Mons")] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        let config_dir = tmp.path().join(".config/tokscale");
+        if let Some(existing) = existing {
+            pin_bucket_timezone(tmp.path(), existing);
+        }
+
+        cmd_with_home(tmp.path())
+            .env("TOKSCALE_CONFIG_DIR", &config_dir)
+            .args(["config", "unset", "timezone"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn test_read_only_config_commands_still_auto_pin_the_timezone() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    let config_dir = tmp.path().join(".config/tokscale");
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_CONFIG_DIR", &config_dir)
+        .args(["config", "get", "timezone"])
+        .assert()
+        .success();
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert!(
+        settings["scanner"]["bucketTimezone"].is_string(),
+        "read-only config commands must retain startup auto-pinning"
+    );
+}
+
+/// A fixed UTC offset cannot follow daylight saving time, so pinning one would
+/// reintroduce a bounded version of the bug pinning removes. Reject it at the
+/// boundary rather than storing a value that silently degrades to unpinned.
+#[test]
+fn test_config_set_timezone_rejects_a_fixed_offset() {
+    let tmp = create_bucket_timezone_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .args(["config", "set", "timezone", "+09:00"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a known IANA timezone name"));
+}
+
+/// A hand-edited settings.json with a bad zone must not break scanning. It
+/// degrades to the pre-pinning behaviour, which is wrong in the old way rather
+/// than a hard failure on every command.
+///
+/// The run also re-detects a real zone for the field (see
+/// `test_auto_pinning_recovers_from_a_bucket_timezone_that_names_no_zone`), and
+/// the buckets are unchanged either way: auto-pinning only ever records a zone
+/// that reproduces `chrono::Local`, which is what the fallback uses.
+#[test]
+fn test_unparseable_pinned_timezone_falls_back_to_the_host_timezone() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    pin_bucket_timezone(tmp.path(), "Mars/Olympus_Mons");
+
+    assert_eq!(
+        graph_day_buckets(tmp.path(), "America/Los_Angeles"),
+        vec![("2026-03-02".to_string(), 2)],
+        "an unknown zone name must fall back to the host, not fail the scan"
+    );
+}
+
+/// Naming the local zone and bucketing in it go through different code with
+/// different rules. `chrono::Local` honors `TZ`; `iana-time-zone` does not read
+/// `TZ` at all on Linux — it resolves `/etc/localtime`. A host where those two
+/// disagree is ordinary (any `TZ=...` in a shell profile, any CI container),
+/// and pinning the detected name there would re-key the whole history on the
+/// first run after upgrading.
+///
+/// `TZ=XYZ8` is a POSIX rule string, not a zone name: `chrono::Local` honors it
+/// as UTC-8, and no detector will ever return it. So either the guard declines
+/// to pin, or it pins something that buckets identically — and the assertion
+/// below holds under both without caring which happened, which is the actual
+/// contract.
+#[test]
+fn test_first_run_never_rebuckets_when_the_detector_disagrees_with_local() {
+    let tmp = create_bucket_timezone_fixture_dir();
+
+    // UTC-8: 03:30 and 10:00 on 2026-03-02 — one day, both messages.
+    assert_eq!(
+        graph_day_buckets(tmp.path(), "XYZ8"),
+        vec![("2026-03-02".to_string(), 2)],
+        "the first run must bucket by chrono::Local no matter what the zone \
+         detector reports"
+    );
+
+    // Whatever it recorded, a second run has to agree with the first. A pin
+    // that moved the buckets would show up here even if the first run's
+    // assertion happened to match by luck.
+    assert_eq!(
+        graph_day_buckets(tmp.path(), "XYZ8"),
+        vec![("2026-03-02".to_string(), 2)],
+        "the recorded zone must reproduce what the first run reported"
+    );
+}
+
+/// Hour keys that actually carry messages, sorted ascending.
+fn hourly_keys(base: &Path, timezone: &str) -> Vec<String> {
+    let output = cmd_with_home(base)
+        .env("TZ", timezone)
+        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut keys: Vec<String> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["hour"].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The hourly key embeds a date, and the rebucket pass has already moved every
+/// message's `date` into the pinned zone. Deriving the hour from the host
+/// instead lets one report disagree with itself about which day an hour belongs
+/// to — and a `--today` filter resolved in the pinned zone then selects rows
+/// labelled with the neighbouring host-local date.
+#[test]
+fn test_hourly_keys_follow_the_pinned_bucket_timezone() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    pin_bucket_timezone(tmp.path(), "Pacific/Kiritimati");
+
+    // 11:30Z and 18:00Z are 01:30 and 08:00 on 03-03 in Kiritimati (UTC+14),
+    // but 03:30 and 10:00 on 03-02 in Los Angeles — a different day *and* a
+    // different hour, so neither half can match by accident.
+    let expected = vec![
+        "2026-03-03 01:00".to_string(),
+        "2026-03-03 08:00".to_string(),
+    ];
+
+    assert_eq!(
+        hourly_keys(tmp.path(), "America/Los_Angeles"),
+        expected,
+        "hour keys must be built in the pinned zone, not the host's"
+    );
+    assert_eq!(
+        hourly_keys(tmp.path(), "Asia/Seoul"),
+        expected,
+        "and they must not move when the host timezone does"
+    );
+}
+
+/// `Settings::load()` answers an unparseable settings.json with
+/// `Settings::default()`. Auto-pinning is the first path in the CLI that loads
+/// and then unconditionally saves, so on its own it would replace a
+/// hand-edited or truncated settings.json with defaults plus a timezone —
+/// erasing scanner paths, aliases, autosubmit config and UI preferences on a
+/// plain `tokscale graph`, with no prompt and no way back.
+///
+/// The positive control matters: if this host cannot name its own zone the pin
+/// is skipped for every home and the negative cases would pass vacuously.
+#[test]
+fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
+    // Positive control — a readable file on this host really does get pinned.
+    let control = create_bucket_timezone_fixture_dir();
+    let control_settings = settings_json_path(control.path());
+    fs::create_dir_all(control_settings.parent().unwrap()).unwrap();
+    fs::write(&control_settings, r#"{"colorPalette":"green"}"#).unwrap();
+    graph_day_buckets(control.path(), "Asia/Seoul");
+    let control_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&control_settings).unwrap()).unwrap();
+    assert!(
+        control_json["scanner"]["bucketTimezone"].is_string(),
+        "auto-pinning must work on this host for the assertions below to mean \
+         anything; got {control_json}"
+    );
+    assert_eq!(
+        control_json["colorPalette"].as_str(),
+        Some("green"),
+        "pinning a readable file must preserve everything else in it"
+    );
+
+    // Truncated JSON, and valid JSON with a field of the wrong type — both make
+    // `serde_json::from_str` fail, and both leave real user data on disk.
+    for unreadable in [
+        r#"{"colorPalette": "green", "scanner": {"#,
+        r#"{"colorPalette": 42, "scanner": {"extraScanPaths": {"claude": ["/data"]}}}"#,
+    ] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        let settings_path = settings_json_path(tmp.path());
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(&settings_path, unreadable).unwrap();
+
+        cmd_with_home(tmp.path())
+            .env("TZ", "Asia/Seoul")
+            .args(["graph", "--client", "opencode", "--no-spinner"])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            unreadable,
+            "a settings.json that could not be read must be left byte-identical, \
+             not replaced with defaults plus a timezone"
+        );
+    }
+}
+
+/// `tokscale config` loads and saves too, and it is the one place a user is
+/// watching. Refuse out loud rather than silently replacing a file whose
+/// contents were never recovered.
+#[test]
+fn test_config_set_refuses_to_overwrite_unreadable_settings() {
+    let tmp = create_bucket_timezone_fixture_dir();
+    let settings_path = settings_json_path(tmp.path());
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    let unreadable = r#"{"scanner": {"extraScanPaths": "not-a-map"}}"#;
+    fs::write(&settings_path, unreadable).unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["config", "set", "timezone", "Asia/Seoul"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "could not read this machine's tokscale settings",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(&settings_path).unwrap(),
+        unreadable,
+        "a refused write must leave the file untouched"
+    );
+}
+
+/// A `bucketTimezone` that does not name a zone the tz database knows is not a
+/// pin: bucketing degrades to host-local, so the device keeps exactly the
+/// exposure auto-pinning exists to close. Treating "present" as "pinned" made
+/// one bad hand edit suppress the fix permanently.
+#[test]
+fn test_auto_pinning_recovers_from_a_bucket_timezone_that_names_no_zone() {
+    let pinned_zone = |base: &Path| -> String {
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(settings_json_path(base)).unwrap()).unwrap();
+        settings["scanner"]["bucketTimezone"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let scan = |base: &Path| {
+        cmd_with_home(base)
+            .env("TZ", "Asia/Seoul")
+            .args(["graph", "--client", "opencode", "--no-spinner"])
+            .assert()
+            .success();
+    };
+
+    // What a real recovery looks like on this host, from a file that is simply
+    // unpinned. Comparing against it keeps the test from passing on a host
+    // where nothing can be detected and every case recovers to nothing.
+    let baseline = create_bucket_timezone_fixture_dir();
+    pin_bucket_timezone_field(baseline.path(), "null");
+    scan(baseline.path());
+    let detected = pinned_zone(baseline.path());
+    assert!(
+        !detected.is_empty(),
+        "auto-pinning must work on this host for the assertions below to mean \
+         anything"
+    );
+
+    for junk in ["", "   ", "Mars/Olympus_Mons", "+09:00"] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        pin_bucket_timezone(tmp.path(), junk);
+
+        scan(tmp.path());
+        assert_eq!(
+            pinned_zone(tmp.path()),
+            detected,
+            "`{junk}` names no zone, so bucketing already falls back to the host \
+             — the next run must re-detect instead of leaving the device \
+             permanently unpinned"
+        );
+
+        // And the recovered value is a real pin, so it is not re-detected again
+        // on every subsequent run.
+        scan(tmp.path());
+        assert_eq!(pinned_zone(tmp.path()), detected);
+    }
+}
+
+/// Whether mode 000 actually denies a read here. Root ignores it, and so do
+/// some container filesystems, and the tests below have nothing to assert when
+/// the file they made unreadable can still be read. Probes the real behaviour
+/// rather than inferring it from the uid.
+#[cfg(unix)]
+fn mode_000_denies_reads(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let probe = dir.join(".mode-probe");
+    fs::write(&probe, "probe").unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::read_to_string(&probe).is_err();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::remove_file(&probe).unwrap();
+    denied
+}
+
+/// `read_to_string(..).ok()` collapses "no such file" into the same `None` as
+/// "this file exists and I could not open it". Auto-pinning has to tell them
+/// apart: the first is safe to write, the second is a file whose contents are
+/// still on disk and still unknown.
+///
+/// A parse failure is covered by
+/// `test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read`; this
+/// is the I/O half, which never reaches the parser at all.
+#[cfg(unix)]
+#[test]
+fn test_auto_pinning_declines_when_settings_json_cannot_be_opened() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = create_bucket_timezone_fixture_dir();
+    if !mode_000_denies_reads(tmp.path()) {
+        return;
+    }
+
+    let settings_path = settings_json_path(tmp.path());
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::write(&settings_path, r#"{"colorPalette":"green"}"#).unwrap();
+    fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+    cmd_with_home(tmp.path())
+        .env("TZ", "Asia/Seoul")
+        .args(["graph", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success();
+
+    fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        fs::read_to_string(&settings_path).unwrap(),
+        r#"{"colorPalette":"green"}"#,
+        "a settings.json that could not be opened must be left byte-identical"
+    );
+}
+
+/// The macOS fallback only fires while the canonical path is absent, so writing
+/// a primary settings.json shadows the legacy file for good — a legacy file the
+/// user could otherwise have repaired. Auto-pinning must not create one on top
+/// of a legacy file it could not open.
+///
+/// macOS-only: `legacy_macos_config_dir()` returns `None` everywhere else, so
+/// there is no fallback to shadow. Uses a permissions failure rather than bad
+/// JSON because unparseable legacy *content* is read successfully and blocked
+/// one step later, by the parse arm.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_auto_pinning_does_not_shadow_a_legacy_settings_file_it_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = create_bucket_timezone_fixture_dir();
+    if !mode_000_denies_reads(tmp.path()) {
+        return;
+    }
+
+    let legacy = tmp
+        .path()
+        .join("Library/Application Support/tokscale/settings.json");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, r#"{"colorPalette":"green"}"#).unwrap();
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let primary = settings_json_path(tmp.path());
+    assert!(!primary.exists(), "fixture must start with no primary file");
+
+    cmd_with_home(tmp.path())
+        // The one test here that must run *without* the config-dir override:
+        // `Settings::load_with_origin` skips the legacy macOS read whenever
+        // `TOKSCALE_CONFIG_DIR` is set, because the override means "this root
+        // and nothing outside it". With it set there is no fallback left to
+        // shadow and the assertion below could never fail. Clearing it leaves
+        // the resolver on `$HOME/.config/tokscale`, which is the same sandbox
+        // directory — this is macOS-only, so no known-folder lookup is in play.
+        .env_remove("TOKSCALE_CONFIG_DIR")
+        .env("TZ", "Asia/Seoul")
+        .args(["graph", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success();
+
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        !primary.exists(),
+        "writing a primary settings.json would shadow the legacy file the user \
+         still has to repair"
+    );
+    assert_eq!(
+        fs::read_to_string(&legacy).unwrap(),
+        r#"{"colorPalette":"green"}"#,
+        "and the legacy file itself must be left alone"
     );
 }

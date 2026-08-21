@@ -1,4 +1,5 @@
 import { getSession, getSessionFromHeader, type SessionUser } from "./session";
+import { getConfiguredPublicOrigin, getPublicOrigin } from "@/lib/seo/urls";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -8,10 +9,18 @@ interface GetSessionFromRequestOptions {
 
 function getAllowedOrigins(): string[] {
   const env = process.env.CSRF_ALLOWED_ORIGINS;
-  if (env) {
-    return env.split(",").map((o) => o.trim()).filter(Boolean);
+  const origins = env
+    ? env.split(",").map((o) => o.trim()).filter(Boolean)
+    : [getPublicOrigin(), "http://localhost:3000"];
+
+  // An explicit allowlist should not be widened by the hosted fallback. Add
+  // only an explicitly configured valid APP_URL in that mode.
+  const configuredOrigin = getConfiguredPublicOrigin();
+  if (configuredOrigin && !origins.includes(configuredOrigin)) {
+    origins.push(configuredOrigin);
   }
-  return ["https://tokscale.ai", "https://tokscale.dev", "http://localhost:3000"];
+
+  return origins;
 }
 
 export async function getSessionFromRequest(

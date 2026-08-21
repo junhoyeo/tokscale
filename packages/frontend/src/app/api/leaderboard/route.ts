@@ -6,7 +6,7 @@ import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 export const revalidate = 60;
 
 const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
-const VALID_SORT_BY: SortBy[] = ["tokens", "cost", "time"];
+const VALID_SORT_BY: SortBy[] = ["tokens", "cost"];
 
 function parseIntSafe(value: string | null, defaultValue: number): number {
   if (!value) return defaultValue;
@@ -47,7 +47,11 @@ export async function GET(request: Request) {
 
     const data = await getLeaderboardData(period, page, limit, sortBy, search, customFrom, customTo);
 
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: {
+        "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+      },
+    });
   } catch (error) {
     console.error("Leaderboard error:", error);
     return NextResponse.json(

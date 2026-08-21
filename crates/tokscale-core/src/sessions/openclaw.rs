@@ -3,12 +3,10 @@
 //! Parses OpenClaw transcript JSONL files from agent directories.
 //! Supports legacy sessions.json index parsing for compatibility.
 
-use super::utils::read_file_or_none;
+use super::utils::{for_each_json_line, read_file_or_none, CamelUsage};
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -41,7 +39,7 @@ struct OpenClawEntry {
 #[derive(Debug, Deserialize)]
 struct OpenClawMessage {
     role: Option<String>,
-    usage: Option<OpenClawUsage>,
+    usage: Option<CamelUsage>,
     timestamp: Option<i64>,
     provider: Option<String>,
     model: Option<String>,
@@ -52,25 +50,6 @@ struct OpenClawModelData {
     provider: Option<String>,
     #[serde(rename = "modelId")]
     model_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenClawUsage {
-    input: Option<i64>,
-    output: Option<i64>,
-    #[serde(rename = "cacheRead")]
-    cache_read: Option<i64>,
-    #[serde(rename = "cacheWrite")]
-    cache_write: Option<i64>,
-    #[serde(rename = "totalTokens")]
-    #[allow(dead_code)]
-    total_tokens: Option<i64>,
-    cost: Option<OpenClawCost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenClawCost {
-    total: Option<f64>,
 }
 
 pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
@@ -135,11 +114,6 @@ fn resolve_session_path(index_dir: &Path, entry: &SessionEntry) -> PathBuf {
 }
 
 fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(session_path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
     // Get file modification time as fallback for missing timestamps
     let file_mtime_ms = std::fs::metadata(session_path)
         .and_then(|m| m.modified())
@@ -148,28 +122,17 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let reader = BufReader::new(file);
     let mut messages = Vec::with_capacity(64);
     let mut current_model: Option<String> = None;
     let mut current_provider: Option<String> = None;
     let mut buffer = Vec::with_capacity(4096);
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    for_each_json_line(session_path, &mut |_index, trimmed| {
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry: OpenClawEntry = match simd_json::from_slice(&mut buffer) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         match entry.entry_type.as_str() {
@@ -183,7 +146,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
             }
             "custom" => {
                 if entry.custom_type.as_deref() != Some("model-snapshot") {
-                    continue;
+                    return;
                 }
 
                 if let Some(data) = entry.data {
@@ -198,12 +161,12 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
             "message" => {
                 if let Some(msg) = entry.message {
                     if msg.role.as_deref() != Some("assistant") {
-                        continue;
+                        return;
                     }
 
                     let usage = match msg.usage {
                         Some(u) => u,
-                        None => continue,
+                        None => return,
                     };
 
                     let model = msg
@@ -220,13 +183,13 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
 
                     let model = match model {
                         Some(model) => model,
-                        None => continue,
+                        None => return,
                     };
 
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
                     let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
-                    let cost = usage.cost.and_then(|c| c.total).unwrap_or(0.0);
+                    let cost = usage.cost.as_ref().and_then(|c| c.total).unwrap_or(0.0);
 
                     messages.push(UnifiedMessage::new(
                         "openclaw",
@@ -234,20 +197,14 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         provider,
                         session_id.to_string(),
                         timestamp,
-                        TokenBreakdown {
-                            input: usage.input.unwrap_or(0).max(0),
-                            output: usage.output.unwrap_or(0).max(0),
-                            cache_read: usage.cache_read.unwrap_or(0).max(0),
-                            cache_write: usage.cache_write.unwrap_or(0).max(0),
-                            reasoning: 0,
-                        },
+                        usage.to_breakdown(),
                         cost.max(0.0),
                     ));
                 }
             }
             _ => {}
         }
-    }
+    });
 
     messages
 }

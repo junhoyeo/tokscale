@@ -12,6 +12,16 @@ export interface SessionUser {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
+  /**
+   * GitHub's immutable numeric account id, used for admin gating — usernames
+   * can be renamed and released, so they are not a safe identity to authorize
+   * against.
+   *
+   * Null for sessions established with a personal API token, which does not
+   * carry it. That is deliberate: it makes admin checks fail closed for token
+   * auth rather than depending on every admin route remembering to opt out.
+   */
+  githubId: number | null;
 }
 
 /**
@@ -51,6 +61,7 @@ export async function getSession(): Promise<SessionUser | null> {
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
+    githubId: user.githubId,
   };
 }
 
@@ -123,6 +134,10 @@ export async function validateApiToken(
     username: result.username,
     displayName: result.displayName,
     avatarUrl: result.avatarUrl,
+    // authenticatePersonalToken does not select github_id. Left null rather
+    // than widening that query: admin actions should not be reachable with a
+    // long-lived CLI token in the first place.
+    githubId: null,
   };
 }
 

@@ -3,6 +3,33 @@
 import Image from "next/image";
 import styled from "styled-components";
 
+const SPONSOR_URL = "https://github.com/sponsors/junhoyeo";
+
+export function SponsorSection() {
+  return (
+    <SponsorSectionShell>
+      <BlueprintPanel>
+        <BlueprintHeader>
+          <SponsorEyebrow>Back the project</SponsorEyebrow>
+          <BlueprintMeta>GitHub Sponsors</BlueprintMeta>
+        </BlueprintHeader>
+        <BlueprintBody>
+          <SponsorCopy>
+            <SponsorTitle>Help ship the next release.</SponsorTitle>
+            <SponsorDescription>
+              Your support gives maintenance, integrations, and cross-platform builds more dedicated time.
+            </SponsorDescription>
+          </SponsorCopy>
+          <SponsorAction href={SPONSOR_URL} target="_blank" rel="noopener noreferrer">
+            <SponsorActionText>Sponsor on GitHub</SponsorActionText>
+            <SponsorActionArrow aria-hidden="true">↗</SponsorActionArrow>
+          </SponsorAction>
+        </BlueprintBody>
+      </BlueprintPanel>
+    </SponsorSectionShell>
+  );
+}
+
 export function FollowSection() {
   return (
     <FollowSectionWrapper>
@@ -13,7 +40,7 @@ export function FollowSection() {
           <MiddleContentInner>
             <Avatar3D>
               <Image
-                src="/assets/landing/follow-3d-avatar.png"
+                src="/assets/landing/follow-3d-avatar.webp"
                 alt="@junhoyeo"
                 width={268}
                 height={268}
@@ -51,6 +78,151 @@ export function FollowSection() {
     </FollowSectionWrapper>
   );
 }
+
+/* ── Sponsor Section Styled Components ── */
+
+const SponsorSectionShell = styled.section`
+  width: 100%;
+  padding: 0 0 64px;
+
+  @media (max-width: 768px) {
+    padding-bottom: 48px;
+  }
+`;
+
+const SponsorCopy = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+`;
+
+const SponsorEyebrow = styled.p`
+  font-family: var(--font-mono), monospace;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.4em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #85caff;
+`;
+
+const SponsorTitle = styled.h2`
+  max-width: 35ch;
+  font-family: var(--font-figtree), "Figtree", sans-serif;
+  font-weight: 600;
+  font-size: 36px;
+  letter-spacing: -0.03em;
+  color: #f4f8ff;
+
+  @media (max-width: 768px) {
+    font-size: 28px;
+  }
+`;
+
+const SponsorDescription = styled.p`
+  max-width: 56ch;
+  font-family: var(--font-figtree), "Figtree", sans-serif;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.5em;
+  color: #a8b3c7;
+`;
+
+const SponsorAction = styled.a`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 14px 0 18px;
+  flex-shrink: 0;
+  border: 1px solid rgba(135, 240, 242, 0.48);
+  border-radius: 12px;
+  background: rgba(0, 115, 255, 0.12);
+  color: #f4fbff;
+  text-decoration: none;
+
+  &:hover {
+    border-color: rgba(135, 240, 242, 0.8);
+    background: rgba(0, 115, 255, 0.2);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #75b6ff;
+    outline-offset: 3px;
+  }
+
+  @media (max-width: 480px) {
+    width: 100%;
+  }
+`;
+
+const SponsorActionText = styled.span`
+  font-family: var(--font-figtree), "Figtree", sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1.2em;
+  white-space: nowrap;
+`;
+
+const SponsorActionArrow = styled.span`
+  font-family: var(--font-figtree), "Figtree", sans-serif;
+  font-weight: 600;
+  font-size: 18px;
+  line-height: 1em;
+  color: #87f0f2;
+`;
+
+const BlueprintPanel = styled.div`
+  overflow: hidden;
+  border: 1px solid rgba(0, 115, 255, 0.48);
+  border-radius: 16px;
+  background: #01070f;
+`;
+
+const BlueprintHeader = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 32px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background-image: url("/assets/landing/separator-pattern-slash@gray.svg");
+  background-size: 24px 24px;
+
+  @media (max-width: 480px) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 24px;
+  }
+`;
+
+const BlueprintMeta = styled.p`
+  font-family: var(--font-mono), monospace;
+  font-weight: 500;
+  font-size: 13px;
+  line-height: 1.4em;
+  letter-spacing: 0.04em;
+  color: #8292b1;
+`;
+
+const BlueprintBody = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 48px;
+  padding: 40px 48px;
+
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 28px;
+    padding: 32px 24px;
+  }
+`;
 
 /* ── Follow Section Styled Components ── */
 
@@ -184,6 +356,10 @@ const HeadingText = styled.p`
 `;
 
 const FollowLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   font-family: var(--font-figtree), "Figtree", sans-serif;
   font-weight: 600;
   font-size: 24px;
@@ -192,10 +368,14 @@ const FollowLink = styled.a`
   text-align: center;
   color: #b6c0d4;
   text-decoration: none;
-  transition: color 0.15s;
 
   &:hover {
     color: #ffffff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #75b6ff;
+    outline-offset: 3px;
   }
 
   @media (max-width: 768px) {
@@ -203,6 +383,7 @@ const FollowLink = styled.a`
   }
 
   @media (max-width: 480px) {
+    min-height: 48px;
     font-size: 18px;
   }
 `;
