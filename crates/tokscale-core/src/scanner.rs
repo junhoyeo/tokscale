@@ -382,7 +382,6 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 
     let mut paths: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
-        .par_bridge()
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
