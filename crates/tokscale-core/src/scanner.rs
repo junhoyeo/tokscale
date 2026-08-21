@@ -1175,6 +1175,22 @@ fn push_grok_dual_source_scan_tasks(
     );
 }
 
+/// Read Kimi Desktop's optional relocated Work share directory.
+fn kimi_work_share_dir_root(app_data: &Path) -> Option<PathBuf> {
+    let config_path = app_data.join("kimi-desktop").join("daimon-storage.json");
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let config: Value = serde_json::from_str(&content).ok()?;
+    let share_dir = config.get("shareDir")?.as_str()?;
+    if share_dir.trim().is_empty() {
+        return None;
+    }
+
+    Some(join_native_path(
+        Path::new(share_dir),
+        "daimon/runtime/kimi-code/home/sessions",
+    ))
+}
+
 /// Candidate Kimi Work session roots (Kimi Desktop's embedded daimon runtime).
 ///
 /// The suffix is the fixed on-disk layout of the desktop app. There is no Work
@@ -1199,10 +1215,11 @@ fn kimi_work_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
         ))];
         if use_env_roots {
             if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-                roots.push(join_native_path(
-                    std::path::Path::new(&app_data),
-                    KIMI_WORK_SUFFIX,
-                ));
+                let app_data = PathBuf::from(app_data);
+                roots.push(
+                    kimi_work_share_dir_root(&app_data)
+                        .unwrap_or_else(|| join_native_path(&app_data, KIMI_WORK_SUFFIX)),
+                );
             }
         }
         return roots;
@@ -5450,7 +5467,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_kimi_code_home_override() {
-        let mut env = EnvGuard::capture(&["KIMI_CODE_HOME"]);
+        let mut env = EnvGuard::capture(&["KIMI_CODE_HOME", "APPDATA"]);
+        env.remove("APPDATA");
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
         let custom_root = dir.path().join("custom-kimi-code");
@@ -5498,7 +5516,8 @@ mod tests {
     #[serial]
     fn test_scan_all_clients_kimi_code_home_blank_falls_back_to_home() {
         for blank in ["", "   ", "\t\n"] {
-            let mut env = EnvGuard::capture(&["KIMI_CODE_HOME"]);
+            let mut env = EnvGuard::capture(&["KIMI_CODE_HOME", "APPDATA"]);
+            env.remove("APPDATA");
             let dir = TempDir::new().unwrap();
             let home = dir.path();
             let wire = setup_mock_kimi_code_dir(&home.join(".kimi-code"));
@@ -5613,6 +5632,30 @@ mod tests {
         assert_eq!(kimi_files.len(), 2);
         assert!(kimi_files.contains(&work_literal));
         assert!(kimi_files.contains(&conflict_wire));
+
+        let share_dir = dir.path().join("custom-share");
+        let config_path = conflicting.join("kimi-desktop").join("daimon-storage.json");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            serde_json::json!({"shareDir": share_dir.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+
+        let configured_wire = super::join_native_path(
+            &share_dir,
+            "daimon/runtime/kimi-code/home/sessions/wd_workspace_c107cac82a87/conv-configured-share/agents/main/wire.jsonl",
+        );
+        fs::create_dir_all(configured_wire.parent().unwrap()).unwrap();
+        File::create(&configured_wire).unwrap();
+
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["kimi".to_string()], true);
+        let kimi_files = result.get(ClientId::Kimi);
+        assert_eq!(kimi_files.len(), 2);
+        assert!(kimi_files.contains(&work_literal));
+        assert!(kimi_files.contains(&configured_wire));
+        assert!(!kimi_files.contains(&conflict_wire));
     }
 
     /// Kimi Work ships as a desktop-only build; a Linux home must not cause a
