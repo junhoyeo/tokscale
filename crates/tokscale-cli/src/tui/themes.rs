@@ -184,6 +184,7 @@ pub struct Theme {
     pub selection: Color,
     striped_row: Color,
     current_row: Color,
+    light: bool,
     color_mode: TerminalColorMode,
 }
 
@@ -339,6 +340,7 @@ impl Theme {
             striped_row: Color::Rgb(20, 24, 30),
             current_row: Color::Rgb(28, 42, 34),
             color_mode,
+            light: false,
         };
 
         match name {
@@ -465,19 +467,39 @@ impl Theme {
     }
 
     pub(crate) fn metric_input_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(100, 200, 100)))
+        let c = if self.light {
+            Color::Rgb(31, 136, 61)
+        } else {
+            Color::Rgb(100, 200, 100)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn metric_output_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(200, 100, 100)))
+        let c = if self.light {
+            Color::Rgb(207, 34, 46)
+        } else {
+            Color::Rgb(200, 100, 100)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn metric_cache_read_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(100, 150, 200)))
+        let c = if self.light {
+            Color::Rgb(9, 105, 218)
+        } else {
+            Color::Rgb(100, 150, 200)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn metric_cache_write_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(200, 150, 100)))
+        let c = if self.light {
+            Color::Rgb(170, 100, 20)
+        } else {
+            Color::Rgb(200, 150, 100)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn metric_total_style(&self) -> Style {
@@ -487,11 +509,21 @@ impl Theme {
     }
 
     pub(crate) fn secondary_text_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(170, 170, 170)))
+        let c = if self.light {
+            Color::Rgb(106, 115, 125)
+        } else {
+            Color::Rgb(170, 170, 170)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn subtle_text_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(102, 102, 102)))
+        let c = if self.light {
+            Color::Rgb(140, 149, 159)
+        } else {
+            Color::Rgb(102, 102, 102)
+        };
+        Style::default().fg(self.color(c))
     }
 
     pub(crate) fn striped_row_style(&self) -> Style {
@@ -508,6 +540,38 @@ impl Theme {
         } else {
             Style::default().bg(self.current_row)
         }
+    }
+    /// Build a light-background variant of `name` for the current terminal.
+    pub(crate) fn from_name_for_current_terminal_light(name: ThemeName) -> Self {
+        Self::from_name_with_color_mode_light(name, TerminalColorMode::from_env(std::env::vars()))
+    }
+
+    /// Build a light-background variant of `name` for an explicit color mode.
+    pub(crate) fn from_name_with_color_mode_light(
+        name: ThemeName,
+        color_mode: TerminalColorMode,
+    ) -> Self {
+        let mut theme = Self::from_name_with_color_mode(name, color_mode);
+        theme.apply_light();
+        theme
+    }
+
+    /// Invert the dark surface to a light one (white background, dark text)
+    /// while keeping the palette's accent grade colors. Driven by the TUI's
+    /// `L` toggle so light-terminal users get a readable UI.
+    fn apply_light(&mut self) {
+        self.light = true;
+        self.background = Color::Rgb(255, 255, 255);
+        self.foreground = Color::Rgb(36, 41, 47);
+        self.border = Color::Rgb(208, 215, 222);
+        self.muted = Color::Rgb(106, 115, 125);
+        self.selection = Color::Rgb(234, 240, 246);
+        self.striped_row = Color::Rgb(246, 248, 250);
+        self.current_row = Color::Rgb(234, 240, 246);
+        // Empty contribution cell: light gray instead of near-black on white.
+        self.colors[0] = Color::Rgb(235, 238, 242);
+        // Accent: a saturated mid grade reads better than Cyan on white.
+        self.accent = self.colors[3];
     }
 }
 
@@ -763,6 +827,37 @@ mod tests {
             assert_eq!(theme.striped_row_style().bg, Some(striped));
             assert_eq!(theme.current_row_style().bg, Some(current));
         }
+    }
+    #[test]
+    fn light_variant_is_white_background_with_dark_text() {
+        let dark = Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::FullColor);
+        let light = Theme::from_name_with_color_mode_light(ThemeName::Blue, TerminalColorMode::FullColor);
+
+        assert!(!dark.light);
+        assert!(light.light);
+
+        // Light mode inverts the surface: white background, dark text.
+        assert_eq!(light.background, Color::Rgb(255, 255, 255));
+        assert_eq!(light.foreground, Color::Rgb(36, 41, 47));
+        assert_ne!(light.background, dark.background);
+
+        // Empty contribution cell becomes light gray, not near-black.
+        assert_eq!(light.colors[0], Color::Rgb(235, 238, 242));
+
+        // Metric text styles switch to dark-on-light contrast colors.
+        assert_eq!(dark.metric_input_style().fg, Some(Color::Rgb(100, 200, 100)));
+        assert_eq!(
+            light.metric_input_style().fg,
+            Some(Color::Rgb(31, 136, 61))
+        );
+        assert_eq!(
+            light.metric_output_style().fg,
+            Some(Color::Rgb(207, 34, 46))
+        );
+        assert_eq!(
+            light.metric_cache_read_style().fg,
+            Some(Color::Rgb(9, 105, 218))
+        );
     }
 
     #[test]

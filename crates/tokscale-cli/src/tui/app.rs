@@ -402,7 +402,11 @@ impl App {
                 .parse()
                 .unwrap_or_else(|_| settings.theme_name())
         };
-        let theme = Theme::from_name_for_current_terminal(theme_name);
+        let theme = if settings.tui_light_mode {
+            Theme::from_name_for_current_terminal_light(theme_name)
+        } else {
+            Theme::from_name_for_current_terminal(theme_name)
+        };
 
         let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
@@ -867,6 +871,9 @@ impl App {
             }
             KeyCode::Char('p') => {
                 self.cycle_theme();
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                self.toggle_light_mode();
             }
             KeyCode::Char('r') => {
                 self.last_auto_refresh = Instant::now();
@@ -1875,7 +1882,11 @@ impl App {
 
     fn cycle_theme(&mut self) {
         let new_theme = self.theme.name.next();
-        self.theme = Theme::from_name_for_current_terminal(new_theme);
+        self.theme = if self.settings.tui_light_mode {
+            Theme::from_name_for_current_terminal_light(new_theme)
+        } else {
+            Theme::from_name_for_current_terminal(new_theme)
+        };
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
         if let Err(e) = self.settings.save() {
@@ -1886,6 +1897,27 @@ impl App {
             ));
         } else {
             self.set_status(&format!("Theme: {}", new_theme.as_str()));
+        }
+    }
+    fn toggle_light_mode(&mut self) {
+        self.settings.tui_light_mode = !self.settings.tui_light_mode;
+        let name = self.theme.name;
+        self.theme = if self.settings.tui_light_mode {
+            Theme::from_name_for_current_terminal_light(name)
+        } else {
+            Theme::from_name_for_current_terminal(name)
+        };
+        self.dialog_stack.set_theme(self.theme.clone());
+        if let Err(e) = self.settings.save() {
+            self.set_status(&format!(
+                "Light mode: {} (save failed: {})",
+                self.settings.tui_light_mode, e
+            ));
+        } else {
+            self.set_status(&format!(
+                "Light mode: {}",
+                if self.settings.tui_light_mode { "on" } else { "off" }
+            ));
         }
     }
 

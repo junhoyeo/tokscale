@@ -211,6 +211,10 @@ pub struct Settings {
     /// existed loading cleanly; an absent or empty map means no folding.
     #[serde(default)]
     pub model_aliases: tokscale_core::ModelAliasMap,
+    /// When true, the interactive TUI uses a light background instead of the
+    /// hardcoded dark one. Toggled live with the `L` key and persisted.
+    #[serde(default)]
+    pub tui_light_mode: bool,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -262,6 +266,7 @@ impl Default for Settings {
             minutely_tab_enabled: false,
             autosubmit: AutosubmitSettings::default(),
             model_aliases: tokscale_core::ModelAliasMap::default(),
+            tui_light_mode: false,
         }
     }
 }
