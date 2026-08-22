@@ -5698,6 +5698,9 @@ mod tests {
         kimi_work_wire_from_root(app_data, session_id)
     }
 
+    // Both callers are gated to macos/windows, so without a matching gate this
+    // helper is compiled with zero callers on linux and warns there.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn kimi_work_wire_from_root(root: &std::path::Path, session_id: &str) -> PathBuf {
         super::join_native_path(
             root,
