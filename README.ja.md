@@ -1124,6 +1124,7 @@ GitHubプロフィールREADMEにTokscaleの公開統計を直接埋め込むこ
 | `template` | `classic`（デフォルト）· `minimal` · `terminal` · `graph` · `orbit` · `vitals` · `blueprint` · `receipt` | カードデザイン |
 | `color` | `blue` · `green` · `teal` · `purple` · `pink` · `orange` · `monochrome` · `halloween` · `YlGnBu` | アクセントカラーと貢献グラフのパレット |
 | `theme` | `dark`（デフォルト）· `light` | ライトまたはダークのカード |
+| `period` | `all`（デフォルト）· `month`（直近30日）· `week`（直近7日） | トークン、コスト、貢献アクティビティの期間。ランクと送信回数はライフタイムのまま |
 | `sort` | `tokens`（デフォルト）· `cost` | ランクを取得するリーダーボード |
 | `tokens`, `cost` | `compact` · `full` | 数値フォーマット、個別に設定可能 — `20.9B` か `20,941,000,000` |
 | `rank` | `plain`（デフォルト、`#134`）· `percent`（`top 12%`）· `total`（`#134 / 1,174`） | リーダーボードのランクの表示方法 |
@@ -1137,6 +1138,7 @@ GitHubプロフィールREADMEにTokscaleの公開統計を直接埋め込むこ
 ![](https://tokscale.ai/api/embed/<username>/svg?template=orbit&color=pink&rank=percent)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=terminal&color=green&theme=light)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=receipt&color=YlGnBu&graph=1)
+![](https://tokscale.ai/api/embed/<username>/svg?period=week&graph=1)
 ```
 
 ### GitHubプロフィールバッジ

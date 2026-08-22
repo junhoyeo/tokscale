@@ -6,6 +6,8 @@ import type {
 import {
   THEMES,
   applyEmbedColor,
+  getEmbedPeriodDateRange,
+  parseEmbedPeriod,
   parseEmbedTemplate,
   parseEmbedColor,
   parseNumberFormat,
@@ -103,6 +105,8 @@ function isometricCubeGeometry(svg: string): string[] {
 }
 
 const mockStats: UserEmbedStats = {
+  period: "all",
+  dateRange: null,
   user: {
     id: "user-id",
     username: "octocat",
@@ -145,6 +149,29 @@ describe("parseEmbedTemplate", () => {
   it("falls back to classic for unknown or missing values", () => {
     expect(parseEmbedTemplate("fancy")).toBe("classic");
     expect(parseEmbedTemplate(null)).toBe("classic");
+  });
+});
+
+describe("embed period", () => {
+  it("accepts profile periods and falls back to lifetime", () => {
+    expect(parseEmbedPeriod("week")).toBe("week");
+    expect(parseEmbedPeriod("month")).toBe("month");
+    expect(parseEmbedPeriod("quarter")).toBe("all");
+    expect(parseEmbedPeriod(null)).toBe("all");
+  });
+
+  it("anchors finite ranges to submitted dates ahead of UTC today", () => {
+    const now = new Date("2026-03-12T12:00:00.000Z");
+
+    expect(getEmbedPeriodDateRange("week", "2026-03-14", now)).toEqual({
+      start: "2026-03-08",
+      end: "2026-03-14",
+    });
+    expect(getEmbedPeriodDateRange("month", null, now)).toEqual({
+      start: "2026-02-11",
+      end: "2026-03-12",
+    });
+    expect(getEmbedPeriodDateRange("all", "2026-03-14", now)).toBeNull();
   });
 });
 
@@ -223,6 +250,19 @@ describe("renderMinimalEmbedSvg", () => {
     expect(svg).toContain("<svg");
     expect(svg).toContain("@octocat");
     expect(svg).toContain("Total tokens");
+  });
+
+  it("labels finite stats and lifetime rank without mixing their scopes", () => {
+    const svg = renderMinimalEmbedSvg({
+      ...mockStats,
+      period: "month",
+      dateRange: { start: "2026-01-26", end: "2026-02-24" },
+    });
+
+    expect(svg).toContain("Tokscale · 30d");
+    expect(svg).toContain("Tokens · 30d");
+    expect(svg).toContain("Cost · 30d");
+    expect(svg).toContain("Rank · lifetime");
   });
 
   it("honors the token number format", () => {
@@ -423,6 +463,8 @@ describe("embed renderer root contracts", () => {
 describe("embed text fitting", () => {
   const username = "u".repeat(39);
   const extremeStats: UserEmbedStats = {
+    period: "all",
+    dateRange: null,
     user: {
       ...mockStats.user,
       username,

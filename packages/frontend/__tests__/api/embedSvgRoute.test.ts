@@ -54,6 +54,8 @@ let GET: ModuleExports["GET"];
 
 function statsFor(username: string) {
   return {
+    period: "all" as const,
+    dateRange: null,
     user: {
       id: "user-1",
       username,
@@ -185,6 +187,44 @@ describe("GET /api/embed/[username]/svg", () => {
     expect(renderMinimalEmbedSvg).not.toHaveBeenCalled();
     expectPublicSvgHeaders(response);
     await expect(response.text()).resolves.toBe("<svg>classic</svg>");
+  });
+
+  it("applies a finite period to stats and contribution data", async () => {
+    const dateRange = { start: "2026-03-01", end: "2026-03-07" };
+    getUserEmbedStats.mockResolvedValue({
+      ...statsFor("octocat"),
+      period: "week",
+      dateRange,
+    });
+
+    const response = await request("?template=graph&period=week");
+
+    expect(response.status).toBe(200);
+    expect(getUserEmbedStats).toHaveBeenCalledWith(
+      "octocat",
+      "tokens",
+      "week",
+    );
+    expect(getUserEmbedContributions).toHaveBeenCalledWith(
+      "octocat",
+      dateRange,
+    );
+    expect(renderGraphEmbedSvg).toHaveBeenCalledWith(
+      expect.objectContaining({ period: "week", dateRange }),
+      expect.objectContaining({ contributions: [] }),
+    );
+  });
+
+  it("falls back to lifetime stats for an unknown period", async () => {
+    getUserEmbedStats.mockResolvedValue(statsFor("octocat"));
+
+    await request("?period=quarter");
+
+    expect(getUserEmbedStats).toHaveBeenCalledWith(
+      "octocat",
+      "tokens",
+      "all",
+    );
   });
 
   it.each([

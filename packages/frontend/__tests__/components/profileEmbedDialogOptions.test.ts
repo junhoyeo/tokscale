@@ -11,6 +11,7 @@ const defaults: EmbedDialogOptions = {
   compact: false,
   costFormat: "compact",
   graph: false,
+  period: "all",
   rankFormat: "plain",
   sortBy: "tokens",
   template: "classic",
@@ -117,6 +118,21 @@ describe("profile embed dialog options", () => {
       tokens: "full",
       cost: "full",
     });
+  });
+
+  it("keeps the selected stats period in the embed and profile links", () => {
+    const links = buildProfileEmbedLinks("octocat", {
+      ...defaults,
+      period: "month",
+    });
+    const embedUrl = new URL(links.embedUrl);
+
+    expect(embedUrl.searchParams.get("period")).toBe("month");
+    expect(links.profileUrl).toBe(
+      "https://tokscale.ai/u/octocat?period=month",
+    );
+    expect(links.markdownSnippet).toContain("period=month");
+    expect(links.htmlSnippet).toContain("period=month");
   });
 
   it("does not show a redundant graph toggle for graph-first templates", () => {

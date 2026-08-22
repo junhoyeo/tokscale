@@ -1125,6 +1125,7 @@ GitHub 프로필 README에 Tokscale 공개 통계를 직접 임베드할 수 있
 | `template` | `classic` (기본값) · `minimal` · `terminal` · `graph` · `orbit` · `vitals` · `blueprint` · `receipt` | 카드 디자인 |
 | `color` | `blue` · `green` · `teal` · `purple` · `pink` · `orange` · `monochrome` · `halloween` · `YlGnBu` | 강조 색상 및 기여 그래프 팔레트 |
 | `theme` | `dark` (기본값) · `light` | 라이트 또는 다크 카드 |
+| `period` | `all` (기본값) · `month` (최근 30일) · `week` (최근 7일) | 토큰, 비용 및 기여 활동 기간. 랭크와 제출 횟수는 전체 기간 기준 |
 | `sort` | `tokens` (기본값) · `cost` | 랭크를 가져올 리더보드 기준 |
 | `tokens`, `cost` | `compact` · `full` | 숫자 형식, 독립적으로 설정 — `20.9B` vs `20,941,000,000` |
 | `rank` | `plain` (기본값, `#134`) · `percent` (`top 12%`) · `total` (`#134 / 1,174`) | 리더보드 랭크 표시 방식 |
@@ -1138,6 +1139,7 @@ GitHub 프로필 README에 Tokscale 공개 통계를 직접 임베드할 수 있
 ![](https://tokscale.ai/api/embed/<username>/svg?template=orbit&color=pink&rank=percent)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=terminal&color=green&theme=light)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=receipt&color=YlGnBu&graph=1)
+![](https://tokscale.ai/api/embed/<username>/svg?period=week&graph=1)
 ```
 
 ### GitHub 프로필 뱃지

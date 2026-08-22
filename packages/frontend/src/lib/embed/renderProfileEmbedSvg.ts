@@ -14,6 +14,8 @@ import {
   divider,
   escapeXml,
   fittedText,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   formatRank,
   getRankColor,
   resolvePalette,
@@ -49,6 +51,11 @@ function renderProfileCardSvg(
     options.costFormat ?? (compactNumbers ? "compact" : "full");
   const sortBy: EmbedSortBy = options.sortBy === "cost" ? "cost" : "tokens";
   const contributions = !compact ? (options.contributions ?? null) : null;
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
 
   const width = compact ? 460 : 680;
   const x = compact ? 18 : 24;
@@ -64,6 +71,7 @@ function renderProfileCardSvg(
         contributions,
         showDayLabels: true,
         showLegend: true,
+        referenceDate,
       })
     : null;
   const height = compact
@@ -89,11 +97,22 @@ function renderProfileCardSvg(
         options.rankFormat,
       )
     : "N/A";
-  const rankLabel = `Rank (${sortBy === "cost" ? "Cost" : "Tokens"})`;
+  const rankLabel =
+    periodLabel === "lifetime"
+      ? `Rank (${sortBy === "cost" ? "Cost" : "Tokens"})`
+      : "Lifetime rank";
   const rankColor = getRankColor(data.stats.rank, palette);
   const metrics = [
-    { label: "Tokens", value: tokens, color: palette.brand },
-    { label: "Cost", value: cost, color: palette.cost },
+    {
+      label: periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`,
+      value: tokens,
+      color: palette.brand,
+    },
+    {
+      label: periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`,
+      value: cost,
+      color: palette.cost,
+    },
     { label: rankLabel, value: rank, color: rankColor },
   ];
 
@@ -133,6 +152,7 @@ function renderProfileCardSvg(
     x,
     y: headerY,
     right,
+    period: data.period,
   })}
   ${divider(x, right, compact ? 58 : 64, palette)}
   ${metricSvg}

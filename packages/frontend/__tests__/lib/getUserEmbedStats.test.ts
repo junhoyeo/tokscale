@@ -33,6 +33,7 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn(() => "eq");
   const and = vi.fn(() => "and");
   const gte = vi.fn(() => "gte");
+  const lte = vi.fn(() => "lte");
   const sql = Object.assign(
     vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({
       strings: Array.from(strings),
@@ -72,6 +73,7 @@ const mockState = vi.hoisted(() => {
     eq,
     and,
     gte,
+    lte,
     sql,
     reset() {
       awaitedResults.length = 0;
@@ -82,6 +84,7 @@ const mockState = vi.hoisted(() => {
       eq.mockClear();
       and.mockClear();
       gte.mockClear();
+      lte.mockClear();
       sql.mockClear();
       sql.raw.mockClear();
     },
@@ -130,6 +133,7 @@ vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   and: mockState.and,
   gte: mockState.gte,
+  lte: mockState.lte,
   sql: mockState.sql,
 }));
 
@@ -284,6 +288,77 @@ describe("user embed data", () => {
         text.toLowerCase().includes("lower(users.username) = imlunahey"),
       ),
     ).toBe(true);
+  });
+
+  it("scopes embed totals to an anchored trailing seven-day window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-12T12:00:00.000Z"));
+
+    try {
+      mockState.pushAwaitedResult([
+        {
+          id: "user-alice",
+          username: "alice",
+          displayName: "Alice",
+          avatarUrl: null,
+          totalTokens: 3000,
+          totalCost: 40,
+          submissionCount: 3,
+          latestDate: "2026-03-14",
+          updatedAt: new Date("2026-03-14T09:00:00.000Z"),
+        },
+      ]);
+      mockState.pushExecuteResult([{ rank: 2, total: 10 }]);
+      mockState.pushExecuteResult([{ totalTokens: 700, totalCost: 7 }]);
+
+      const stats = await getUserEmbedStats("alice", "tokens", "week");
+      const sqlTexts = serializeSqlCalls();
+
+      expect(stats).toMatchObject({
+        period: "week",
+        dateRange: { start: "2026-03-08", end: "2026-03-14" },
+        stats: {
+          totalTokens: 700,
+          totalCost: 7,
+          submissionCount: 3,
+          rank: 2,
+          rankTotal: 10,
+        },
+      });
+      expect(
+        sqlTexts.some(
+          (text) =>
+            text.includes("d.date >= 2026-03-08") &&
+            text.includes("d.date <= 2026-03-14"),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds contribution queries to a finite stats window", async () => {
+    const dateRange = { start: "2026-03-01", end: "2026-03-07" };
+    mockState.pushAwaitedResult([{ id: "user-alice" }]);
+    mockState.pushAwaitedResult([
+      { date: "2026-03-01", tokens: 10, cost: 1 },
+      { date: "2026-03-07", tokens: 100, cost: 10 },
+    ]);
+
+    const contributions = await getUserEmbedContributions(
+      "alice",
+      dateRange,
+    );
+
+    expect(mockState.gte).toHaveBeenCalledWith(
+      mockState.tables.dailyBreakdown.date,
+      dateRange.start,
+    );
+    expect(mockState.lte).toHaveBeenCalledWith(
+      mockState.tables.dailyBreakdown.date,
+      dateRange.end,
+    );
+    expect(contributions?.map(({ intensity }) => intensity)).toEqual([1, 4]);
   });
 
   it("derives contribution intensity from max-relative tokens even when cost is zero", async () => {

@@ -19,6 +19,7 @@ import {
 export { escapeXml };
 
 export type EmbedTheme = "dark" | "light";
+export type EmbedPeriod = "all" | "month" | "week";
 export type EmbedTemplate =
   | "classic"
   | "minimal"
@@ -31,6 +32,11 @@ export type EmbedTemplate =
 export type EmbedNumberFormat = "compact" | "full";
 export type EmbedRankFormat = "plain" | "percent" | "total";
 export type EmbedColorName = ColorPaletteName;
+
+export interface EmbedPeriodDateRange {
+  start: string;
+  end: string;
+}
 
 export interface ThemePalette {
   scheme: EmbedTheme;
@@ -126,6 +132,76 @@ export const EMBED_TEMPLATES: EmbedTemplate[] = [
   "blueprint",
   "receipt",
 ];
+
+const EMBED_PERIODS: EmbedPeriod[] = ["all", "month", "week"];
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Parse the `period` query param, falling back to lifetime stats. */
+export function parseEmbedPeriod(value: string | null): EmbedPeriod {
+  return EMBED_PERIODS.includes(value as EmbedPeriod)
+    ? (value as EmbedPeriod)
+    : "all";
+}
+
+/** Short label used anywhere an embed needs to identify its stats window. */
+export function getEmbedPeriodLabel(
+  period: EmbedPeriod | undefined,
+): "lifetime" | "30d" | "7d" {
+  if (period === "month") return "30d";
+  if (period === "week") return "7d";
+  return "lifetime";
+}
+
+/** Number of calendar days in a finite embed window. */
+export function getEmbedPeriodDayCount(
+  period: EmbedPeriod | undefined,
+): 7 | 30 | null {
+  if (period === "month") return 30;
+  if (period === "week") return 7;
+  return null;
+}
+
+function parseDateKey(value: string | null | undefined): Date | null {
+  if (!value || !DATE_KEY_PATTERN.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * Resolve the same trailing 7d/30d window as the public profile. The newest
+ * submitted calendar day wins when it is ahead of UTC today, which keeps data
+ * reported from timezones east of UTC inside the requested window.
+ */
+export function getEmbedPeriodDateRange(
+  period: EmbedPeriod,
+  latestDate: string | null | undefined,
+  now: Date = new Date(),
+): EmbedPeriodDateRange | null {
+  const dayCount = getEmbedPeriodDayCount(period);
+  if (!dayCount) return null;
+
+  const utcToday = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  const latest = parseDateKey(latestDate);
+  const end = latest && latest > utcToday ? latest : utcToday;
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - (dayCount - 1));
+
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10),
+  };
+}
+
+/** Use a finite period's anchored end date when laying out its graph. */
+export function getEmbedPeriodReferenceDate(
+  period: EmbedPeriod | undefined,
+  dateRange: EmbedPeriodDateRange | null | undefined,
+): Date | undefined {
+  if (period === "all" || !dateRange) return undefined;
+  return parseDateKey(dateRange.end) ?? undefined;
+}
 
 /** Parse the `template` query param, falling back to the classic card. */
 export function parseEmbedTemplate(value: string | null): EmbedTemplate {
@@ -326,8 +402,9 @@ export function getContributionWindow<T extends ContributionDay>(
  */
 export function layoutContributions(
   contributions: ContributionDay[],
+  referenceDate: Date = new Date(),
 ): ContributionLayout {
-  const window = getContributionWindow(contributions);
+  const window = getContributionWindow(contributions, referenceDate);
   const hasTokenTotals = window.days.some(
     ({ totalTokens }) => typeof totalTokens === "number",
   );
@@ -481,13 +558,16 @@ export interface CardHeaderOptions {
   x: number;
   y: number;
   right: number;
+  period?: EmbedPeriod;
 }
 
 /** Compact identity header shared by every 2D widget. */
 export function cardHeader(options: CardHeaderOptions): string {
-  const { username, displayName, palette, x, y, right } = options;
+  const { username, displayName, palette, x, y, right, period } = options;
   const identityWidth = Math.max(80, right - x - 92);
   const headline = displayName?.trim() || `@${username}`;
+  const periodLabel = getEmbedPeriodLabel(period);
+  const brand = periodLabel === "lifetime" ? "Tokscale" : `Tokscale · ${periodLabel}`;
 
   return [
     fittedText({
@@ -511,7 +591,7 @@ export function cardHeader(options: CardHeaderOptions): string {
           minFontSize: 8,
         })
       : "",
-    `<text x="${right}" y="${y}" fill="${palette.muted}" font-size="11" font-weight="600" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">Tokscale</text>`,
+    `<text x="${right}" y="${y}" fill="${palette.muted}" font-size="11" font-weight="600" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${brand}</text>`,
   ]
     .filter(Boolean)
     .join("\n  ");
@@ -567,6 +647,7 @@ export interface ContributionPanelOptions {
   showLegend?: boolean;
   mono?: boolean;
   heading?: string;
+  referenceDate?: Date;
 }
 
 export interface ContributionPanelResult {
@@ -592,8 +673,9 @@ export function contributionPanel(
     showLegend = false,
     mono = false,
     heading = "Contribution activity",
+    referenceDate,
   } = options;
-  const layout = layoutContributions(contributions);
+  const layout = layoutContributions(contributions, referenceDate);
   const colors = gradeColors(palette);
   const font = mono ? MONO_FONT_STACK : FIGTREE_FONT_STACK;
   const dayLabelWidth = showDayLabels ? 30 : 0;

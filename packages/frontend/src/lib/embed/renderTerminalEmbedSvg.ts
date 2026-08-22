@@ -15,6 +15,8 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   resolvePalette,
 } from "./embedShared";
@@ -41,6 +43,11 @@ export function renderTerminalEmbedSvg(
   const palette = resolvePalette(theme, options.color ?? null);
   const sortBy = options.sortBy === "cost" ? "cost" : "tokens";
   const contributions = options.graph ? (options.contributions ?? []) : null;
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
   const right = W - PAD;
   const rank = data.stats.rank
     ? formatRank(
@@ -51,7 +58,7 @@ export function renderTerminalEmbedSvg(
     : "unranked";
   const rows = [
     {
-      label: "tokens",
+      label: periodLabel === "lifetime" ? "tokens" : `tokens.${periodLabel}`,
       value: formatNumber(
         data.stats.totalTokens,
         (options.tokensFormat ?? "full") === "compact",
@@ -59,7 +66,7 @@ export function renderTerminalEmbedSvg(
       color: palette.brand,
     },
     {
-      label: "cost",
+      label: periodLabel === "lifetime" ? "cost" : `cost.${periodLabel}`,
       value: formatCurrency(
         data.stats.totalCost,
         (options.costFormat ?? "compact") === "compact",
@@ -67,7 +74,10 @@ export function renderTerminalEmbedSvg(
       color: palette.cost,
     },
     {
-      label: `rank.${sortBy}`,
+      label:
+        periodLabel === "lifetime"
+          ? `rank.${sortBy}`
+          : `rank.lifetime.${sortBy}`,
       value: rank,
       color: getRankColor(data.stats.rank, palette),
     },
@@ -81,6 +91,7 @@ export function renderTerminalEmbedSvg(
         palette,
         contributions,
         mono: true,
+        referenceDate,
       })
     : null;
   const height = graph ? Math.ceil(graphY + graph.height + 32) : 176;
@@ -96,6 +107,7 @@ export function renderTerminalEmbedSvg(
     x: PAD,
     y: 28,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 60, palette)}
   <g data-readout="usage">

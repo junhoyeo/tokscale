@@ -15,6 +15,7 @@ import {
   buildProfileEmbedLinks,
   getEmbedDialogCapabilities,
   type EmbedNumberFormat,
+  type EmbedPeriod,
   type EmbedRankFormat,
   type EmbedSortBy,
   type EmbedTheme,
@@ -51,6 +52,7 @@ export function ProfileEmbedDialog({
 }: ProfileEmbedDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<EmbedTheme>("dark");
+  const [period, setPeriod] = useState<EmbedPeriod>("all");
   const [sortBy, setSortBy] = useState<EmbedSortBy>("tokens");
   const [layoutCompact, setLayoutCompact] = useState(false);
   const [threeDCompact, setThreeDCompact] = useState(false);
@@ -148,6 +150,7 @@ export function ProfileEmbedDialog({
         compact,
         costFormat,
         graph,
+        period,
         rankFormat,
         sortBy,
         template,
@@ -160,6 +163,7 @@ export function ProfileEmbedDialog({
       compact,
       costFormat,
       graph,
+      period,
       rankFormat,
       sortBy,
       template,
@@ -303,6 +307,32 @@ export function ProfileEmbedDialog({
                 >
                   Light
                 </SegmentButton>
+              </SegmentedControl>
+            </OptionGroup>
+
+            <OptionGroup>
+              <OptionLabel id="embed-period-label">Time range</OptionLabel>
+              <SegmentedControl
+                role="group"
+                aria-labelledby="embed-period-label"
+              >
+                {(
+                  [
+                    ["all", "Lifetime"],
+                    ["month", "30d"],
+                    ["week", "7d"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <SegmentButton
+                    key={value}
+                    type="button"
+                    $active={period === value}
+                    aria-pressed={period === value}
+                    onClick={() => setPeriod(value)}
+                  >
+                    {label}
+                  </SegmentButton>
+                ))}
               </SegmentedControl>
             </OptionGroup>
 

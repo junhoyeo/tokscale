@@ -14,6 +14,9 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodDayCount,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   layoutContributions,
   resolvePalette,
@@ -40,8 +43,21 @@ export function renderVitalsEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const contributions = options.contributions ?? [];
-  const layout = layoutContributions(contributions);
-  const rangeCells = layout.cells.filter(({ inRange }) => inRange);
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const activityPeriodLabel =
+    periodLabel === "lifetime" ? "1y" : periodLabel;
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
+  const layout = layoutContributions(contributions, referenceDate);
+  const dateRange = data.dateRange;
+  const rangeCells = dateRange
+    ? layout.cells.filter(
+        ({ date }) => date >= dateRange.start && date <= dateRange.end,
+      )
+    : layout.cells.filter(({ inRange }) => inRange);
+  const activeDays = rangeCells.filter(({ intensity }) => intensity > 0).length;
   const avgIntensity = rangeCells.length
     ? rangeCells.reduce((sum, day) => sum + day.intensity, 0) /
       rangeCells.length
@@ -53,7 +69,11 @@ export function renderVitalsEmbedSvg(
     : "Unranked";
   const activityCoverage = Math.min(
     1,
-    layout.activeDays / Math.max(1, layout.rangeDays),
+    activeDays /
+      Math.max(
+        1,
+        getEmbedPeriodDayCount(data.period) ?? layout.rangeDays,
+      ),
   );
   const right = W - PAD;
   const tokens = formatNumber(
@@ -76,11 +96,12 @@ export function renderVitalsEmbedSvg(
     x: PAD,
     y: 27,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 62, palette)}
-  <text x="${PAD}" y="82" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Active days · 1y</text>
+  <text x="${PAD}" y="82" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Active days · ${activityPeriodLabel}</text>
   ${fittedText({
-    text: String(layout.activeDays),
+    text: String(activeDays),
     x: PAD,
     y: 111,
     maxWidth: 180,
@@ -91,9 +112,9 @@ export function renderVitalsEmbedSvg(
   })}
   <rect x="${PAD}" y="121" width="${right - PAD}" height="5" rx="2.5" fill="${palette.graphGrade0}"/>
   <rect x="${PAD}" y="121" width="${((right - PAD) * activityCoverage).toFixed(1)}" height="5" rx="2.5" fill="${palette.brand}"/>
-  <text x="${right}" y="141" fill="${palette.muted}" font-size="10" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${Math.round(activityCoverage * 100)}% of trailing year</text>
+  <text x="${right}" y="141" fill="${palette.muted}" font-size="10" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${Math.round(activityCoverage * 100)}% of ${periodLabel === "lifetime" ? "trailing year" : activityPeriodLabel}</text>
   ${divider(PAD, right, 150, palette)}
-  <text x="${PAD}" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Tokens</text>
+  <text x="${PAD}" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`}</text>
   ${fittedText({
     text: tokens,
     x: PAD,
@@ -104,7 +125,7 @@ export function renderVitalsEmbedSvg(
     minFontSize: 8,
     fontWeight: 600,
   })}
-  <text x="264" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Cost</text>
+  <text x="264" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`}</text>
   ${fittedText({
     text: cost,
     x: right,
@@ -116,7 +137,7 @@ export function renderVitalsEmbedSvg(
     fontWeight: 600,
     textAnchor: "end",
   })}
-  <text x="${PAD}" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Average intensity · 1y</text>
+  <text x="${PAD}" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Average intensity · ${activityPeriodLabel}</text>
   ${fittedText({
     text: `${avgIntensity.toFixed(1)} / 4`,
     x: PAD,
@@ -127,7 +148,7 @@ export function renderVitalsEmbedSvg(
     minFontSize: 8,
     fontWeight: 600,
   })}
-  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}</text>
+  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}` : "Rank · lifetime"}</text>
   ${fittedText({
     text: rankText,
     x: right,

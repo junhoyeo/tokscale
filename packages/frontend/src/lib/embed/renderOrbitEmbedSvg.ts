@@ -15,6 +15,8 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   layoutContributions,
   resolvePalette,
@@ -41,6 +43,11 @@ export function renderOrbitEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const sortBy = options.sortBy === "cost" ? "cost" : "tokens";
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
   const rank = data.stats.rank;
   const rankTotal = data.stats.rankTotal ?? null;
   const rankText = rank
@@ -51,7 +58,7 @@ export function renderOrbitEmbedSvg(
       ? Math.max(0, Math.min(1, (rankTotal - rank) / rankTotal))
       : 0;
   const layout = options.contributions?.length
-    ? layoutContributions(options.contributions)
+    ? layoutContributions(options.contributions, referenceDate)
     : null;
   const contributions = options.graph ? (options.contributions ?? []) : null;
   const right = W - PAD;
@@ -63,12 +70,13 @@ export function renderOrbitEmbedSvg(
         width: W - PAD * 2,
         palette,
         contributions,
+        referenceDate,
       })
     : null;
   const height = graph ? 384 : 248;
   const statRows = [
     {
-      label: "Tokens",
+      label: periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`,
       value: formatNumber(
         data.stats.totalTokens,
         (options.tokensFormat ?? "compact") === "compact",
@@ -76,7 +84,7 @@ export function renderOrbitEmbedSvg(
       color: palette.text,
     },
     {
-      label: "Cost",
+      label: periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`,
       value: formatCurrency(
         data.stats.totalCost,
         (options.costFormat ?? "compact") === "compact",
@@ -86,7 +94,10 @@ export function renderOrbitEmbedSvg(
     ...(layout
       ? [
           {
-            label: "Active days",
+            label:
+              periodLabel === "lifetime"
+                ? "Active days"
+                : `Active days · ${periodLabel}`,
             value: String(layout.activeDays),
             color: palette.text,
           },
@@ -105,9 +116,10 @@ export function renderOrbitEmbedSvg(
     x: PAD,
     y: 28,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 66, palette)}
-  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Rank · ${sortBy === "cost" ? "cost" : "tokens"}</text>
+  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${sortBy === "cost" ? "cost" : "tokens"}` : "Rank · lifetime"}</text>
   ${fittedText({
     text: rankText,
     x: PAD,

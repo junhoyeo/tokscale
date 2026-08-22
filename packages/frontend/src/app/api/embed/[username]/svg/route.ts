@@ -20,8 +20,11 @@ import {
   type EmbedTemplate,
   type EmbedColorName,
   type EmbedNumberFormat,
+  type EmbedPeriod,
+  type EmbedPeriodDateRange,
   parseEmbedTemplate,
   parseEmbedColor,
+  parseEmbedPeriod,
   parseNumberFormat,
   parseRankFormat,
 } from "@/lib/embed/embedShared";
@@ -81,9 +84,10 @@ interface RouteParams {
 async function getContributionsWithEvidence(
   username: string,
   template: EmbedTemplate | "3d",
+  dateRange: EmbedPeriodDateRange | null,
 ) {
   try {
-    return await getUserEmbedContributions(username);
+    return await getUserEmbedContributions(username, dateRange);
   } catch (error) {
     console.warn("[embed-svg] contribution fetch failed", {
       username,
@@ -117,6 +121,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const theme = parseTheme(searchParams);
   const compact = parseCompact(searchParams);
   const sortBy = parseSort(searchParams);
+  const period: EmbedPeriod = parseEmbedPeriod(searchParams.get("period"));
   const showGraph = parseGraph(searchParams);
   const view = parseView(searchParams);
   const template: EmbedTemplate = parseEmbedTemplate(
@@ -146,7 +151,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   }
 
   try {
-    const data = await getUserEmbedStats(username, sortBy);
+    const data = await getUserEmbedStats(username, sortBy, period);
 
     if (!data) {
       const svg =
@@ -169,7 +174,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     if (view === "3d") {
-      const contributions = await getContributionsWithEvidence(username, "3d");
+      const contributions = await getContributionsWithEvidence(
+        username,
+        "3d",
+        data.dateRange,
+      );
 
       if (!contributions) {
         const svg = renderIsometric3DErrorSvg(
@@ -192,6 +201,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         status: 200,
         durationMs: Date.now() - startedAt,
         sortBy,
+        period,
         theme,
         compact,
       });
@@ -209,7 +219,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       template === "orbit" ||
       template === "receipt";
     const contributions = wantsContributions
-      ? await getContributionsWithEvidence(username, template)
+      ? await getContributionsWithEvidence(
+          username,
+          template,
+          data.dateRange,
+        )
       : null;
 
     if (contributionDataRequired && !contributions) {
@@ -272,6 +286,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       color,
       compact,
       sortBy,
+      period,
       theme,
       graph: showGraph,
     });

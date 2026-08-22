@@ -6,6 +6,8 @@ import {
   formatDateLabel,
   getContributionIntensity,
   getContributionWindow,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
 } from "./embedShared";
 
 export type EmbedTheme = "dark" | "light";
@@ -130,8 +132,16 @@ export function renderIsometric3DEmbedSvg(
   const compactNumbers = options.compact ?? false;
   const palette = THEMES[theme];
   const cls = theme === "dark" ? "d" : "l";
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
 
-  const contributionWindow = getContributionWindow(contributions);
+  const contributionWindow = getContributionWindow(
+    contributions,
+    referenceDate,
+  );
   const visibleContributions = contributionWindow.days;
   const start = new Date(`${contributionWindow.calendarStart}T00:00:00Z`);
   const today = new Date(`${contributionWindow.rangeEnd}T00:00:00Z`);
@@ -206,16 +216,33 @@ export function renderIsometric3DEmbedSvg(
     .map((c) => c.date)
     .sort();
   const activeDays = activeDates.length;
-  const dateRange = formatActiveDateRange(activeDates);
+  const dateRange = data.dateRange
+    ? formatActiveDateRange([data.dateRange.start, data.dateRange.end])
+    : formatActiveDateRange(activeDates);
 
   const dataRailHeight = 72;
   const dataRailY = height - dataRailHeight;
   const metricWidth = (width - px * 2) / 4;
   const metrics = [
-    { label: "Tokens", value: tokens },
-    { label: "Cost", value: cost },
-    { label: "Rank", value: rank },
-    { label: "Active days", value: String(activeDays) },
+    {
+      label: periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`,
+      value: tokens,
+    },
+    {
+      label: periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`,
+      value: cost,
+    },
+    {
+      label: periodLabel === "lifetime" ? "Rank" : "Rank · lifetime",
+      value: rank,
+    },
+    {
+      label:
+        periodLabel === "lifetime"
+          ? "Active days"
+          : `Active days · ${periodLabel}`,
+      value: String(activeDays),
+    },
   ];
   const metricMarkup = metrics
     .map((metric, index) => {
@@ -245,7 +272,7 @@ export function renderIsometric3DEmbedSvg(
   <style>${faceCss}</style>
   <rect width="${width}" height="${height}" rx="${rx}" fill="${palette.surface}"/>
   ${fittedText({ text: username, x: px, y: 29, maxWidth: 300, fill: palette.text, fontSize: 16, minFontSize: 9, fontFamily: FONT_STACK, fontWeight: 600 })}
-  ${fittedText({ text: `tokscale.ai/u/${data.user.username}`, x: width - px, y: 29, maxWidth: 260, fill: palette.muted, fontSize: 11, minFontSize: 8, fontFamily: FONT_STACK, textAnchor: "end" })}
+  ${fittedText({ text: `tokscale.ai/u/${data.user.username}${periodLabel === "lifetime" ? "" : ` · ${periodLabel}`}`, x: width - px, y: 29, maxWidth: 260, fill: palette.muted, fontSize: 11, minFontSize: 8, fontFamily: FONT_STACK, textAnchor: "end" })}
   <text x="${px}" y="49" fill="${palette.muted}" font-size="10" font-family="${FONT_STACK}">${updated}</text>
   ${fittedText({ text: dateRange, x: width - px, y: 49, maxWidth: 260, fill: palette.muted, fontSize: 10, minFontSize: 8, fontFamily: FONT_STACK, textAnchor: "end" })}
   <line x1="${px}" y1="62.5" x2="${width - px}" y2="62.5" stroke="${palette.divider}" stroke-opacity="${palette.dividerOpacity}"/>

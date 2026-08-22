@@ -16,6 +16,8 @@ import {
   fittedText,
   formatRank,
   getContributionWindow,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   layoutContributions,
   resolvePalette,
@@ -42,7 +44,17 @@ export function renderBlueprintEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const contributionDays = options.contributions ?? [];
-  const scopedContributionDays = getContributionWindow(contributionDays).days;
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const activityPeriodLabel =
+    periodLabel === "lifetime" ? "1y" : periodLabel;
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
+  const scopedContributionDays = getContributionWindow(
+    contributionDays,
+    referenceDate,
+  ).days;
   const contributions = options.graph ? contributionDays : null;
   const right = W - PAD;
   const innerWidth = W - PAD * 2;
@@ -55,7 +67,7 @@ export function renderBlueprintEmbedSvg(
         options.rankFormat,
       )
     : "Unranked";
-  const activity = layoutContributions(contributionDays);
+  const activity = layoutContributions(contributionDays, referenceDate);
   const yearTokens = scopedContributionDays.reduce(
     (total, day) => total + Math.max(0, day.totalTokens || 0),
     0,
@@ -81,51 +93,72 @@ export function renderBlueprintEmbedSvg(
     {
       id: "total-tokens",
       value: formatNumber(data.stats.totalTokens, tokensCompact),
-      label: "Tokens · lifetime",
+      label: `Tokens · ${periodLabel}`,
       color: palette.brand,
     },
     {
       id: "total-cost",
       value: formatCurrency(data.stats.totalCost, costCompact),
-      label: "Cost · lifetime",
+      label: `Cost · ${periodLabel}`,
       color: palette.cost,
     },
     {
       id: "rank",
       value: rank,
-      label: `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`,
+      label:
+        periodLabel === "lifetime"
+          ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`
+          : "Rank · lifetime",
       color: getRankColor(data.stats.rank, palette),
     },
     {
       id: "submissions",
       value: data.stats.submissionCount.toLocaleString("en-US"),
-      label: "Submissions",
+      label:
+        periodLabel === "lifetime" ? "Submissions" : "Submissions · lifetime",
       color: palette.text,
     },
     {
       id: "active-days",
       value: activity.activeDays.toLocaleString("en-US"),
-      label: "Active days · 1y",
+      label: `Active days · ${activityPeriodLabel}`,
       color: palette.text,
     },
     {
       id: "peak-day",
       value: peakDate,
-      label: "Peak day · 1y",
+      label: `Peak day · ${activityPeriodLabel}`,
       color: palette.text,
     },
-    {
-      id: "year-tokens",
-      value: formatNumber(yearTokens, tokensCompact),
-      label: "Tokens · 1y",
-      color: palette.text,
-    },
-    {
-      id: "year-cost",
-      value: formatCurrency(yearCost, costCompact),
-      label: "Cost · 1y",
-      color: palette.cost,
-    },
+    ...(periodLabel === "lifetime"
+      ? [
+          {
+            id: "year-tokens",
+            value: formatNumber(yearTokens, tokensCompact),
+            label: "Tokens · 1y",
+            color: palette.text,
+          },
+          {
+            id: "year-cost",
+            value: formatCurrency(yearCost, costCompact),
+            label: "Cost · 1y",
+            color: palette.cost,
+          },
+        ]
+      : [
+          {
+            id: "range-start",
+            value: data.dateRange?.start ?? "N/A",
+            label: "Range start",
+            color: palette.text,
+          },
+          {
+            id: "range-end",
+            value: data.dateRange?.end ?? "N/A",
+            label: "Range end",
+            color: palette.text,
+          },
+        ]),
   ];
   const detailBottom = 190;
   const graphY = 208;
@@ -136,6 +169,7 @@ export function renderBlueprintEmbedSvg(
         width: innerWidth,
         palette,
         contributions,
+        referenceDate,
       })
     : null;
   const height = graph ? 367 : 232;
@@ -151,6 +185,7 @@ export function renderBlueprintEmbedSvg(
     x: PAD,
     y: 26,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 64, palette)}
   ${details

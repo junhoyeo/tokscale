@@ -14,6 +14,8 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   resolvePalette,
 } from "./embedShared";
@@ -38,6 +40,11 @@ export function renderGraphEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const sortBy = options.sortBy === "cost" ? "cost" : "tokens";
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
   const right = W - PAD;
   const tokens = formatNumber(
     data.stats.totalTokens,
@@ -62,14 +69,26 @@ export function renderGraphEmbedSvg(
     contributions: options.contributions ?? [],
     showDayLabels: true,
     showLegend: true,
+    referenceDate,
   });
   const H = Math.ceil(58 + graph.height + 32);
   const stats = [
-    { value: tokens, label: "Tokens", color: palette.brand },
-    { value: cost, label: "Cost", color: palette.cost },
+    {
+      value: tokens,
+      label: periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`,
+      color: palette.brand,
+    },
+    {
+      value: cost,
+      label: periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`,
+      color: palette.cost,
+    },
     {
       value: rank,
-      label: `Rank · ${sortBy}`,
+      label:
+        periodLabel === "lifetime"
+          ? `Rank · ${sortBy}`
+          : "Lifetime rank",
       color: getRankColor(data.stats.rank, palette),
     },
   ];
@@ -85,6 +104,7 @@ export function renderGraphEmbedSvg(
     x: PAD,
     y: 34,
     right: 336,
+    period: data.period,
   })}
   ${stats
     .map((stat, index) => {

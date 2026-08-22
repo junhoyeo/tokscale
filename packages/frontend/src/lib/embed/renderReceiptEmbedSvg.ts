@@ -15,6 +15,8 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   layoutContributions,
   resolvePalette,
@@ -41,8 +43,13 @@ export function renderReceiptEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const contributions = options.graph ? (options.contributions ?? []) : null;
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
   const layout = options.contributions?.length
-    ? layoutContributions(options.contributions)
+    ? layoutContributions(options.contributions, referenceDate)
     : null;
   const right = W - PAD;
   const rank = data.stats.rank
@@ -54,7 +61,7 @@ export function renderReceiptEmbedSvg(
     : "Unranked";
   const rows = [
     [
-      "Tokens",
+      periodLabel === "lifetime" ? "Tokens" : `Tokens · ${periodLabel}`,
       formatNumber(
         data.stats.totalTokens,
         (options.tokensFormat ?? "full") === "compact",
@@ -62,7 +69,7 @@ export function renderReceiptEmbedSvg(
       palette.brand,
     ],
     [
-      "Cost",
+      periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`,
       formatCurrency(
         data.stats.totalCost,
         (options.costFormat ?? "full") === "compact",
@@ -70,12 +77,22 @@ export function renderReceiptEmbedSvg(
       palette.cost,
     ],
     [
-      `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`,
+      periodLabel === "lifetime"
+        ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`
+        : "Rank · lifetime",
       rank,
       getRankColor(data.stats.rank, palette),
     ],
     ...(layout
-      ? [["Active days", String(layout.activeDays), palette.text]]
+      ? [
+          [
+            periodLabel === "lifetime"
+              ? "Active days"
+              : `Active days · ${periodLabel}`,
+            String(layout.activeDays),
+            palette.text,
+          ],
+        ]
       : []),
   ] as const;
   const graphY = 224;
@@ -86,6 +103,7 @@ export function renderReceiptEmbedSvg(
         width: W - PAD * 2,
         palette,
         contributions,
+        referenceDate,
       })
     : null;
   const height = graph ? 352 : 250;
@@ -101,6 +119,7 @@ export function renderReceiptEmbedSvg(
     x: PAD,
     y: 26,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 64, palette)}
   ${rows

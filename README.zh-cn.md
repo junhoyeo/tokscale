@@ -1126,6 +1126,7 @@ Tokscale 包含一个社交平台，您可以在其中分享使用数据并与�
 | `template` | `classic`（默认）· `minimal` · `terminal` · `graph` · `orbit` · `vitals` · `blueprint` · `receipt` | 卡片设计 |
 | `color` | `blue` · `green` · `teal` · `purple` · `pink` · `orange` · `monochrome` · `halloween` · `YlGnBu` | 强调色和贡献图配色 |
 | `theme` | `dark`（默认）· `light` | 浅色或深色卡片 |
+| `period` | `all`（默认）· `month`（最近30天）· `week`（最近7天） | 令牌、成本和贡献活动的统计区间；排名和提交次数仍为全时段 |
 | `sort` | `tokens`（默认）· `cost` | 排名取自哪个排行榜 |
 | `tokens`、`cost` | `compact` · `full` | 数字格式，可分别设置 —— `20.9B` 对比 `20,941,000,000` |
 | `rank` | `plain`（默认，`#134`）· `percent`（`top 12%`）· `total`（`#134 / 1,174`） | 排行榜名次的显示方式 |
@@ -1139,6 +1140,7 @@ Tokscale 包含一个社交平台，您可以在其中分享使用数据并与�
 ![](https://tokscale.ai/api/embed/<username>/svg?template=orbit&color=pink&rank=percent)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=terminal&color=green&theme=light)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=receipt&color=YlGnBu&graph=1)
+![](https://tokscale.ai/api/embed/<username>/svg?period=week&graph=1)
 ```
 
 ### GitHub 个人资料徽章

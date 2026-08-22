@@ -15,6 +15,8 @@ import {
   escapeXml,
   fittedText,
   formatRank,
+  getEmbedPeriodLabel,
+  getEmbedPeriodReferenceDate,
   getRankColor,
   resolvePalette,
 } from "./embedShared";
@@ -42,6 +44,11 @@ export function renderMinimalEmbedSvg(
   const tokensFormat = options.tokensFormat ?? "compact";
   const costFormat = options.costFormat ?? "compact";
   const contributions = options.graph ? (options.contributions ?? []) : null;
+  const periodLabel = getEmbedPeriodLabel(data.period);
+  const referenceDate = getEmbedPeriodReferenceDate(
+    data.period,
+    data.dateRange,
+  );
   const right = W - PAD;
 
   const tokens = formatNumber(
@@ -65,6 +72,7 @@ export function renderMinimalEmbedSvg(
         width: W - PAD * 2,
         palette,
         contributions,
+        referenceDate,
       })
     : null;
   const height = graph ? Math.ceil(graphY + graph.height + 32) : 162;
@@ -80,14 +88,15 @@ export function renderMinimalEmbedSvg(
     x: PAD,
     y: 28,
     right,
+    period: data.period,
   })}
   ${divider(PAD, right, 60, palette)}
-  <text x="${PAD}" y="82" fill="${palette.muted}" font-size="11" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Total tokens</text>
+  <text x="${PAD}" y="82" fill="${palette.muted}" font-size="11" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Total tokens" : `Tokens · ${periodLabel}`}</text>
   ${fittedText({ text: tokens, x: PAD, y: 118, maxWidth: 296, fill: palette.brand, fontSize: 34, minFontSize: 14, fontWeight: 600 })}
   <line x1="350" y1="74" x2="350" y2="132" stroke="${palette.divider}"/>
-  <text x="372" y="80" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Cost</text>
+  <text x="372" y="80" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`}</text>
   ${fittedText({ text: cost, x: 372, y: 99, maxWidth: 202, fill: palette.cost, fontSize: 17, minFontSize: 8, fontWeight: 600 })}
-  <text x="372" y="114" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Rank</text>
+  <text x="372" y="114" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Rank" : "Rank · lifetime"}</text>
   ${fittedText({ text: rank, x: 372, y: 132, maxWidth: 202, fill: rankColor, fontSize: 16, minFontSize: 8, fontWeight: 600 })}
   ${graph ? `${divider(PAD, right, 136, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({

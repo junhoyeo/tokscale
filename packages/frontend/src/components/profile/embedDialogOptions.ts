@@ -1,7 +1,11 @@
-import type { EmbedTemplate } from "@/lib/embed/embedShared";
+import type {
+  EmbedPeriod as SharedEmbedPeriod,
+  EmbedTemplate,
+} from "@/lib/embed/embedShared";
 import type { ColorPaletteName } from "@/lib/themes";
 
 export type EmbedTheme = "dark" | "light";
+export type EmbedPeriod = SharedEmbedPeriod;
 export type EmbedSortBy = "tokens" | "cost";
 export type EmbedView = "2d" | "3d";
 export type EmbedNumberFormat = "compact" | "full";
@@ -12,6 +16,7 @@ export interface EmbedDialogOptions {
   compact: boolean;
   costFormat: EmbedNumberFormat;
   graph: boolean;
+  period: EmbedPeriod;
   rankFormat: EmbedRankFormat;
   sortBy: EmbedSortBy;
   template: EmbedTemplate;
@@ -86,6 +91,7 @@ export function buildProfileEmbedLinks(
   if (options.view === "3d") params.set("view", "3d");
   if (options.theme !== "dark") params.set("theme", options.theme);
   if (options.sortBy !== "tokens") params.set("sort", options.sortBy);
+  if (options.period !== "all") params.set("period", options.period);
 
   if (options.view === "3d") {
     if (options.compact) params.set("compact", "1");
@@ -110,7 +116,9 @@ export function buildProfileEmbedLinks(
   const escapedUsername = escapeHtmlAttribute(username);
   const baseEmbedUrl = `${TOKSCALE_URL}/api/embed/${encodedUsername}/svg`;
   const embedUrl = query ? `${baseEmbedUrl}?${query}` : baseEmbedUrl;
-  const profileUrl = `${TOKSCALE_URL}/u/${encodedUsername}`;
+  const profileUrl = `${TOKSCALE_URL}/u/${encodedUsername}${
+    options.period === "all" ? "" : `?period=${options.period}`
+  }`;
 
   return {
     embedUrl,
