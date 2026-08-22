@@ -72,7 +72,12 @@ fn main() {
         // or the test cannot tell it apart from a parent that drained promptly.
         "descendant" => {
             let exe = std::env::current_exe().expect("current_exe");
-            std::process::Command::new(exe)
+            // Deliberately never waited on: outliving this process, still
+            // holding the inherited stdout pipe, is the entire point of the
+            // fixture. Reaping it here would close the write end and destroy
+            // the condition under test.
+            #[allow(clippy::zombie_processes)]
+            let _descendant = std::process::Command::new(exe)
                 .env("TOKSCALE_FAKE_CODEX_MODE", "slow")
                 .stdout(std::process::Stdio::inherit())
                 .stdin(std::process::Stdio::null())
