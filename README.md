@@ -1160,7 +1160,7 @@ customize the design.
 | `template` | `classic` (default) · `minimal` · `terminal` · `graph` · `orbit` · `vitals` · `blueprint` · `receipt` | Card design |
 | `color` | `blue` · `green` · `teal` · `purple` · `pink` · `orange` · `monochrome` · `halloween` · `YlGnBu` | Accent color and contribution-graph palette |
 | `theme` | `dark` (default) · `light` | Light or dark card |
-| `period` | `all` (default) · `month` (trailing 30 days) · `week` (trailing 7 days) | Token, cost, and contribution window; rank and submission count stay lifetime |
+| `period` | `all` (default) · `month` (trailing 30 days) · `week` (trailing 7 days) | Token, cost, contribution, and rank window; submission count stays lifetime |
 | `sort` | `tokens` (default) · `cost` | Which leaderboard the rank is taken from |
 | `tokens`, `cost` | `compact` · `full` | Number format, set independently — `20.9B` vs `20,941,000,000` |
 | `rank` | `plain` (default, `#134`) · `percent` (`top 12%`) · `total` (`#134 / 1,174`) | How the leaderboard rank is shown |

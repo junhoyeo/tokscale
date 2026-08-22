@@ -78,53 +78,6 @@ async function fetchUserEmbedStats(
   let rankTotal: number | null = null;
   const dateRange = getEmbedPeriodDateRange(period, result.latestDate);
 
-  const rankingValue =
-    sortBy === "cost"
-      ? Number(result.totalCost) || 0
-      : Number(result.totalTokens) || 0;
-
-  if (rankingValue > 0) {
-    // Both the rank and the "of N" denominator count rankable users only, so a
-    // hidden account neither holds a position nor inflates the total. A hidden
-    // user is absent from the CTE, so this returns no row and rank stays null.
-    const rankResult = await db.execute<{ rank: number; total: number }>(sql`
-      WITH rankable AS (
-        SELECT s.*
-        FROM submissions s
-        JOIN users u ON u.id = s.user_id
-        WHERE u.leaderboard_hidden = false
-      ),
-      ranked AS (
-        SELECT
-          user_id,
-          RANK() OVER (
-            ORDER BY
-              ${
-                sortBy === "cost"
-                  ? sql`CAST(total_cost AS DECIMAL(18,4)) DESC`
-                  : sql`total_tokens DESC`
-              }
-          ) AS rank
-        FROM rankable
-      )
-      SELECT rank, (SELECT COUNT(*)::int FROM rankable) AS total
-      FROM ranked WHERE user_id = ${result.id}
-    `);
-
-    const rankRow = (
-      rankResult as unknown as { rank: number; total: number }[]
-    )[0];
-    // Coerced because RANK() is a Postgres bigint, which postgres-js hands
-    // back as a string — so without this the returned value is "1", not 1, and
-    // the `number | null` on UserEmbedStats is wrong. publicProfileData.ts
-    // compensates for the same thing at its call site.
-    //
-    // Number(undefined) is NaN and falls through to null, so a missing row
-    // behaves as before.
-    rank = Number(rankRow?.rank) || null;
-    rankTotal = Number(rankRow?.total) || null;
-  }
-
   let totalTokens = Number(result.totalTokens) || 0;
   let totalCost = Number(result.totalCost) || 0;
 
@@ -145,6 +98,77 @@ async function fetchUserEmbedStats(
     const periodRow = periodResult[0];
     totalTokens = Number(periodRow?.totalTokens) || 0;
     totalCost = Number(periodRow?.totalCost) || 0;
+  }
+
+  const rankingValue = sortBy === "cost" ? totalCost : totalTokens;
+
+  if (rankingValue > 0) {
+    // Both the rank and the "of N" denominator count rankable users only, so a
+    // hidden account neither holds a position nor inflates the total. A hidden
+    // user is absent from the CTE, so this returns no row and rank stays null.
+    const rankResult = dateRange
+      ? await db.execute<{ rank: number; total: number }>(sql`
+          WITH rankable AS (
+            SELECT
+              s.user_id,
+              SUM(d.tokens) AS total_tokens,
+              SUM(CAST(d.cost AS DECIMAL(18,4))) AS total_cost
+            FROM daily_breakdown d
+            INNER JOIN submissions s ON d.submission_id = s.id
+            INNER JOIN users u ON u.id = s.user_id
+            WHERE u.leaderboard_hidden = false
+              AND d.date >= ${dateRange.start}
+              AND d.date <= ${dateRange.end}
+            GROUP BY s.user_id
+          ),
+          ranked AS (
+            SELECT
+              user_id,
+              RANK() OVER (
+                ORDER BY
+                  ${
+                    sortBy === "cost"
+                      ? sql`total_cost DESC`
+                      : sql`total_tokens DESC`
+                  }
+              ) AS rank
+            FROM rankable
+          )
+          SELECT rank, (SELECT COUNT(*)::int FROM rankable) AS total
+          FROM ranked WHERE user_id = ${result.id}
+        `)
+      : await db.execute<{ rank: number; total: number }>(sql`
+          WITH rankable AS (
+            SELECT s.*
+            FROM submissions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.leaderboard_hidden = false
+          ),
+          ranked AS (
+            SELECT
+              user_id,
+              RANK() OVER (
+                ORDER BY
+                  ${
+                    sortBy === "cost"
+                      ? sql`CAST(total_cost AS DECIMAL(18,4)) DESC`
+                      : sql`total_tokens DESC`
+                  }
+              ) AS rank
+            FROM rankable
+          )
+          SELECT rank, (SELECT COUNT(*)::int FROM rankable) AS total
+          FROM ranked WHERE user_id = ${result.id}
+        `);
+
+    const rankRow = (
+      rankResult as unknown as { rank: number; total: number }[]
+    )[0];
+    // Coerced because RANK() is a Postgres bigint, which postgres-js hands
+    // back as a string. Number(undefined) is NaN and falls through to null, so
+    // a missing row behaves as before.
+    rank = Number(rankRow?.rank) || null;
+    rankTotal = Number(rankRow?.total) || null;
   }
 
   return {

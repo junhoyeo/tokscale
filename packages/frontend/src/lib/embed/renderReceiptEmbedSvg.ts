@@ -79,7 +79,7 @@ export function renderReceiptEmbedSvg(
     [
       periodLabel === "lifetime"
         ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`
-        : "Rank · lifetime",
+        : `Rank · ${periodLabel}`,
       rank,
       getRankColor(data.stats.rank, palette),
     ],

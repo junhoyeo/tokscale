@@ -290,7 +290,7 @@ describe("user embed data", () => {
     ).toBe(true);
   });
 
-  it("scopes embed totals to an anchored trailing seven-day window", async () => {
+  it("scopes embed totals and rank to an anchored trailing seven-day window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-12T12:00:00.000Z"));
 
@@ -308,8 +308,8 @@ describe("user embed data", () => {
           updatedAt: new Date("2026-03-14T09:00:00.000Z"),
         },
       ]);
-      mockState.pushExecuteResult([{ rank: 2, total: 10 }]);
       mockState.pushExecuteResult([{ totalTokens: 700, totalCost: 7 }]);
+      mockState.pushExecuteResult([{ rank: 2, total: 10 }]);
 
       const stats = await getUserEmbedStats("alice", "tokens", "week");
       const sqlTexts = serializeSqlCalls();
@@ -328,6 +328,9 @@ describe("user embed data", () => {
       expect(
         sqlTexts.some(
           (text) =>
+            text.includes("WITH rankable AS") &&
+            text.includes("FROM daily_breakdown d") &&
+            text.includes("RANK() OVER") &&
             text.includes("d.date >= 2026-03-08") &&
             text.includes("d.date <= 2026-03-14"),
         ),

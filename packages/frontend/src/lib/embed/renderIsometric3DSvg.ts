@@ -233,7 +233,7 @@ export function renderIsometric3DEmbedSvg(
       value: cost,
     },
     {
-      label: periodLabel === "lifetime" ? "Rank" : "Rank · lifetime",
+      label: periodLabel === "lifetime" ? "Rank" : `Rank · ${periodLabel}`,
       value: rank,
     },
     {

@@ -108,7 +108,7 @@ export function renderBlueprintEmbedSvg(
       label:
         periodLabel === "lifetime"
           ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`
-          : "Rank · lifetime",
+          : `Rank · ${periodLabel}`,
       color: getRankColor(data.stats.rank, palette),
     },
     {

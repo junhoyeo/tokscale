@@ -77,7 +77,7 @@ export function renderTerminalEmbedSvg(
       label:
         periodLabel === "lifetime"
           ? `rank.${sortBy}`
-          : `rank.lifetime.${sortBy}`,
+          : `rank.${periodLabel}.${sortBy}`,
       value: rank,
       color: getRankColor(data.stats.rank, palette),
     },

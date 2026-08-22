@@ -88,7 +88,7 @@ export function renderGraphEmbedSvg(
       label:
         periodLabel === "lifetime"
           ? `Rank · ${sortBy}`
-          : "Lifetime rank",
+          : `Rank · ${periodLabel}`,
       color: getRankColor(data.stats.rank, palette),
     },
   ];

@@ -252,7 +252,7 @@ describe("renderMinimalEmbedSvg", () => {
     expect(svg).toContain("Total tokens");
   });
 
-  it("labels finite stats and lifetime rank without mixing their scopes", () => {
+  it("labels finite stats and rank with the selected scope", () => {
     const svg = renderMinimalEmbedSvg({
       ...mockStats,
       period: "month",
@@ -262,7 +262,7 @@ describe("renderMinimalEmbedSvg", () => {
     expect(svg).toContain("Tokscale · 30d");
     expect(svg).toContain("Tokens · 30d");
     expect(svg).toContain("Cost · 30d");
-    expect(svg).toContain("Rank · lifetime");
+    expect(svg).toContain("Rank · 30d");
   });
 
   it("honors the token number format", () => {

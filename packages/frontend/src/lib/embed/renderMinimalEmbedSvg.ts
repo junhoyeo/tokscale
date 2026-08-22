@@ -96,7 +96,7 @@ export function renderMinimalEmbedSvg(
   <line x1="350" y1="74" x2="350" y2="132" stroke="${palette.divider}"/>
   <text x="372" y="80" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Cost" : `Cost · ${periodLabel}`}</text>
   ${fittedText({ text: cost, x: 372, y: 99, maxWidth: 202, fill: palette.cost, fontSize: 17, minFontSize: 8, fontWeight: 600 })}
-  <text x="372" y="114" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Rank" : "Rank · lifetime"}</text>
+  <text x="372" y="114" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? "Rank" : `Rank · ${periodLabel}`}</text>
   ${fittedText({ text: rank, x: 372, y: 132, maxWidth: 202, fill: rankColor, fontSize: 16, minFontSize: 8, fontWeight: 600 })}
   ${graph ? `${divider(PAD, right, 136, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({

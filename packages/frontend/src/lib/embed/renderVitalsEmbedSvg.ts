@@ -148,7 +148,7 @@ export function renderVitalsEmbedSvg(
     minFontSize: 8,
     fontWeight: 600,
   })}
-  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}` : "Rank · lifetime"}</text>
+  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel}`}</text>
   ${fittedText({
     text: rankText,
     x: right,

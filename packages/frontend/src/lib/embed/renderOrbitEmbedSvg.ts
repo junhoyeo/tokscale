@@ -119,7 +119,7 @@ export function renderOrbitEmbedSvg(
     period: data.period,
   })}
   ${divider(PAD, right, 66, palette)}
-  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${sortBy === "cost" ? "cost" : "tokens"}` : "Rank · lifetime"}</text>
+  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel}`}</text>
   ${fittedText({
     text: rankText,
     x: PAD,

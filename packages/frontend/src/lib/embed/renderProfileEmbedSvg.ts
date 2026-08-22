@@ -100,7 +100,7 @@ function renderProfileCardSvg(
   const rankLabel =
     periodLabel === "lifetime"
       ? `Rank (${sortBy === "cost" ? "Cost" : "Tokens"})`
-      : "Lifetime rank";
+      : `Rank · ${periodLabel}`;
   const rankColor = getRankColor(data.stats.rank, palette);
   const metrics = [
     {
