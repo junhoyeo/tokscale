@@ -38,7 +38,9 @@ pub fn legacy_macos_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use serial_test::serial;
+    #[cfg(target_os = "macos")]
     use std::env;
 
     #[test]
