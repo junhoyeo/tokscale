@@ -53,6 +53,10 @@ if [[ "${local_sha}" != "${EXPECTED_RELEASE_BASE_SHA}" ]]; then
   fail "Checked-out release base ${local_sha} does not match expected ${EXPECTED_RELEASE_BASE_SHA}"
 fi
 
+# Authoritative staleness check. scripts/check-release-base-fresh.sh runs the same
+# comparison early in the workflow so a stale dispatch fails fast, but the branch can
+# move while the binaries build, so this check must stay -- it is the one that runs
+# immediately before the release commit is pushed and the npm packages go out.
 remote_tracking_ref="refs/remotes/origin/${RELEASE_REF_NAME}"
 git fetch --no-tags origin "+refs/heads/${RELEASE_REF_NAME}:${remote_tracking_ref}"
 remote_sha="$(git rev-parse "${remote_tracking_ref}^{commit}")"
