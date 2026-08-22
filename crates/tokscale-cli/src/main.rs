@@ -5700,7 +5700,7 @@ fn report_unpriced_submission_exclusions(
         println!(
             "{}",
             format!(
-                "  Hint: excluded models stay unsubmitted until priced. Add exact-match entries to\n          {}\n          (an explicit 0 declares a free model or a known routing-label rate), then re-check with\n          `tokscale submit --dry-run` and `tokscale pricing <model-id>`.",
+                "  Hint: excluded models stay unsubmitted until priced. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate, then\n          re-check with `tokscale submit --dry-run` and `tokscale pricing <model-id>`.",
                 pricing_path.display(),
             )
             .bright_black()
