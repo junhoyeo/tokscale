@@ -565,13 +565,16 @@ tokscale logout
 
 送信前に、すべてのメッセージが、そのメッセージが実際に使用したトークンバケット（入力・出力・キャッシュ読み・キャッシュ書き）をすべてカバーする権威ある価格に解決されている必要があります。価格を解決できないメッセージはスキップされ、`Warning: excluded N unpriced provider/model message(s)` として報告されます。未知のモデルが推測された料金で送信されることはなく、残りの価格済み使用量は通常どおり送信されます。
 
-3 つの除外理由：
+除外理由：
 
 - `no authoritative model-to-price mapping` — モデル ID が LiteLLM・OpenRouter・models.dev・カスタム価格のいずれにも存在しません。
 - `generic routing label has no authoritative model-to-price mapping` — その ID はルーターラベル（`auto`、`gemini-default` など）で、リクエストごとに実際のモデルが変わるため、そのままでは拒否されます。実際のレートが分かっている場合は、`custom-pricing.json` に明示的なエントリを追加することが公式にサポートされた方法です。
 - `pricing does not cover every populated token bucket` — 価格行は見つかったものの、実際に使用されたトークンのレート（多くの場合キャッシュ読みまたはキャッシュ書き）が欠けています。
+- `model price match does not establish the requested provider` — モデル ID のモデル部分のみ、またはプロバイダー接頭辞の推測で価格行が見つかっただけで、その料金が実際のプロバイダーの料金である確証がありません。
+- `model price match does not exactly name the requested model` — 曖昧一致で価格行が見つかりましたが、そのキーが実際に使用したモデルを正確に指している保証がありません。
+- `model price lookup is ambiguous across non-equivalent candidates` — 複数の候補行が一致しましたが、それぞれ異なる価格を示しています。
 
-除外された使用量を含めるには、`~/.config/tokscale/custom-pricing.json` に完全一致のエントリを追加し——明示的な `0` は本物の無料モデルの宣言です——その後 `tokscale submit --dry-run` を再実行して警告がなくなることを確認してください。`tokscale pricing <model-id>` でどのエントリが一致したかを確認できます。
+除外された使用量を含めるには、`~/.config/tokscale/custom-pricing.json` に完全一致のエントリを追加し——明示的な `0` は本物の無料モデルの宣言です——その後 `tokscale submit --dry-run` を再実行して警告がなくなることを確認してください。`tokscale pricing <model-id>` でどのエントリが一致したかを確認できます。このファイルのキーはモデル ID のみです（警告に表示される `provider/model` のうち `model` の部分）。
 
 ### Autosubmit
 

@@ -563,13 +563,17 @@ tokscale logout
 
 Before anything is submitted, every message must resolve to an authoritative price that covers every token bucket the message populated (input, output, cache read, cache write). Messages that cannot be priced are skipped and reported as `Warning: excluded N unpriced provider/model message(s)` — unknown models never submit invented or guessed spend, and all remaining priced usage still submits normally.
 
-The three exclusion reasons:
+The exclusion reasons:
 
 - `no authoritative model-to-price mapping` — the model ID is absent from LiteLLM, OpenRouter, models.dev, and your custom overrides.
 - `generic routing label has no authoritative model-to-price mapping` — the ID is a router label (`auto`, `gemini-default`, …) whose underlying model varies per request, so it is refused outright. An explicit entry for the label in `custom-pricing.json` is the supported way to assert a rate you know applies.
 - `pricing does not cover every populated token bucket` — a price row was found, but it is missing a rate (most often cache read or cache creation) that this usage actually populates.
+- `model price match does not establish the requested provider` — a price row was found only by matching the model part of the ID, or by trying a provider prefix, which does not prove your provider bills at that row's rate.
+- `model price match does not exactly name the requested model` — a fuzzy or provider-scoped match was found, but nothing proves the priced key names the model you actually used.
+- `model price lookup is ambiguous across non-equivalent candidates` — several candidate rows matched and they quote different prices.
 
-To include previously excluded usage, add an exact-match entry to `custom-pricing.json` (see [Custom Pricing Overrides](#custom-pricing-overrides)) — an explicit `0` declares a genuinely free model — then re-run `tokscale submit --dry-run` until no warnings remain. `tokscale pricing <model-id>` shows which entry matched.
+To include previously excluded usage, add an exact-match entry to `custom-pricing.json` (see [Custom Pricing Overrides](#custom-pricing-overrides)) — an explicit `0` declares a genuinely free model — then re-run `tokscale submit --dry-run` until no warnings remain. `tokscale pricing <model-id>` shows which entry matched. The file is keyed by the model ID alone — the `model` half of the `provider/model` pair shown in the warning.
+
 ### Autosubmit
 
 Autosubmit schedules the normal `tokscale submit` flow with the operating system scheduler. It is useful for keeping your public profile current without a manual terminal run.
