@@ -1014,6 +1014,7 @@ describe("GET /api/users/[username]", () => {
       { params: Promise.resolve({ username: "alice" }) },
     );
     const body = await response.json();
+    const sqlTexts = serializeSqlCalls();
 
     expect(response.status).toBe(200);
     expect(mockState.gte).toHaveBeenCalledWith(
@@ -1026,6 +1027,16 @@ describe("GET /api/users/[username]", () => {
       end: "2026-07-24",
     });
     expect(body.dateRange).toEqual({ start: "2026-07-18", end: "2026-07-24" });
+    expect(body.user.rank).toBe(1);
+    expect(
+      sqlTexts.some(
+        (text) =>
+          text.includes("FROM daily_breakdown d") &&
+          text.includes("RANK() OVER") &&
+          text.includes("d.date >= 2026-07-18") &&
+          text.includes("d.date <= 2026-07-24"),
+      ),
+    ).toBe(true);
     expect(body.stats).toEqual(
       expect.objectContaining({
         totalTokens: 35,
@@ -1059,7 +1070,13 @@ describe("GET /api/users/[username]", () => {
     expect(calendar.activeDays).toBe(body.stats.activeDays);
   });
 
-  it("recalculates profile overview stats from daily rows for rolling periods", async () => {
+  async function assertRollingProfilePeriod({
+    period,
+    start,
+  }: {
+    period: "week" | "month";
+    start: string;
+  }) {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
 
@@ -1165,21 +1182,32 @@ describe("GET /api/users/[username]", () => {
     mockState.pushExecuteResult([{ rank: 4 }]);
 
     const response = await GET(
-      new Request("http://localhost:3000/api/users/alice?period=week"),
+      new Request(`http://localhost:3000/api/users/alice?period=${period}`),
       { params: Promise.resolve({ username: "alice" }) },
     );
     const body = await response.json();
+    const sqlTexts = serializeSqlCalls();
 
     expect(response.status).toBe(200);
     expect(mockState.gte).toHaveBeenCalledWith(
       mockState.tables.dailyBreakdown.date,
-      "2026-06-22",
+      start,
     );
     // No upper bound in SQL: the window's end is the anchor, which is not known
     // when the query is built, and no row can sit above it anyway.
     expect(mockState.lte).not.toHaveBeenCalled();
-    expect(body.period).toBe("week");
-    expect(body.dateRange).toEqual({ start: "2026-06-22", end: "2026-06-28" });
+    expect(body.period).toBe(period);
+    expect(body.dateRange).toEqual({ start, end: "2026-06-28" });
+    expect(body.user.rank).toBe(4);
+    expect(
+      sqlTexts.some(
+        (text) =>
+          text.includes("FROM daily_breakdown d") &&
+          text.includes("RANK() OVER") &&
+          text.includes(`d.date >= ${start}`) &&
+          text.includes("d.date <= 2026-06-28"),
+      ),
+    ).toBe(true);
     expect(body.stats).toEqual(
       expect.objectContaining({
         totalTokens: 500,
@@ -1195,7 +1223,15 @@ describe("GET /api/users/[username]", () => {
     );
     expect(body.clients).toEqual(["codex", "claude"]);
     expect(body.models).toEqual(["gpt-5.5", "claude-sonnet-4-5"]);
-  });
+  }
+
+  it.each([
+    { period: "week", start: "2026-06-22" },
+    { period: "month", start: "2026-05-30" },
+  ] as const)(
+    "recalculates profile overview stats and rank for the $period period",
+    assertRollingProfilePeriod,
+  );
 
   it("returns submission freshness metadata for the latest submission", async () => {
     vi.useFakeTimers();

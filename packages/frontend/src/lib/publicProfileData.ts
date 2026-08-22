@@ -225,28 +225,29 @@ export async function getPublicProfileResponse(
           .orderBy(desc(submissions.updatedAt))
           .limit(1),
 
-        // Ranks over rankable users only. A hidden user is absent from the CTE
-        // entirely, so this returns no row and the profile reports rank null —
-        // which is the intent: hiding withdraws someone from the standings, so
-        // there is no position left to display.
-        db.execute<{ rank: number }>(sql`
-        WITH user_totals AS (
-          SELECT
-            s.user_id,
-            SUM(s.total_tokens) as total_tokens
-          FROM submissions s
-          JOIN users u ON u.id = s.user_id
-          WHERE u.leaderboard_hidden = false
-          GROUP BY s.user_id
-        ),
-        ranked AS (
-          SELECT
-            user_id,
-            RANK() OVER (ORDER BY total_tokens DESC) as rank
-          FROM user_totals
-        )
-        SELECT rank FROM ranked WHERE user_id = ${user.id}
-      `),
+        // A finite rank needs the anchored profile range, which is only known
+        // after the stats query returns the newest submitted date. Keep the
+        // lifetime rank concurrent and defer only finite-period ranking.
+        period === "all"
+          ? db.execute<{ rank: number }>(sql`
+              WITH user_totals AS (
+                SELECT
+                  s.user_id,
+                  SUM(s.total_tokens) as total_tokens
+                FROM submissions s
+                JOIN users u ON u.id = s.user_id
+                WHERE u.leaderboard_hidden = false
+                GROUP BY s.user_id
+              ),
+              ranked AS (
+                SELECT
+                  user_id,
+                  RANK() OVER (ORDER BY total_tokens DESC) as rank
+                FROM user_totals
+              )
+              SELECT rank FROM ranked WHERE user_id = ${user.id}
+            `)
+          : Promise.resolve([]),
 
         db
           .select({
@@ -269,12 +270,42 @@ export async function getPublicProfileResponse(
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
-    const rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
     // Resolved only once the newest submitted date is known, so every window —
     // lifetime and period alike — ends on the data instead of on UTC "today".
     const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
     const periodRange = getProfilePeriodDateRange(period, rangeAnchor);
     const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
+    // Ranks over rankable users only. A hidden user is absent from the CTE
+    // entirely, so this returns no row and the profile reports rank null. The
+    // finite query uses the exact same anchored window as the visible profile
+    // totals and chart.
+    const scopedRankResult = periodRange
+      ? await db.execute<{ rank: number }>(sql`
+          WITH user_totals AS (
+            SELECT
+              s.user_id,
+              SUM(d.tokens) as total_tokens
+            FROM daily_breakdown d
+            INNER JOIN submissions s ON d.submission_id = s.id
+            INNER JOIN users u ON u.id = s.user_id
+            WHERE u.leaderboard_hidden = false
+              AND d.date >= ${periodRange.start}
+              AND d.date <= ${periodRange.end}
+            GROUP BY s.user_id
+          ),
+          ranked AS (
+            SELECT
+              user_id,
+              RANK() OVER (ORDER BY total_tokens DESC) as rank
+            FROM user_totals
+          )
+          SELECT rank FROM ranked WHERE user_id = ${user.id}
+        `)
+      : rankResult;
+    const rank =
+      Number(
+        (scopedRankResult as unknown as { rank: number }[])[0]?.rank,
+      ) || null;
 
     type ModelData = {
       tokens: number;
@@ -669,7 +700,7 @@ export async function getPublicProfileResponse(
         displayName: user.displayName,
         avatarUrl: user.avatarUrl,
         createdAt: user.createdAt,
-        rank: isPeriodFiltered ? null : rank ? Number(rank) : null,
+        rank,
       },
       stats: {
         totalTokens: isPeriodFiltered

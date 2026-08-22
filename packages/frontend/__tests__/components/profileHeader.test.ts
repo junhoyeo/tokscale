@@ -4,7 +4,11 @@
 process.env.TZ = "America/New_York";
 
 import { describe, expect, it } from "vitest";
-import { formatJoined, formatLastUpdated } from "../../src/components/profile";
+import {
+  formatJoined,
+  formatLastUpdated,
+  getProfileRankLabel,
+} from "../../src/components/profile";
 
 // A fixed instant, 2026-07-10 15:30:00 UTC.
 const ISO_A = "2026-07-10T15:30:00.000Z";
@@ -98,5 +102,13 @@ describe("formatJoined", () => {
   it("falls back to the host zone when no zone is given", () => {
     // TZ is pinned to America/New_York at the top of this file.
     expect(formatJoined(JOINED_BOUNDARY)).toBe("Dec 2025");
+  });
+});
+
+describe("getProfileRankLabel", () => {
+  it("makes the rank window explicit", () => {
+    expect(getProfileRankLabel("all")).toBe("All-time rank");
+    expect(getProfileRankLabel("month")).toBe("30d rank");
+    expect(getProfileRankLabel("week")).toBe("7d rank");
   });
 });

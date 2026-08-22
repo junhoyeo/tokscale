@@ -22,6 +22,14 @@ export interface ProfileOverviewProps {
   className?: string;
 }
 
+export function getProfileRankLabel(
+  period: NonNullable<ProfileOverviewProps["period"]>,
+): string {
+  if (period === "month") return "30d rank";
+  if (period === "week") return "7d rank";
+  return "All-time rank";
+}
+
 const OverviewPanel = styled.section`
   overflow: hidden;
   border: 1px solid var(--service-border);
@@ -442,7 +450,7 @@ export function ProfileOverview({
               <Metadata aria-label="Profile details">
                 {user.rank != null && (
                   <RankItem>
-                    <span>Rank</span>
+                    <span>{getProfileRankLabel(period)}</span>
                     <strong>#{user.rank.toLocaleString("en-US")}</strong>
                   </RankItem>
                 )}
