@@ -447,12 +447,50 @@ fn headless_capture_slow_command_times_out() {
     // faster means the parent gave up early.
     //
     // Note this test cannot catch #1049: the stand-in spawns nothing, so its pipe
-    // closes the moment it is killed, and the unbounded `output_handle.join()`
-    // after the kill is never exercised. Widening the gap does not hide that —
-    // it was never covered.
+    // closes the moment it is killed, and the drain after the kill returns at
+    // once instead of waiting out `STDOUT_DRAIN_GRACE`. Widening the gap does not
+    // hide that — it was never covered here. The descendant shape that #1049
+    // actually reports is covered by
+    // `headless_capture_descendant_holding_stdout_still_times_out` below.
     assert!(
         elapsed >= HEADLESS_SLOW_MIN_ELAPSED && elapsed < HEADLESS_SLOW_MAX_ELAPSED,
         "slow command timeout duration was unexpected: {elapsed:?}"
+    );
+}
+
+/// The #1049 shape: the child is killed at the deadline but a *descendant* still
+/// holds the write end of the stdout pipe, so the pump never sees EOF.
+///
+/// Unix-only. The grandchild is the stand-in binary itself, and Windows keeps a
+/// running image locked, which would leave the fixture's TempDir undeletable for
+/// the two minutes the grandchild lives. #1049 is a Linux report and
+/// `run_capture_command` is ordinary `std::process` code, so ubuntu and macOS
+/// coverage is what this needs to be worth its cost.
+///
+/// The bound this asserts is the point: a parent that waits for EOF without one
+/// cannot finish before the grandchild's 120s sleep, well past
+/// `HEADLESS_SLOW_MAX_ELAPSED`.
+#[test]
+#[cfg(unix)]
+fn headless_capture_descendant_holding_stdout_still_times_out() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("descendant.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "descendant",
+        HEADLESS_SLOW_TIMEOUT_MS,
+    )
+    .assert()
+    .failure()
+    .code(124);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= HEADLESS_SLOW_MIN_ELAPSED && elapsed < HEADLESS_SLOW_MAX_ELAPSED,
+        "a descendant holding stdout must not extend the timeout: {elapsed:?}"
     );
 }
 

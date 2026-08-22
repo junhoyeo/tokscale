@@ -64,6 +64,23 @@ fn main() {
         // so the parent's timeout always wins by a margin the runner cannot eat
         // into. See `FAKE_CODEX_SLOW_SLEEP_SECS`.
         "slow" => std::thread::sleep(std::time::Duration::from_secs(FAKE_CODEX_SLOW_SLEEP_SECS)),
+        // #1049's shape. A grandchild inherits the stdout pipe and outlives the
+        // direct child, so killing the child does not close the write end and
+        // the parent's pump never reaches EOF. The grandchild must outlast the
+        // test's own upper bound, not merely the parent's deadline: a parent
+        // that waits for EOF unboundedly has to look *slower than the bound*,
+        // or the test cannot tell it apart from a parent that drained promptly.
+        "descendant" => {
+            let exe = std::env::current_exe().expect("current_exe");
+            std::process::Command::new(exe)
+                .env("TOKSCALE_FAKE_CODEX_MODE", "slow")
+                .stdout(std::process::Stdio::inherit())
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("failed to spawn descendant");
+            std::thread::sleep(std::time::Duration::from_secs(FAKE_CODEX_SLOW_SLEEP_SECS));
+        }
         _ => {
             eprintln!("unknown TOKSCALE_FAKE_CODEX_MODE");
             std::process::exit(2);

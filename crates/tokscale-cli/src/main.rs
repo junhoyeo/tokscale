@@ -6401,6 +6401,15 @@ struct CaptureCommandOutcome {
     timed_out: bool,
 }
 
+/// How long the stdout pump gets to finish draining a killed child's pipe.
+///
+/// Bounded because a *descendant* of the child may still hold the write end, in
+/// which case the pump never reaches EOF and an unbounded wait hangs the whole
+/// timeout (#1049). Two seconds because the ordinary case -- the pipe closing
+/// with the child -- only has to move at most one pipe buffer, so anything past
+/// a few milliseconds already means a descendant is holding it open.
+const STDOUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 fn run_capture_command(
     command: &str,
     args: &[String],
@@ -6433,23 +6442,30 @@ fn run_capture_command(
         )
     })?;
 
-    let output_handle = thread::spawn(move || -> Result<()> {
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut buffer = [0; 8192];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => return Ok(()),
-                Ok(n) => output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to read from subprocess stdout: {}",
-                        e
-                    ));
+    // The pump reports completion over a channel rather than only through its
+    // JoinHandle, so the timeout path below can wait for it with a bound.
+    let (pump_done_tx, pump_done_rx) = std::sync::mpsc::channel::<Result<()>>();
+    thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buffer = [0; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => output_file
+                        .write_all(&buffer[..n])
+                        .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to read from subprocess stdout: {}",
+                            e
+                        ));
+                    }
                 }
             }
-        }
+        })();
+        // A panic drops the sender instead, surfacing as RecvError below.
+        let _ = pump_done_tx.send(result);
     });
 
     let deadline = Instant::now() + timeout;
@@ -6473,11 +6489,20 @@ fn run_capture_command(
         thread::sleep(Duration::from_millis(25));
     };
 
-    if !timed_out {
-        let output_result = output_handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
-        output_result?;
+    if timed_out {
+        // Wait, but with a bound. An unbounded wait hangs whenever a descendant
+        // holds the pipe open (#1049); no wait at all loses output, because the
+        // caller prints "Partial output saved" and then calls process::exit,
+        // which does not wait for threads -- so anything the child had already
+        // written but the pump had not yet copied would be dropped.
+        //
+        // A drain error is deliberately ignored: the run already failed on the
+        // timeout, and the partial file is best-effort by definition.
+        let _ = pump_done_rx.recv_timeout(STDOUT_DRAIN_GRACE);
+    } else {
+        pump_done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))??;
     }
 
     Ok(CaptureCommandOutcome {
