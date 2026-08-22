@@ -1194,8 +1194,9 @@ fn kimi_work_share_dir_root(app_data: &Path) -> Option<PathBuf> {
 /// Candidate Kimi Work session roots (Kimi Desktop's embedded daimon runtime).
 ///
 /// The suffix is the fixed on-disk layout of the desktop app. There is no Work
-/// build for Linux, so only the macOS app-data root and the Windows
-/// `%APPDATA%`/literal pair are produced.
+/// build for Linux. On macOS the app-data root is used; on Windows the
+/// home-relative root is always included, while the environment-derived root
+/// uses a valid `shareDir` or falls back to `%APPDATA%`.
 /// The Windows environment root is only consulted when env roots are enabled,
 /// matching the Kiro/Cline root helpers.
 fn kimi_work_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -5586,8 +5587,8 @@ mod tests {
         assert!(kimi_files.contains(&ctitle));
     }
 
-    /// The literal Work root is always included; the `%APPDATA%` root is only
-    /// included for normal scans where environment roots are enabled.
+    /// The home-relative Work root is always included; the environment-selected
+    /// root is only included for normal scans where environment roots are enabled.
     #[test]
     #[serial]
     #[cfg(target_os = "windows")]
