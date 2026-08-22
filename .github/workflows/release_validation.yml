@@ -12,6 +12,7 @@ on:
       - "packages/cli-*/package.json"
       - "scripts/calculate-release-version.sh"
       - "scripts/check-npm-release-state.sh"
+      - "scripts/check-release-base-fresh.sh"
       - "scripts/check-release-workflow-safety.py"
       - "scripts/check-version-coherence.sh"
       - "scripts/prepare-release-provenance.sh"
@@ -19,6 +20,7 @@ on:
       - "scripts/generate-release-notes.ts"
       - "scripts/post-discord-release.sh"
       - "scripts/test-calculate-release-version.sh"
+      - "scripts/test-check-release-base-fresh.sh"
       - "scripts/test-check-version-coherence.sh"
       - "scripts/test-npm-release-state.sh"
       - "scripts/test-prepare-release-provenance.sh"
@@ -62,6 +64,7 @@ jobs:
         run: |
           bash -n scripts/test-release-package-artifacts.sh
           bash scripts/test-calculate-release-version.sh
+          bash scripts/test-check-release-base-fresh.sh
           bash scripts/test-check-version-coherence.sh
           bash scripts/test-npm-release-state.sh
           bash scripts/test-prepare-release-provenance.sh
