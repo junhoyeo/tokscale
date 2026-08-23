@@ -40,6 +40,19 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
                     requests.extend(arr.iter().cloned());
                 }
             }
+            1 => {
+                if let Some(k) = obj.get("k").and_then(Value::as_array) {
+                    if k.first().and_then(Value::as_str) == Some("requests") {
+                        if let Some(index) = k.get(1).and_then(|v| v.as_u64()).map(|u| u as usize) {
+                            if let Some(req) = requests.get_mut(index) {
+                                if let Some(value) = obj.get("v") {
+                                    apply_update(req, &k[2..], value.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             2 => {
                 if let Some(k) = obj.get("k").and_then(Value::as_array) {
                     let is_requests = k
@@ -62,6 +75,62 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         .iter()
         .filter_map(|req| request_to_message(req, &session_id, &workspace))
         .collect()
+}
+
+fn apply_update(target: &mut Value, path: &[Value], value: Value) {
+    if path.is_empty() {
+        *target = value;
+        return;
+    }
+
+    let mut current = target;
+    for i in 0..path.len() {
+        let key = &path[i];
+        let is_last = i == path.len() - 1;
+
+        if let Some(k_str) = key.as_str() {
+            if !current.is_object() {
+                *current = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if is_last {
+                current.as_object_mut().unwrap().insert(k_str.to_string(), value.clone());
+            } else {
+                let obj = current.as_object_mut().unwrap();
+                if !obj.contains_key(k_str) {
+                    obj.insert(k_str.to_string(), serde_json::Value::Object(serde_json::Map::new()));
+                }
+            }
+            if !is_last {
+                current = current.get_mut(k_str).unwrap();
+            }
+        } else if let Some(k_idx) = key.as_u64() {
+            let idx = k_idx as usize;
+            if !current.is_array() {
+                *current = serde_json::Value::Array(Vec::new());
+            }
+            if is_last {
+                let arr = current.as_array_mut().unwrap();
+                if idx < arr.len() {
+                    arr[idx] = value.clone();
+                } else {
+                    while arr.len() < idx {
+                        arr.push(serde_json::Value::Null);
+                    }
+                    arr.push(value.clone());
+                }
+            } else {
+                let arr = current.as_array_mut().unwrap();
+                while arr.len() <= idx {
+                    arr.push(serde_json::Value::Null);
+                }
+            }
+            if !is_last {
+                current = current.get_mut(idx).unwrap();
+            }
+        } else {
+            return;
+        }
+    }
 }
 
 fn request_to_message(
@@ -355,5 +424,30 @@ mod tests {
         );
 
         assert!(parse_copilot_vscode_sessions(&[path]).is_empty());
+    }
+    #[test]
+    fn parse_kind1_path_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let uuid = "750e8400-e29b-41d4-a716-446655440002";
+        let path = sessions_dir.join(format!("{}.jsonl", uuid));
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r3","timestamp":1783918320000,"agent":{"id":"github.copilot"}}]}}"#,
+                r#"{"kind":1,"k":["requests",0,"promptTokens"],"v":18561}"#,
+                r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":143}"#,
+                r#"{"kind":1,"k":["requests",0,"result"],"v":{"metadata":{"promptTokens":18561,"outputTokens":143,"resolvedModel":"gpt-5.6-luna"}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m.model_id, "gpt-5.6-luna");
+        assert_eq!(m.tokens.input, 18561);
+        assert_eq!(m.tokens.output, 143);
     }
 }
