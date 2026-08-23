@@ -93,11 +93,17 @@ fn apply_update(target: &mut Value, path: &[Value], value: Value) {
                 *current = serde_json::Value::Object(serde_json::Map::new());
             }
             if is_last {
-                current.as_object_mut().unwrap().insert(k_str.to_string(), value.clone());
+                current
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(k_str.to_string(), value.clone());
             } else {
                 let obj = current.as_object_mut().unwrap();
                 if !obj.contains_key(k_str) {
-                    obj.insert(k_str.to_string(), serde_json::Value::Object(serde_json::Map::new()));
+                    obj.insert(
+                        k_str.to_string(),
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    );
                 }
             }
             if !is_last {
