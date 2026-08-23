@@ -15,8 +15,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
+
+#[cfg(not(target_os = "windows"))]
 static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+#[cfg(not(target_os = "windows"))]
 static HTTPS_RPC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
 static RPC_TRANSPORT: OnceLock<Mutex<HashMap<u16, RpcTransport>>> = OnceLock::new();
 
 /// Which transport an Antigravity RPC port has already answered on.
@@ -1945,7 +1950,8 @@ fn https_rpc_request(
 ) -> Result<Value> {
     // The idea is to bypass tokio-native-tls SChannel renegotiation deadlocks on Windows
     // by giving the task to the native OS curl.exe
-    #[cfg(target_os = "windows")] {
+    #[cfg(target_os = "windows")]
+    {
         let url = format!(
             "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
             connection.port, method
@@ -1954,12 +1960,22 @@ fn https_rpc_request(
 
         let output = std::process::Command::new("curl.exe")
             .args([
-                "-k", "-sS", "--http1.1", "--max-time", "10",
-                "-X", "POST", &url,
-                "-H", "Content-Type: application/json",
-                "-H", "Connect-Protocol-Version: 1",
-                "-H", &format!("X-Codeium-Csrf-Token: {}", connection.csrf_token),
-                "-d", &body_str,
+                "-k",
+                "-sS",
+                "--http1.1",
+                "--max-time",
+                "10",
+                "-X",
+                "POST",
+                &url,
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                "Connect-Protocol-Version: 1",
+                "-H",
+                &format!("X-Codeium-Csrf-Token: {}", connection.csrf_token),
+                "-d",
+                &body_str,
             ])
             .output()
             .with_context(|| "Failed to execute curl.exe for Windows RPC fallback")?;
@@ -2637,6 +2653,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn parse_port_from_line_reads_lsof_output() {
         assert_eq!(
             parse_port_from_line("proc 123 user 12u IPv4 0x0 0t0 TCP 127.0.0.1:41234 (LISTEN)"),
@@ -2897,6 +2914,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn run_port_query_treats_missing_lsof_as_empty() {
         let ports = run_port_query(
             "__tokscale_missing_lsof__",
