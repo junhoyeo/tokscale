@@ -1008,13 +1008,20 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
     }
 }
 
-pub async fn fetch_cursor_usage_csv(session_token: &str) -> Result<String> {
+pub async fn fetch_cursor_usage_csv(
+    session_token: &str,
+    timeout_override: Option<Duration>,
+) -> Result<String> {
     let client = build_cursor_http_client()?;
-    let response = client
+    let mut req = client
         .get(USAGE_CSV_ENDPOINT)
-        .headers(build_cursor_headers(session_token))
-        .send()
-        .await?;
+        .headers(build_cursor_headers(session_token));
+
+    if let Some(timeout) = timeout_override {
+        req = req.timeout(timeout);
+    }
+
+    let response = req.send().await?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -1180,13 +1187,18 @@ where
     }
 }
 
-pub async fn sync_cursor_cache() -> SyncCursorResult {
+pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
     // Prefer a fresh token from the local Cursor desktop login when available.
     // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
     let _ = ensure_credentials_from_local_cursor();
 
-    sync_cursor_cache_with_fetcher(|session_token| async move {
-        fetch_cursor_usage_csv(&session_token).await
+    sync_cursor_cache_with_fetcher(move |session_token| async move {
+        let timeout = if explicit {
+            Some(Duration::from_secs(120))
+        } else {
+            None
+        };
+        fetch_cursor_usage_csv(&session_token, timeout).await
     })
     .await
 }
@@ -1448,7 +1460,7 @@ pub fn run_cursor_sync(json: bool) -> Result<()> {
     use tokio::runtime::Runtime;
 
     let rt = Runtime::new()?;
-    let result = rt.block_on(sync_cursor_cache());
+    let result = rt.block_on(sync_cursor_cache(true));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);

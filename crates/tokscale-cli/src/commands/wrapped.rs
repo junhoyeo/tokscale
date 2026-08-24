@@ -182,7 +182,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor_logged_in {
-        cursor_sync_result = Some(cursor::sync_cursor_cache().await);
+        cursor_sync_result = Some(cursor::sync_cursor_cache(false).await);
     }
 
     if let Some(sync) = cursor_sync_result.as_ref() {

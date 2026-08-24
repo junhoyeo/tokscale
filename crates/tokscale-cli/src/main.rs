@@ -1612,7 +1612,7 @@ where
     F: FnOnce() -> std::io::Result<tokio::runtime::Runtime>,
 {
     match build_runtime() {
-        Ok(rt) => rt.block_on(async { cursor::sync_cursor_cache().await }),
+        Ok(rt) => rt.block_on(async { cursor::sync_cursor_cache(false).await }),
         Err(error) => cursor::SyncCursorResult {
             synced: false,
             rows: 0,
@@ -5831,7 +5831,7 @@ fn run_submit_command(
     if include_cursor && cursor::is_cursor_logged_in() {
         println!("{}", "  Syncing Cursor usage data...".bright_black());
         let rt_sync = Runtime::new()?;
-        let sync_result = rt_sync.block_on(async { cursor::sync_cursor_cache().await });
+        let sync_result = rt_sync.block_on(async { cursor::sync_cursor_cache(false).await });
         if sync_result.synced {
             println!(
                 "{}",
