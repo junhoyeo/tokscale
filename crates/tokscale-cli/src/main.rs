@@ -5354,6 +5354,17 @@ fn run_import_command(
         "{}",
         format!("    Models: {}", graph.summary.models.len()).bright_black()
     );
+    if outcome.agent_attributed_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "    Client attribution: exact, from the export's per-agent breakdowns \
+                 ({} row(s))",
+                outcome.agent_attributed_rows
+            )
+            .bright_black()
+        );
+    }
 
     if !outcome.unknown_clients.is_empty() {
         eprintln!(

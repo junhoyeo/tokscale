@@ -20,6 +20,11 @@
 //! - the unified/agent-aware report — `period`, `agent: "all"`, and
 //!   `metadata.agents` naming the participants. Reasoning, when present, is
 //!   nested under `metadata`, not beside the other token fields.
+//! - the same report run with `--by-agent` — every row additionally carries an
+//!   `agents` array, one entry per agent that ran that day, each with its own
+//!   `modelBreakdowns`. It is the only shape that records *who* made each
+//!   call, so it is attributed directly rather than guessed at by model
+//!   family; see [`resolve_client`].
 //! - `ccusage-codex` — spells cost `costUSD` and puts `reasoningOutputTokens`
 //!   beside the token fields (see ccusage#831).
 //!
@@ -83,6 +88,11 @@ pub struct ImportOutcome {
     /// but their summed tokens/cost diverge from the aggregate-level
     /// totals beyond a small tolerance — a sign of partial breakdown data.
     pub breakdown_reconciliation_warnings: Vec<String>,
+    /// Number of ccusage rows that carried `agents` (a `--by-agent` export)
+    /// and were therefore attributed to the client each breakdown was reported
+    /// under, rather than to whichever listed agent the model family matched.
+    /// Surfaced so the caller can say which of the two the numbers came from.
+    pub agent_attributed_rows: usize,
 }
 
 /// Parse an export of the given `format` into normalized tokscale data.
@@ -195,6 +205,8 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
     let mut non_finite_cost_rows = 0usize;
     let mut multi_model_fallback_rows = 0usize;
     let mut breakdown_reconciliation_warnings: Vec<String> = Vec::new();
+    // clawdboard rows are already per-client, so nothing here is agent-attributed.
+    let agent_attributed_rows = 0usize;
     let today = chrono::Utc::now().date_naive();
 
     for agg in &export.daily_aggregates {
@@ -335,6 +347,7 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
         non_finite_cost_rows,
         multi_model_fallback_rows,
         breakdown_reconciliation_warnings,
+        agent_attributed_rows,
     })
 }
 
@@ -394,6 +407,12 @@ struct CcusageDaily {
     model_breakdowns: Vec<CcusageModelBreakdown>,
     #[serde(default)]
     metadata: Option<CcusageMetadata>,
+    /// Present only under `--by-agent`: one entry per agent that ran that day,
+    /// each carrying its own `modelBreakdowns`. The row-level breakdowns are a
+    /// merge of these keyed by model name, so a model two agents both used
+    /// survives only here.
+    #[serde(default)]
+    agents: Vec<CcusageAgentBreakdown>,
 }
 
 impl CcusageDaily {
@@ -419,7 +438,8 @@ impl CcusageDaily {
     /// Whether the row carries no usage at all. ccusage emits a row for every
     /// day in the range, including days with nothing on them.
     fn is_empty_day(&self) -> bool {
-        self.model_breakdowns.is_empty()
+        self.agents.is_empty()
+            && self.model_breakdowns.is_empty()
             && self.models_used.is_empty()
             && self.input_tokens <= 0
             && self.output_tokens <= 0
@@ -441,6 +461,54 @@ struct CcusageMetadata {
     /// Where the unified report actually records reasoning output.
     #[serde(default)]
     reasoning_output_tokens: i64,
+}
+
+/// One agent's slice of a `--by-agent` row.
+///
+/// Same shape as the row itself minus `period`/`metadata`: ccusage serializes
+/// both from the same record (`agent_json` in its `adapter-all` crate), which
+/// is why the field names line up.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CcusageAgentBreakdown {
+    /// ccusage's own id for the agent (`claude`, `codex`, `opencode`, ...),
+    /// taken from its `BUILT_IN_AGENT_NAMES`. Every one of those ids is a
+    /// registered tokscale client, so this needs no inference — only the same
+    /// spelling normalization the rest of the importer applies.
+    agent: String,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    /// The unified report does not currently emit reasoning per agent (it is
+    /// dropped when rows are merged into `agent: "all"`), but `ccusage-codex`
+    /// spells it flat like this, so accept it if it ever appears here.
+    #[serde(default)]
+    reasoning_output_tokens: i64,
+    /// The agent's own `input + output + cacheCreation + cacheRead`. Used as a
+    /// per-agent cross-check, the same way the row's `totalTokens` is used for
+    /// the row.
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    total_cost: Option<CostValue>,
+    #[serde(default, rename = "costUSD", alias = "costUsd")]
+    cost_usd: Option<CostValue>,
+    #[serde(default)]
+    models_used: Vec<String>,
+    #[serde(default)]
+    model_breakdowns: Vec<CcusageModelBreakdown>,
+}
+
+impl CcusageAgentBreakdown {
+    /// `totalCost`, or `ccusage-codex`'s `costUSD` spelling of it.
+    fn declared_cost(&self) -> Option<&CostValue> {
+        self.total_cost.as_ref().or(self.cost_usd.as_ref())
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -525,13 +593,16 @@ fn ccusage_token_breakdown(
 /// than silently folded into the first one — misattributed usage is worse than
 /// usage the caller is told about.
 ///
-/// Known limit: this splits by *family*, not by which client actually made the
-/// call, and a family can belong to more than one listed agent. On a day with
-/// `["claude", "opencode"]`, Claude models all land on `claude` even though
-/// OpenCode routinely drives them — the unified row does not record enough to
-/// tell them apart. Splitting exactly needs ccusage's `--by-agent` output,
-/// where each agent carries its own `modelBreakdowns`; supporting that shape
-/// would remove the guess entirely and is the right follow-up here.
+/// This is a guess, and only a fallback. It splits by model *family*, not by
+/// which client actually made the call, and a family can belong to more than
+/// one listed agent: on a day with `["claude", "opencode"]`, Claude models all
+/// land on `claude` even though OpenCode routinely drives them. It also only
+/// knows three families, so on a multi-agent day the other thirteen agent ids
+/// ccusage can emit resolve to nothing and fall through to `unknown`.
+///
+/// A row carrying `agents` needs none of this — see [`attribute_agent`]. This
+/// path is what remains for the exports that predate `--by-agent` or were
+/// produced without it.
 fn resolve_client(model: &str, agents: &[String]) -> Option<String> {
     if agents.len() == 1 {
         return Some(normalize_client_id(&agents[0]));
@@ -595,6 +666,7 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
     let mut non_finite_cost_rows = 0usize;
     let mut multi_model_fallback_rows = 0usize;
     let mut breakdown_reconciliation_warnings: Vec<String> = Vec::new();
+    let mut agent_attributed_rows = 0usize;
     let today = chrono::Utc::now().date_naive();
 
     for row in &export.daily {
@@ -628,7 +700,7 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
             .unwrap_or_default();
         let day = days.entry(date.clone()).or_default();
 
-        if row.model_breakdowns.is_empty() {
+        if row.agents.is_empty() && row.model_breakdowns.is_empty() {
             // No per-model split: attribute the aggregate to the first listed
             // model, mirroring the clawdboard fallback.
             let model = row
@@ -664,32 +736,93 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
         let mut mb_total = 0i64;
         let mut mb_cost = 0.0f64;
 
-        for mb in &row.model_breakdowns {
-            let client = attribute(&mb.model_name, &agents, &mut unknown);
-            let tokens = ccusage_token_breakdown(
-                mb.input_tokens,
-                mb.output_tokens,
-                mb.cache_read_tokens,
-                mb.cache_creation_tokens,
-                mb.reasoning_output_tokens,
-                &mut negative_values_clamped,
-            );
-            let raw_cost = sanitize_cost(mb.cost, &mut non_finite_cost_rows);
-            let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
-            if cost > 0.0
-                && tokens.total() == 0
-                && !is_cursor_legacy_tokenless(&client, &mb.model_name)
-            {
-                suspect_cost_rows += 1;
+        if row.agents.is_empty() {
+            for mb in &row.model_breakdowns {
+                let client = attribute(&mb.model_name, &agents, &mut unknown);
+                let (tokens, cost) = add_model_breakdown(
+                    day,
+                    &client,
+                    mb,
+                    &mut negative_values_clamped,
+                    &mut non_finite_cost_rows,
+                    &mut suspect_cost_rows,
+                );
+                mb_total = mb_total.saturating_add(tokens);
+                mb_cost += cost;
             }
+        } else {
+            // `--by-agent`: the row names the agent behind every breakdown, so
+            // each one is attributed to the client that reported it and the
+            // family guess never runs. Two agents sharing a model stay apart
+            // here; the row-level `modelBreakdowns` has already merged them.
+            agent_attributed_rows += 1;
+            for agent in &row.agents {
+                let client = attribute_agent(&agent.agent, &mut unknown);
+                let mut agent_total = 0i64;
 
-            // `total()` re-adds the reasoning that `ccusage_token_breakdown`
-            // moved out of `output`, so this sum is back in ccusage's own
-            // vocabulary and is directly comparable to the row's scalars.
-            mb_total = mb_total.saturating_add(tokens.total());
-            mb_cost += cost;
+                if agent.model_breakdowns.is_empty() {
+                    // Same fallback as the row-level one, scoped to this agent.
+                    let model = agent
+                        .models_used
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    if agent.models_used.len() > 1 {
+                        multi_model_fallback_rows += 1;
+                    }
+                    let raw_cost = agent
+                        .declared_cost()
+                        .map(|c| c.resolve(&mut unparseable_cost_rows))
+                        .unwrap_or(0.0);
+                    let raw_cost = sanitize_cost(raw_cost, &mut non_finite_cost_rows);
+                    let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
+                    let tokens = ccusage_token_breakdown(
+                        agent.input_tokens,
+                        agent.output_tokens,
+                        agent.cache_read_tokens,
+                        agent.cache_creation_tokens,
+                        agent.reasoning_output_tokens,
+                        &mut negative_values_clamped,
+                    );
+                    if cost > 0.0
+                        && tokens.total() == 0
+                        && !is_cursor_legacy_tokenless(&client, &model)
+                    {
+                        suspect_cost_rows += 1;
+                    }
+                    agent_total = agent_total.saturating_add(tokens.total());
+                    mb_cost += cost;
+                    add_row(day, &client, &model, tokens, cost);
+                } else {
+                    for mb in &agent.model_breakdowns {
+                        let (tokens, cost) = add_model_breakdown(
+                            day,
+                            &client,
+                            mb,
+                            &mut negative_values_clamped,
+                            &mut non_finite_cost_rows,
+                            &mut suspect_cost_rows,
+                        );
+                        agent_total = agent_total.saturating_add(tokens);
+                        mb_cost += cost;
+                    }
+                }
 
-            add_row(day, &client, &mb.model_name, tokens, cost);
+                // Each agent entry declares its own `totalTokens`, so the
+                // row-level cross-check has a per-agent counterpart: it is what
+                // catches one agent's buckets being mapped through twice on a
+                // day whose row total still happens to add up.
+                if let Some(declared) = agent.total_tokens.filter(|t| *t > 0) {
+                    if tokens_diverge(agent_total, declared) {
+                        breakdown_reconciliation_warnings.push(format!(
+                            "{date}: agent '{}' imported {agent_total} token(s) but its own totalTokens reports {declared}",
+                            agent.agent
+                        ));
+                    }
+                }
+
+                mb_total = mb_total.saturating_add(agent_total);
+            }
         }
 
         // ccusage always populates the aggregate scalars alongside the
@@ -748,7 +881,54 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
         non_finite_cost_rows,
         multi_model_fallback_rows,
         breakdown_reconciliation_warnings,
+        agent_attributed_rows,
     })
+}
+
+/// Convert one ccusage model breakdown into a tokscale row.
+///
+/// Returns the row's tokens in ccusage's *own* vocabulary (`total()` re-adds
+/// the reasoning that [`ccusage_token_breakdown`] moved out of `output`) plus
+/// its cost, so callers can reconcile against the scalars the export declares.
+fn add_model_breakdown(
+    day: &mut DayBuilder,
+    client: &str,
+    mb: &CcusageModelBreakdown,
+    negative_values_clamped: &mut usize,
+    non_finite_cost_rows: &mut usize,
+    suspect_cost_rows: &mut usize,
+) -> (i64, f64) {
+    let tokens = ccusage_token_breakdown(
+        mb.input_tokens,
+        mb.output_tokens,
+        mb.cache_read_tokens,
+        mb.cache_creation_tokens,
+        mb.reasoning_output_tokens,
+        negative_values_clamped,
+    );
+    let raw_cost = sanitize_cost(mb.cost, non_finite_cost_rows);
+    let cost = clamp_f64(raw_cost, negative_values_clamped);
+    if cost > 0.0 && tokens.total() == 0 && !is_cursor_legacy_tokenless(client, &mb.model_name) {
+        *suspect_cost_rows += 1;
+    }
+    let total = tokens.total();
+    add_row(day, client, &mb.model_name, tokens, cost);
+    (total, cost)
+}
+
+/// Take the client from a `--by-agent` entry, which states it outright.
+///
+/// Nothing is inferred here: the row already says which agent produced the
+/// usage, so the only work left is mapping ccusage's spelling onto tokscale's
+/// client id and flagging an id tokscale does not register. Every id in
+/// ccusage's `BUILT_IN_AGENT_NAMES` is registered today, so the warning path
+/// exists for ids added upstream before they are added here.
+fn attribute_agent(agent: &str, unknown: &mut BTreeSet<String>) -> String {
+    let client = normalize_client_id(agent);
+    if ClientId::from_str(&client).is_none() {
+        unknown.insert(client.clone());
+    }
+    client
 }
 
 /// Resolve a model to its client, recording anything unattributable so the
@@ -1346,6 +1526,59 @@ mod tests {
       ]
     }"#;
 
+    /// The same day as [`CCUSAGE_MIXED`] captured with `--by-agent`: the row
+    /// keeps its merged `modelBreakdowns` and gains an `agents` array whose
+    /// entries carry the per-agent split. Field names and nesting are copied
+    /// from a real `ccusage daily --by-agent --json` capture (ccusage 20.0.20).
+    const CCUSAGE_BY_AGENT: &str = r#"{
+      "daily": [
+        {
+          "agent": "all",
+          "period": "2026-08-14",
+          "inputTokens": 1100,
+          "outputTokens": 2200,
+          "cacheCreationTokens": 300,
+          "cacheReadTokens": 4400,
+          "totalCost": 30.0,
+          "totalTokens": 8000,
+          "metadata": { "agents": ["claude", "codex"] },
+          "modelsUsed": ["claude-opus-5", "gpt-5.6-sol"],
+          "modelBreakdowns": [
+            { "modelName": "claude-opus-5", "cost": 20.0, "inputTokens": 100,
+              "outputTokens": 200, "cacheReadTokens": 400, "cacheCreationTokens": 300 },
+            { "modelName": "gpt-5.6-sol", "cost": 10.0, "inputTokens": 1000,
+              "outputTokens": 2000, "cacheReadTokens": 4000, "cacheCreationTokens": 0,
+              "reasoningOutputTokens": 700 }
+          ],
+          "agents": [
+            {
+              "agent": "claude",
+              "inputTokens": 100, "outputTokens": 200,
+              "cacheCreationTokens": 300, "cacheReadTokens": 400,
+              "totalTokens": 1000, "totalCost": 20.0,
+              "modelsUsed": ["claude-opus-5"],
+              "modelBreakdowns": [
+                { "modelName": "claude-opus-5", "cost": 20.0, "inputTokens": 100,
+                  "outputTokens": 200, "cacheReadTokens": 400, "cacheCreationTokens": 300 }
+              ]
+            },
+            {
+              "agent": "codex",
+              "inputTokens": 1000, "outputTokens": 2000,
+              "cacheCreationTokens": 0, "cacheReadTokens": 4000,
+              "totalTokens": 7000, "totalCost": 10.0,
+              "modelsUsed": ["gpt-5.6-sol"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.6-sol", "cost": 10.0, "inputTokens": 1000,
+                  "outputTokens": 2000, "cacheReadTokens": 4000, "cacheCreationTokens": 0,
+                  "reasoningOutputTokens": 700 }
+              ]
+            }
+          ]
+        }
+      ]
+    }"#;
+
     fn client_rows(out: &ImportOutcome, day: usize) -> Vec<(String, String)> {
         out.graph.contributions[day]
             .clients
@@ -1372,6 +1605,149 @@ mod tests {
         assert!((claude.cost - 20.0).abs() < 1e-9);
         assert!((codex.cost - 10.0).abs() < 1e-9);
         assert!(out.unknown_clients.is_empty());
+    }
+
+    #[test]
+    fn ccusage_by_agent_matches_the_family_guess_when_families_are_disjoint() {
+        // Same day, same numbers, both shapes. Claude and Codex models belong
+        // to different families here, so the guess was already right and the
+        // per-agent path must not move a single token.
+        let guessed = parse_ccusage_export(CCUSAGE_MIXED).unwrap();
+        let declared = parse_ccusage_export(CCUSAGE_BY_AGENT).unwrap();
+        assert_eq!(client_rows(&declared, 0), client_rows(&guessed, 0));
+        assert_eq!(
+            declared.graph.contributions[0].token_breakdown,
+            guessed.graph.contributions[0].token_breakdown
+        );
+        assert_eq!(declared.agent_attributed_rows, 1);
+        assert_eq!(guessed.agent_attributed_rows, 0);
+    }
+
+    #[test]
+    fn ccusage_by_agent_reconciles_against_each_agent_declared_total() {
+        // Every `agents` entry states its own totalTokens. That is the
+        // per-agent counterpart of the row-level cross-check, and it is what
+        // would catch one agent's buckets being mapped through twice.
+        let out = parse_ccusage_export(CCUSAGE_BY_AGENT).unwrap();
+        let claude = &out.graph.contributions[0].clients[0];
+        let codex = &out.graph.contributions[0].clients[1];
+        assert_eq!(claude.tokens.total(), 1000, "claude's declared totalTokens");
+        assert_eq!(codex.tokens.total(), 7000, "codex's declared totalTokens");
+        assert_eq!(out.graph.contributions[0].totals.tokens, 8000);
+        assert!(out.breakdown_reconciliation_warnings.is_empty());
+    }
+
+    #[test]
+    fn ccusage_by_agent_separates_two_agents_sharing_one_model() {
+        // The case the family guess cannot answer: OpenCode drives Claude
+        // models, so both agents report `claude-opus-5` and ccusage merges the
+        // two into one row-level breakdown. Reading `agents` keeps them apart;
+        // reading the merged row would hand OpenCode's whole day to Claude.
+        let json = r#"{"daily":[{"period":"2026-08-14","agent":"all",
+            "inputTokens":300,"outputTokens":600,"cacheCreationTokens":0,"cacheReadTokens":0,
+            "totalTokens":900,"totalCost":9.0,
+            "metadata":{"agents":["claude","opencode"]},
+            "modelsUsed":["claude-opus-5"],
+            "modelBreakdowns":[{"modelName":"claude-opus-5","cost":9.0,"inputTokens":300,
+              "outputTokens":600,"cacheReadTokens":0,"cacheCreationTokens":0}],
+            "agents":[
+              {"agent":"claude","inputTokens":100,"outputTokens":200,"cacheCreationTokens":0,
+               "cacheReadTokens":0,"totalTokens":300,"totalCost":3.0,
+               "modelsUsed":["claude-opus-5"],
+               "modelBreakdowns":[{"modelName":"claude-opus-5","cost":3.0,"inputTokens":100,
+                 "outputTokens":200,"cacheReadTokens":0,"cacheCreationTokens":0}]},
+              {"agent":"opencode","inputTokens":200,"outputTokens":400,"cacheCreationTokens":0,
+               "cacheReadTokens":0,"totalTokens":600,"totalCost":6.0,
+               "modelsUsed":["claude-opus-5"],
+               "modelBreakdowns":[{"modelName":"claude-opus-5","cost":6.0,"inputTokens":200,
+                 "outputTokens":400,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(
+            client_rows(&out, 0),
+            vec![
+                ("claude".to_string(), "claude-opus-5".to_string()),
+                ("opencode".to_string(), "claude-opus-5".to_string()),
+            ]
+        );
+        assert_eq!(out.graph.contributions[0].clients[0].tokens.total(), 300);
+        assert_eq!(out.graph.contributions[0].clients[1].tokens.total(), 600);
+        assert!(out.unknown_clients.is_empty());
+        assert_eq!(out.graph.contributions[0].totals.tokens, 900);
+    }
+
+    #[test]
+    fn ccusage_by_agent_attributes_agents_the_family_guess_cannot() {
+        // `model_family` knows three families; ccusage names sixteen agents.
+        // On a shared day the other thirteen fall through to `unknown` and the
+        // export is reported as unsubmittable. Their own entries name them.
+        let json = r#"{"daily":[{"period":"2026-08-14","agent":"all",
+            "totalTokens":30,"totalCost":2.0,
+            "metadata":{"agents":["amp","droid"]},
+            "modelsUsed":["amp-fast","droid-core"],
+            "modelBreakdowns":[
+              {"modelName":"amp-fast","cost":1.0,"inputTokens":10,"outputTokens":5,
+               "cacheReadTokens":0,"cacheCreationTokens":0},
+              {"modelName":"droid-core","cost":1.0,"inputTokens":10,"outputTokens":5,
+               "cacheReadTokens":0,"cacheCreationTokens":0}],
+            "agents":[
+              {"agent":"amp","totalTokens":15,"totalCost":1.0,"modelsUsed":["amp-fast"],
+               "modelBreakdowns":[{"modelName":"amp-fast","cost":1.0,"inputTokens":10,
+                 "outputTokens":5,"cacheReadTokens":0,"cacheCreationTokens":0}]},
+              {"agent":"droid","totalTokens":15,"totalCost":1.0,"modelsUsed":["droid-core"],
+               "modelBreakdowns":[{"modelName":"droid-core","cost":1.0,"inputTokens":10,
+                 "outputTokens":5,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(
+            client_rows(&out, 0),
+            vec![
+                ("amp".to_string(), "amp-fast".to_string()),
+                ("droid".to_string(), "droid-core".to_string()),
+            ]
+        );
+        assert!(
+            out.unknown_clients.is_empty(),
+            "the row names both agents, so nothing is unattributable"
+        );
+    }
+
+    #[test]
+    fn ccusage_by_agent_entry_without_breakdowns_uses_its_own_aggregate() {
+        // Mirrors the row-level fallback: an entry with no per-model split
+        // still belongs to its named agent, not to a guessed one.
+        let json = r#"{"daily":[{"period":"2026-08-14","agent":"all",
+            "totalTokens":15,"totalCost":1.0,
+            "metadata":{"agents":["goose"]},
+            "modelsUsed":["mystery-1"],
+            "agents":[{"agent":"goose","inputTokens":10,"outputTokens":5,
+              "totalTokens":15,"totalCost":1.0,"modelsUsed":["mystery-1"]}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        assert_eq!(
+            client_rows(&out, 0),
+            vec![("goose".to_string(), "mystery-1".to_string())]
+        );
+        assert_eq!(out.multi_model_fallback_rows, 0);
+        assert!(out.unknown_clients.is_empty());
+    }
+
+    #[test]
+    fn ccusage_by_agent_warns_when_an_agent_total_disagrees() {
+        // A row total that still adds up can hide one agent's buckets being
+        // counted twice; the per-agent cross-check is what sees it.
+        let json = r#"{"daily":[{"period":"2026-08-14","agent":"all",
+            "totalTokens":30,"totalCost":2.0,
+            "metadata":{"agents":["claude"]},
+            "modelsUsed":["claude-opus-5"],
+            "agents":[{"agent":"claude","inputTokens":10,"outputTokens":5,
+              "totalTokens":900,"totalCost":1.0,"modelsUsed":["claude-opus-5"],
+              "modelBreakdowns":[{"modelName":"claude-opus-5","cost":1.0,"inputTokens":10,
+                "outputTokens":5,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}]}"#;
+        let out = parse_ccusage_export(json).unwrap();
+        let warning = out
+            .breakdown_reconciliation_warnings
+            .iter()
+            .find(|w| w.contains("agent 'claude'"))
+            .expect("the agent's own totalTokens must be cross-checked");
+        assert!(warning.contains("900"), "{warning}");
     }
 
     #[test]
