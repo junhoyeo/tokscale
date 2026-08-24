@@ -1948,17 +1948,43 @@ fn https_rpc_request(
     method: &str,
     body: &Value,
 ) -> Result<Value> {
-    // The idea is to bypass tokio-native-tls SChannel renegotiation deadlocks on Windows
-    // by giving the task to the native OS curl.exe
+    // On Windows, the reqwest (rustls) request to the local DesktopAgent
+    // stalls until the timeout, while the in-box curl.exe (SChannel) completes
+    // the same request instantly (#1129). The mechanism is unverified, so the
+    // request is handed to curl.exe instead of guessing at a rustls-side fix.
+    // `--http1.1` is a defensive pin: unlike this workspace's reqwest build
+    // (no `http2` feature), curl can negotiate h2 via ALPN.
     #[cfg(target_os = "windows")]
     {
+        // curl config-file values are enclosed in double quotes, inside which
+        // backslashes and double quotes must be backslash-escaped.
+        fn curl_config_quote(value: &str) -> String {
+            let mut quoted = String::with_capacity(value.len() + 2);
+            quoted.push('"');
+            for ch in value.chars() {
+                if matches!(ch, '\\' | '"') {
+                    quoted.push('\\');
+                }
+                quoted.push(ch);
+            }
+            quoted.push('"');
+            quoted
+        }
+
         let url = format!(
             "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
             connection.port, method
         );
         let body_str = serde_json::to_string(body)?;
 
-        let output = std::process::Command::new("curl.exe")
+        // Resolve curl.exe by absolute path: a PATH lookup can be shadowed by
+        // a user-writable directory, handing the CSRF token to an impostor.
+        let system32_curl = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Windows"))
+            .join("System32\\curl.exe");
+
+        let mut child = std::process::Command::new(&system32_curl)
             .args([
                 "-k",
                 "-sS",
@@ -1972,24 +1998,76 @@ fn https_rpc_request(
                 "Content-Type: application/json",
                 "-H",
                 "Connect-Protocol-Version: 1",
-                "-H",
-                &format!("X-Codeium-Csrf-Token: {}", connection.csrf_token),
-                "-d",
-                &body_str,
+                "-K",
+                "-",
+                "--write-out",
+                "\\n%{http_code}",
             ])
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| "Failed to execute curl.exe for Windows RPC fallback")?;
+
+        // The CSRF token and body ride stdin (`-K -`) rather than argv, which
+        // any same-user process can read.
+        let config = format!(
+            "header = {}\ndata = {}\n",
+            curl_config_quote(&format!("X-Codeium-Csrf-Token: {}", connection.csrf_token)),
+            curl_config_quote(&body_str),
+        );
+        child
+            .stdin
+            .take()
+            .context("curl.exe stdin unavailable for Windows RPC fallback")?
+            .write_all(config.as_bytes())
+            .context("Failed to write curl.exe config for Windows RPC fallback")?;
+
+        let output = child
+            .wait_with_output()
             .with_context(|| "Failed to execute curl.exe for Windows RPC fallback")?;
 
         if !output.status.success() {
             anyhow::bail!(
                 "Windows curl.exe RPC fallback failed (exit code {}): {}",
-                output.status.code().unwrap_or(0),
+                output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
                 String::from_utf8_lossy(&output.stderr)
             );
         }
 
-        let response_body = String::from_utf8_lossy(&output.stdout);
-        Ok(serde_json::from_str(&response_body)?)
+        if output.stdout.len() > MAX_RPC_BODY_BYTES {
+            anyhow::bail!(
+                "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
+                output.stdout.len()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (response_body, status_line) = stdout.rsplit_once('\n').with_context(|| {
+            format!("curl.exe returned no HTTP status for Antigravity RPC {method}")
+        })?;
+        let status: u16 = status_line.trim().parse().with_context(|| {
+            format!(
+                "curl.exe returned unparseable HTTP status {:?} for Antigravity RPC {method}",
+                status_line.trim()
+            )
+        })?;
+        if !(200..300).contains(&status) {
+            anyhow::bail!(
+                "Antigravity HTTPS RPC {} failed with status {}: {}",
+                method,
+                status,
+                response_body
+            );
+        }
+
+        serde_json::from_str(response_body).with_context(|| {
+            format!("Failed to parse Antigravity RPC {method} response from curl.exe")
+        })
     }
 
     #[cfg(not(target_os = "windows"))]
