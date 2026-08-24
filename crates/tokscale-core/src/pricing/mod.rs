@@ -169,6 +169,10 @@ impl PricingService {
                 },
             );
         }
+        // Grok 4.6: $2.00/$6.00 per 1M input/output, $0.50/M cache read;
+        // >200K-context tier $4.00/$12.00 per 1M, $1.00/M cache read
+        // Source: Cursor model docs (cursor.com/docs/models#model-pricing);
+        // rates mirror models.dev xai/grok-4.6 including the >200K context tier
         overrides.insert(
             "grok-4.6".to_string(),
             ModelPricing {

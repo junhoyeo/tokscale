@@ -418,8 +418,14 @@ mod tests {
             msg.workspace_key.as_deref(),
             Some("/Users/alice/current-opencode-repo")
         );
-        assert_eq!(msg.workspace_label.as_deref(), Some("current-opencode-repo"));
-        assert_eq!(msg.session_title.as_deref(), Some("Current OpenCode session"));
+        assert_eq!(
+            msg.workspace_label.as_deref(),
+            Some("current-opencode-repo")
+        );
+        assert_eq!(
+            msg.session_title.as_deref(),
+            Some("Current OpenCode session")
+        );
         assert_eq!(msg.dedup_key.as_deref(), Some("msg_current_v2"));
     }
 
@@ -450,7 +456,11 @@ mod tests {
         drop(conn);
 
         let messages = parse_opencode_sqlite(&db_path);
-        assert_eq!(messages.len(), 1, "usage should parse without session metadata");
+        assert_eq!(
+            messages.len(),
+            1,
+            "usage should parse without session metadata"
+        );
         assert_eq!(messages[0].workspace_key, None);
         assert_eq!(messages[0].session_title, None);
         assert_eq!(

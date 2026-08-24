@@ -36,6 +36,10 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-for-coding", "kimi-k2.7-code");
     m.insert("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed");
     m.insert("k3", "kimi-k3");
+    // models.dev also publishes `kimi-for-coding/k3-256k` at $0.00, so the
+    // long-context spelling must resolve to the same real moonshotai row as
+    // bare `k3` instead of landing on the zero-priced subscription namespace.
+    m.insert("k3-256k", "kimi-k3");
     // Kimi Work (the Kimi desktop app's agent mode) embeds the same kimi-code
     // kernel and writes the same wire protocol, but reports its own ids.
     // Unaliased they fuzzy-match badly: `k2d6-agent` landed on
@@ -256,6 +260,10 @@ mod tests {
             Some("kimi-k2.7-code-highspeed")
         );
         assert_eq!(resolve_alias("k3"), Some("kimi-k3"));
+        // The long-context spelling has its own zero-priced
+        // `kimi-for-coding/k3-256k` row on models.dev, so it must resolve to
+        // the same real moonshotai row as bare `k3`.
+        assert_eq!(resolve_alias("k3-256k"), Some("kimi-k3"));
     }
 
     #[test]
@@ -294,6 +302,19 @@ mod tests {
         ] {
             assert_eq!(resolve_alias(tier), Some("grok-4.6"), "tier: {tier}");
             assert!(uses_cursor_pricing(tier), "tier: {tier}");
+        }
+    }
+
+    #[test]
+    fn cursor_pricing_alias_keys_stay_disjoint_from_model_aliases() {
+        // `resolve_alias` consults MODEL_ALIASES first, so a key present in
+        // both maps would resolve through MODEL_ALIASES while
+        // `uses_cursor_pricing` still forced the Cursor catalog for it.
+        for key in super::CURSOR_PRICING_ALIASES.keys() {
+            assert!(
+                !super::MODEL_ALIASES.contains_key(key),
+                "{key} is in both CURSOR_PRICING_ALIASES and MODEL_ALIASES"
+            );
         }
     }
 

@@ -4352,6 +4352,56 @@ mod tests {
     }
 
     #[test]
+    fn hinted_kimi_k3_selects_the_real_moonshotai_row_with_provider_scoped_evidence() {
+        // models.dev carries the `kimi-for-coding/*` subscription namespace at
+        // $0.00 alongside the real `moonshotai/kimi-k3` row. A Kimi client
+        // reporting model `k3` with a kimi/moonshot provider hint must price
+        // at the real moonshotai rates with provider-scoped evidence instead
+        // of landing on the zero-priced subscription row.
+        let models_dev = HashMap::from([
+            (
+                "kimi-for-coding/k3".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshotai/kimi-k3".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        for hint in ["kimi_for_coding", "moonshot"] {
+            let result = lookup
+                .lookup_with_provider("k3", Some(hint))
+                .expect("the hinted Kimi alias must price");
+
+            assert_eq!(result.source, "Models.dev", "hint: {hint}");
+            assert_eq!(result.matched_key, "moonshotai/kimi-k3", "hint: {hint}");
+            assert_eq!(
+                result.evidence.kind,
+                ResolutionKind::ProviderScoped,
+                "hint: {hint}"
+            );
+            assert!(result.evidence.alias_applied, "hint: {hint}");
+            assert!(result.evidence.is_submission_safe(), "hint: {hint}");
+        }
+    }
+
+    #[test]
     fn cursor_specific_aliases_explicitly_select_cursor_pricing() {
         let cursor = HashMap::from([(
             "grok-4.6".to_string(),
