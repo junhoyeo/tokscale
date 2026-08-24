@@ -493,7 +493,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(
                 day.date.format("%a, %b %d, %Y").to_string(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(app.theme.foreground)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
@@ -558,7 +558,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                         Span::styled("●", Style::default().fg(model_color)),
                         Span::styled(
                             format!(" {}", truncate_model_name(&model_info.display_name, 25)),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(app.theme.foreground),
                         ),
                     ]));
 

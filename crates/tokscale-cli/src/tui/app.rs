@@ -872,7 +872,9 @@ impl App {
             KeyCode::Char('p') => {
                 self.cycle_theme();
             }
-            KeyCode::Char('l') | KeyCode::Char('L') => {
+            KeyCode::Char('l') | KeyCode::Char('L')
+                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 self.toggle_light_mode();
             }
             KeyCode::Char('r') => {
@@ -1908,20 +1910,15 @@ impl App {
             Theme::from_name_for_current_terminal(name)
         };
         self.dialog_stack.set_theme(self.theme.clone());
-        if let Err(e) = self.settings.save() {
-            self.set_status(&format!(
-                "Light mode: {} (save failed: {})",
-                self.settings.tui_light_mode, e
-            ));
+        let state = if self.settings.tui_light_mode {
+            "on"
         } else {
-            self.set_status(&format!(
-                "Light mode: {}",
-                if self.settings.tui_light_mode {
-                    "on"
-                } else {
-                    "off"
-                }
-            ));
+            "off"
+        };
+        if let Err(e) = self.settings.save() {
+            self.set_status(&format!("Light mode: {} (save failed: {})", state, e));
+        } else {
+            self.set_status(&format!("Light mode: {}", state));
         }
     }
 
