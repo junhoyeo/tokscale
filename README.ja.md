@@ -74,7 +74,7 @@
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR` でオーバーライド可能) |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（`KIMCHI_CODING_AGENT_DIR` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（`REASONIX_STATE_HOME` または `REASONIX_HOME` でオーバーライド可能） |
-| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (`KIMI_CODE_HOME` でオーバーライド可能) |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (`KIMI_CODE_HOME` でオーバーライド可能) kimi-work: デスクトップ app-data ルート（自動検出） |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) |
@@ -180,7 +180,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - 設定可能なカラーテーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、fx、Oh My Piの使用量を追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、fx、Oh My Piの使用量を追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -561,6 +561,21 @@ tokscale logout
 ```
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
+
+#### 価格未設定の使用量は送信から除外されます
+
+送信前に、すべてのメッセージが、そのメッセージが実際に使用したトークンバケット（入力・出力・キャッシュ読み・キャッシュ書き）をすべてカバーする権威ある価格に解決されている必要があります。価格を解決できないメッセージはスキップされ、`Warning: excluded N unpriced provider/model message(s)` として報告されます。未知のモデルが推測された料金で送信されることはなく、残りの価格済み使用量は通常どおり送信されます。
+
+除外理由：
+
+- `no authoritative model-to-price mapping` — モデル ID が LiteLLM・OpenRouter・models.dev・カスタム価格のいずれにも存在しません。
+- `generic routing label has no authoritative model-to-price mapping` — その ID はルーターラベル（`auto`、`gemini-default` など）で、リクエストごとに実際のモデルが変わるため、そのままでは拒否されます。実際のレートが分かっている場合は、`custom-pricing.json` に明示的なエントリを追加することが公式にサポートされた方法です。
+- `pricing does not cover every populated token bucket` — 価格行は見つかったものの、実際に使用されたトークンのレート（多くの場合キャッシュ読みまたはキャッシュ書き）が欠けています。
+- `model price match does not establish the requested provider` — モデル ID のモデル部分のみ、またはプロバイダー接頭辞の推測で価格行が見つかっただけで、その料金が実際のプロバイダーの料金である確証がありません。
+- `model price match does not exactly name the requested model` — 曖昧一致で価格行が見つかりましたが、そのキーが実際に使用したモデルを正確に指している保証がありません。
+- `model price lookup is ambiguous across non-equivalent candidates` — 複数の候補行が一致しましたが、それぞれ異なる価格を示しています。
+
+除外された使用量を含めるには、`~/.config/tokscale/custom-pricing.json` に完全一致のエントリを追加し——明示的な `0` は本物の無料モデルの宣言です——その後 `tokscale submit --dry-run` を再実行して警告がなくなることを確認してください。`tokscale pricing <model-id>` でどのエントリが一致したかを確認できます。このファイルのキーはモデル ID のみです（警告に表示される `provider/model` のうち `model` の部分）。
 
 ### Autosubmit
 
@@ -1457,6 +1472,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | `KIMCHI_CODING_AGENT_DIR` 環境変数でオーバーライド可能；Pi互換のJSONLセッション |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | すべてのプラットフォームで同じパス |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | すべてのプラットフォームで同じパス |
+| Kimi Work (desktop) | `~/Library/Application Support/kimi-desktop/` | `%APPDATA%\kimi-desktop\` | Linux ビルドなし |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | すべてのプラットフォームで同じパス |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorageタスクログ |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorageタスクログ |

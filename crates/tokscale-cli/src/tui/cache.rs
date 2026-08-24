@@ -86,6 +86,17 @@ fn legacy_cache_files() -> Vec<PathBuf> {
 struct CachedTUIData {
     #[serde(default)]
     schema_version: u32,
+    /// `parser_generation()` at write time.
+    ///
+    /// `schema_version` covers the shape of this file; this covers the shape of
+    /// the *numbers inside it*. A parser fix changes totals without changing
+    /// either the file layout or any of the keys below, so without this a
+    /// pre-fix aggregate is indistinguishable from a current one.
+    ///
+    /// Defaults to 0 for files written before this field existed, which never
+    /// matches a real generation, so those are rebuilt once.
+    #[serde(default)]
+    parser_generation: u64,
     timestamp: u64,
     enabled_clients: Vec<String>,
     #[serde(default)]
@@ -778,6 +789,13 @@ fn classify_cached_payload(
     if cached.schema_version > CACHE_SCHEMA_VERSION {
         return CacheResult::Miss;
     }
+    // Miss, not Stale. Everything below can still hand back `Stale`, and
+    // `decide_initial_data` paints `Stale` exactly like `Fresh` -- so treating a
+    // parser change as merely stale would show the pre-fix totals anyway, which
+    // is the whole thing this guards against.
+    if cached.parser_generation != tokscale_core::parser_generation() {
+        return CacheResult::Miss;
+    }
     let schema_outdated = cached.schema_version < CACHE_SCHEMA_VERSION;
     let cached_group_by = cached
         .group_by
@@ -942,6 +960,7 @@ pub fn save_cached_data(
 
     let cached = CachedTUIData {
         schema_version: CACHE_SCHEMA_VERSION,
+        parser_generation: tokscale_core::parser_generation(),
         timestamp,
         enabled_clients: clients_vec,
         include_synthetic,
@@ -982,6 +1001,21 @@ pub fn save_cached_data(
 
 #[cfg(test)]
 mod tests {
+
+    /// Stamps the current parser generation into a hand-written cache fixture.
+    ///
+    /// The fixtures below are raw JSON on purpose -- they pin legacy on-disk
+    /// shapes that no current writer produces. `parserGeneration` is the one
+    /// field that cannot be pinned: it is computed from every client's
+    /// `parser_version`, so hardcoding it would make each of these files need
+    /// editing on every parser bump. Tests that are about generation
+    /// mismatch set it themselves instead of going through this.
+    fn with_current_generation(json: &str) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(json).expect("fixture is valid JSON");
+        value["parserGeneration"] = serde_json::json!(tokscale_core::parser_generation());
+        value.to_string()
+    }
     use super::*;
     use serial_test::serial;
     use std::ffi::OsString;
@@ -1227,6 +1261,68 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_from_a_different_parser_generation_misses() {
+        // The point of the field. A parser fix changes the totals without
+        // changing the file layout, the group_by, the scope or the client set,
+        // so every other check here passes and the pre-fix numbers get handed
+        // back. Same payload as the fresh case, only the generation differs.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&with_current_generation(LEGACY_FALLBACK_PAYLOAD)).unwrap();
+        value["parserGeneration"] =
+            serde_json::json!(tokscale_core::parser_generation().wrapping_add(1));
+
+        let payload: CachedTUIData = serde_json::from_value(value).unwrap();
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let result = classify_cached_payload(
+            payload,
+            &clients,
+            &GroupBy::Model,
+            &CacheReportScope::default(),
+        );
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "a stale parser generation must Miss, not Stale -- Stale is painted just like Fresh; got {}",
+            other_variant_name(&result)
+        );
+    }
+
+    #[test]
+    fn a_cache_written_before_the_generation_field_misses() {
+        // Migration path. Files written before the field existed deserialize to
+        // 0, which no real generation equals, so they rebuild once on their own
+        // -- no schema bump needed to evict them.
+        let payload: CachedTUIData = serde_json::from_str(LEGACY_FALLBACK_PAYLOAD).unwrap();
+        assert_eq!(payload.parser_generation, 0, "pre-field files default to 0");
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let result = classify_cached_payload(
+            payload,
+            &clients,
+            &GroupBy::Model,
+            &CacheReportScope::default(),
+        );
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "a cache predating the field must rebuild; got {}",
+            other_variant_name(&result)
+        );
+    }
+
+    #[test]
+    fn parser_generation_is_stable_and_non_zero() {
+        // The value is persisted, so it must not vary between calls. This
+        // deliberately does not pin a literal: that would need editing on every
+        // parser bump, which is the maintenance burden the field removes.
+        assert_eq!(
+            tokscale_core::parser_generation(),
+            tokscale_core::parser_generation()
+        );
+        // 0 is the serde default for pre-field files, so a real generation must
+        // never collide with it.
+        assert_ne!(tokscale_core::parser_generation(), 0);
+    }
+
+    #[test]
     #[serial]
     fn load_cache_misses_when_report_scope_differs() {
         let temp_dir = TempDir::new().unwrap();
@@ -1236,7 +1332,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1259,6 +1356,7 @@ mod tests {
     "longestStreak": 0
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1318,7 +1416,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1336,6 +1435,7 @@ mod tests {
     "longestStreak": 0
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1362,7 +1462,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
@@ -1376,6 +1477,7 @@ mod tests {
     "longestStreak": 0
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1396,7 +1498,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 4,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1412,6 +1515,7 @@ mod tests {
     "longestStreak": 0
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1436,7 +1540,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 3,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1477,6 +1582,7 @@ mod tests {
     "longestStreak": 1
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1505,7 +1611,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
@@ -1589,6 +1696,7 @@ mod tests {
     "longestStreak": 1
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1618,7 +1726,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 5,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1662,6 +1771,7 @@ mod tests {
     "longestStreak": 1
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1686,7 +1796,8 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(
             &cache_path,
-            r#"{
+            with_current_generation(
+                r#"{
   "schemaVersion": 3,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
@@ -1727,6 +1838,7 @@ mod tests {
     "longestStreak": 1
   }
 }"#,
+            ),
         )
         .unwrap();
 
@@ -1789,7 +1901,7 @@ mod tests {
         let legacy = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
         fs::create_dir_all(canonical.parent().unwrap()).unwrap();
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, LEGACY_FALLBACK_PAYLOAD).unwrap();
+        fs::write(&legacy, with_current_generation(LEGACY_FALLBACK_PAYLOAD)).unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         let scope = CacheReportScope::default();

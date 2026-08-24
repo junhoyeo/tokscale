@@ -50,6 +50,30 @@ fn emit(text: &str) {
     stdout.flush().expect("failed to flush stdout");
 }
 
+/// Spawns a grandchild that inherits stdout and outlives this process, so the
+/// write end of the parent's pipe stays open after this process is gone.
+///
+/// Deliberately never waited on -- reaping it would close the write end and
+/// destroy the condition under test. The PID is published to
+/// `TOKSCALE_FAKE_CODEX_PIDFILE` when set so the test can reap it in teardown
+/// rather than leaving it to age out on its own.
+fn spawn_stdout_holder() {
+    let exe = std::env::current_exe().expect("current_exe");
+    #[allow(clippy::zombie_processes)]
+    let holder = std::process::Command::new(exe)
+        .env("TOKSCALE_FAKE_CODEX_MODE", "slow")
+        .env_remove("TOKSCALE_FAKE_CODEX_PIDFILE")
+        .stdout(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn stdout holder");
+
+    if let Ok(path) = std::env::var("TOKSCALE_FAKE_CODEX_PIDFILE") {
+        let _ = std::fs::write(path, holder.id().to_string());
+    }
+}
+
 fn main() {
     let mode = std::env::var("TOKSCALE_FAKE_CODEX_MODE").unwrap_or_default();
 
@@ -64,6 +88,27 @@ fn main() {
         // so the parent's timeout always wins by a margin the runner cannot eat
         // into. See `FAKE_CODEX_SLOW_SLEEP_SECS`.
         "slow" => std::thread::sleep(std::time::Duration::from_secs(FAKE_CODEX_SLOW_SLEEP_SECS)),
+        // #1049's shape. A grandchild inherits the stdout pipe and outlives the
+        // direct child, so killing the child does not close the write end and
+        // the parent's pump never reaches EOF. The grandchild must outlast the
+        // test's own upper bound, not merely the parent's deadline: a parent
+        // that waits for EOF unboundedly has to look *slower than the bound*,
+        // or the test cannot tell it apart from a parent that drained promptly.
+        // The direct child is killed at the deadline while the holder keeps the
+        // pipe open: the timeout branch of the drain.
+        "descendant" => {
+            spawn_stdout_holder();
+            std::thread::sleep(std::time::Duration::from_secs(FAKE_CODEX_SLOW_SLEEP_SECS));
+        }
+        // The direct child exits *successfully and immediately* while the holder
+        // keeps the pipe open, so `try_wait` observes a normal exit and
+        // `timed_out` stays false: the non-timeout branch of the drain. The
+        // parent has no deadline to fall back on here, which is what makes this
+        // shape distinct from `descendant`.
+        "descendant-exit" => {
+            spawn_stdout_holder();
+            emit("captured partial");
+        }
         _ => {
             eprintln!("unknown TOKSCALE_FAKE_CODEX_MODE");
             std::process::exit(2);

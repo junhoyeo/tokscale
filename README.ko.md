@@ -74,7 +74,7 @@
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/` (`KIMCHI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl` (`REASONIX_STATE_HOME` 또는 `REASONIX_HOME`으로 오버라이드 가능) |
-| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (override via `KIMI_CODE_HOME`) |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (override via `KIMI_CODE_HOME`) kimi-work: desktop app-data root (auto-discovered) |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) |
@@ -178,7 +178,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, fx, Oh My Pi 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, fx, Oh My Pi 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -557,6 +557,21 @@ tokscale logout
 ```
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
+
+#### 가격이 책정되지 않은 사용량은 제출에서 제외됩니다
+
+제출하기 전에 모든 메시지는 해당 메시지가 실제로 사용한 토큰 버킷(입력, 출력, 캐시 읽기, 캐시 쓰기)을 모두 커버하는 신뢰할 수 있는 가격으로 확인되어야 합니다. 가격을 확인할 수 없는 메시지는 건너뛰며 `Warning: excluded N unpriced provider/model message(s)` 경고로 보고됩니다. 알 수 없는 모델이 추측된 요금으로 제출되는 일은 없으며, 나머지 가격이 책정된 사용량은 정상적으로 제출됩니다.
+
+제외 사유:
+
+- `no authoritative model-to-price mapping` — 모델 ID가 LiteLLM, OpenRouter, models.dev, 사용자 지정 가격 어디에도 존재하지 않습니다.
+- `generic routing label has no authoritative model-to-price mapping` — 해당 ID는 라우팅 레이블(`auto`, `gemini-default` 등)로, 요청마다 실제 모델이 달라지므로 그대로는 거부됩니다. 실제 요금을 알고 있다면 `custom-pricing.json`에 명시적 항목을 추가하는 것이 공식적으로 지원되는 방법입니다.
+- `pricing does not cover every populated token bucket` — 가격 행을 찾았지만, 실제로 사용된 토큰(대개 캐시 읽기 또는 캐시 쓰기)에 대한 요금이 누락되었습니다.
+- `model price match does not establish the requested provider` — 모델 ID의 모델 부분만으로, 또는 공급자 접두사 추정으로 가격 행을 찾았을 뿐이어서 해당 요금이 실제 공급자의 요금이라고 확정할 수 없습니다.
+- `model price match does not exactly name the requested model` — 유사 일치로 가격 행을 찾았지만, 그 키가 실제로 사용한 모델을 정확히 가리킨다는 근거가 없습니다.
+- `model price lookup is ambiguous across non-equivalent candidates` — 여러 후보 행이 일치했지만 서로 다른 가격을 제시합니다.
+
+제외된 사용량을 포함하려면 `~/.config/tokscale/custom-pricing.json`에 정확히 일치하는 항목을 추가하세요(명시적인 `0`은 실제 무료 모델의 선언입니다). 그런 다음 `tokscale submit --dry-run`을 다시 실행하여 경고가 없어졌는지 확인하세요. `tokscale pricing <model-id>`로 어떤 항목이 일치했는지 확인할 수 있습니다. 이 파일의 키는 모델 ID 단독입니다 — 경고에 표시되는 `provider/model` 중 `model` 부분만 사용하세요.
 
 ### Autosubmit
 
@@ -1458,6 +1473,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | `KIMCHI_CODING_AGENT_DIR` 환경변수로 오버라이드 가능; Pi 호환 JSONL 세션 |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 모든 플랫폼에서 동일한 경로 |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | 모든 플랫폼에서 동일한 경로 |
+| Kimi Work (desktop) | `~/Library/Application Support/kimi-desktop/` | `%APPDATA%\kimi-desktop\` | Linux 빌드 없음 |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | 모든 플랫폼에서 동일한 경로 |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 작업 로그 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 작업 로그 |

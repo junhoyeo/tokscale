@@ -34,6 +34,11 @@ const LEGACY_CACHE_FORMAT_VERSION: u32 = 4;
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
+/// The pre-v2 monolith (`CACHE_FILENAME` in #327, dropped by #856).
+///
+/// Never read since v2 landed, and nothing rewrites it, so it is dead weight
+/// that only grows stale -- a real profile still had 155 MB of it from April.
+const LEGACY_MONOLITH_CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_SHARD_COUNT: usize = 256;
 const MAX_CACHE_SHARD_BYTES: u64 = 256 * 1024 * 1024;
 const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
@@ -62,6 +67,39 @@ fn cache_shard_dir() -> Option<PathBuf> {
 
 fn cache_lock_path() -> Option<PathBuf> {
     Some(cache_dir()?.join(CACHE_LOCK_FILENAME))
+}
+
+/// Deletes the pre-v2 monolithic cache file, once per process.
+///
+/// V2 deliberately never reads it (see the note on `CACHE_SHARD_DIRNAME`), so
+/// once the shard directory is in use the monolith is unreachable bytes. It is
+/// checked in all three historic homes because #473 moved the cache root and
+/// the old copies were left where they were.
+///
+/// Best-effort on purpose: a read-only cache dir, a permission problem, or a
+/// concurrent tokscale winning the race all just leave the file alone. The lock
+/// file sharing its stem is still live and is never touched here.
+///
+/// The `legacy_*` probes return `None` under `TOKSCALE_CONFIG_DIR`, so an
+/// isolated profile never reaches into the real cache locations to delete
+/// anything.
+fn remove_legacy_monolith_cache() {
+    let candidates = [
+        cache_dir(),
+        crate::paths::legacy_dirs_cache_dir(),
+        crate::paths::legacy_dot_cache_tokscale_dir(),
+    ];
+    for dir in candidates.into_iter().flatten() {
+        let _ = fs::remove_file(dir.join(LEGACY_MONOLITH_CACHE_FILENAME));
+    }
+}
+
+/// `Once` wrapper for the hot path. Split from the body above so tests can
+/// exercise the removal itself -- a process-wide `Once` fires for whichever
+/// test runs first and is invisible to every other one.
+fn remove_legacy_monolith_cache_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(remove_legacy_monolith_cache);
 }
 
 fn fallback_cache_dir() -> Option<PathBuf> {
@@ -942,6 +980,36 @@ impl CacheIdentity {
     }
 }
 
+/// One value identifying the parser generation of every client at once.
+///
+/// Derived caches store this so a `parser_version` bump invalidates them too.
+/// The source cache versions each client independently, but anything folded on
+/// top of it -- the TUI aggregate cache -- mixes all clients into one set of
+/// totals, so it cannot say which client a given number came from and has to
+/// rebuild whenever any of them changes.
+///
+/// Deliberately covers `ClientId::ALL` rather than only the enabled set. A
+/// derived cache that reads this is rebuilt in the background anyway (see
+/// `decide_initial_data`), so an unnecessary rebuild costs one first paint,
+/// while a missed one shows numbers we already know are wrong. Reordering
+/// `define_clients!` also changes the value; that is the same cheap trade.
+///
+/// FNV-1a rather than `DefaultHasher`: this value is persisted, and
+/// `DefaultHasher`'s output is explicitly not stable across Rust releases.
+pub fn parser_generation() -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut acc = FNV_OFFSET_BASIS;
+    for client in ClientId::ALL {
+        for byte in parser_version(client).to_le_bytes() {
+            acc ^= u64::from(byte);
+            acc = acc.wrapping_mul(FNV_PRIME);
+        }
+    }
+    acc
+}
+
 fn parser_version(client: ClientId) -> u32 {
     match client {
         // These clients accumulated parser-only invalidations under the old
@@ -1039,6 +1107,11 @@ fn parser_version(client: ClientId) -> u32 {
         // recognizes user tool-result records as continuations instead of
         // beginning a new turn, so cached turns must be reparsed.
         ClientId::Cline => 3,
+        // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
+        // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
+        // `Cost` (including explicit zero) is retained as provider-reported so
+        // repricing no longer drops the Team/Enterprise Cursor Token Rate.
+        ClientId::Cursor => 2,
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
@@ -1114,6 +1187,16 @@ fn parser_version(client: ClientId) -> u32 {
         // them. v6 entries carry a count on every record, which `sessionize`
         // reads as one session per record.
         ClientId::Droid => 7,
+        // v1->v2: `compaction/summary` events carry the provider-reported cost
+        // of DSH's summarize call and used to fall through unread, so v1
+        // entries undercount every session that compacted (#1152). DSH has not
+        // shipped in a release, so this only rebuilds caches written by builds
+        // from main.
+        // v2->v3: idless rows (which is every summary) fell back to a
+        // session-scoped dedup key, so a fork without `seedLength` counted the
+        // copied summary twice. The key now falls back to `seq`, so v2 entries
+        // carry keys that no longer match and must be reparsed.
+        ClientId::Dsh => 3,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -1582,6 +1665,10 @@ impl SourceMessageCache {
             );
             return;
         }
+        // The shard directory is now known-usable, which is the point at which
+        // the v1 monolith is provably unreachable. Doing it here rather than at
+        // startup keeps it off the path of runs that never touch the cache.
+        remove_legacy_monolith_cache_once();
         let lock_file = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -2594,6 +2681,46 @@ mod tests {
         env
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn legacy_monolith_cache_is_removed_but_the_live_lock_is_not() {
+        let temp_home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(temp_home.path());
+
+        let dir = cache_dir().expect("sandboxed cache dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let monolith = dir.join(LEGACY_MONOLITH_CACHE_FILENAME);
+        // The lock shares the stem with the monolith and is still live, so the
+        // cleanup has to be able to tell them apart.
+        let lock = dir.join(CACHE_LOCK_FILENAME);
+        let shards = dir.join(CACHE_SHARD_DIRNAME);
+        std::fs::write(&monolith, b"v1 monolith payload").unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::create_dir_all(&shards).unwrap();
+
+        remove_legacy_monolith_cache();
+
+        assert!(!monolith.exists(), "the v1 monolith must be deleted");
+        assert!(lock.exists(), "the live lock file must survive");
+        assert!(shards.exists(), "the v2 shard directory must survive");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn removing_the_legacy_monolith_is_idempotent_and_survives_a_missing_dir() {
+        // Runs on every cache load, so the common case is that there is nothing
+        // to delete -- and the cache dir may not exist yet on a first run.
+        let temp_home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(temp_home.path());
+
+        remove_legacy_monolith_cache();
+        remove_legacy_monolith_cache();
+
+        let dir = cache_dir().expect("sandboxed cache dir");
+        assert!(!dir.join(LEGACY_MONOLITH_CACHE_FILENAME).exists());
+    }
+
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
@@ -3116,6 +3243,11 @@ mod tests {
     #[test]
     fn test_micode_parser_version_invalidates_rows_without_cost_provenance() {
         assert_eq!(parser_version(ClientId::MiMoCode), 3);
+    }
+
+    #[test]
+    fn test_cursor_parser_version_invalidates_incorrect_token_and_cost_rows() {
+        assert_eq!(parser_version(ClientId::Cursor), 2);
     }
 
     #[test]

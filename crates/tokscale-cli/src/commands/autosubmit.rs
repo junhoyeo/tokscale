@@ -1843,6 +1843,13 @@ mod tests {
     }
 
     #[test]
+    // `render_systemd_spec` resolves the unit directory from `XDG_CONFIG_HOME`
+    // and the log path from the config dir (`TOKSCALE_CONFIG_DIR`), then
+    // creates that directory. Both are process-global and every sibling test
+    // that sets them is serial, so running this one in parallel with them
+    // reads a half-torn override — the failure surfaces as an `unwrap` on the
+    // `Err` from `create_dir_all`.
+    #[serial_test::serial]
     fn systemd_spec_uses_autosubmit_run() {
         let settings = AutosubmitSettings {
             interval_minutes: 120,

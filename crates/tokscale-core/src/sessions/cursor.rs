@@ -128,21 +128,25 @@ fn infer_provider(model: &str) -> &'static str {
     provider_identity::inferred_provider_from_model(model).unwrap_or("cursor")
 }
 
-/// Parse a cost string like "$0.50" or "0.50" to f64
-/// Returns 0.0 for empty strings, NaN values, or invalid formats
-fn parse_cost(cost_str: &str) -> f64 {
+/// Parse a cost string like "$0.50" or "0.50" as a finite, non-negative number.
+///
+/// `Some(0.0)` represents an explicit zero from Cursor. Missing, sentinel,
+/// invalid, negative, and non-finite values return `None` so callers can distinguish
+/// provider-reported zero cost from a row that still needs estimation.
+fn parse_finite_cost(cost_str: &str) -> Option<f64> {
     let cleaned = cost_str.replace(['$', ','], "");
     let trimmed = cleaned.trim();
 
-    // Handle empty, NaN, or non-numeric values (e.g., "Included", "-" in v3)
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("nan")
-        || !trimmed.chars().any(|c| c.is_ascii_digit())
-    {
-        return 0.0;
-    }
+    trimmed
+        .parse::<f64>()
+        .ok()
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
 
-    trimmed.parse().unwrap_or(0.0)
+/// Parse a cost string, defaulting missing or invalid values to zero.
+#[cfg(test)]
+fn parse_cost(cost_str: &str) -> f64 {
+    parse_finite_cost(cost_str).unwrap_or(0.0)
 }
 
 /// Parse a Cursor usage CSV file
@@ -236,7 +240,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             .parse()
             .unwrap_or(0);
         let cost_str = fields[cost_idx].trim().trim_matches('"');
-        let cost = parse_cost(cost_str);
+        let cost = parse_finite_cost(cost_str);
 
         // Skip empty or errored entries
         if model.is_empty() {
@@ -249,26 +253,26 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        // Cache write = input_with_cache_write - input_without_cache_write
-        let cache_write = (input_with_cache_write - input_without_cache_write).max(0);
-        // Input tokens = input_without_cache_write
-        let input = input_without_cache_write;
-
-        messages.push(UnifiedMessage::new(
+        // Cursor exports independent token buckets rather than cumulative totals.
+        let mut message = UnifiedMessage::new(
             "cursor",
             model,
             infer_provider(model),
             format!("cursor-{}-{}", account_id, date_str),
             timestamp,
             TokenBreakdown {
-                input: input.max(0),
+                input: input_without_cache_write.max(0),
                 output: output_tokens.max(0),
                 cache_read: cache_read.max(0),
-                cache_write, // Already clamped above with .max(0)
+                cache_write: input_with_cache_write.max(0),
                 reasoning: 0,
             },
-            cost.max(0.0),
-        ));
+            cost.unwrap_or(0.0).max(0.0),
+        );
+        if cost.is_some() {
+            message.mark_provider_reported_cost();
+        }
+        messages.push(message);
     }
 
     messages
@@ -378,6 +382,11 @@ mod tests {
         // v3 format values
         assert_eq!(parse_cost("Included"), 0.0);
         assert_eq!(parse_cost("-"), 0.0);
+        assert_eq!(parse_finite_cost("$0.00"), Some(0.0));
+        assert_eq!(parse_finite_cost("Included"), None);
+        assert_eq!(parse_finite_cost("-"), None);
+        assert_eq!(parse_finite_cost("inf"), None);
+        assert_eq!(parse_finite_cost("-0.50"), None);
     }
 
     #[test]
@@ -427,8 +436,12 @@ mod tests {
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[0].tokens.input, 5);
         assert_eq!(messages[0].tokens.output, 15);
-        assert_eq!(messages[0].tokens.cache_write, 5); // 10 - 5
+        assert_eq!(messages[0].tokens.cache_write, 10);
         assert!((messages[0].cost - 0.10).abs() < 0.001);
+        assert_eq!(
+            messages[0].cost_source,
+            super::super::CostSource::ProviderReported
+        );
 
         assert_eq!(messages[1].model_id, "gpt-4o-mini");
     }
@@ -454,14 +467,36 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 775);
         assert_eq!(messages[0].tokens.output, 21282);
         assert_eq!(messages[0].tokens.cache_read, 105891);
-        assert_eq!(messages[0].tokens.cache_write, 28342 - 775); // 27567
+        assert_eq!(messages[0].tokens.cache_write, 28342);
         assert!((messages[0].cost - 0.19).abs() < 0.001);
+        assert_eq!(
+            messages[0].cost_source,
+            super::super::CostSource::ProviderReported
+        );
 
         // Second message: gpt-5-codex
         assert_eq!(messages[1].model_id, "gpt-5-codex");
         assert_eq!(messages[1].provider_id, "openai"); // gpt -> openai
         assert_eq!(messages[1].tokens.input, 8263);
         assert_eq!(messages[1].tokens.cache_read, 66964);
+    }
+
+    #[test]
+    fn test_parse_cursor_csv_luna_style_total_tokens() {
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-08-18T12:00:00.000Z","On-Demand","claude-sonnet-4","No","15000000","1000000","20000000","2000000","38000000","$9.50"
+"2026-08-18T13:00:00.000Z","On-Demand","claude-sonnet-4","No","5000000","500000","8000000","660000","14160000","$3.54""#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.csv");
+        std::fs::write(&file_path, csv).unwrap();
+
+        let total_tokens: i64 = parse_cursor_file(&file_path)
+            .iter()
+            .map(|message| message.tokens.total())
+            .sum();
+
+        assert_eq!(total_tokens, 52_160_000);
     }
 
     #[test]
@@ -483,14 +518,55 @@ mod tests {
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "composer-2");
         assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(messages[0].cost_source, super::super::CostSource::Unknown);
         assert_eq!(messages[0].tokens.cache_read, 29045760);
 
         // Second message: actual cost from "On-Demand"
         assert_eq!(messages[1].model_id, "composer-2");
         assert!((messages[1].cost - 0.11).abs() < 0.001);
+        assert_eq!(
+            messages[1].cost_source,
+            super::super::CostSource::ProviderReported
+        );
 
         // Third message: "-" cost should be 0 (Errored, No Charge)
         assert_eq!(messages[2].model_id, "composer-2");
         assert_eq!(messages[2].cost, 0.0);
+        assert_eq!(messages[2].cost_source, super::super::CostSource::Unknown);
+    }
+
+    #[test]
+    fn test_explicit_zero_cost_is_provider_reported() {
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-08-18T12:00:00.000Z","On-Demand","gpt-5","No","10","5","20","3","38","$0.00""#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.csv");
+        std::fs::write(&file_path, csv).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(
+            messages[0].cost_source,
+            super::super::CostSource::ProviderReported
+        );
+    }
+
+    #[test]
+    fn test_negative_cost_is_not_provider_reported() {
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-08-18T12:00:00.000Z","On-Demand","gpt-5","No","10","5","20","3","38","-$0.50""#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.csv");
+        std::fs::write(&file_path, csv).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(messages[0].cost_source, super::super::CostSource::Unknown);
     }
 }

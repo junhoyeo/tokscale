@@ -745,7 +745,7 @@ mod tests {
         println!("去重后总消息数: {}", total_messages);
         println!("去重后总 token: {}", total_tokens);
         let mut models: Vec<_> = by_model.into_iter().collect();
-        models.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        models.sort_by_key(|a| std::cmp::Reverse(a.1 .1));
         for (m, (c, t)) in models {
             println!("  {m:<24} msgs={c:>6}  tokens={t:>14}");
         }

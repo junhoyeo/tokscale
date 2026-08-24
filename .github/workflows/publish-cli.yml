@@ -51,6 +51,13 @@ jobs:
             exit 1
           fi
 
+      - name: Check release base is current
+        env:
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          EXPECTED_RELEASE_BASE_SHA: ${{ github.sha }}
+        run: bash scripts/check-release-base-fresh.sh
+
       - name: Check release workflow safety
         run: python3 scripts/check-release-workflow-safety.py
 

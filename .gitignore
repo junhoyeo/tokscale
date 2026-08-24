@@ -29,7 +29,10 @@ notepad.md
 ai-todolist.md
 *.tgz
 .sisyphus
-crates/tokscale-cli/tokscale-export-*.json
+# The TUI's export key writes to the process cwd, so these land wherever
+# tokscale (or `cargo test`, from the workspace root) was run from — not only
+# under the CLI crate.
+tokscale-export-*.json
 self-host/tokscale-key.pem
 self-host/
 .next/

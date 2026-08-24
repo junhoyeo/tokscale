@@ -23,6 +23,7 @@ pub mod wiki;
 pub use aggregator::*;
 pub use bucket_tz::BucketTimezone;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
+pub use message_cache::parser_generation;
 pub use model_alias::ModelAliasMap;
 pub use parser::*;
 pub use scanner::*;
@@ -7445,7 +7446,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_cursor_parse_path_reprices_zero_cost_composer_1_5_rows() {
+    fn test_cursor_parse_path_reprices_missing_cost_composer_1_5_rows() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -7453,7 +7454,7 @@ mod tests {
         std::fs::create_dir_all(&cursor_cache_dir).unwrap();
 
         let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#;
+"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","Included""#;
         std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
 
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
@@ -7467,6 +7468,7 @@ mod tests {
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "Composer 1.5");
         assert!(messages[0].cost > 0.0);
+        assert!(!messages[0].has_authoritative_cost());
     }
 
     #[test]
@@ -7503,7 +7505,8 @@ mod tests {
             Some(&pricing),
         );
         assert_eq!(cold.len(), 1);
-        assert!(cold[0].cost > 0.0);
+        assert_eq!(cold[0].cost, 0.0);
+        assert!(cold[0].has_authoritative_cost());
         assert_eq!(
             sessions::cursor::parse_cursor_file_call_count(source_home.path()),
             1,
@@ -7525,7 +7528,8 @@ mod tests {
             Some(&pricing),
         );
         assert_eq!(warm.len(), 1);
-        assert!(warm[0].cost > 0.0);
+        assert_eq!(warm[0].cost, 0.0);
+        assert!(warm[0].has_authoritative_cost());
         assert_eq!(warm, cold);
         assert_eq!(
             sessions::cursor::parse_cursor_file_call_count(source_home.path()),
@@ -8709,6 +8713,61 @@ mod tests {
             assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
             assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_parse_local_clients_kimi_work_uses_kimi_code_parser() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let work_root = if cfg!(target_os = "macos") {
+            source_home
+                .path()
+                .join("Library")
+                .join("Application Support")
+        } else {
+            source_home.path().join("AppData").join("Roaming")
+        };
+        let wire = work_root
+            .join("kimi-desktop")
+            .join("daimon-share")
+            .join("daimon")
+            .join("runtime")
+            .join("kimi-code")
+            .join("home")
+            .join("sessions")
+            .join("wd_workspace_c107cac82a87")
+            .join("conv-4e171339d10b9954d0fc24da")
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire,
+            r#"{"type":"usage.record","model":"k2d6-agent","usage":{"inputOther":100,"output":10,"inputCacheRead":20,"inputCacheCreation":0},"usageScope":"turn","time":1780319377010}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["kimi".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Kimi), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        let message = &parsed.messages[0];
+        assert_eq!(message.session_id, "conv-4e171339d10b9954d0fc24da");
+        assert_eq!(message.model_id, "k2d6-agent");
+        assert_eq!(message.input, 100);
     }
 
     #[test]
@@ -10480,7 +10539,7 @@ mod tests {
             std::fs::create_dir_all(&cursor_cache_dir).unwrap();
 
             let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#;
+"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","Included""#;
             std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
 
             let mut litellm = HashMap::new();
@@ -11662,6 +11721,41 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_preserves_cursor_provider_reported_cost() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "cursor",
+            "gpt-4o",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.42,
+        );
+        msg.mark_provider_reported_cost();
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.42);
     }
 
     #[test]

@@ -447,12 +447,120 @@ fn headless_capture_slow_command_times_out() {
     // faster means the parent gave up early.
     //
     // Note this test cannot catch #1049: the stand-in spawns nothing, so its pipe
-    // closes the moment it is killed, and the unbounded `output_handle.join()`
-    // after the kill is never exercised. Widening the gap does not hide that —
-    // it was never covered.
+    // closes the moment it is killed, and the drain after the kill returns at
+    // once instead of waiting out `STDOUT_DRAIN_GRACE`. Widening the gap does not
+    // hide that — it was never covered here. The descendant shape that #1049
+    // actually reports is covered by
+    // `headless_capture_descendant_holding_stdout_still_times_out` below.
     assert!(
         elapsed >= HEADLESS_SLOW_MIN_ELAPSED && elapsed < HEADLESS_SLOW_MAX_ELAPSED,
         "slow command timeout duration was unexpected: {elapsed:?}"
+    );
+}
+
+/// The #1049 shape: the child is killed at the deadline but a *descendant* still
+/// holds the write end of the stdout pipe, so the pump never sees EOF.
+///
+/// Unix-only. The grandchild is the stand-in binary itself, and Windows keeps a
+/// running image locked, which would leave the fixture's TempDir undeletable for
+/// the two minutes the grandchild lives. #1049 is a Linux report and
+/// `run_capture_command` is ordinary `std::process` code, so ubuntu and macOS
+/// coverage is what this needs to be worth its cost.
+///
+/// The bound this asserts is the point: a parent that waits for EOF without one
+/// cannot finish before the grandchild's 120s sleep, well past
+/// `HEADLESS_SLOW_MAX_ELAPSED`.
+#[test]
+#[cfg(unix)]
+fn headless_capture_descendant_holding_stdout_still_times_out() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("descendant.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "descendant",
+        HEADLESS_SLOW_TIMEOUT_MS,
+    )
+    .assert()
+    .failure()
+    .code(124);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= HEADLESS_SLOW_MIN_ELAPSED && elapsed < HEADLESS_SLOW_MAX_ELAPSED,
+        "a descendant holding stdout must not extend the timeout: {elapsed:?}"
+    );
+}
+
+/// Reaps the stdout holder `fake_codex` publishes to `TOKSCALE_FAKE_CODEX_PIDFILE`.
+///
+/// The holder deliberately outlives the direct child, so without this it would
+/// sit in the process table for the rest of its 120s sleep. Parallel and retried
+/// CI runs accumulate those, so teardown kills it rather than waiting it out.
+#[cfg(unix)]
+struct HolderReaper {
+    pidfile: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for HolderReaper {
+    fn drop(&mut self) {
+        let Ok(raw) = std::fs::read_to_string(&self.pidfile) else {
+            return;
+        };
+        let Ok(pid) = raw.trim().parse::<i32>() else {
+            return;
+        };
+        // Shelling out to kill(1) keeps this dependency-free -- tokscale-cli does
+        // not depend on libc, and pulling it in for one test teardown is not
+        // worth it. An already-exited pid just makes kill exit non-zero.
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// The other half of #1049: the direct child exits *successfully* before the
+/// deadline while a descendant keeps stdout open.
+///
+/// `try_wait` sees a normal exit, so `timed_out` stays false and the drain takes
+/// the non-timeout branch. That branch waited unboundedly -- both before #1166
+/// (an unconditional `join`) and after it -- so this hung forever with no
+/// deadline to rescue it. The timeout branch's `STDOUT_DRAIN_GRACE` does not
+/// apply here, which is exactly why this needs its own test.
+#[test]
+#[cfg(unix)]
+fn headless_capture_descendant_after_clean_exit_does_not_hang() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("descendant-exit.jsonl");
+    let pidfile = fake_bin.path().join("holder.pid");
+    let _reaper = HolderReaper {
+        pidfile: pidfile.clone(),
+    };
+
+    let started = Instant::now();
+    headless_capture_command(
+        fake_bin.path(),
+        &output_path,
+        "descendant-exit",
+        HEADLESS_SLOW_TIMEOUT_MS,
+    )
+    .env("TOKSCALE_FAKE_CODEX_PIDFILE", &pidfile)
+    .assert()
+    .failure();
+    let elapsed = started.elapsed();
+
+    // The bound is the assertion. The holder sleeps 120s, so anything that waits
+    // for EOF cannot return before then; finishing inside the 60s ceiling proves
+    // the wait is bounded rather than merely slow.
+    assert!(
+        elapsed < HEADLESS_SLOW_MAX_ELAPSED,
+        "a descendant holding stdout after a clean child exit must not hang: {elapsed:?}"
     );
 }
 
@@ -4774,6 +4882,22 @@ fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
     assert!(
         stdout.contains("Remaining priced usage will be submitted."),
         "the warning must say covered usage remains: {stdout}"
+    );
+    assert!(
+        stdout.contains("Hint: excluded models stay unsubmitted until priced"),
+        "the exclusion must be followed by a fix hint: {stdout}"
+    );
+    assert!(
+        stdout.contains("custom-pricing.json"),
+        "the hint must name the custom pricing file: {stdout}"
+    );
+    assert!(
+        stdout.contains("keyed by the model id alone"),
+        "the hint must state the key format, since the warning above prints provider/model but CustomPricing::lookup keys on the model id: {stdout}"
+    );
+    assert!(
+        stdout.contains("submit --dry-run"),
+        "the hint must point at the verification command: {stdout}"
     );
     assert!(
         stdout.contains("Dry run - not submitting data."),

@@ -5358,6 +5358,17 @@ fn run_import_command(
         "{}",
         format!("    Models: {}", graph.summary.models.len()).bright_black()
     );
+    if outcome.agent_attributed_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "    Client attribution: exact, from the export's per-agent breakdowns \
+                 ({} row(s))",
+                outcome.agent_attributed_rows
+            )
+            .bright_black()
+        );
+    }
 
     if !outcome.unknown_clients.is_empty() {
         eprintln!(
@@ -5691,6 +5702,23 @@ fn report_unpriced_submission_exclusions(
                 remaining_usage_message,
             )
             .yellow()
+        );
+    }
+
+    // Homebrew-style follow-up: the warnings above name the gap, but nothing
+    // told the user the fix is one file away. #1021/#1035 reporters (and the
+    // custom-pricing docs added after them) all had to read core sources to
+    // discover that an exact-match entry in custom-pricing.json — including
+    // explicit 0 rates for free models and routing labels — is the supported fix.
+    if !excluded.is_empty() {
+        let pricing_path = crate::paths::get_config_dir().join("custom-pricing.json");
+        println!(
+            "{}",
+            format!(
+                "  Hint: excluded models stay unsubmitted until priced. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate, then\n          re-check with `tokscale submit --dry-run` and `tokscale pricing <model-id>`.",
+                pricing_path.display(),
+            )
+            .bright_black()
         );
     }
 }
@@ -6405,6 +6433,15 @@ struct CaptureCommandOutcome {
     timed_out: bool,
 }
 
+/// How long the stdout pump gets to finish draining a killed child's pipe.
+///
+/// Bounded because a *descendant* of the child may still hold the write end, in
+/// which case the pump never reaches EOF and an unbounded wait hangs the whole
+/// timeout (#1049). Two seconds because the ordinary case -- the pipe closing
+/// with the child -- only has to move at most one pipe buffer, so anything past
+/// a few milliseconds already means a descendant is holding it open.
+const STDOUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 fn run_capture_command(
     command: &str,
     args: &[String],
@@ -6437,23 +6474,30 @@ fn run_capture_command(
         )
     })?;
 
-    let output_handle = thread::spawn(move || -> Result<()> {
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut buffer = [0; 8192];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => return Ok(()),
-                Ok(n) => output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to read from subprocess stdout: {}",
-                        e
-                    ));
+    // The pump reports completion over a channel rather than only through its
+    // JoinHandle, so the timeout path below can wait for it with a bound.
+    let (pump_done_tx, pump_done_rx) = std::sync::mpsc::channel::<Result<()>>();
+    thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buffer = [0; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => output_file
+                        .write_all(&buffer[..n])
+                        .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to read from subprocess stdout: {}",
+                            e
+                        ));
+                    }
                 }
             }
-        }
+        })();
+        // A panic drops the sender instead, surfacing as RecvError below.
+        let _ = pump_done_tx.send(result);
     });
 
     let deadline = Instant::now() + timeout;
@@ -6477,11 +6521,46 @@ fn run_capture_command(
         thread::sleep(Duration::from_millis(25));
     };
 
-    let output_result = output_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
-    if !timed_out {
-        output_result?;
+    if timed_out {
+        // Wait, but with a bound. An unbounded wait hangs whenever a descendant
+        // holds the pipe open (#1049); no wait at all loses output, because the
+        // caller prints "Partial output saved" and then calls process::exit,
+        // which does not wait for threads -- so anything the child had already
+        // written but the pump had not yet copied would be dropped.
+        //
+        // A drain error is deliberately ignored: the run already failed on the
+        // timeout, and the partial file is best-effort by definition.
+        let _ = pump_done_rx.recv_timeout(STDOUT_DRAIN_GRACE);
+    } else {
+        // The child exited on its own, but that does NOT mean the pipe is closed:
+        // a descendant it spawned can still hold the write end, and then the pump
+        // never reaches EOF. This branch has no deadline behind it -- `timed_out`
+        // is false precisely because the deadline was never reached -- so an
+        // unbounded wait here hangs forever with nothing to rescue it. That was
+        // true of the original unconditional join too, and #1166 only bounded the
+        // timeout branch, so it survived both.
+        //
+        // Bound it by whatever is left of the caller's own deadline, plus the same
+        // drain grace. Total wall time therefore stays within the configured
+        // timeout plus the grace, whichever path is taken.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match pump_done_rx.recv_timeout(remaining + STDOUT_DRAIN_GRACE) {
+            Ok(pump_result) => pump_result?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Report rather than silently truncate: the child succeeded, so
+                // returning Ok here would present a capture file we cannot show
+                // is complete.
+                return Err(anyhow::anyhow!(
+                    "Subprocess '{}' exited but its stdout stayed open past the capture deadline, \
+                     which happens when it leaves a background process holding the pipe. \
+                     The output file may be incomplete.",
+                    command
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!("Subprocess stdout reader thread panicked"));
+            }
+        }
     }
 
     Ok(CaptureCommandOutcome {

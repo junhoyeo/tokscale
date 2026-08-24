@@ -75,7 +75,7 @@
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（可通过 `KIMCHI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（可通过 `REASONIX_STATE_HOME` 或 `REASONIX_HOME` 覆盖） |
-| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/`（可通过 `KIMI_CODE_HOME` 覆盖） |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/`（可通过 `KIMI_CODE_HOME` 覆盖）kimi-work：桌面端 app-data 根目录（自动发现） |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) |
@@ -178,7 +178,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、fx 和 Oh My Pi 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、fx 和 Oh My Pi 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -557,6 +557,21 @@ tokscale logout
 ```
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
+
+#### 未定价的用量不会提交
+
+提交前，每条消息都必须解析到一个能覆盖其所有已填充 token 桶（输入、输出、缓存读、缓存写）的权威价格。无法定价的消息会被跳过，并显示为 `Warning: excluded N unpriced provider/model message(s)` 警告——未知模型绝不会以编造或猜测的价格提交，其余已定价用量仍会正常提交。
+
+排除原因：
+
+- `no authoritative model-to-price mapping` — 该模型 ID 在 LiteLLM、OpenRouter、models.dev 以及你的自定义定价中都不存在。
+- `generic routing label has no authoritative model-to-price mapping` — 该 ID 是路由标签（如 `auto`、`gemini-default` 等），其实际底层模型随每次请求变化，因此直接拒绝计价。若你清楚该标签实际对应的费率，可在 `custom-pricing.json` 中为它显式声明一条条目。
+- `pricing does not cover every populated token bucket` — 找到了价格行，但缺少本次用量实际填充的某项费率（最常见的是缓存读或缓存创建）。
+- `model price match does not establish the requested provider` — 仅通过模型 ID 的模型部分或供应商前缀猜测匹配到价格行，无法确定该费率就是你的供应商实际计费的费率。
+- `model price match does not exactly name the requested model` — 通过模糊匹配找到了价格行，但无法证明该键精确对应你实际使用的模型。
+- `model price lookup is ambiguous across non-equivalent candidates` — 匹配到多个候选行，但它们给出的价格并不一致。
+
+要纳入被排除的用量，请在 `~/.config/tokscale/custom-pricing.json` 中添加精确匹配条目——显式的 `0` 即声明真正免费的模型——然后重新运行 `tokscale submit --dry-run`，直到不再出现警告。可用 `tokscale pricing <model-id>` 确认最终命中的是哪条条目。该文件以模型 ID 单独作为键——即警告中 `provider/model` 的 `model` 部分。
 
 ### Autosubmit
 
@@ -1457,6 +1472,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | 可通过 `KIMCHI_CODING_AGENT_DIR` 环境变量覆盖；Pi 兼容的 JSONL 会话 |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 所有平台使用相同路径 |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | 所有平台使用相同路径 |
+| Kimi Work（桌面端） | `~/Library/Application Support/kimi-desktop/` | `%APPDATA%\kimi-desktop\` | 无 Linux 版本 |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | 所有平台使用相同路径 |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 任务日志 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 任务日志 |
