@@ -831,7 +831,8 @@ mod tests {
     #[test]
     fn light_variant_is_white_background_with_dark_text() {
         let dark = Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::FullColor);
-        let light = Theme::from_name_with_color_mode_light(ThemeName::Blue, TerminalColorMode::FullColor);
+        let light =
+            Theme::from_name_with_color_mode_light(ThemeName::Blue, TerminalColorMode::FullColor);
 
         assert!(!dark.light);
         assert!(light.light);
@@ -845,11 +846,11 @@ mod tests {
         assert_eq!(light.colors[0], Color::Rgb(235, 238, 242));
 
         // Metric text styles switch to dark-on-light contrast colors.
-        assert_eq!(dark.metric_input_style().fg, Some(Color::Rgb(100, 200, 100)));
         assert_eq!(
-            light.metric_input_style().fg,
-            Some(Color::Rgb(31, 136, 61))
+            dark.metric_input_style().fg,
+            Some(Color::Rgb(100, 200, 100))
         );
+        assert_eq!(light.metric_input_style().fg, Some(Color::Rgb(31, 136, 61)));
         assert_eq!(
             light.metric_output_style().fg,
             Some(Color::Rgb(207, 34, 46))

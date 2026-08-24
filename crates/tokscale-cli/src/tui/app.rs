@@ -1916,7 +1916,11 @@ impl App {
         } else {
             self.set_status(&format!(
                 "Light mode: {}",
-                if self.settings.tui_light_mode { "on" } else { "off" }
+                if self.settings.tui_light_mode {
+                    "on"
+                } else {
+                    "off"
+                }
             ));
         }
     }
