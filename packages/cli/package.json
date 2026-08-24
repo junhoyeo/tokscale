@@ -51,6 +51,7 @@
     "gemini",
     "codex",
     "fx",
+    "omp",
     "cli"
   ]
 }

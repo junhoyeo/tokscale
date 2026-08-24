@@ -1,12 +1,12 @@
 //! Pi (badlogic/pi-mono) session parser
 //!
-//! Parses JSONL files from `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` (and,
-//! via the `pi` client's OMP scan root, `~/.omp/agent/sessions/...`). Current
+//! Parses JSONL files from `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. Current
 //! OMP builds write a `title` metadata record before the `session` header in
 //! newly-created session files; see [`PRE_SESSION_METADATA_TYPES`].
 //!
 //! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
-//! is shared: see `sessions::senpi` for Senpi (OmO Native).
+//! is shared: see `sessions::senpi` for Senpi (OmO Native) and `sessions::omp`
+//! for Oh My Pi, which owns the `~/.omp/agent/sessions` root.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};

@@ -78,6 +78,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   cherrystudio: "Cherry Studio",
   dsh: "DeepSeek Harness",
   fx: "Fx",
+  omp: "Oh My Pi",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -139,6 +140,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   cherrystudio: `${GITHUB_CDN_BASE}/client-cherrystudio.png`,
   dsh: "https://github.com/deepseek-ai.png",
   fx: `${GITHUB_CDN_BASE}/client-fx.png`,
+  omp: "https://github.com/can1357.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -193,6 +195,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   cherrystudio: "#FA7298",
   dsh: "#4D6BFE",
   fx: "#0070F3",
+  omp: "#E11D48",
 };
 
 // Derived values

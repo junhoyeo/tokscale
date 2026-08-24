@@ -50,6 +50,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "cherrystudio",
   "dsh",
   "fx",
+  "omp",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

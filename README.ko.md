@@ -69,7 +69,8 @@
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; `CODEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff와 동일한 `~/.config/manicode/` 공유 (동일 런타임); 토큰 사용량은 트랜스크립트에서 추정 (로컬 사용량 없음; `FREEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
-| <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) |
+| <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` |
+| <img width="48px" src="https://github.com/can1357.png" alt="Oh My Pi" /> | [Oh My Pi](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/` (`KIMCHI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl` (`REASONIX_STATE_HOME` 또는 `REASONIX_HOME`으로 오버라이드 가능) |
@@ -177,7 +178,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, fx 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, fx, Oh My Pi 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -1452,7 +1453,8 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCode와 동일하게 `xdg-basedir` 사용 |
 | Cursor | API 동기화 | API 동기화 | API로 가져와 `usage*.csv`로 캐시; 데스크톱 자동 로그인은 `state.vscdb` 인증만 읽음; 로컬 `~/.cursor` 세션 데이터는 파싱하지 않음 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 모든 플랫폼에서 동일한 경로 |
-| Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | 모든 플랫폼에서 동일한 경로 (Pi 및 [Oh My Pi](https://github.com/can1357/oh-my-pi) 모두 지원) |
+| Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 모든 플랫폼에서 동일한 경로 |
+| Oh My Pi | `~/.omp/` | `%USERPROFILE%\.omp\` | 모든 플랫폼에서 동일한 경로 ([Oh My Pi](https://github.com/can1357/oh-my-pi)) |
 | Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | `KIMCHI_CODING_AGENT_DIR` 환경변수로 오버라이드 가능; Pi 호환 JSONL 세션 |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 모든 플랫폼에서 동일한 경로 |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | 모든 플랫폼에서 동일한 경로 |
@@ -1772,7 +1774,7 @@ Hermes는 세션 수준 사용량을 SQLite `sessions` 테이블에 저장합니
 
 ### Pi
 
-위치: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` 및 `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl` ([Oh My Pi](https://github.com/can1357/oh-my-pi))
+위치: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. [Oh My Pi](https://github.com/can1357/oh-my-pi)는 동일한 세션 형식을 `~/.omp/agent/sessions/` 아래에 기록하며 별도의 `omp` 클라이언트로 추적됩니다.
 
 세션 헤더와 메시지 항목을 포함하는 JSONL 형식:
 ```json

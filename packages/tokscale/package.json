@@ -25,6 +25,7 @@
     "gemini",
     "cursor",
     "fx",
+    "omp",
     "cli"
   ],
   "dependencies": {

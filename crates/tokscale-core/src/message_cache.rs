@@ -1118,6 +1118,11 @@ fn parser_version(client: ClientId) -> u32 {
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
         ClientId::Fx => 1,
+        // omp delegates to the shared pi-format parser, so any pi.rs parse
+        // change that bumps ClientId::Pi must be evaluated for Omp (and Senpi)
+        // too — the shared code path changes what byte-identical omp files
+        // parse to even though omp's own module did not change.
+        ClientId::Omp => 1,
         _ => 1,
     }
 }

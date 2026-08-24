@@ -1649,6 +1649,7 @@ mod tests {
         assert_eq!(clients[46], ClientId::Dsh);
         assert_eq!(clients[47], ClientId::Mcode);
         assert_eq!(clients[48], ClientId::Fx);
+        assert_eq!(clients[49], ClientId::Omp);
     }
 
     #[test]
@@ -1703,6 +1704,7 @@ mod tests {
             "DeepSeek Harness",
             "MiniMax Code",
             "Fx",
+            "Oh My Pi",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -1749,6 +1751,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::PrimeAgent), 'P');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mcode), 'M');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Fx), 'X');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), 'Y');
     }
 
     #[test]
