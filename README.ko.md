@@ -293,6 +293,7 @@ tokscale models --json > report.json   # 파일로 저장
   - `v`: Table/Profile 뷰 전환 (Hourly 탭)
   - `y`: 선택된 행을 클립보드에 복사
   - `p`: 색상 테마 순환
+  - `L`: 라이트 모드 (흰색 배경) 토글
   - `r`: 데이터 새로고침; `Shift+R`로 자동 새로고침 토글; `+`/`-`로 간격 조정
   - `e`: JSON으로 내보내기
   - `q` 또는 `Ctrl+C`: 종료

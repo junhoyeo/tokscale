@@ -294,6 +294,7 @@ tokscale models --json > report.json   # 保存到文件
   - `v`：切换表格/Profile 视图（Hourly 标签）
   - `y`：复制选中行到剪贴板
   - `p`：循环颜色主题
+  - `L`：切换浅色模式（白色背景）
   - `r`：刷新数据；`Shift+R` 切换自动刷新；`+`/`-` 调整间隔
   - `e`：导出为 JSON
   - `q` 或 `Ctrl+C`：退出

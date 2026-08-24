@@ -295,6 +295,7 @@ The interactive TUI mode provides:
   - `v`: Toggle Table/Profile view (Hourly tab)
   - `y`: Copy selected row to clipboard
   - `p`: Cycle through color themes
+  - `L`: Toggle light mode (white background)
   - `r`: Refresh data; `Shift+R` toggles auto-refresh; `+`/`-` adjusts interval
   - `e`: Export to JSON
   - `q` or `Ctrl+C`: Quit
