@@ -508,6 +508,7 @@ mod tests {
             agent: None,
             dedup_key: None,
             session_title: None,
+            parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
             duration_ms: None,

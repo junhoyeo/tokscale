@@ -376,6 +376,10 @@ pub struct App {
 
     pub hourly_view_mode: HourlyViewMode,
 
+    /// When true, the Sessions tab shows subagent sessions rolled into their
+    /// parent session (combined tokens/cost) instead of as separate rows.
+    pub roll_up_subagents: bool,
+
     pub model_shade_map: HashMap<String, Color>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
@@ -528,6 +532,7 @@ impl App {
             dialog_language_selected,
             dialog_needs_save_language,
             hourly_view_mode: HourlyViewMode::default(),
+            roll_up_subagents: false,
             model_shade_map: HashMap::new(),
             subscription_usage: {
                 #[cfg(not(test))]
@@ -991,6 +996,16 @@ impl App {
                 // Rollup changes the grouping key, so rows must be rebuilt.
                 self.needs_reload = true;
                 self.reset_selection();
+            }
+            KeyCode::Char('b') if self.current_tab == Tab::Sessions => {
+                self.roll_up_subagents = !self.roll_up_subagents;
+                self.reset_selection();
+                let count = self.active_sessions().len();
+                self.set_status(&if self.roll_up_subagents {
+                    format!("Subagent sessions rolled into parents ({count} sessions)")
+                } else {
+                    format!("Subagent sessions shown separately ({count} sessions)")
+                });
             }
             KeyCode::Char('a') if self.current_tab == Tab::Usage => {
                 self.start_codex_login();
@@ -1861,7 +1876,7 @@ impl App {
                 self.get_sorted_monthly_detail_days().len()
             }
             Tab::Monthly => self.data.monthly.len(),
-            Tab::Sessions => self.data.sessions.len(),
+            Tab::Sessions => self.active_sessions().len(),
             Tab::Projects => self.data.projects.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
@@ -2656,8 +2671,19 @@ impl App {
         self.terminal_width < 60
     }
 
+    /// The session list backing the Sessions tab: the flat per-session view,
+    /// or the view with subagent sessions rolled into their parents when the
+    /// user toggled roll-up on.
+    pub fn active_sessions(&self) -> &[SessionUsage] {
+        if self.roll_up_subagents {
+            &self.data.sessions_rolled
+        } else {
+            &self.data.sessions
+        }
+    }
+
     pub fn get_sorted_sessions(&self) -> Vec<&SessionUsage> {
-        let mut sessions: Vec<&SessionUsage> = self.data.sessions.iter().collect();
+        let mut sessions: Vec<&SessionUsage> = self.active_sessions().iter().collect();
         sort_usage_rows(
             &mut sessions,
             self.sort_field,
@@ -4540,6 +4566,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── handle_key_event: subagent roll-up ─────────────────────────
+
+    #[test]
+    fn test_sessions_tab_b_toggles_subagent_rollup() {
+        let mut app = make_app();
+        app.current_tab = Tab::Sessions;
+        assert!(!app.roll_up_subagents);
+
+        app.handle_key_event(key(KeyCode::Char('b')));
+        assert!(app.roll_up_subagents);
+
+        app.handle_key_event(key(KeyCode::Char('b')));
+        assert!(!app.roll_up_subagents);
+    }
+
+    #[test]
+    fn test_rollup_toggle_updates_list_length() {
+        // given: three flat sessions; the rolled view collapses two
+        // subagents into the parent row
+        let mut app = make_app();
+        app.current_tab = Tab::Sessions;
+        let mk = |session_id: &str| SessionUsage {
+            session_id: session_id.to_string(),
+            client: "pi".to_string(),
+            title: None,
+            models: Vec::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 1.0,
+            message_count: 1,
+            turn_count: 0,
+            first_active_ms: 0,
+            last_active_ms: 0,
+            subagent_count: 0,
+        };
+        app.data.sessions = vec![mk("parent"), mk("child-1"), mk("child-2")];
+        app.data.sessions_rolled = vec![mk("parent")];
+
+        // when: toggled, selection/paging bounds must follow the rendered list
+        assert_eq!(app.get_current_list_len(), 3);
+        app.handle_key_event(key(KeyCode::Char('b')));
+        assert_eq!(app.get_current_list_len(), 1);
+    }
+
+    #[test]
+    fn test_b_ignored_outside_sessions_tab() {
+        let mut app = make_app();
+        app.current_tab = Tab::Overview;
+        app.handle_key_event(key(KeyCode::Char('b')));
+        assert!(!app.roll_up_subagents);
+    }
+
+    #[test]
+    fn test_active_sessions_follows_rollup_toggle() {
+        let mut app = make_app();
+        app.data.sessions = vec![SessionUsage {
+            session_id: "child".to_string(),
+            client: "pi".to_string(),
+            title: None,
+            models: Vec::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 0.5,
+            message_count: 1,
+            turn_count: 0,
+            first_active_ms: 0,
+            last_active_ms: 0,
+            subagent_count: 0,
+        }];
+        app.data.sessions_rolled = vec![SessionUsage {
+            session_id: "parent".to_string(),
+            client: "pi".to_string(),
+            title: None,
+            models: Vec::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 1.5,
+            message_count: 3,
+            turn_count: 0,
+            first_active_ms: 0,
+            last_active_ms: 0,
+            subagent_count: 1,
+        }];
+
+        assert_eq!(app.active_sessions()[0].session_id, "child");
+        app.roll_up_subagents = true;
+        assert_eq!(app.active_sessions()[0].session_id, "parent");
     }
 
     // ── handle_key_event: export ────────────────────────────────────

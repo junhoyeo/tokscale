@@ -189,7 +189,7 @@ fn current_count_label(app: &App) -> String {
             MessageKey::CountDays,
         ),
         Tab::Monthly => format_count(app.data.monthly.len(), MessageKey::CountMonths),
-        Tab::Sessions => format_count(app.data.sessions.len(), MessageKey::CountSessions),
+        Tab::Sessions => format_count(app.active_sessions().len(), MessageKey::CountSessions),
         Tab::Projects => format_count(app.data.projects.len(), MessageKey::CountProjects),
         Tab::Stats | Tab::Usage => String::new(),
     }
@@ -274,6 +274,17 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         }
         if app.current_tab == Tab::Hourly {
             spans.push(Span::styled(tr(lang, MessageKey::HelpProfile), hint_style));
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
+        if app.current_tab == Tab::Sessions {
+            spans.push(Span::styled(
+                if app.roll_up_subagents {
+                    tr(lang, MessageKey::HelpRollupOn)
+                } else {
+                    tr(lang, MessageKey::HelpRollupOff)
+                },
+                count_style,
+            ));
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         }
         spans.push(Span::styled(tr(lang, MessageKey::HelpSources), count_style));

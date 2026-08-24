@@ -301,6 +301,7 @@ The interactive TUI mode provides:
   - `g`: Open group-by picker dialog (model, client+model, client+provider+model, workspace+model, session+model, client+session+model)
   - `h`: Toggle Daily/Hourly chart granularity (Overview tab)
   - `v`: Toggle Table/Profile view (Hourly tab)
+  - `b`: Toggle subagent session roll-up into parent sessions (Sessions tab)
   - `y`: Copy selected row to clipboard
   - `p`: Cycle through color themes
   - `L`: Toggle light mode (white background)

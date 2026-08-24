@@ -345,6 +345,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             // Resolved after the cache by `apply_session_titles`; see the
             // module docs for why the shared index stays out of the parse.
             session_title: None,
+            parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
         });
@@ -385,6 +386,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
                 agent: None,
                 dedup_key: Some(format!("fx:{session_id}:{UNKNOWN_MODEL}")),
                 session_title: None,
+                parent_session_id: None,
                 is_turn_start: false,
                 model_attribution_conflicted: false,
             });

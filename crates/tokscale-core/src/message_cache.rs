@@ -21,8 +21,6 @@ use std::time::UNIX_EPOCH;
 // revalidated without reparsing the sidechain on every warm scan, while a
 // later-created parent transcript still invalidates the entry.
 // 3: UnifiedMessage gained session_title, changing the bincode payload layout.
-// Old shards must read as Stale (silent rebuild), not Invalid (corruption
-// warning), so the format version moves with the struct.
 // 4: UnifiedMessage gained model_attribution_conflicted, changing the bincode
 // payload layout. Old shards must be silently rebuilt rather than decoded.
 // 5: Prime Agent entries cache reconciliation accounting beside their messages.
@@ -43,16 +41,23 @@ use std::time::UNIX_EPOCH;
 // layout. Version-8 shards have a wire migration below so cached messages,
 // including Claude's compacted history, survive the layout change. MiMo v9
 // has its own envelope and migrates with its row provenance intact.
-const CACHE_FORMAT_VERSION: u32 = 9;
+// 10: UnifiedMessage gained parent_session_id, changing the bincode payload
+// layout. bincode is positional, so versions 4 through 9 carry their own
+// message type and migrate with the field empty. Only the Pi-format driver
+// populates it, and every client that driver serves reads Stale through the
+// parser version, so those entries re-parse rather than migrate.
+const CACHE_FORMAT_VERSION: u32 = 10;
 // MiMo stores exact per-row provenance beside each cached entry. Its envelope
 // version moves too because those entries also serialize UnifiedMessage, so
 // it stays one ahead of CACHE_FORMAT_VERSION as both move together.
-const MICODE_CACHE_FORMAT_VERSION: u32 = 10;
+const MICODE_CACHE_FORMAT_VERSION: u32 = 11;
 const LEGACY_CACHE_FORMAT_VERSION_V4: u32 = 4;
 const LEGACY_CACHE_FORMAT_VERSION_V5: u32 = 5;
 const LEGACY_CACHE_FORMAT_VERSION_V6: u32 = 6;
 const LEGACY_CACHE_FORMAT_VERSION_V7: u32 = 7;
 const LEGACY_CACHE_FORMAT_VERSION_V8: u32 = 8;
+const LEGACY_CACHE_FORMAT_VERSION_V9: u32 = 9;
+const LEGACY_MICODE_CACHE_FORMAT_VERSION_V10: u32 = 10;
 const LEGACY_MICODE_CACHE_FORMAT_VERSION_V9: u32 = 9;
 const LEGACY_MICODE_CACHE_FORMAT_VERSION_V8: u32 = 8;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
@@ -1718,6 +1723,46 @@ impl From<crate::TokenBreakdown> for LegacyTokenBreakdownV8 {
     }
 }
 
+/// TokenBreakdown wire layout used by cache format 9, before
+/// `parent_session_id` was added. The live `TokenBreakdown` is frozen here so
+/// a future field on it cannot silently misalign version-9 shards the way the
+/// live type once did for the versions above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyTokenBreakdownV9 {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+    reasoning: i64,
+}
+
+impl From<LegacyTokenBreakdownV9> for crate::TokenBreakdown {
+    fn from(tokens: LegacyTokenBreakdownV9) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            cache_write_1h: tokens.cache_write_1h,
+            reasoning: tokens.reasoning,
+        }
+    }
+}
+
+impl From<crate::TokenBreakdown> for LegacyTokenBreakdownV9 {
+    fn from(tokens: crate::TokenBreakdown) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            cache_write_1h: tokens.cache_write_1h,
+            reasoning: tokens.reasoning,
+        }
+    }
+}
+
 /// UnifiedMessage wire layout used by cache formats 4 through 7, before
 /// `service_tier` was added. Bincode encodes struct fields positionally, so
 /// decoding these payloads directly as the current UnifiedMessage would shift
@@ -1764,12 +1809,16 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             agent: message.agent,
             dedup_key: message.dedup_key,
             session_title: message.session_title,
+            parent_session_id: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
     }
 }
 
+/// Rewrites a current message into the version-7 layout, so the migration
+/// tests can write the shards a previous release left behind.
+#[cfg(test)]
 impl From<UnifiedMessage> for LegacyUnifiedMessageV7 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
@@ -1845,6 +1894,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             agent: message.agent,
             dedup_key: message.dedup_key,
             session_title: message.session_title,
+            parent_session_id: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -1878,6 +1928,92 @@ impl From<UnifiedMessage> for LegacyUnifiedMessageV8 {
 }
 
 fn migrate_legacy_v8_messages(messages: Vec<LegacyUnifiedMessageV8>) -> Vec<UnifiedMessage> {
+    messages.into_iter().map(UnifiedMessage::from).collect()
+}
+
+/// UnifiedMessage wire layout used by cache format 9, before
+/// `parent_session_id` was added. Everything else matches the live type,
+/// including `service_tier` and the 1-hour cache-write bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyUnifiedMessageV9 {
+    client: String,
+    model_id: String,
+    provider_id: String,
+    session_id: String,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+    timestamp: i64,
+    date: String,
+    tokens: LegacyTokenBreakdownV9,
+    cost: f64,
+    cost_source: crate::sessions::CostSource,
+    service_tier: Option<String>,
+    duration_ms: Option<i64>,
+    message_count: i32,
+    agent: Option<String>,
+    dedup_key: Option<String>,
+    session_title: Option<String>,
+    is_turn_start: bool,
+    model_attribution_conflicted: bool,
+}
+
+impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
+    fn from(message: LegacyUnifiedMessageV9) -> Self {
+        Self {
+            client: message.client,
+            model_id: message.model_id,
+            provider_id: message.provider_id,
+            session_id: message.session_id,
+            workspace_key: message.workspace_key,
+            workspace_label: message.workspace_label,
+            timestamp: message.timestamp,
+            date: message.date,
+            tokens: message.tokens.into(),
+            cost: message.cost,
+            cost_source: message.cost_source,
+            service_tier: message.service_tier,
+            duration_ms: message.duration_ms,
+            message_count: message.message_count,
+            agent: message.agent,
+            dedup_key: message.dedup_key,
+            session_title: message.session_title,
+            parent_session_id: None,
+            is_turn_start: message.is_turn_start,
+            model_attribution_conflicted: message.model_attribution_conflicted,
+        }
+    }
+}
+
+/// Rewrites a current message into the version-9 layout, so the migration
+/// tests can write the shards the previous release left behind.
+#[cfg(test)]
+impl From<UnifiedMessage> for LegacyUnifiedMessageV9 {
+    fn from(message: UnifiedMessage) -> Self {
+        Self {
+            client: message.client,
+            model_id: message.model_id,
+            provider_id: message.provider_id,
+            session_id: message.session_id,
+            workspace_key: message.workspace_key,
+            workspace_label: message.workspace_label,
+            timestamp: message.timestamp,
+            date: message.date,
+            tokens: message.tokens.into(),
+            cost: message.cost,
+            cost_source: message.cost_source,
+            service_tier: message.service_tier,
+            duration_ms: message.duration_ms,
+            message_count: message.message_count,
+            agent: message.agent,
+            dedup_key: message.dedup_key,
+            session_title: message.session_title,
+            is_turn_start: message.is_turn_start,
+            model_attribution_conflicted: message.model_attribution_conflicted,
+        }
+    }
+}
+
+fn migrate_legacy_v9_messages(messages: Vec<LegacyUnifiedMessageV9>) -> Vec<UnifiedMessage> {
     messages.into_iter().map(UnifiedMessage::from).collect()
 }
 
@@ -1938,6 +2074,39 @@ impl From<LegacyCachedSourceEntryV8> for CachedSourceEntry {
             path: entry.path,
             fingerprint: entry.fingerprint,
             messages: migrate_legacy_v8_messages(entry.messages),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: entry.opencode_incremental,
+            micode_metadata: None,
+        }
+    }
+}
+
+/// Exact version-9 entry layout, before `UnifiedMessage` gained
+/// `parent_session_id`. Same shape as version 8 otherwise, and it already
+/// carries the 1-hour cache-write bucket.
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyCachedSourceEntryV9 {
+    parser_namespace: String,
+    parser_version: u32,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    messages: Vec<LegacyUnifiedMessageV9>,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+    prime_accounting: Option<crate::sessions::prime_agent::PrimeFileAccounting>,
+    opencode_incremental: Option<crate::sessions::opencode_schema::OpenCodeIncrementalState>,
+}
+
+impl From<LegacyCachedSourceEntryV9> for CachedSourceEntry {
+    fn from(entry: LegacyCachedSourceEntryV9) -> Self {
+        Self {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: migrate_legacy_v9_messages(entry.messages),
             fallback_timestamp_indices: entry.fallback_timestamp_indices,
             codex_incremental: entry.codex_incremental,
             prime_accounting: entry.prime_accounting,
@@ -2893,8 +3062,9 @@ fn read_shard(path: &Path, identity: CacheIdentity) -> ShardReadStatus {
     read_shard_with_limit(path, identity, MAX_CACHE_SHARD_BYTES)
 }
 
-/// Every legacy format migrates through here: a Claude entry with no 1-hour
-/// split drops its retention marker so the next scan reparses the live file.
+/// Every legacy format that predates the 1-hour split migrates through here:
+/// a Claude entry with no 1-hour split drops its retention marker so the next
+/// scan reparses the live file.
 fn migrated_shard(mut entries: Vec<CachedSourceEntry>) -> ShardReadStatus {
     for entry in &mut entries {
         if entry.is_claude_namespace() {
@@ -2973,6 +3143,36 @@ fn read_shard_with_limit(
         };
     }
 
+    if envelope.format_version == LEGACY_MICODE_CACHE_FORMAT_VERSION_V10
+        && identity.namespace == ClientId::MiMoCode.as_str()
+    {
+        type LegacyMiMoWireEntryV10 = (
+            LegacyCachedSourceEntryV9,
+            Option<Vec<crate::sessions::micode::MiMoRowMetadata>>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyMiMoWireEntryV10>>(&envelope.payload)
+        {
+            Ok(entries) => migrated_shard(
+                entries
+                    .into_iter()
+                    .map(|(legacy_entry, metadata)| {
+                        let mut entry = CachedSourceEntry::from(legacy_entry);
+                        entry.micode_metadata = metadata;
+                        if !entry.has_valid_micode_metadata() {
+                            // Keep messages available but make the MiMo loader
+                            // rebuild an invalid or absent provenance pair.
+                            entry.micode_metadata = None;
+                        }
+                        entry
+                    })
+                    .collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
     if envelope.format_version == LEGACY_MICODE_CACHE_FORMAT_VERSION_V9
         && identity.namespace == ClientId::MiMoCode.as_str()
     {
@@ -3003,6 +3203,13 @@ fn read_shard_with_limit(
         };
     }
 
+    // MiMo's released envelope, whose nested entry is the version-7 layout:
+    // it predates `service_tier`, `cache_write_1h`, and `parent_session_id`.
+    // Only MiMo can hold one, and MiMo's parser version rides the `opencode
+    // schema` family rather than the Pi one, so the messages migrate like any
+    // other legacy shard instead of being reported as corruption. The
+    // provenance stored beside the entry survives, which is what the envelope
+    // exists to keep.
     if envelope.format_version == LEGACY_MICODE_CACHE_FORMAT_VERSION_V8
         && identity.namespace == ClientId::MiMoCode.as_str()
     {
@@ -3085,6 +3292,20 @@ fn read_shard_with_limit(
             Ok(entries) => {
                 migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
             }
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+    // Version 9 already carries `cache_write_1h`, so unlike the older formats
+    // it keeps the Claude retention provenance marker: the entry's token split
+    // is complete and a reparse would only churn the retained set.
+    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V9 {
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyCachedSourceEntryV9>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries.into_iter().map(CachedSourceEntry::from).collect(),
+            ),
             Err(error) => ShardReadStatus::Invalid(error.to_string()),
         };
     }
@@ -3712,6 +3933,20 @@ mod tests {
         }
     }
 
+    fn legacy_v9_entry(entry: CachedSourceEntry) -> LegacyCachedSourceEntryV9 {
+        LegacyCachedSourceEntryV9 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages.into_iter().map(Into::into).collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: entry.opencode_incremental,
+        }
+    }
+
     fn legacy_v6_entry(entry: CachedSourceEntry) -> LegacyCachedSourceEntryV6 {
         LegacyCachedSourceEntryV6 {
             parser_namespace: entry.parser_namespace,
@@ -4196,7 +4431,7 @@ mod tests {
 
     #[test]
     fn test_lossy_jsonl_parser_versions_invalidate_v3_entries() {
-        assert_eq!(parser_version(ClientId::PrimeAgent), 5);
+        assert_eq!(parser_version(ClientId::PrimeAgent), 6);
         assert_eq!(parser_version(ClientId::Reasonix), 4);
     }
 
@@ -4209,7 +4444,7 @@ mod tests {
                 b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"valid\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n".as_slice(),
                 "stale-prime-v3",
                 "anthropic",
-                5,
+                6,
             ),
             (
                 ClientId::Reasonix,
@@ -6523,6 +6758,53 @@ mod tests {
         }
     }
 
+    /// A shard the previous release wrote for MiMo: envelope version 8, nested
+    /// entry in the version-7 layout, because `parent_session_id` postdates
+    /// both. Reading it must migrate the messages and keep the provenance
+    /// beside them instead of reporting an intact cache as corrupt.
+    #[test]
+    fn test_released_micode_envelope_migrates_with_its_provenance() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::MiMoCode);
+        let entry = test_entry(identity, source.path(), "released-mimo");
+        let legacy_entry = LegacyCachedSourceEntryV7 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(LegacyUnifiedMessageV7::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: None,
+        };
+        let metadata = vec![micode_test_metadata()];
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_MICODE_CACHE_FORMAT_VERSION_V8,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(legacy_entry, Some(metadata.clone()))])
+                .unwrap(),
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("released-micode.bin");
+        std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
+
+        assert!(matches!(
+            read_shard(&path, identity),
+            ShardReadStatus::Migrated(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].session_id == "released-mimo"
+                    && entries[0].messages[0].parent_session_id.is_none()
+                    && entries[0].micode_metadata.as_deref() == Some(metadata.as_slice())
+        ));
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_micode_drained_clean_payload_survives_dirty_sibling_shard_save() {
@@ -6675,10 +6957,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_old_micode_v10_layout_migrates_messages_and_row_provenance() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::MiMoCode);
+        let entry = legacy_v9_entry(test_entry(identity, source.path(), "legacy"));
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_MICODE_CACHE_FORMAT_VERSION_V10,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(entry, Some(vec![micode_test_metadata()]))])
+                .unwrap(),
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.bin");
+        std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
+        assert!(matches!(
+            read_shard(&path, identity),
+            ShardReadStatus::Migrated(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].session_id == "legacy"
+                    && entries[0].messages[0].parent_session_id.is_none()
+                    && entries[0].has_valid_micode_metadata()
+        ));
+    }
+
     fn run_shard_migration_preserves_claude_compacted_history(
         cache_write: i64,
+        cache_write_1h: i64,
         service_tier: Option<&str>,
         format_version: u32,
+        strip_retention_provenance: bool,
         serialize_legacy_entries: impl FnOnce(CachedSourceEntry) -> Vec<u8>,
         assert_version_specific: impl FnOnce(&CachedSourceEntry),
     ) {
@@ -6698,6 +7008,7 @@ mod tests {
                 output: 7,
                 cache_read: 3,
                 cache_write,
+                cache_write_1h,
                 ..Default::default()
             },
             0.25,
@@ -6735,8 +7046,16 @@ mod tests {
             Some("uuid:retained-assistant-turn")
         );
         assert_version_specific(&migrated);
-        assert_eq!(migrated.fallback_timestamp_indices, vec![1]);
-        assert!(migrated.needs_retention_provenance_migration());
+        if strip_retention_provenance {
+            assert_eq!(migrated.fallback_timestamp_indices, vec![1]);
+            assert!(migrated.needs_retention_provenance_migration());
+        } else {
+            assert_eq!(
+                migrated.fallback_timestamp_indices,
+                vec![1, CLAUDE_RETENTION_PROVENANCE_MARKER]
+            );
+            assert!(!migrated.needs_retention_provenance_migration());
+        }
         assert!(cache.has_rewrite_shard(&shard_key));
         cache.save_if_dirty();
         assert!(matches!(
@@ -6753,8 +7072,10 @@ mod tests {
     fn test_v7_shard_migration_preserves_claude_compacted_history() {
         run_shard_migration_preserves_claude_compacted_history(
             0,
+            0,
             None,
             LEGACY_CACHE_FORMAT_VERSION_V7,
+            true,
             |entry| {
                 bincode::options()
                     .serialize(&vec![legacy_v7_entry(entry)])
@@ -6771,8 +7092,10 @@ mod tests {
     fn test_v8_shard_migration_preserves_claude_compacted_history() {
         run_shard_migration_preserves_claude_compacted_history(
             100,
+            0,
             Some("priority"),
             LEGACY_CACHE_FORMAT_VERSION_V8,
+            true,
             |entry| {
                 bincode::options()
                     .serialize(&vec![legacy_v8_entry(entry)])
@@ -6789,13 +7112,44 @@ mod tests {
         );
     }
 
+    /// Version 9 is the format the previous release wrote: it already carries
+    /// the 1-hour split, so its Claude entries migrate with their retention
+    /// provenance intact and pay no reparse.
+    #[test]
+    #[serial_test::serial]
+    fn test_v9_shard_migration_keeps_cache_write_1h_and_retention_provenance() {
+        run_shard_migration_preserves_claude_compacted_history(
+            100,
+            25,
+            Some("priority"),
+            LEGACY_CACHE_FORMAT_VERSION_V9,
+            false,
+            |entry| {
+                bincode::options()
+                    .serialize(&vec![legacy_v9_entry(entry)])
+                    .unwrap()
+            },
+            |migrated| {
+                assert_eq!(
+                    migrated.messages[1].service_tier.as_deref(),
+                    Some("priority")
+                );
+                assert_eq!(migrated.messages[1].tokens.cache_write, 100);
+                assert_eq!(migrated.messages[1].tokens.cache_write_1h, 25);
+                assert!(migrated.messages[1].parent_session_id.is_none());
+            },
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_v6_shard_migration_strips_retention_provenance_marker() {
         run_shard_migration_preserves_claude_compacted_history(
             0,
+            0,
             None,
             LEGACY_CACHE_FORMAT_VERSION_V6,
+            true,
             |entry| {
                 bincode::options()
                     .serialize(&vec![legacy_v6_entry(entry)])
@@ -6907,6 +7261,44 @@ mod tests {
             Some(1),
             false,
             "the stale v1 shard must be reparsed after the parser version bump",
+        );
+    }
+
+    #[test]
+    fn test_legacy_micode_v7_has_no_provenance_and_requires_one_reparse() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::MiMoCode);
+        let entry = test_entry(identity, source.path(), "legacy");
+        // A shard labelled 7 has to hold version-7 bytes: serializing the
+        // current layout under a 7 label would only test decoder tolerance for
+        // a state no release wrote.
+        let legacy_entry = LegacyCachedSourceEntryV7 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(LegacyUnifiedMessageV7::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: None,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CACHE_FORMAT_VERSION_V7,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![legacy_entry]).unwrap(),
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.bin");
+        std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
+        assert!(
+            matches!(read_shard(&path,identity),ShardReadStatus::Migrated(entries)
+            if entries[0].messages.len()==1 && !entries[0].has_valid_micode_metadata())
         );
     }
 
@@ -7231,6 +7623,69 @@ mod tests {
         let migrated = cache.get(identity, source.path()).unwrap();
         assert_eq!(migrated.messages[0].session_id, "v6-opencode");
         assert!(migrated.opencode_incremental.is_none());
+        assert!(cache.has_rewrite_shard(&shard_key));
+        cache.save_if_dirty();
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Loaded(entries) if entries.len() == 1
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_v7_shard_migrates_messages_without_the_parent_link() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = test_entry(identity, source.path(), "v7-claude");
+        let key = CacheKey::from_entry(&entry);
+        let shard_key = key.shard();
+        let legacy_path = shard_path(&cache_shard_dir().unwrap(), &shard_key);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let legacy_entry = LegacyCachedSourceEntryV7 {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry
+                .messages
+                .into_iter()
+                .map(LegacyUnifiedMessageV7::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: None,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CACHE_FORMAT_VERSION_V7,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![legacy_entry]).unwrap(),
+        };
+        let mut writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &envelope)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        // given: a shard from the release before UnifiedMessage gained the
+        // parent link, when: it is read under the current identity, then: its
+        // messages migrate with the link empty instead of being discarded.
+        assert!(matches!(
+            read_shard(&legacy_path, identity),
+            ShardReadStatus::Migrated(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].session_id == "v7-claude"
+                    && entries[0].messages[0].parent_session_id.is_none()
+        ));
+
+        let mut cache = SourceMessageCache::load();
+        let migrated = cache.get(identity, source.path()).unwrap();
+        assert_eq!(migrated.messages[0].session_id, "v7-claude");
+        assert!(migrated.messages[0].parent_session_id.is_none());
         assert!(cache.has_rewrite_shard(&shard_key));
         cache.save_if_dirty();
         assert!(matches!(

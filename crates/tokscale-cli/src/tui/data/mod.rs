@@ -166,6 +166,105 @@ pub struct SessionUsage {
     /// Unix-ms timestamp of the most recent message observed in this session.
     /// `0` when every message lacked a usable timestamp.
     pub last_active_ms: i64,
+    /// Number of subagent sessions rolled into this entry. Only nonzero in
+    /// `UsageData::sessions_rolled`; the flat `sessions` view leaves it 0.
+    pub subagent_count: u32,
+}
+
+impl SessionUsage {
+    fn new(client: &str, session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            client: client.to_string(),
+            title: None,
+            models: Vec::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            message_count: 0,
+            turn_count: 0,
+            first_active_ms: 0,
+            last_active_ms: 0,
+            subagent_count: 0,
+        }
+    }
+}
+
+/// Accumulate one message into a session bucket: tokens, cost, counts,
+/// activity window, title adoption, and the distinct-models list. Shared by
+/// the flat and subagent-rolled session aggregations. `owner_msg` is true
+/// when the message belongs to the bucket's own session (vs a rolled-in
+/// subagent): the bucket owner's title always wins, while a subagent title
+/// only fills an empty slot.
+fn accumulate_session_entry(
+    entry: &mut SessionUsage,
+    msg: &UnifiedMessage,
+    msg_cost: f64,
+    normalized_model: &str,
+    model_key: &str,
+    owner_msg: bool,
+) {
+    entry.tokens.input = entry
+        .tokens
+        .input
+        .saturating_add(msg.tokens.input.max(0) as u64);
+    entry.tokens.output = entry
+        .tokens
+        .output
+        .saturating_add(msg.tokens.output.max(0) as u64);
+    entry.tokens.cache_read = entry
+        .tokens
+        .cache_read
+        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+    entry.tokens.cache_write = entry
+        .tokens
+        .cache_write
+        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+    entry.tokens.reasoning = entry
+        .tokens
+        .reasoning
+        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+    entry.cost += msg_cost;
+    entry.message_count = entry
+        .message_count
+        .saturating_add(msg.message_count.max(0) as u32);
+    if msg.is_turn_start {
+        entry.turn_count += 1;
+    }
+
+    let ts = message_timestamp_ms(msg);
+    if ts > 0 {
+        if entry.first_active_ms == 0 || ts < entry.first_active_ms {
+            entry.first_active_ms = ts;
+        }
+        if ts > entry.last_active_ms {
+            entry.last_active_ms = ts;
+        }
+    }
+
+    // Adopt the first non-empty session_title seen across the session's
+    // messages. Parsers that don't populate the field leave it `None` and
+    // the Sessions tab falls back to the ID. In rolled-up buckets the
+    // parent session's own title takes precedence over a subagent's.
+    if let Some(ref title) = msg.session_title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.title.is_none()) {
+            entry.title = Some(trimmed.to_string());
+        }
+    }
+
+    // Track distinct models in first-seen order, retaining provider and
+    // color_key for correct shade-map lookups.
+    if !entry
+        .models
+        .iter()
+        .any(|m| m.display_name == normalized_model)
+    {
+        entry.models.push(SessionModel {
+            display_name: normalized_model.to_string(),
+            provider: msg.provider_id.clone(),
+            color_key: model_key.to_string(),
+        });
+    }
 }
 
 /// A model entry within a session, retaining the provider and color_key
@@ -228,6 +327,10 @@ pub struct UsageData {
     pub monthly: Vec<MonthlyUsage>,
     pub sessions: Vec<SessionUsage>,
     pub projects: Vec<ProjectUsage>,
+    /// Sessions view with subagent sessions (messages carrying
+    /// `parent_session_id`) rolled into their parent session's row.
+    /// Recomputed alongside `sessions` on every aggregation.
+    pub sessions_rolled: Vec<SessionUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -586,6 +689,10 @@ impl DataLoader {
                 }
             }
         }
+        let mut session_rolled_map: HashMap<String, SessionUsage> = HashMap::new();
+        // Distinct subagent session ids rolled into each bucket, so the
+        // "(+N)" marker counts sessions, not messages.
+        let mut rolled_child_sessions: HashMap<String, HashSet<String>> = HashMap::new();
 
         for msg in &messages {
             // Recovered daily-floor rows are day-level aggregates with a
@@ -1092,87 +1199,50 @@ impl DataLoader {
             // Skips messages with an empty session_id (some legacy/scanner
             // records lack one) rather than lumping them into a single bogus
             // "no-session" row.
+            //
+            // A second, parallel aggregation rolls subagent sessions (OMP
+            // transcripts carrying `parent_session_id`) into their parent's
+            // bucket so the Sessions tab can show the full cost of a session
+            // including its subagents. Both views are built in the same pass
+            // because messages are dropped after aggregation.
             if !is_recovery_floor && !msg.session_id.is_empty() {
                 let session_key = format!("{}:{}", msg.client, msg.session_id);
-                let session_entry =
-                    session_map
-                        .entry(session_key)
-                        .or_insert_with(|| SessionUsage {
-                            session_id: msg.session_id.clone(),
-                            client: msg.client.clone(),
-                            title: None,
-                            models: Vec::new(),
-                            tokens: TokenBreakdown::default(),
-                            cost: 0.0,
-                            message_count: 0,
-                            turn_count: 0,
-                            first_active_ms: 0,
-                            last_active_ms: 0,
-                        });
+                let session_entry = session_map
+                    .entry(session_key)
+                    .or_insert_with(|| SessionUsage::new(&msg.client, &msg.session_id));
+                accumulate_session_entry(
+                    session_entry,
+                    msg,
+                    msg_cost,
+                    &normalized_model,
+                    &model_key,
+                    true,
+                );
 
-                session_entry.tokens.input = session_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                session_entry.tokens.output = session_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                session_entry.tokens.cache_read = session_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                session_entry.tokens.cache_write = session_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                session_entry.tokens.reasoning = session_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                session_entry.cost += msg_cost;
-                session_entry.message_count = session_entry
-                    .message_count
-                    .saturating_add(msg.message_count.max(0) as u32);
-                if msg.is_turn_start {
-                    session_entry.turn_count += 1;
-                }
-
-                let ts = message_timestamp_ms(msg);
-                if ts > 0 {
-                    if session_entry.first_active_ms == 0 || ts < session_entry.first_active_ms {
-                        session_entry.first_active_ms = ts;
+                let (rolled_session_id, is_subagent_msg) = match msg.parent_session_id.as_deref() {
+                    Some(parent) if !parent.is_empty() && parent != msg.session_id => {
+                        (parent, true)
                     }
-                    if ts > session_entry.last_active_ms {
-                        session_entry.last_active_ms = ts;
-                    }
+                    _ => (msg.session_id.as_str(), false),
+                };
+                let rolled_key = format!("{}:{}", msg.client, rolled_session_id);
+                let rolled_entry = session_rolled_map
+                    .entry(rolled_key.clone())
+                    .or_insert_with(|| SessionUsage::new(&msg.client, rolled_session_id));
+                if is_subagent_msg {
+                    rolled_child_sessions
+                        .entry(rolled_key)
+                        .or_default()
+                        .insert(msg.session_id.clone());
                 }
-
-                // Adopt the first non-empty session_title seen across the
-                // session's messages. Parsers that don't populate the field
-                // leave it `None` and the Sessions tab falls back to the ID.
-                if session_entry.title.is_none() {
-                    if let Some(ref title) = msg.session_title {
-                        let trimmed = title.trim();
-                        if !trimmed.is_empty() {
-                            session_entry.title = Some(trimmed.to_string());
-                        }
-                    }
-                }
-
-                // Track distinct models in first-seen order, retaining
-                // provider and color_key for correct shade-map lookups.
-                if !session_entry
-                    .models
-                    .iter()
-                    .any(|m| m.display_name == normalized_model)
-                {
-                    session_entry.models.push(SessionModel {
-                        display_name: normalized_model.clone(),
-                        provider: msg.provider_id.clone(),
-                        color_key: model_key.clone(),
-                    });
-                }
+                accumulate_session_entry(
+                    rolled_entry,
+                    msg,
+                    msg_cost,
+                    &normalized_model,
+                    &model_key,
+                    !is_subagent_msg,
+                );
             }
 
             // Project aggregation: one bucket per repo identity so the Projects
@@ -1301,14 +1371,25 @@ impl DataLoader {
 
         let monthly = aggregate_monthly_from_daily(&daily);
 
+        for (key, children) in rolled_child_sessions {
+            if let Some(entry) = session_rolled_map.get_mut(&key) {
+                entry.subagent_count = children.len() as u32;
+            }
+        }
+
+        let sort_sessions = |sessions: &mut Vec<SessionUsage>| {
+            sessions.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                    .then_with(|| a.client.cmp(&b.client))
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
+        };
         let mut sessions: Vec<SessionUsage> = session_map.into_values().collect();
-        sessions.sort_by(|a, b| {
-            b.cost
-                .total_cmp(&a.cost)
-                .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                .then_with(|| a.client.cmp(&b.client))
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
+        sort_sessions(&mut sessions);
+        let mut sessions_rolled: Vec<SessionUsage> = session_rolled_map.into_values().collect();
+        sort_sessions(&mut sessions_rolled);
 
         let mut projects: Vec<ProjectUsage> = project_map.into_values().collect();
         // Path resolution is deferred to here so it runs once per distinct
@@ -1348,6 +1429,7 @@ impl DataLoader {
             monthly,
             sessions,
             projects,
+            sessions_rolled,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -3749,6 +3831,112 @@ after"#,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_rolls_subagent_sessions_into_parent() {
+        let loader = DataLoader::new(None);
+        let base_ms = 1_735_689_600_000_i64;
+        let mk = |session_id: &str,
+                  title: Option<&str>,
+                  parent: Option<&str>,
+                  ms: i64,
+                  input: i64,
+                  cost: f64| {
+            let mut msg = UnifiedMessage::new(
+                "pi",
+                "gpt-5",
+                "openai",
+                session_id,
+                ms,
+                tokscale_core::TokenBreakdown {
+                    input,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    cache_write_1h: 0,
+                    reasoning: 0,
+                },
+                cost,
+            );
+            msg.session_title = title.map(str::to_string);
+            msg.parent_session_id = parent.map(str::to_string);
+            msg
+        };
+
+        // Child messages come FIRST so the rolled bucket is created by a
+        // subagent: the parent's own title must still win when it arrives.
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    mk(
+                        "child-1",
+                        Some("[Sub]: scout work"),
+                        Some("parent-1"),
+                        base_ms + 2000,
+                        50,
+                        0.5,
+                    ),
+                    // Second message from the SAME subagent session: the
+                    // roll-up marker counts sessions, not messages.
+                    mk(
+                        "child-1",
+                        Some("[Sub]: scout work"),
+                        Some("parent-1"),
+                        base_ms + 2500,
+                        10,
+                        0.1,
+                    ),
+                    mk(
+                        "child-2",
+                        Some("[Sub]: orphan work"),
+                        Some("parent-missing"),
+                        base_ms + 3000,
+                        25,
+                        0.25,
+                    ),
+                    mk("parent-1", Some("Parent session"), None, base_ms, 100, 1.0),
+                    mk(
+                        "parent-1",
+                        Some("Parent session"),
+                        None,
+                        base_ms + 1000,
+                        100,
+                        1.0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        // Flat view: one row per session, no roll-up markers.
+        assert_eq!(usage.sessions.len(), 3);
+        assert!(usage.sessions.iter().all(|s| s.subagent_count == 0));
+
+        // Rolled view: child-1 merged into parent-1; child-2 rolls under the
+        // (message-less) parent id instead of vanishing.
+        assert_eq!(usage.sessions_rolled.len(), 2);
+        let parent = usage
+            .sessions_rolled
+            .iter()
+            .find(|s| s.session_id == "parent-1")
+            .expect("parent row");
+        assert_eq!(parent.subagent_count, 1, "two messages, ONE subagent");
+        assert_eq!(parent.tokens.input, 260);
+        assert!((parent.cost - 2.6).abs() < 1e-9);
+        assert_eq!(parent.message_count, 4);
+        assert_eq!(parent.title.as_deref(), Some("Parent session"));
+        assert_eq!(parent.first_active_ms, base_ms);
+        assert_eq!(parent.last_active_ms, base_ms + 2500);
+
+        let orphan = usage
+            .sessions_rolled
+            .iter()
+            .find(|s| s.session_id == "parent-missing")
+            .expect("orphan parent row");
+        assert_eq!(orphan.subagent_count, 1);
+        assert_eq!(orphan.tokens.input, 25);
+        assert_eq!(orphan.title.as_deref(), Some("[Sub]: orphan work"));
     }
 
     #[test]

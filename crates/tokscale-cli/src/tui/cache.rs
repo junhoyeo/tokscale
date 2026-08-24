@@ -660,12 +660,15 @@ impl TryFrom<CachedUsageData> for UsageData {
             monthly,
             // Sessions are recomputed on each load (high cardinality, not
             // worth round-tripping through the on-disk cache); the first
-            // foreground refresh after cache hit will populate it.
+            // foreground refresh after cache hit will populate it. The
+            // subagent-rolled variant is derived in the same aggregation
+            // pass, so it is excluded here too.
             sessions: Vec::new(),
             // Projects follow the sessions/minutely precedent: recomputed on
             // each load so the cache schema does not need a version bump; the
             // first background refresh after cache hit will populate them.
             projects: Vec::new(),
+            sessions_rolled: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,

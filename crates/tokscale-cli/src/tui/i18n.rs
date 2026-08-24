@@ -164,6 +164,8 @@ pub enum MessageKey {
     HelpLanguage,
     HelpRefresh,
     HelpQuit,
+    HelpRollupOn,
+    HelpRollupOff,
 
     // Dialogs: Common
     DialogCloseHint,
@@ -577,6 +579,8 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::HelpLanguage => "[k:lang]",
         MessageKey::HelpRefresh => "[r:refresh]",
         MessageKey::HelpQuit => "q",
+        MessageKey::HelpRollupOn => "[b:rollup]",
+        MessageKey::HelpRollupOff => "[b:subs]",
 
         MessageKey::DialogCloseHint => "Esc close",
         MessageKey::DialogFilterPlaceholder => "Type to filter...",
@@ -976,6 +980,8 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::HelpLanguage => "[k:언어]",
         MessageKey::HelpRefresh => "[r:새로고침]",
         MessageKey::HelpQuit => "q",
+        MessageKey::HelpRollupOn => "[b:롤업]",
+        MessageKey::HelpRollupOff => "[b:서브]",
 
         MessageKey::DialogCloseHint => "Esc 닫기",
         MessageKey::DialogFilterPlaceholder => "검색어 입력...",
@@ -1380,6 +1386,8 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::HelpLanguage => "[k:言語]",
         MessageKey::HelpRefresh => "[r:更新]",
         MessageKey::HelpQuit => "q",
+        MessageKey::HelpRollupOn => "[b:ロールアップ]",
+        MessageKey::HelpRollupOff => "[b:サブ]",
 
         MessageKey::DialogCloseHint => "Esc 閉じる",
         MessageKey::DialogFilterPlaceholder => "検索語を入力...",
@@ -1775,6 +1783,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::HelpLanguage => "[k:语言]",
         MessageKey::HelpRefresh => "[r:刷新]",
         MessageKey::HelpQuit => "q",
+        MessageKey::HelpRollupOn => "[b:汇总]",
+        MessageKey::HelpRollupOff => "[b:子代理]",
 
         MessageKey::DialogCloseHint => "Esc 关闭",
         MessageKey::DialogFilterPlaceholder => "输入以过滤...",
@@ -2162,6 +2172,8 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::HelpLanguage => "[k:langue]",
         MessageKey::HelpRefresh => "[r:rafraîchir]",
         MessageKey::HelpQuit => "q",
+        MessageKey::HelpRollupOn => "[b:agrégation]",
+        MessageKey::HelpRollupOff => "[b:sous-agents]",
 
         MessageKey::DialogCloseHint => "Esc fermer",
         MessageKey::DialogFilterPlaceholder => "Filtrer...",
@@ -2684,6 +2696,8 @@ mod tests {
             MessageKey::HelpLanguage,
             MessageKey::HelpRefresh,
             MessageKey::HelpQuit,
+            MessageKey::HelpRollupOn,
+            MessageKey::HelpRollupOff,
             MessageKey::DialogCloseHint,
             MessageKey::DialogFilterPlaceholder,
             MessageKey::DialogFilterLabel,

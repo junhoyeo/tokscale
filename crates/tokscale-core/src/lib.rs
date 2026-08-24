@@ -6765,6 +6765,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         agent: msg.agent.clone(),
         dedup_key: None,
         session_title: None,
+        parent_session_id: None,
         is_turn_start: false,
         model_attribution_conflicted: false,
     }
