@@ -2896,6 +2896,16 @@ mod tests {
             rgb.is_empty(),
             "Compatible mode must not emit any Color::Rgb, found: {rgb:?}"
         );
+
+        // The light variant must hold the same guarantee: a non-truecolor
+        // terminal never sees raw RGB, even with light mode toggled on.
+        app.theme =
+            Theme::from_name_with_color_mode_light(ThemeName::Blue, TerminalColorMode::Compatible);
+        let rgb = render_rgb_colors(&mut app, 150, 32);
+        assert!(
+            rgb.is_empty(),
+            "Compatible light mode must not emit any Color::Rgb, found: {rgb:?}"
+        );
     }
 
     #[test]

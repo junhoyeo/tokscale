@@ -561,6 +561,20 @@ impl Theme {
     /// `L` toggle so light-terminal users get a readable UI.
     fn apply_light(&mut self) {
         self.light = true;
+        // Non-truecolor terminals garble raw RGB sequences, so stick to the
+        // named-color palette there instead of the tuned light surface.
+        if self.color_mode == TerminalColorMode::Compatible {
+            self.background = Color::White;
+            self.foreground = Color::Black;
+            self.border = Color::Gray;
+            self.muted = Color::DarkGray;
+            self.selection = Color::Gray;
+            self.striped_row = Color::White;
+            self.current_row = Color::Gray;
+            self.colors[0] = Color::Gray;
+            self.accent = Color::Blue;
+            return;
+        }
         self.background = Color::Rgb(255, 255, 255);
         self.foreground = Color::Rgb(36, 41, 47);
         self.border = Color::Rgb(208, 215, 222);
@@ -875,6 +889,32 @@ mod tests {
         assert_ne!(theme.background, Color::Reset);
         assert!(!matches!(theme.foreground, Color::Rgb(..)));
         assert!(!matches!(theme.selection, Color::Rgb(..)));
+    }
+
+    #[test]
+    fn compatible_light_theme_preserves_name_and_avoids_rgb_palette() {
+        let theme =
+            Theme::from_name_with_color_mode_light(ThemeName::Green, TerminalColorMode::Compatible);
+
+        assert_eq!(theme.name, ThemeName::Green);
+        assert!(theme.light);
+        assert!(theme
+            .colors
+            .iter()
+            .all(|color| !matches!(color, Color::Rgb(..))));
+        assert!(!matches!(theme.background, Color::Rgb(..)));
+        assert_ne!(theme.background, Color::Reset);
+        assert!(!matches!(theme.foreground, Color::Rgb(..)));
+        assert!(!matches!(theme.border, Color::Rgb(..)));
+        assert!(!matches!(theme.muted, Color::Rgb(..)));
+        assert!(!matches!(theme.selection, Color::Rgb(..)));
+        assert!(!matches!(theme.accent, Color::Rgb(..)));
+        assert!(!matches!(theme.striped_row, Color::Rgb(..)));
+        assert!(!matches!(theme.current_row, Color::Rgb(..)));
+
+        // The light surface still inverts: white background, dark text.
+        assert_eq!(theme.background, Color::White);
+        assert_eq!(theme.foreground, Color::Black);
     }
 
     #[test]
