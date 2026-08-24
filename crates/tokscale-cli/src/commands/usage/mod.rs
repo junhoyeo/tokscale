@@ -559,7 +559,15 @@ fn render_light(output: &UsageOutput) {
     println!("╰{}╯", "─".repeat(CARD_WIDTH));
 }
 
-pub fn run(json: bool, _light: bool) -> Result<()> {
+pub fn run(json: bool, _light: bool, debug: bool) -> Result<()> {
+    if debug {
+        // Log to stderr so `--json` stdout stays pure JSON for downstream
+        // consumers (see the note in the json branch below).
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let report = fetch_all_report_with_intent(UsageFetchIntent::CliReadOnly);
     if json {
         // Keep stdout pure JSON: do NOT emit provider warnings here, since they

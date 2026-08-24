@@ -117,7 +117,9 @@ fn parse_token_from_hosts() -> Result<String> {
         if !path.exists() {
             continue;
         }
-        let content = std::fs::read_to_string(&path)?;
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         // Parse YAML-like: look for "oauth_token: <token>" under "github.com:"
         let mut in_github = false;
         for line in content.lines() {
@@ -259,7 +261,16 @@ pub fn fetch() -> Result<UsageOutput> {
         .build()?;
     rt.block_on(async {
         let client = reqwest::Client::new();
-        let resp = fetch_api(&client, &token).await?;
+        let resp = fetch_api(&client, &token).await.map_err(|e| {
+            if e.to_string().contains("NEEDS_AUTH") {
+                anyhow::anyhow!(
+                    "GitHub token found but not authorized for Copilot. \
+                     Run 'gh auth login' or check your GH_TOKEN/GITHUB_TOKEN."
+                )
+            } else {
+                e
+            }
+        })?;
 
         let plan = resp
             .get("copilot_plan")

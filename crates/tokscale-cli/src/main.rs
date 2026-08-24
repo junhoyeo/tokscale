@@ -887,7 +887,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Usage { json, light }) => {
             reject_unsupported_home_override(&cli.home, "usage")?;
-            commands::usage::run(json, light)
+            commands::usage::run(json, light, cli.debug)
         }
         Some(Commands::Codex { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "codex")?;
