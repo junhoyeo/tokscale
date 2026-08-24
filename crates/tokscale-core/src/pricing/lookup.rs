@@ -1,4 +1,4 @@
-use super::{aliases, litellm::ModelPricing};
+use super::{aliases, litellm::ModelPricing, self_hosted};
 use crate::{provider_identity, strip_parenthesized_reasoning_tier, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -187,7 +187,7 @@ pub struct ResolutionEvidence {
 }
 
 impl ResolutionEvidence {
-    fn deterministic(kind: ResolutionKind) -> Self {
+    pub(super) fn deterministic(kind: ResolutionKind) -> Self {
         Self {
             kind,
             candidate_count: 1,
@@ -511,6 +511,12 @@ impl PricingLookup {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        if force_source.is_none() {
+            if let Some(result) = self_hosted::lookup(model_id, provider_id) {
+                return Some(result);
+            }
+        }
+
         // A router is not a model. Resolving one by model-part match elects
         // whatever unrelated vendor publishes the same word, and the result is
         // billed as if it were the real thing (#1062).
@@ -554,6 +560,12 @@ impl PricingLookup {
 
         let lower_ref: &str = normalized_owned.as_deref().unwrap_or(&lower);
 
+        if alias_applied && force_source.is_none() && aliases::uses_cursor_pricing(model_id) {
+            if let Some(result) = self.exact_match_cursor(lower_ref) {
+                return Some(result.with_alias());
+            }
+        }
+
         // Helper to perform lookup with the given source constraint
         let do_lookup = |id: &str| match force_source {
             Some("litellm") => self.lookup_litellm_only(id, provider_id),
@@ -583,6 +595,16 @@ impl PricingLookup {
             }
             if normalized_owned.is_some() {
                 result = result.with_normalization();
+            }
+            if matches_inferred_model_provider(lower_ref, provider_id)
+                && provider_id
+                    .is_some_and(|hint| key_root_matches_provider_hint(&result.matched_key, hint))
+                && matches!(
+                    result.evidence.kind,
+                    ResolutionKind::ModelPart | ResolutionKind::ProviderPrefix
+                )
+            {
+                result = result.with_kind(ResolutionKind::ProviderScoped);
             }
             result
         };
@@ -2861,6 +2883,18 @@ fn normalize_provider_hint(provider_id: Option<&str>) -> Option<&str> {
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
 }
 
+fn matches_inferred_model_provider(model_id: &str, provider_id: Option<&str>) -> bool {
+    let Some(provider_id) = provider_id else {
+        return false;
+    };
+    let terminal_model_id = model_id.rsplit('/').next().unwrap_or(model_id);
+    let Some(inferred) = provider_identity::inferred_provider_from_model(terminal_model_id) else {
+        return false;
+    };
+    provider_identity::canonical_provider(provider_id)
+        == provider_identity::canonical_provider(inferred)
+}
+
 fn build_lookup_cache_key(model_id: &str, provider_id: Option<&str>) -> String {
     match provider_id {
         Some(provider) if !provider.trim().is_empty() => {
@@ -4244,6 +4278,111 @@ mod tests {
             Some(SubmissionSafetyGap::UnverifiedProviderIdentity)
         );
         assert!(!result.evidence.is_submission_safe());
+    }
+
+    #[test]
+    fn inferred_model_vendor_does_not_verify_a_reseller_pricing_row() {
+        let models_dev = HashMap::from([(
+            "venice/gpt-5.4".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        )]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup
+            .lookup_with_provider("gpt-5.4", Some("openai"))
+            .expect("the reseller price remains available as an estimate");
+
+        assert_eq!(result.matched_key, "venice/gpt-5.4");
+        assert_eq!(result.evidence.kind, ResolutionKind::ModelPart);
+        assert_eq!(
+            result.evidence.submission_safety_gap(),
+            Some(SubmissionSafetyGap::UnverifiedProviderIdentity)
+        );
+    }
+
+    #[test]
+    fn forced_source_does_not_return_builtin_self_hosted_pricing() {
+        let lookup = PricingLookup::new(HashMap::new(), HashMap::new(), HashMap::new());
+
+        assert!(lookup
+            .lookup_with_source_and_provider("local-model", Some("litellm"), Some("llama.cpp"),)
+            .is_none());
+    }
+
+    #[test]
+    fn ordinary_aliases_preserve_upstream_precedence_over_cursor_overrides() {
+        let cursor = HashMap::from([(
+            "kimi-k3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(9e-6),
+                output_cost_per_token: Some(18e-6),
+                ..Default::default()
+            },
+        )]);
+        let models_dev = HashMap::from([(
+            "moonshotai/kimi-k3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        )]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            cursor,
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("k3").expect("the Kimi alias must price");
+
+        assert_eq!(result.source, "Models.dev");
+        assert_eq!(result.matched_key, "moonshotai/kimi-k3");
+    }
+
+    #[test]
+    fn cursor_specific_aliases_explicitly_select_cursor_pricing() {
+        let cursor = HashMap::from([(
+            "grok-4.6".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(2e-6),
+                output_cost_per_token: Some(6e-6),
+                ..Default::default()
+            },
+        )]);
+        let models_dev = HashMap::from([(
+            "xai/grok-4.6".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(3e-6),
+                ..Default::default()
+            },
+        )]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            cursor,
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup
+            .lookup("cursor-grok-4.6-high")
+            .expect("the Cursor tier alias must price");
+
+        assert_eq!(result.source, "Cursor");
+        assert_eq!(result.matched_key, "grok-4.6");
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod litellm;
 pub mod lookup;
 pub mod models_dev;
 pub mod openrouter;
+mod self_hosted;
 
 use custom::CustomPricing;
 use lookup::{compute_cost, LookupResult, PricingLookup, ResolutionEvidence, ResolutionKind};
@@ -168,6 +169,18 @@ impl PricingService {
                 },
             );
         }
+        overrides.insert(
+            "grok-4.6".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(2e-6),
+                output_cost_per_token: Some(6e-6),
+                cache_read_input_token_cost: Some(5e-7),
+                input_cost_per_token_above_200k_tokens: Some(4e-6),
+                output_cost_per_token_above_200k_tokens: Some(12e-6),
+                cache_read_input_token_cost_above_200k_tokens: Some(1e-6),
+                ..Default::default()
+            },
+        );
         overrides
     }
 
@@ -717,6 +730,34 @@ mod tests {
             Some("azure"),
             &cache_read_usage()
         ));
+    }
+
+    #[test]
+    fn self_hosted_llama_cpp_usage_is_covered_at_zero_cost() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 25,
+            cache_write: 10,
+            reasoning: 5,
+        };
+
+        for provider in ["llama.cpp", "llama.cpp_modal"] {
+            assert!(service.covers_usage_with_provider(
+                "Qwen3.8-27B-ABLITERATED-Q4_K_M-MTP-Q4_0",
+                Some(provider),
+                &usage,
+            ));
+            assert_eq!(
+                service.calculate_cost_with_provider(
+                    "Qwen3.8-27B-ABLITERATED-Q4_K_M-MTP-Q4_0",
+                    Some(provider),
+                    &usage,
+                ),
+                0.0,
+            );
+        }
     }
 
     // Custom overrides are exact-only and provider-agnostic, so they must be

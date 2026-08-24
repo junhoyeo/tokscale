@@ -13,6 +13,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "x_ai" | "xai" => "xai",
         "z_ai" | "zai" => "zai",
         "moonshot" | "moonshotai" => "moonshotai",
+        "kimi_for_coding" => "moonshotai",
         "meta" | "meta_llama" => "meta_llama",
         "azure" | "azure_ai" => "azure_ai",
         "anthropic" | "vertex" | "vertex_ai" => "anthropic",
@@ -60,6 +61,13 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
 
 pub fn canonical_provider(raw: &str) -> Option<String> {
     provider_tags(raw).into_iter().next()
+}
+
+pub fn is_self_hosted_provider(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "llama.cpp" | "llama.cpp_modal"
+    )
 }
 
 pub fn provider_tags(raw: &str) -> Vec<String> {
@@ -372,6 +380,7 @@ mod tests {
             ("MiniMax", vec!["minimax"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
+            ("kimi_for_coding", vec!["moonshotai"]),
         ];
 
         for (raw, expected) in cases {
@@ -388,6 +397,14 @@ mod tests {
         );
         assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
+    }
+
+    #[test]
+    fn self_hosted_runtime_classification_is_canonical_provider_policy() {
+        for provider in ["llama.cpp", "LLAMA.CPP_MODAL"] {
+            assert!(is_self_hosted_provider(provider));
+        }
+        assert!(!is_self_hosted_provider("openrouter"));
     }
 
     #[test]
