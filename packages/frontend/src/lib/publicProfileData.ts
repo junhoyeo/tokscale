@@ -279,28 +279,56 @@ export async function getPublicProfileResponse(
     // entirely, so this returns no row and the profile reports rank null. The
     // finite query uses the exact same anchored window as the visible profile
     // totals and chart.
+    //
+    // The scan ranks every rankable user's daily rows, so it is cached for a
+    // minute per user and window instead of running on every request. A user
+    // with no daily rows in the window has no row in the CTE either, so the
+    // scan is skipped outright and the rank reported null directly.
+    const hasPeriodRows =
+      periodRange !== null &&
+      dailyData.some(
+        (day) => day.date >= periodRange.start && day.date <= periodRange.end,
+      );
     const scopedRankResult = periodRange
-      ? await db.execute<{ rank: number }>(sql`
-          WITH user_totals AS (
-            SELECT
-              s.user_id,
-              SUM(d.tokens) as total_tokens
-            FROM daily_breakdown d
-            INNER JOIN submissions s ON d.submission_id = s.id
-            INNER JOIN users u ON u.id = s.user_id
-            WHERE u.leaderboard_hidden = false
-              AND d.date >= ${periodRange.start}
-              AND d.date <= ${periodRange.end}
-            GROUP BY s.user_id
-          ),
-          ranked AS (
-            SELECT
-              user_id,
-              RANK() OVER (ORDER BY total_tokens DESC) as rank
-            FROM user_totals
-          )
-          SELECT rank FROM ranked WHERE user_id = ${user.id}
-        `)
+      ? hasPeriodRows
+        ? await unstable_cache(
+            () =>
+              db.execute<{ rank: number }>(sql`
+                WITH user_totals AS (
+                  SELECT
+                    s.user_id,
+                    SUM(d.tokens) as total_tokens
+                  FROM daily_breakdown d
+                  INNER JOIN submissions s ON d.submission_id = s.id
+                  INNER JOIN users u ON u.id = s.user_id
+                  WHERE u.leaderboard_hidden = false
+                    AND d.date >= ${periodRange.start}
+                    AND d.date <= ${periodRange.end}
+                  GROUP BY s.user_id
+                ),
+                ranked AS (
+                  SELECT
+                    user_id,
+                    RANK() OVER (ORDER BY total_tokens DESC) as rank
+                  FROM user_totals
+                )
+                SELECT rank FROM ranked WHERE user_id = ${user.id}
+              `),
+            [
+              "profile-period-rank",
+              user.id,
+              periodRange.start,
+              periodRange.end,
+            ],
+            {
+              revalidate: 60,
+              tags: [
+                "leaderboard",
+                `user:${normalizeUsernameCacheKey(user.username)}`,
+              ],
+            },
+          )()
+        : []
       : rankResult;
     const rank =
       Number(

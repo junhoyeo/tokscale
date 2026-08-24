@@ -127,6 +127,10 @@ const mockState = vi.hoisted(() => {
   };
 });
 
+const unstableCacheMock = vi.hoisted(() => vi.fn((fn: () => unknown) => fn));
+
+vi.mock("next/cache", () => ({ unstable_cache: unstableCacheMock }));
+
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
   users: mockState.tables.users,
@@ -191,6 +195,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockState.reset();
+  unstableCacheMock.mockClear();
 });
 
 afterEach(() => {
@@ -1037,6 +1042,16 @@ describe("GET /api/users/[username]", () => {
           text.includes("d.date <= 2026-07-24"),
       ),
     ).toBe(true);
+    // The cache key carries the anchored window, not the one measured back
+    // from UTC today, so a moved anchor is a different cache entry.
+    expect(unstableCacheMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      ["profile-period-rank", "user-ahead-of-utc", "2026-07-18", "2026-07-24"],
+      {
+        revalidate: 60,
+        tags: ["leaderboard", "user:alice"],
+      },
+    );
     expect(body.stats).toEqual(
       expect.objectContaining({
         totalTokens: 35,
@@ -1208,6 +1223,14 @@ describe("GET /api/users/[username]", () => {
           text.includes("d.date <= 2026-06-28"),
       ),
     ).toBe(true);
+    expect(unstableCacheMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      ["profile-period-rank", "user-1", start, "2026-06-28"],
+      {
+        revalidate: 60,
+        tags: ["leaderboard", "user:alice"],
+      },
+    );
     expect(body.stats).toEqual(
       expect.objectContaining({
         totalTokens: 500,
@@ -1232,6 +1255,61 @@ describe("GET /api/users/[username]", () => {
     "recalculates profile overview stats and rank for the $period period",
     assertRollingProfilePeriod,
   );
+
+  it("skips the period rank scan when the user has no daily rows in the window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 1000,
+        totalCost: 10,
+        inputTokens: 600,
+        outputTokens: 400,
+        cacheReadTokens: 100,
+        cacheCreationTokens: 50,
+        reasoningTokens: 25,
+        submissionCount: 3,
+        earliestDate: "2026-01-01",
+        latestDate: "2026-01-15",
+        sessionCount: 8,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        sourcesUsed: ["codex"],
+        modelsUsed: ["gpt-5.5"],
+        updatedAt: new Date("2026-01-15T10:00:00.000Z"),
+        cliVersion: "2.0.0",
+        schemaVersion: 2,
+      },
+    ]);
+    // The daily query only reaches back seven days, and this user's rows all
+    // predate the window.
+    mockState.pushSelectResult([]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice?period=week"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    // A user with no rows in the window has no row in the ranked CTE either,
+    // so the answer is known without scanning every user's daily rows.
+    expect(body.user.rank).toBeNull();
+    expect(mockState.db.execute).not.toHaveBeenCalled();
+    expect(unstableCacheMock).not.toHaveBeenCalled();
+  });
 
   it("returns submission freshness metadata for the latest submission", async () => {
     vi.useFakeTimers();
