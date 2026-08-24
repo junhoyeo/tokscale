@@ -837,6 +837,7 @@ tokscale usage --light
 | **Kimi** | OAuth（`~/.kimi/credentials/kimi-code.json`） | Session、Weekly 配额 | 运行 `kimi` 登录 |
 | **MiniMax** | API key（环境变量） | 各模型的 Prompt 配额 | 设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN` |
 | **MiniMax Token Plan** | API key（环境变量） | 区间 + 每周剩余百分比配额（按区域：CN minimaxi.com + Global minimax.io） | 设置 `MINIMAX_TOKEN_PLAN_CN_KEY` 和/或 `MINIMAX_TOKEN_PLAN_GLOBAL_KEY` |
+| **OpenCode Go** | API 密钥（`~/.local/share/opencode/auth.json` 或环境变量） | Rolling、Weekly、Monthly 配额 | 在 OpenCode 中运行 `/connect`，或设置 `OPENCODE_API_KEY` |
 | **Sakana**（Fugu） | 会话 cookie（环境变量或文件）—— 计费控制台 HTML 抓取，无公开 API | 5 小时、Weekly 配额窗口（套餐等级 + 月度价格作为元数据） | 设置 `SAKANA_SESSION_COOKIE`（参见 [docs/providers/sakana.md](docs/providers/sakana.md)） |
 
 提供商会被自动检测——仅显示具有有效凭据的提供商。如果缺少某个提供商，请确认您已登录或设置了所需的环境变量。

@@ -835,6 +835,7 @@ TUI에서는 **Usage** 탭으로 이동해 구독 데이터를 확인하세요. 
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | 세션, 주간 할당량 | `kimi`를 실행해 로그인 |
 | **MiniMax** | API 키 (환경 변수) | 모델별 프롬프트 할당량 | `MINIMAX_API_KEY` 또는 `MINIMAX_API_TOKEN` 설정 |
 | **MiniMax Token Plan** | API 키 (환경 변수) | 구간 + 주간 잔여 비율 할당량 (지역별: CN minimaxi.com + Global minimax.io) | `MINIMAX_TOKEN_PLAN_CN_KEY` 및/또는 `MINIMAX_TOKEN_PLAN_GLOBAL_KEY` 설정 |
+| **OpenCode Go** | API 키 (`~/.local/share/opencode/auth.json` 또는 환경 변수) | Rolling, Weekly, Monthly 할당량 | OpenCode에서 `/connect` 실행, 또는 `OPENCODE_API_KEY` 설정 |
 | **Sakana** (Fugu) | 세션 쿠키 (환경 변수 또는 파일) — 빌링 콘솔 HTML 스크레이프, 공개 API 없음 | 5시간, 주간 할당량 창 (플랜 티어 + 월 가격은 메타데이터) | `SAKANA_SESSION_COOKIE` 설정 ([docs/providers/sakana.md](docs/providers/sakana.md) 참조) |
 
 프로바이더는 자동 감지됩니다 — 유효한 자격 증명이 있는 프로바이더만 표시됩니다. 프로바이더가 보이지 않으면 로그인했는지 또는 필요한 환경 변수를 설정했는지 확인하세요.

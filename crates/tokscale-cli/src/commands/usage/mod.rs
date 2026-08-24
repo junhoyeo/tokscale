@@ -9,6 +9,7 @@ pub mod helpers;
 mod kimi;
 mod minimax;
 mod minimax_tokenplan;
+mod opencode_go;
 mod sakana;
 #[cfg(test)]
 mod test_server;
@@ -406,6 +407,11 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
             "Sakana",
             sakana::has_credentials,
             Fetch::Single(sakana::fetch),
+        ),
+        (
+            "OpenCode Go",
+            opencode_go::has_credentials,
+            Fetch::Multi(opencode_go::fetch_all),
         ),
     ]
 }

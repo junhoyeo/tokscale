@@ -840,6 +840,7 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
 | **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
 | **MiniMax Token Plan** | API key (env var) | Interval + weekly remaining-percent quotas (per region: CN minimaxi.com + Global minimax.io) | Set `MINIMAX_TOKEN_PLAN_CN_KEY` and/or `MINIMAX_TOKEN_PLAN_GLOBAL_KEY` |
+| **OpenCode Go** | API key (`~/.local/share/opencode/auth.json` or env var) | Rolling, Weekly, Monthly quotas | Run `/connect` in OpenCode, or set `OPENCODE_API_KEY` |
 | **Sakana** (Fugu) | Session cookie (env var or file) — billing-console HTML scrape, no public API | 5-hour, Weekly quota windows (plan tier + monthly price as metadata) | Set `SAKANA_SESSION_COOKIE` (see [docs/providers/sakana.md](docs/providers/sakana.md)) |
 
 Providers are auto-detected — only those with valid credentials are shown. If a provider is missing, ensure you've logged in or set the required environment variable.
