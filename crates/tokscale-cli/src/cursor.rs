@@ -11,7 +11,15 @@ use std::time::{Duration, SystemTime};
 /// auto-sync (which runs synchronously before local reports and the TUI) while
 /// still tolerating routine API latency. If the network is hung, the report
 /// proceeds against cached data after this timeout instead of stalling forever.
+/// Explicit `tokscale cursor sync` overrides this for the usage-CSV download
+/// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Per-request timeout for the usage-CSV download during an explicit
+/// `tokscale cursor sync`. Large accounts export CSVs that take well over the
+/// default [`CURSOR_HTTP_TIMEOUT`] to generate and stream (issue #1175); the
+/// user asked for the sync, so waiting longer beats failing fast.
+const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Skip implicit pre-report sync when every expected Cursor account cache file
 /// was modified within this window. Prevents `tokscale models` (and its
@@ -1187,18 +1195,19 @@ where
     }
 }
 
+/// Timeout override for the usage-CSV download: explicit syncs get the longer
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`]; implicit syncs keep the client default.
+fn csv_timeout_override(explicit: bool) -> Option<Duration> {
+    explicit.then_some(CURSOR_EXPLICIT_SYNC_TIMEOUT)
+}
+
 pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
     // Prefer a fresh token from the local Cursor desktop login when available.
     // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
     let _ = ensure_credentials_from_local_cursor();
 
     sync_cursor_cache_with_fetcher(move |session_token| async move {
-        let timeout = if explicit {
-            Some(Duration::from_secs(120))
-        } else {
-            None
-        };
-        fetch_cursor_usage_csv(&session_token, timeout).await
+        fetch_cursor_usage_csv(&session_token, csv_timeout_override(explicit)).await
     })
     .await
 }
@@ -1679,6 +1688,12 @@ mod tests {
         assert_eq!(CURSOR_HTTP_TIMEOUT, std::time::Duration::from_secs(15));
         // Use the client briefly to ensure it's structurally valid.
         let _ = client.get("https://example.invalid").build();
+    }
+
+    #[test]
+    fn test_csv_timeout_override_only_for_explicit_sync() {
+        assert_eq!(csv_timeout_override(true), Some(Duration::from_secs(120)));
+        assert_eq!(csv_timeout_override(false), None);
     }
 
     #[test]
