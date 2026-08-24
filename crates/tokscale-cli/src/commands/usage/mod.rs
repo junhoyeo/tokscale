@@ -429,10 +429,25 @@ pub fn fetch_all_report_with_intent(intent: UsageFetchIntent) -> UsageFetchRepor
 }
 
 fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFetchReport {
-    let active: Vec<_> = usage_providers(Fetch::Multi(codex::fetch_all))
-        .into_iter()
-        .filter(|(_, has, _)| has())
-        .collect();
+    let mut active: Vec<UsageProvider> = Vec::new();
+    // Observability (#947): when a provider is filtered out for lack of
+    // credentials, log what was probed so a missing quota card can be traced
+    // to credential detection rather than the fetch path.
+    for (provider, has, fetch) in usage_providers(Fetch::Multi(codex::fetch_all)) {
+        if has() {
+            active.push((provider, has, fetch));
+        } else {
+            tracing::debug!(
+                provider,
+                probes = ?if provider == "Copilot" {
+                    copilot::credential_probe()
+                } else {
+                    Vec::<String>::new()
+                },
+                "usage provider filtered out: no credentials detected"
+            );
+        }
+    }
 
     if active.is_empty() {
         return UsageFetchReport::default();

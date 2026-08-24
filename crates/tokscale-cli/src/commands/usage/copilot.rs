@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -42,6 +44,55 @@ fn read_token_from_keychain() -> Result<String> {
     }
 }
 
+fn token_from_env() -> Option<String> {
+    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Some(value) = std::env::var_os(var) {
+            let value = value.to_string_lossy().trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn hosts_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![gh_config_dir().join("hosts.yml")];
+    if cfg!(windows) {
+        if let Some(home) = crate::paths::home_dir() {
+            let legacy = home.join(".config/gh/hosts.yml");
+            if legacy != candidates[0] {
+                candidates.push(legacy);
+            }
+        }
+    }
+    candidates
+}
+
+/// Paths and env vars probed by credential detection, for observability.
+/// Never includes the token value itself; only presence/absence is reported.
+pub(super) fn credential_probe() -> Vec<String> {
+    let mut probes = Vec::new();
+    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        probes.push(format!(
+            "{var}={}",
+            if std::env::var_os(var).is_some() {
+                "set"
+            } else {
+                "unset"
+            }
+        ));
+    }
+    for path in hosts_candidates() {
+        probes.push(format!(
+            "hosts={} ({})",
+            path.display(),
+            if path.exists() { "exists" } else { "missing" }
+        ));
+    }
+    probes
+}
+
 fn gh_config_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("GH_CONFIG_DIR") {
         return std::path::PathBuf::from(dir);
@@ -62,32 +113,33 @@ fn gh_config_dir() -> std::path::PathBuf {
 }
 
 fn parse_token_from_hosts() -> Result<String> {
-    let path = gh_config_dir().join("hosts.yml");
-    if !path.exists() {
-        anyhow::bail!("No gh hosts file");
-    }
-    let content = std::fs::read_to_string(&path)?;
-    // Parse YAML-like: look for "oauth_token: <token>" under "github.com:"
-    let mut in_github = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "github.com:" {
-            in_github = true;
+    for path in hosts_candidates() {
+        if !path.exists() {
             continue;
         }
-        // A non-indented, non-empty, non-comment line starts a new section
-        if in_github
-            && !line.starts_with(' ')
-            && !line.starts_with('\t')
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-        {
-            in_github = false;
-        }
-        if in_github && trimmed.starts_with("oauth_token:") {
-            let token = trimmed.trim_start_matches("oauth_token:").trim();
-            if !token.is_empty() {
-                return Ok(token.to_string());
+        let content = std::fs::read_to_string(&path)?;
+        // Parse YAML-like: look for "oauth_token: <token>" under "github.com:"
+        let mut in_github = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed == "github.com:" {
+                in_github = true;
+                continue;
+            }
+            // A non-indented, non-empty, non-comment line starts a new section
+            if in_github
+                && !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+            {
+                in_github = false;
+            }
+            if in_github && trimmed.starts_with("oauth_token:") {
+                let token = trimmed.trim_start_matches("oauth_token:").trim();
+                if !token.is_empty() {
+                    return Ok(token.to_string());
+                }
             }
         }
     }
@@ -99,6 +151,9 @@ fn read_token_from_hosts() -> Result<String> {
 }
 
 fn read_credentials() -> Result<String> {
+    if let Some(token) = token_from_env() {
+        return Ok(token);
+    }
     read_token_from_keychain()
         .or_else(|_| read_token_from_hosts())
         .map_err(|_| {
@@ -187,6 +242,9 @@ async fn fetch_api(client: &reqwest::Client, token: &str) -> Result<serde_json::
 }
 
 pub fn has_credentials() -> bool {
+    if token_from_env().is_some() {
+        return true;
+    }
     if super::helpers::read_keychain("gh:github.com").is_ok() {
         return true;
     }
