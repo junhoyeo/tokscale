@@ -163,7 +163,9 @@ fn fetch_blocking(usage_url: &str, auth_path: &Path) -> Result<Vec<UsageOutput>>
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
         let resp = client
             .get(usage_url)
             .header("Authorization", format!("Bearer {api_key}"))
@@ -192,7 +194,7 @@ fn fetch_blocking(usage_url: &str, auth_path: &Path) -> Result<Vec<UsageOutput>>
             }
             anyhow::bail!(
                 "usage request failed (HTTP {status}): {}",
-                server_msg.unwrap_or(body)
+                server_msg.unwrap_or_else(|| body.chars().take(200).collect::<String>())
             );
         }
 
@@ -482,6 +484,16 @@ mod tests {
         r#"{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}"#;
     const ENTITLEMENT_ERROR_BODY: &str = r#"{"type":"error","error":{"type":"EntitlementError","message":"OpenCode Go subscription required."}}"#;
 
+    /// Non-JSON HTML error page longer than 200 chars; the marker sits past
+    /// the truncation point.
+    const CDN_ERROR_BODY: &str = concat!(
+        "<html><head><title>502 Bad Gateway</title></head><body>",
+        "........................................................",
+        "........................................................",
+        "........................................................",
+        "<p>TAIL-MARKER</p></body></html>"
+    );
+
     fn write_auth(dir: &Path, key: &str) -> PathBuf {
         let path = dir.join("auth.json");
         std::fs::write(
@@ -584,6 +596,25 @@ mod tests {
         assert!(
             err.to_string().contains("403"),
             "non-entitlement 403 must surface as error: {err}"
+        );
+    }
+
+    /// A CDN 502 returns a full HTML page, not the API's JSON error shape.
+    /// The one-line diagnostic must not dump the whole body.
+    #[test]
+    #[serial_test::serial]
+    fn generic_failure_truncates_non_json_body() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let auth = write_auth(tmp.path(), "sk-cdn");
+        let _guard = EnvVarGuard::remove("OPENCODE_API_KEY");
+        let (url, _log) = spawn_usage_server(502, CDN_ERROR_BODY);
+
+        let err = fetch_blocking(&url, &auth).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("502"), "should mention HTTP status: {msg}");
+        assert!(
+            !msg.contains("TAIL-MARKER"),
+            "body beyond 200 chars must not appear: {msg}"
         );
     }
 
