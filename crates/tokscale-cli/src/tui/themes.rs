@@ -41,6 +41,14 @@ impl TerminalColorMode {
             return Self::Compatible;
         }
 
+        if term_program == "tmux" {
+            if matches!(colorterm.as_str(), "truecolor" | "24bit")
+                || term.contains("tmux-256color")
+            {
+                return Self::FullColor;
+            }
+        }
+
         if matches!(colorterm.as_str(), "truecolor" | "24bit")
             || term.contains("truecolor")
             || term.contains("24bit")
@@ -681,6 +689,23 @@ mod tests {
     #[test]
     fn xterm_256_without_truecolor_evidence_uses_compatible_colors() {
         let mode = TerminalColorMode::from_env(env(&[("TERM", "xterm-256color")]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn tmux_program_with_tmux_256_term_keeps_full_color() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "tmux"),
+            ("TERM", "tmux-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::FullColor);
+    }
+
+    #[test]
+    fn tmux_256_without_term_program_uses_compatible_colors() {
+        let mode = TerminalColorMode::from_env(env(&[("TERM", "tmux-256color")]));
 
         assert_eq!(mode, TerminalColorMode::Compatible);
     }
