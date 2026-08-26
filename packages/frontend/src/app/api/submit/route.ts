@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
 import { and, eq, sql } from "drizzle-orm";
@@ -41,6 +41,7 @@ import {
 } from "@/lib/db/parserHighWater";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
+import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 import { createSafeRecord, ownValue } from "@/lib/safeRecord";
@@ -1271,6 +1272,20 @@ export async function POST(request: Request) {
       revalidateTag(`user-rank:${usernameCacheKey}`, "max");
     } catch (e) {
       console.error("Public cache invalidation failed:", e);
+    }
+
+    // Re-warm the default leaderboard view in the background so the first
+    // visitor after the invalidation gets a cache hit instead of paying the
+    // multi-second cold aggregation query.
+    try {
+      after(() =>
+        getLeaderboardData().catch((e) => {
+          console.error("Leaderboard cache warmup failed:", e);
+        }),
+      );
+    } catch {
+      // `after` throws outside a request scope (e.g. direct handler calls in
+      // tests) — the warmup is best-effort, so skip it there.
     }
 
     try {
