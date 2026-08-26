@@ -382,7 +382,7 @@ export function getLeaderboardData(
         customTo,
       ),
     [cacheKey],
-    { tags: ["leaderboard", `leaderboard:${period}`], revalidate: 60 },
+    { tags: ["leaderboard", `leaderboard:${period}`], revalidate: 300 },
   )();
 }
 
@@ -452,7 +452,7 @@ export function getUserRank(
     [`user-rank:${usernameCacheKey}:${periodKey}:${sortBy}`],
     {
       tags: ["leaderboard", "user-rank", `user-rank:${usernameCacheKey}`],
-      revalidate: 60,
+      revalidate: 300,
     },
   )();
 }
