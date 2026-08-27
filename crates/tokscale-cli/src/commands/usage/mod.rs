@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(dead_code))]
 
 mod amp;
+mod antigravity;
 mod claude;
 pub mod codex;
 mod copilot;
@@ -381,6 +382,13 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
         ("Codex", codex::has_credentials, codex_fetch),
         ("Z.ai", zai::has_credentials, Fetch::Single(zai::fetch)),
         ("Amp", amp::has_credentials, Fetch::Single(amp::fetch)),
+        (
+            "Antigravity",
+            antigravity::has_credentials,
+            // One output per model group: Antigravity meters Gemini models and
+            // Claude/GPT models against separate limits.
+            Fetch::Multi(antigravity::fetch_all),
+        ),
         (
             "Copilot",
             copilot::has_credentials,
