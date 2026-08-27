@@ -380,8 +380,36 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
 
+    // #1153: `~/.config/Code/logs` can hold tens of thousands of entries
+    // (34,598 measured) from many extensions. The `codebuddy-extension-log`
+    // pattern only cares about `Tencent-Cloud.coding-copilot` underneath it,
+    // so prune every other subtree before WalkDir enumerates it.
+    let prune_to_tencent = pattern == "codebuddy-extension-log";
+    let root_path = PathBuf::from(root);
+
     let mut paths: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
+        .filter_entry(|e| {
+            if !prune_to_tencent {
+                return true;
+            }
+            if e.path() == root_path {
+                return true;
+            }
+            if e.file_type().is_dir() {
+                let dominated = e.path().components().any(|c| {
+                    c.as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
+                });
+                if dominated {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy();
+                return name.eq_ignore_ascii_case("Tencent-Cloud.coding-copilot");
+            }
+            true
+        })
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
@@ -2306,14 +2334,27 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    // Execute scans in parallel
-    let scan_results: Vec<(ClientId, String, Vec<PathBuf>)> = tasks
-        .into_par_iter()
-        .map(|(client_id, path, pattern)| {
-            let files = scan_directory(&path, pattern);
-            (client_id, path, files)
+    // #1153: bound scan parallelism to avoid futex storms on machines with
+    // huge Code/logs trees. WalkDir enumeration under 34k+ entries plus an
+    // unbounded `into_par_iter` can spike to 90+ contending workers
+    // (measured 97 threads futex_wait_queue). Cap to 2 workers to respect
+    // the 2-thread build/test budget and keep the global rayon pool calm.
+    let scan_results: Vec<(ClientId, String, Vec<PathBuf>)> = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .thread_name(|i| format!("tokscale-scan-{i}"))
+            .build()
+            .unwrap();
+        pool.install(|| {
+            tasks
+                .into_par_iter()
+                .map(|(client_id, path, pattern)| {
+                    let files = scan_directory(&path, pattern);
+                    (client_id, path, files)
+                })
+                .collect()
         })
-        .collect();
+    };
 
     // Aggregate results, deduplicating canonical file paths across overlapping
     // roots while preserving one copy per client. Cherry Studio's V1 and V2
