@@ -2043,6 +2043,63 @@ mod tests {
         }
     }
 
+    /// Both generations scan into one message list and a cached message does
+    /// not record which produced it, so a session id present in both metadata
+    /// tables cannot be re-stamped without one generation overwriting the
+    /// other's title and workspace. A full scan is the correct answer there.
+    #[test]
+    fn test_incremental_rescan_refuses_a_session_id_shared_by_both_schemas() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_timed_v1_db(&db_path);
+        insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+        // A half-migrated database: the same session id in the v2 table too.
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                title TEXT,
+                time_updated INTEGER NOT NULL
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            INSERT INTO session_v2 (id, directory, title, time_updated)
+            VALUES ('ses_1', '/tmp/v2', 'V2 title', 500);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let cold = scan_opencode_sqlite(&db_path);
+        let Some(state) = cold.incremental.clone() else {
+            // Refusing to mark at all is also a safe answer here.
+            return;
+        };
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE session_v2 SET title = 'V2 renamed', time_updated = 9000 WHERE id = 'ses_1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session SET title = 'V1 renamed', time_updated = 9000 WHERE id = 'ses_1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            rescan_opencode_sqlite(&db_path, &state, cold.messages).is_none(),
+            "a session id in both metadata tables must force a full re-parse"
+        );
+    }
+
     #[test]
     fn test_incremental_rescan_refuses_a_row_that_lost_its_tokens() {
         // The row is still there, so the count guard sees nothing wrong, and

@@ -1113,7 +1113,11 @@ fn collect_rows_since(
             on_row((id, session_id, data_json, workspace_root, session_title));
             Ok(())
         });
-    scan.prepared()
+    // `ran()`, not `prepared()`: the delta is only complete if the statement
+    // finished. `prepared()` also accepts a statement that failed while
+    // stepping -- json_extract on a malformed payload, say -- and a truncated
+    // delta read as a complete one keeps cached messages a cold parse drops.
+    scan.ran()
 }
 
 /// Whether any row that stopped qualifying as usage backs a cached message.
@@ -1151,7 +1155,9 @@ fn disqualified_row_backs_cached_message(
                     .is_some_and(|id| cached_keys.contains(id));
             Ok(())
         });
-    scan.prepared().then_some(hit)
+    // Completion required for the same reason as the delta: a probe that
+    // stopped early has not proved the absence of a disqualified row.
+    scan.ran().then_some(hit)
 }
 
 /// Highest `time_updated` in a variant's metadata table, or `i64::MIN` when the
@@ -1169,7 +1175,7 @@ fn read_metadata_high_water(
         high_water = row.get::<_, Option<i64>>(0)?.unwrap_or(i64::MIN);
         Ok(())
     });
-    scan.prepared().then_some(high_water)
+    scan.ran().then_some(high_water)
 }
 
 /// Re-apply session metadata that changed since `since` to already-cached
@@ -1192,6 +1198,7 @@ fn refresh_changed_session_metadata(
     stats_query: &str,
     since: i64,
     cached: &mut [UnifiedMessage],
+    already_refreshed: &mut std::collections::HashSet<String>,
 ) -> Option<i64> {
     if query.is_empty() {
         return Some(i64::MIN);
@@ -1210,9 +1217,16 @@ fn refresh_changed_session_metadata(
             changed.insert(session_id, (workspace_root, session_title));
             Ok(())
         });
-    if !scan.prepared() || !usable {
+    if !scan.ran() || !usable {
         return None;
     }
+
+    // A session already re-stamped by another generation's table would be
+    // overwritten here with a different generation's metadata.
+    if changed.keys().any(|id| already_refreshed.contains(id)) {
+        return None;
+    }
+    already_refreshed.extend(changed.keys().cloned());
 
     if !changed.is_empty() {
         for message in cached.iter_mut() {
@@ -1592,6 +1606,15 @@ pub(crate) fn rescan_opencode_schema_sqlite(
     // `cached_keys` borrowed `cached_messages` for the probe above and is dead
     // from here, so the refresh can take it mutably.
     drop(cached_keys);
+    // Both generations are scanned into one message list, and a cached message
+    // does not record which group produced it. So a session id that exists in
+    // more than one generation's metadata table cannot be re-stamped safely:
+    // the later group would overwrite the earlier group's messages with its own
+    // title and workspace, and a cold parse would disagree. Refusing is rare --
+    // it needs the same id in both `session` and `session_v2`, which is the
+    // half-migrated database -- and a full scan is correct there.
+    let mut refreshed_sessions: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for (index, query, stats_query, since) in pending_metadata {
         // A rename moves session metadata without touching a message row, so
         // the cached messages are re-stamped rather than left stale.
@@ -1602,6 +1625,7 @@ pub(crate) fn rescan_opencode_schema_sqlite(
             stats_query,
             since,
             &mut cached_messages,
+            &mut refreshed_sessions,
         )?;
         if let Some(Some(mark)) = marks.get_mut(index) {
             mark.metadata_high_water = metadata_high_water;

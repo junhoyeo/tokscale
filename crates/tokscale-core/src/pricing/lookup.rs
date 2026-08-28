@@ -1768,22 +1768,35 @@ fn uses_openai_full_request_272k_pricing(result: &LookupResult, provider_id: Opt
 /// pricing table: https://docs.x.ai/developers/pricing.
 fn uses_xai_full_request_200k_pricing(result: &LookupResult, provider_id: Option<&str>) -> bool {
     let provider_id = normalize_provider_hint(provider_id);
-    if result.source != "LiteLLM"
-        || provider_id.is_some_and(|provider| {
-            provider_identity::canonical_provider(provider).as_deref() != Some("xai")
-        })
-    {
+    let hinted_xai = provider_id.is_some_and(|provider| {
+        provider_identity::canonical_provider(provider).as_deref() == Some("xai")
+    });
+    if provider_id.is_some() && !hinted_xai {
         return false;
     }
 
     let key = result.matched_key.trim().to_ascii_lowercase();
     let mut parts = key.split('/');
-    let (Some(provider), Some(model), None) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
+    let identifies_xai_grok = match (parts.next(), parts.next(), parts.next()) {
+        // `xai/grok-*` from the upstream catalog.
+        (Some(provider), Some(model), None) => {
+            result.source == "LiteLLM"
+                && provider_identity::canonical_provider(provider).as_deref() == Some("xai")
+                && model.starts_with("grok-")
+        }
+        // A bare `grok-*` from the built-in Cursor table, which is how that
+        // table keys it. Those rows are transcribed from xAI's own published
+        // tariff -- the same numbers, including the >200K tier -- so billing
+        // them progressively while the upstream row bills request-wide made the
+        // identical request cost half as much depending on which dataset
+        // resolved it. The xAI hint is required, because a bare `grok-*` says
+        // nothing about who billed it.
+        (Some(model), None, None) => {
+            result.source == "Cursor" && hinted_xai && model.starts_with("grok-")
+        }
+        _ => false,
     };
-    if provider_identity::canonical_provider(provider).as_deref() != Some("xai")
-        || !model.starts_with("grok-")
-    {
+    if !identifies_xai_grok {
         return false;
     }
 

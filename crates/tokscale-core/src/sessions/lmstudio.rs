@@ -36,6 +36,13 @@ const SERVER_LOG_WINDOW_BYTES: usize = 8 * 1024 * 1024;
 /// Bytes pulled from the log per read.
 const SERVER_LOG_CHUNK_BYTES: usize = 64 * 1024;
 
+/// How far past an eviction boundary the identity scan reads.
+///
+/// Enough to span a whole `"id"` / `"model"` field or a log header, so a field
+/// straddling the cut is still recovered. These are short: a response id is
+/// tens of bytes and a header under fifty.
+const IDENTITY_OVERLAP_BYTES: usize = 512;
+
 #[derive(Debug, Default, Deserialize)]
 struct PromptTokenDetails {
     #[serde(default, alias = "cache_read_tokens")]
@@ -223,24 +230,36 @@ fn last_json_string_field(bytes: &[u8], field: &[u8]) -> Option<String> {
     found
 }
 
+/// Timestamp of the last LM Studio log header in `bytes`.
+///
+/// Anchored to the header's shape -- `[<ts>]` at the start of a line and
+/// immediately followed by `[` -- rather than to any bracketed date. A model
+/// that prints `[2020-01-01 00:00:00]` in its answer lands *after* the real
+/// header in this region, so a last-match-wins scan over bare brackets would
+/// date the usage from the model's own output.
 fn last_log_timestamp(bytes: &[u8]) -> Option<i64> {
     let text = String::from_utf8_lossy(bytes);
-    let mut remainder = text.as_ref();
     let mut parsed = None;
-    while let Some(start) = remainder.find('[') {
-        let after = &remainder[start + 1..];
-        let Some(end) = after.find(']') else {
-            break;
+    for line in text.split('\n') {
+        let line = line.strip_prefix('\r').unwrap_or(line);
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
         };
-        let candidate = &after[..end];
-        if let Ok(naive) = NaiveDateTime::parse_from_str(candidate, "%Y-%m-%d %H:%M:%S") {
-            parsed = match Local.from_local_datetime(&naive) {
-                LocalResult::Single(value) => Some(value.timestamp_millis()),
-                LocalResult::Ambiguous(first, _) => Some(first.timestamp_millis()),
-                LocalResult::None => parsed,
-            };
+        let Some(end) = rest.find(']') else {
+            continue;
+        };
+        // The header always continues into its next bracketed field.
+        if !rest[end + 1..].starts_with('[') {
+            continue;
         }
-        remainder = &after[end + 1..];
+        let Ok(naive) = NaiveDateTime::parse_from_str(&rest[..end], "%Y-%m-%d %H:%M:%S") else {
+            continue;
+        };
+        parsed = match Local.from_local_datetime(&naive) {
+            LocalResult::Single(value) => Some(value.timestamp_millis()),
+            LocalResult::Ambiguous(first, _) => Some(first.timestamp_millis()),
+            LocalResult::None => parsed,
+        };
     }
     parsed
 }
@@ -348,6 +367,9 @@ fn parse_lmstudio_file_windowed(
     // window does not rescan what it has seen.
     let mut scanned_to = 0usize;
     let mut chunk = vec![0u8; chunk_bytes.max(1)];
+    // Identity recovered from bytes the window had to evict before the record
+    // they belong to was complete.
+    let mut carried = CarriedIdentity::default();
 
     loop {
         let read = reader.read(&mut chunk).unwrap_or(0);
@@ -385,6 +407,7 @@ fn parse_lmstudio_file_windowed(
             if let Some(message) = message_from_record(
                 &window[object_start..object_end],
                 &window[metadata_from..marker],
+                &carried,
                 path,
                 absolute_marker,
                 &session_id,
@@ -393,6 +416,7 @@ fn parse_lmstudio_file_windowed(
                 messages.push(message);
             }
             metadata_start = absolute_end;
+            carried.clear();
         }
 
         // Release what is behind the next record's metadata. Everything before
@@ -406,11 +430,26 @@ fn parse_lmstudio_file_windowed(
             window_start += keep_from;
         }
 
-        // A single record larger than the window would otherwise grow it
-        // without bound, which is the failure this window exists to prevent.
-        // Dropping it costs that one response and keeps the rest of the file.
+        // A response body longer than the window pushes its own header out of
+        // it. That header is where the response id, the model, and the log
+        // timestamp live, so evicting it blind would leave the record with an
+        // unknown model, the file's mtime for a date, and a path-derived dedup
+        // key -- which stops matching the same response in a mirrored log and
+        // drifts the date every time the file is appended to. The identity is
+        // therefore lifted out of the bytes on their way past.
         if window.len() > window_bytes {
             let overflow = window.len() - window_bytes;
+            // Read past the cut before dropping: the eviction boundary falls
+            // wherever the refill arithmetic puts it, which is happily in the
+            // middle of `"id":"chatcmpl-..."`. A field split across the cut
+            // would be in neither the evicted slice nor the retained window.
+            // The overlap only reaches forward into bytes that are still ahead
+            // of the current record's marker, so it cannot pick up a later
+            // record's identity.
+            let absorb_to = overflow
+                .saturating_add(IDENTITY_OVERLAP_BYTES)
+                .min(window.len());
+            carried.absorb(&window[..absorb_to]);
             window.drain(..overflow);
             window_start += overflow;
             metadata_start = metadata_start.max(window_start);
@@ -429,9 +468,56 @@ fn parse_lmstudio_file_windowed(
 ///
 /// Split out of the scan loop so the loop deals only in window arithmetic:
 /// this half sees two slices and never an offset it has to translate.
+/// Response identity rescued from window bytes before they were dropped.
+///
+/// A record's `id`, `model` and log timestamp sit ahead of its `usage` object,
+/// so a long response body can push them out of the window before the record
+/// completes. Keeping them here makes the result independent of where the
+/// buffer boundaries happened to fall.
+#[derive(Default)]
+struct CarriedIdentity {
+    response_id: Option<String>,
+    model: Option<String>,
+    timestamp: Option<i64>,
+}
+
+impl CarriedIdentity {
+    /// Take the identity out of bytes about to be discarded. Later bytes win,
+    /// matching the "last one before the usage object" rule applied to a window
+    /// that still holds them.
+    fn absorb(&mut self, bytes: &[u8]) {
+        if let Some(id) = response_id_in(bytes) {
+            self.response_id = Some(id);
+        }
+        if let Some(model) = model_in(bytes) {
+            self.model = Some(model);
+        }
+        if let Some(timestamp) = last_log_timestamp(bytes) {
+            self.timestamp = Some(timestamp);
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn response_id_in(bytes: &[u8]) -> Option<String> {
+    last_json_string_field(bytes, b"id").filter(|value| {
+        ["chatcmpl-", "cmpl-", "resp_"]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    })
+}
+
+fn model_in(bytes: &[u8]) -> Option<String> {
+    last_json_string_field(bytes, b"model").filter(|value| !value.trim().is_empty())
+}
+
 fn message_from_record(
     usage_object: &[u8],
     metadata: &[u8],
+    carried: &CarriedIdentity,
     path: &Path,
     marker: usize,
     session_id: &str,
@@ -440,15 +526,15 @@ fn message_from_record(
     let usage = serde_json::from_slice::<UsagePayload>(usage_object).ok()?;
     let tokens = normalized_tokens(&usage)?;
 
-    let response_id = last_json_string_field(metadata, b"id").filter(|value| {
-        ["chatcmpl-", "cmpl-", "resp_"]
-            .iter()
-            .any(|prefix| value.starts_with(prefix))
-    });
-    let model = last_json_string_field(metadata, b"model")
-        .filter(|value| !value.trim().is_empty())
+    // What the window still holds is nearer the usage object than anything
+    // evicted, so it wins; the carried value is the fallback, not the default.
+    let response_id = response_id_in(metadata).or_else(|| carried.response_id.clone());
+    let model = model_in(metadata)
+        .or_else(|| carried.model.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let timestamp = last_log_timestamp(metadata).unwrap_or(fallback_timestamp);
+    let timestamp = last_log_timestamp(metadata)
+        .or(carried.timestamp)
+        .unwrap_or(fallback_timestamp);
     if timestamp <= 0 {
         return None;
     }
@@ -550,6 +636,67 @@ mod tests {
                 "window={window} chunk={chunk} changed the parse"
             );
         }
+    }
+
+    /// A response body long enough to evict its own header must still be
+    /// attributed to the right model, date and response id.
+    ///
+    /// Without carrying the identity past eviction the record falls back to an
+    /// unknown model, the file's mtime, and a path-derived dedup key -- which
+    /// stops matching the same response in a mirrored log and moves the date
+    /// every time the file is appended to.
+    #[test]
+    fn a_response_that_outgrows_the_window_keeps_its_identity() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Header and identity first, then a body far longer than the window,
+        // then the usage object -- the real shape of a long completion.
+        let body = "b".repeat(4096);
+        write!(
+            file,
+            "[2026-07-09 10:00:00][INFO][fixture-model]\n\
+             Final response: {{\"id\":\"chatcmpl-far\",\"model\":\"big-model\",\
+             \"choices\":[{{\"text\":\"{body}\"}}],\
+             \"usage\":{{\"prompt_tokens\":31,\"completion_tokens\":7,\"total_tokens\":38}}}}\n"
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_lmstudio_file_windowed(file.path(), 512, 64);
+        assert_eq!(messages.len(), 1, "the record must survive eviction");
+        let message = &messages[0];
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("lmstudio:chatcmpl-far"),
+            "the response id must survive its own body"
+        );
+        assert_eq!(message.model_id, "big-model");
+        assert_eq!(message.tokens.input, 31);
+        // 2026-07-09 local, not the file's mtime.
+        assert_eq!(message.date, "2026-07-09");
+        // And the windowed parse agrees with the unwindowed one.
+        assert_eq!(messages, parse_lmstudio_file(file.path()));
+    }
+
+    /// A bracketed date inside the model's answer is not a log header.
+    #[test]
+    fn a_timestamp_printed_by_the_model_is_not_taken_as_the_log_time() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "[2026-07-09 10:00:00][INFO][fixture-model]\n\
+             Final response: {{\"id\":\"chatcmpl-quoted\",\"model\":\"fixture-model\",\
+             \"choices\":[{{\"text\":\"the log said [2019-03-04 05:06:07] earlier\"}}],\
+             \"usage\":{{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}}}\n"
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_lmstudio_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].date, "2026-07-09",
+            "the header dates the usage, not a date the model printed"
+        );
     }
 
     /// A record whose own bytes exceed the window is dropped, and only it.

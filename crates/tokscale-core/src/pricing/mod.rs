@@ -540,6 +540,57 @@ mod tests {
         )
     }
 
+    /// The same Grok request must cost the same whichever dataset priced it.
+    ///
+    /// xAI documents the >200K rate as request-wide. The upstream `xai/grok-*`
+    /// row was billed that way while the built-in Cursor row -- transcribed
+    /// from the same published tariff, and keyed bare as `grok-4.6` -- fell
+    /// through to progressive billing, halving the cost of a long request.
+    #[test]
+    fn cursor_grok_long_context_bills_request_wide_like_the_upstream_row() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 150_000,
+            output: 10_000,
+            cache_read: 50_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolved = service
+            .lookup_with_source_and_provider("grok-4.6", None, Some("xai"))
+            .expect("the built-in Cursor row prices grok-4.6");
+        assert_eq!(resolved.source, "Cursor");
+        assert_eq!(resolved.matched_key, "grok-4.6");
+
+        // 210K total crosses the boundary, so every bucket bills at the high
+        // rate: 150k*4 + 10k*12 + 50k*1 per million.
+        let cost = service.calculate_cost_with_provider("grok-4.6", Some("xai"), &usage);
+        assert!(
+            (cost - 0.770).abs() < 1e-9,
+            "request-wide pricing expected, got {cost}"
+        );
+    }
+
+    /// Without an xAI hint a bare `grok-*` says nothing about who billed it, so
+    /// the request-wide rule must not apply.
+    #[test]
+    fn an_unhinted_bare_grok_row_keeps_progressive_pricing() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 150_000,
+            output: 10_000,
+            cache_read: 50_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let cost = service.calculate_cost_with_provider("grok-4.6", Some("openrouter"), &usage);
+        assert!(
+            (cost - 0.770).abs() > 1e-9,
+            "an unrelated provider hint must not get request-wide pricing: {cost}"
+        );
+    }
+
     fn cache_read_usage() -> TokenBreakdown {
         TokenBreakdown {
             input: 1_000_000,

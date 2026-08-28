@@ -212,6 +212,12 @@ async fn call_rpc(port: u16) -> Result<QuotaSummary> {
     // RPC client in `crate::antigravity` is built the same way.
     let client = reqwest::Client::builder()
         .no_proxy()
+        // Redirects are refused for the same reason the proxy is: discovery
+        // probes ports that may belong to anything, and reqwest follows up to
+        // ten redirects by default. A stale or hostile local listener answering
+        // 307 with an external URL would carry the request off loopback, and
+        // the remote answer would then be accepted as a quota summary.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(PROBE_TIMEOUT)
         .build()?;
     let response = client
