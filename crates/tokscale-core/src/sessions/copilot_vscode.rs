@@ -42,7 +42,10 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
                 // agent session that doubling is measured in gigabytes.
                 if let Some(slot) = obj.pointer_mut("/v/requests") {
                     if let Value::Array(arr) = slot.take() {
-                        requests.extend(arr);
+                        requests.extend(arr.into_iter().map(|mut req| {
+                            prune_request(&mut req);
+                            req
+                        }));
                     }
                 }
             }
@@ -58,6 +61,13 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
                             // Dropping out-of-range updates is intentional: padding placeholders would mint timestamp-0 messages.
                             if let Some(req) = requests.get_mut(index) {
                                 apply_update(req, &k[2..], value);
+                                // Pruning after the write rather than refusing
+                                // the update keeps one code path for every
+                                // shape an update can take, including a write
+                                // that replaces `result` wholesale. The payload
+                                // was moved in, not copied, so the discarded
+                                // branches cost no extra peak.
+                                prune_request(req);
                             }
                         }
                     }
@@ -73,7 +83,10 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
                         k.len() == 1 && k.first().and_then(Value::as_str) == Some("requests");
                     if is_requests {
                         if let Some(Value::Array(arr)) = obj.get_mut("v").map(Value::take) {
-                            requests.extend(arr);
+                            requests.extend(arr.into_iter().map(|mut req| {
+                                prune_request(&mut req);
+                                req
+                            }));
                         }
                     }
                 }
@@ -86,6 +99,70 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         .iter()
         .filter_map(|req| request_to_message(req, &session_id, &workspace))
         .collect()
+}
+
+/// Drop everything from a request that [`request_to_message`] does not read.
+///
+/// A session file is not one big snapshot: the `kind:0` line is a near-empty
+/// stub (1,340 bytes against a 1.3 MB file on the local corpus) and the content
+/// arrives as `kind:1`/`kind:2` lines appended over the session's life. So peak
+/// memory is not set by parsing any single line -- it is set by the `requests`
+/// vec accumulating full request bodies across all of them.
+///
+/// Almost none of that body is ever looked at. Across 60 local session files,
+/// requests held 1,077,254 bytes, of which 45,500 are reachable from the reads
+/// below; `variableData`, `edits`, `response`, and `metadata.toolCallResults`
+/// alone are 87%. Pruning on the way in keeps the accumulation proportional to
+/// what the parse actually needs.
+///
+/// **This function and `request_to_message` must agree.** A field the reader
+/// starts reading without being kept here reads as absent, which silently drops
+/// usage rather than failing -- the worst shape of bug this file can have.
+/// `projection_keeps_every_field_request_to_message_reads` fails if they
+/// diverge.
+fn prune_request(req: &mut Value) {
+    let Some(request) = req.as_object_mut() else {
+        return;
+    };
+    request.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "promptTokens" | "completionTokens" | "timestamp" | "modelId" | "result"
+        )
+    });
+
+    let Some(result) = request.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    result.retain(|key, _| key == "metadata");
+
+    let Some(metadata) = result.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return;
+    };
+    metadata.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "promptTokens" | "outputTokens" | "resolvedModel" | "toolCallRounds"
+        )
+    });
+
+    // Only `thinking.tokens` is summed out of a round, and the rounds carry the
+    // tool arguments and results that make them the largest surviving field.
+    let Some(rounds) = metadata
+        .get_mut("toolCallRounds")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for round in rounds {
+        let Some(round) = round.as_object_mut() else {
+            continue;
+        };
+        round.retain(|key, _| key == "thinking");
+        if let Some(thinking) = round.get_mut("thinking").and_then(Value::as_object_mut) {
+            thinking.retain(|key, _| key == "tokens");
+        }
+    }
 }
 
 /// Upper bound for numeric indexes in an update path. A corrupted line with a
@@ -301,6 +378,115 @@ mod tests {
         for line in lines {
             writeln!(f, "{}", line).unwrap();
         }
+    }
+
+    /// The projection's allowlist and `request_to_message`'s reads are two
+    /// spellings of one list, in two places. This pins them together: a
+    /// request carrying every readable field must survive pruning with the
+    /// identical message coming out the other side.
+    ///
+    /// A field added to the reader but not to `prune_request` reads as absent
+    /// after pruning, so this fails rather than letting the usage disappear.
+    #[test]
+    fn projection_keeps_every_field_request_to_message_reads() {
+        // Every field the reader touches, each with a value it could not
+        // produce by accident, wrapped in the noise a real request carries.
+        let full = serde_json::json!({
+            "requestId": "r-full",
+            "timestamp": 1_783_918_304_896i64,
+            "modelId": "copilot/gpt-5.3",
+            "promptTokens": 4242,
+            "completionTokens": 777,
+            "variableData": {"junk": "x".repeat(64)},
+            "edits": ["noise", "noise"],
+            "response": [{"value": "y".repeat(64)}],
+            "result": {
+                "timings": {"totalElapsed": 1234},
+                "details": "noise",
+                "metadata": {
+                    "promptTokens": 5150,
+                    "outputTokens": 888,
+                    "resolvedModel": "gpt-5.3-codex",
+                    "toolCallResults": {"big": "z".repeat(128)},
+                    "renderedUserMessage": "w".repeat(128),
+                    "toolCallRounds": [
+                        {"thinking": {"tokens": 30, "text": "noise"}, "response": "noise"},
+                        {"thinking": {"tokens": 70}, "toolCalls": ["noise"]},
+                    ],
+                },
+            },
+        });
+
+        let mut pruned = full.clone();
+        prune_request(&mut pruned);
+
+        let workspace = None;
+        let before = request_to_message(&full, "session-full", &workspace)
+            .expect("the unpruned request is a copilot message");
+        let after = request_to_message(&pruned, "session-full", &workspace)
+            .expect("pruning must not make a readable request unreadable");
+
+        assert_eq!(
+            before, after,
+            "prune_request dropped a field request_to_message reads"
+        );
+        // Guard against the test passing because nothing was read at all.
+        assert_eq!(before.tokens.input, 4242);
+        assert_eq!(before.tokens.output, 777);
+        assert_eq!(before.tokens.reasoning, 100);
+        assert_eq!(before.model_id, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn projection_drops_the_bodies_it_never_reads() {
+        let mut req = serde_json::json!({
+            "timestamp": 1000,
+            "modelId": "copilot/auto",
+            "promptTokens": 10,
+            "completionTokens": 5,
+            "variableData": {"a": 1},
+            "edits": [1, 2, 3],
+            "response": ["body"],
+            "result": {
+                "timings": {"t": 1},
+                "metadata": {
+                    "resolvedModel": "gpt-5.3",
+                    "toolCallResults": {"big": "x"},
+                    "renderedUserMessage": "y",
+                    "toolCallRounds": [{"thinking": {"tokens": 7}, "toolCalls": ["c"]}],
+                },
+            },
+        });
+        prune_request(&mut req);
+
+        let obj = req.as_object().unwrap();
+        for dropped in ["variableData", "edits", "response", "requestId"] {
+            assert!(!obj.contains_key(dropped), "{dropped} should be pruned");
+        }
+        let metadata = req
+            .pointer("/result/metadata")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        for dropped in ["toolCallResults", "renderedUserMessage"] {
+            assert!(
+                !metadata.contains_key(dropped),
+                "{dropped} should be pruned"
+            );
+        }
+        assert!(req.pointer("/result/timings").is_none());
+        // A round keeps its thinking tokens and nothing else.
+        let round = req
+            .pointer("/result/metadata/toolCallRounds/0")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert!(!round.contains_key("toolCalls"));
+        assert_eq!(
+            req.pointer("/result/metadata/toolCallRounds/0/thinking/tokens")
+                .and_then(Value::as_i64),
+            Some(7)
+        );
     }
 
     #[test]
