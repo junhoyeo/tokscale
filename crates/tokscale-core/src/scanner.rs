@@ -382,33 +382,32 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 
     // #1153: `~/.config/Code/logs` can hold tens of thousands of entries
     // (34,598 measured) from many extensions. The `codebuddy-extension-log`
-    // pattern only cares about `Tencent-Cloud.coding-copilot` underneath it,
-    // so prune every other subtree before WalkDir enumerates it.
-    let prune_to_tencent = pattern == "codebuddy-extension-log";
-    let root_path = PathBuf::from(root);
+    // pattern only cares about `Tencent-Cloud.coding-copilot`, and every
+    // extension -- CodeBuddy included -- gets its own directory under an
+    // `exthost` parent. Pruning the siblings there drops the bulk of the tree.
+    //
+    // Deliberately keyed on the parent and not on the entry's own name: the
+    // CodeBuddy directory sits at `logs/<timestamp>/window<N>/exthost/...`, so
+    // admitting only directories named after the extension would prune the
+    // timestamp level and find nothing at all. Anything whose parent is not
+    // `exthost` is descended into, which keeps an unfamiliar layout correct
+    // and merely unpruned.
+    let prune_extension_siblings = pattern == "codebuddy-extension-log";
 
     let mut paths: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| {
-            if !prune_to_tencent {
+            if !prune_extension_siblings || !e.file_type().is_dir() {
                 return true;
             }
-            if e.path() == root_path {
-                return true;
-            }
-            if e.file_type().is_dir() {
-                let dominated = e.path().components().any(|c| {
-                    c.as_os_str()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
-                });
-                if dominated {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                return name.eq_ignore_ascii_case("Tencent-Cloud.coding-copilot");
-            }
-            true
+            let under_exthost = e
+                .path()
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|parent| parent.eq_ignore_ascii_case("exthost"));
+            !under_exthost
+                || e.file_name()
+                    .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
         })
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -1506,6 +1505,11 @@ fn scan_all_clients_with_env_strategy_inner(
     let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
 
     // Define scan tasks
+    /// Most workers a scan will run, however many cores the machine has.
+    /// Directory walks block on the filesystem rather than the CPU, so past a
+    /// handful the extra workers park and contend instead of finding files.
+    const SCAN_WORKER_CEILING: usize = 4;
+
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
     let mut devin_cli_roots: Vec<PathBuf> = Vec::new();
@@ -2335,25 +2339,37 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     // #1153: bound scan parallelism to avoid futex storms on machines with
-    // huge Code/logs trees. WalkDir enumeration under 34k+ entries plus an
-    // unbounded `into_par_iter` can spike to 90+ contending workers
-    // (measured 97 threads futex_wait_queue). Cap to 2 workers to respect
-    // the 2-thread build/test budget and keep the global rayon pool calm.
-    let scan_results: Vec<(ClientId, String, Vec<PathBuf>)> = {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .thread_name(|i| format!("tokscale-scan-{i}"))
-            .build()
-            .unwrap();
-        pool.install(|| {
-            tasks
-                .into_par_iter()
-                .map(|(client_id, path, pattern)| {
-                    let files = scan_directory(&path, pattern);
-                    (client_id, path, files)
-                })
-                .collect()
-        })
+    // huge log trees. These tasks are blocking directory walks rather than
+    // CPU work, so one worker per core leaves most of them parked on the
+    // filesystem and contending -- 97 threads in `futex_wait_queue` on the
+    // reporter's machine.
+    //
+    // The ceiling is deliberately a proportion of the machine rather than a
+    // constant: a fixed two workers would serialize scanning for every user to
+    // fix one user's storm, and scanning is what the whole command spends its
+    // time on. Four is enough to keep several disks-worth of walks in flight
+    // without the herd.
+    let scan = |tasks: Vec<(ClientId, String, &str)>| {
+        tasks
+            .into_par_iter()
+            .map(|(client_id, path, pattern)| {
+                let files = scan_directory(&path, pattern);
+                (client_id, path, files)
+            })
+            .collect()
+    };
+    let scan_workers = std::thread::available_parallelism()
+        .map_or(2, |cores| cores.get().min(SCAN_WORKER_CEILING));
+    let scan_results: Vec<(ClientId, String, Vec<PathBuf>)> = match rayon::ThreadPoolBuilder::new()
+        .num_threads(scan_workers)
+        .thread_name(|i| format!("tokscale-scan-{i}"))
+        .build()
+    {
+        Ok(pool) => pool.install(|| scan(tasks)),
+        // A pool that will not build is not worth failing the scan over. The
+        // global pool still produces correct results, just with the contention
+        // this cap exists to avoid.
+        Err(_) => scan(tasks),
     };
 
     // Aggregate results, deduplicating canonical file paths across overlapping
@@ -2636,6 +2652,61 @@ mod tests {
         let log_files = scan_directory(path.to_str().unwrap(), "*.log");
         assert_eq!(log_files.len(), 2);
         assert!(log_files.iter().all(|p| p.extension().unwrap() == "log"));
+    }
+
+    /// VS Code nests extension logs several levels below the root it is
+    /// scanned from: `logs/<timestamp>/window<N>/exthost/<publisher>.<ext>/`.
+    /// Pruning has to survive that descent -- the CodeBuddy directory is never
+    /// a direct child of the scan root, so a filter that only admits
+    /// directories named after the extension prunes the timestamp level and
+    /// finds nothing at all.
+    #[test]
+    fn test_scan_directory_finds_codebuddy_logs_below_the_vscode_log_tree() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let codebuddy = root
+            .join("20260823T075801")
+            .join("window1")
+            .join("exthost")
+            .join("Tencent-Cloud.coding-copilot");
+        fs::create_dir_all(&codebuddy).unwrap();
+        File::create(codebuddy.join("CodeBuddy.log")).unwrap();
+
+        let found = scan_directory(root.to_str().unwrap(), "codebuddy-extension-log");
+
+        assert_eq!(
+            found,
+            vec![codebuddy.join("CodeBuddy.log")],
+            "the extension log must survive the timestamp and window levels"
+        );
+    }
+
+    /// The point of the pruning: the sibling extension directories under
+    /// `exthost` are the bulk of the tree (34,598 entries on the #1153
+    /// reporter's machine) and none of them can contain CodeBuddy logs.
+    #[test]
+    fn test_scan_directory_skips_unrelated_extension_logs() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let exthost = root.join("20260823T075801").join("window1").join("exthost");
+
+        let codebuddy = exthost.join("Tencent-Cloud.coding-copilot");
+        fs::create_dir_all(&codebuddy).unwrap();
+        File::create(codebuddy.join("CodeBuddy.log")).unwrap();
+
+        for noisy in [
+            "ms-python.python",
+            "rust-lang.rust-analyzer",
+            "vscodevim.vim",
+        ] {
+            let other = exthost.join(noisy);
+            fs::create_dir_all(&other).unwrap();
+            File::create(other.join("extension.log")).unwrap();
+        }
+
+        let found = scan_directory(root.to_str().unwrap(), "codebuddy-extension-log");
+
+        assert_eq!(found, vec![codebuddy.join("CodeBuddy.log")]);
     }
 
     #[test]
