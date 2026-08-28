@@ -523,6 +523,42 @@ const OPENCODE_V1_STATS_QUERY: &str = r#"
     FROM message
 "#;
 
+/// Changed rows the usage queries no longer select.
+///
+/// The row count is a deletion test, but a row that is rewritten until it stops
+/// being priceable usage -- its role moves off `assistant`, or its `tokens`
+/// object goes away -- leaves the count untouched while dropping out of the
+/// incremental result. The merge only replaces keys it is handed, so without
+/// this probe that row's cached message would stay counted for as long as the
+/// mark survives, and a cold scan would disagree with the cache indefinitely.
+///
+/// Only the ids are read: the caller needs to know whether a *cached* message
+/// came from the row, not what the row says now. Bounded by the same
+/// `time_updated` mark as the usage queries, so it reads the delta rather than
+/// the table -- unlike folding the predicate into the stats query, which costs
+/// a `json_extract` per row on every rescan (measured at +14.6s on a 14 GB
+/// database, against 5.1s for the whole stats pass).
+///
+/// The `COALESCE` matters: `json_extract` returns SQL NULL for an absent
+/// `$.role`, and an unguarded `NOT (NULL = 'assistant' AND ...)` evaluates to
+/// NULL, which `WHERE` drops -- silently exempting exactly the malformed rows
+/// this is meant to catch.
+const OPENCODE_V2_DISQUALIFIED_QUERY: &str = r#"
+    SELECT sm.id, json_extract(sm.data, '$.id')
+    FROM session_message sm
+    WHERE sm.time_updated >= ?1
+      AND NOT (sm.type = 'assistant'
+               AND json_extract(sm.data, '$.tokens') IS NOT NULL)
+"#;
+
+const OPENCODE_V1_DISQUALIFIED_QUERY: &str = r#"
+    SELECT m.id, json_extract(m.data, '$.id')
+    FROM message m
+    WHERE m.time_updated >= ?1
+      AND NOT (COALESCE(json_extract(m.data, '$.role'), '') = 'assistant'
+               AND json_extract(m.data, '$.tokens') IS NOT NULL)
+"#;
+
 /// Incremental support for one entry of [`OpenCodeSchemaConfig::query_groups`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OpenCodeIncrementalGroup {
@@ -532,6 +568,10 @@ pub(crate) struct OpenCodeIncrementalGroup {
     queries: &'static [&'static str],
     /// Row-population invariants for the group's base table.
     stats: &'static str,
+    /// Changed rows the group's usage queries no longer select. One query for
+    /// the whole group rather than one per variant: the variants differ only
+    /// in the metadata join, which this does not read.
+    disqualified: &'static str,
 }
 
 /// Incremental support for [`OPENCODE_QUERY_GROUPS`], in the same order.
@@ -539,10 +579,12 @@ const OPENCODE_INCREMENTAL_GROUPS: &[OpenCodeIncrementalGroup] = &[
     OpenCodeIncrementalGroup {
         queries: OPENCODE_V2_INCREMENTAL_QUERIES,
         stats: OPENCODE_V2_STATS_QUERY,
+        disqualified: OPENCODE_V2_DISQUALIFIED_QUERY,
     },
     OpenCodeIncrementalGroup {
         queries: OPENCODE_V1_INCREMENTAL_QUERIES,
         stats: OPENCODE_V1_STATS_QUERY,
+        disqualified: OPENCODE_V1_DISQUALIFIED_QUERY,
     },
 ];
 
@@ -1028,6 +1070,44 @@ fn collect_rows_since(
     scan.prepared()
 }
 
+/// Whether any row that stopped qualifying as usage backs a cached message.
+///
+/// Returns `None` if the probe could not run, which the caller treats the same
+/// as a hit: an unverifiable delta is not a safe one.
+///
+/// Both candidate dedup keys are tested for every row -- the embedded id and
+/// the row id -- rather than reproducing [`SchemaAccumulator::ingest`]'s choice
+/// between them. The two spellings cannot collide across different rows in
+/// practice, and the failure directions are not symmetric: an extra key costs
+/// one unnecessary full scan, while a missed one leaves a stale message counted
+/// for the life of the mark.
+fn disqualified_row_backs_cached_message(
+    db_path: &Path,
+    conn: &rusqlite::Connection,
+    query: &str,
+    since: i64,
+    db_namespace: &str,
+    cached_keys: &std::collections::HashSet<&str>,
+) -> Option<bool> {
+    let mut hit = false;
+    let scan =
+        sqlite_for_each_row_on_with_params(conn, db_path, query, &[&since], None, &mut |row| {
+            if hit {
+                return Ok(());
+            }
+            let row_id: String = row.get(0)?;
+            let embedded_id: Option<String> = row.get(1)?;
+            let namespaced = format!("{db_namespace}:{row_id}");
+            hit = cached_keys.contains(row_id.as_str())
+                || cached_keys.contains(namespaced.as_str())
+                || embedded_id
+                    .as_deref()
+                    .is_some_and(|id| cached_keys.contains(id));
+            Ok(())
+        });
+    scan.prepared().then_some(hit)
+}
+
 /// Parse assistant turns out of a SQLite database that uses the OpenCode
 /// message schema, applying `cfg`'s per-client policy.
 ///
@@ -1271,6 +1351,12 @@ pub(crate) fn rescan_opencode_schema_sqlite(
 
     let mut acc = SchemaAccumulator::default();
     let mut marks: Vec<Option<OpenCodeGroupMark>> = Vec::with_capacity(cached_state.groups.len());
+    // Borrowed for the disqualification probe below; `cached_messages` is not
+    // consumed until the merge at the end of this function.
+    let cached_keys: std::collections::HashSet<&str> = cached_messages
+        .iter()
+        .filter_map(|message| message.dedup_key.as_deref())
+        .collect();
 
     for (group_index, group) in cfg.query_groups.iter().enumerate() {
         let incremental = incremental_groups.get(group_index)?;
@@ -1310,6 +1396,21 @@ pub(crate) fn rescan_opencode_schema_sqlite(
         // only reusable while the same variant still wins.
         let chosen = group.iter().position(|query| conn.prepare(query).is_ok())?;
         if query_digest(group[chosen]) != mark.query_digest {
+            return None;
+        }
+
+        // Rows that stopped being usage are invisible to the query above, so
+        // they are probed for separately. A hit means the cache holds a message
+        // whose row no longer backs it, and only a full scan can drop it.
+        if disqualified_row_backs_cached_message(
+            db_path,
+            &conn,
+            incremental.disqualified,
+            mark.updated_high_water,
+            &db_namespace,
+            &cached_keys,
+        ) != Some(false)
+        {
             return None;
         }
 

@@ -1989,6 +1989,121 @@ mod tests {
         );
     }
 
+    /// Rewrite a row so the usage queries stop selecting it, without changing
+    /// the row count. `payload` replaces the whole `data` object.
+    fn disqualify_timed_v1_message(conn: &Connection, id: &str, updated: i64, payload: &str) {
+        let changed = conn
+            .execute(
+                "UPDATE message SET data = ?2, time_updated = ?3 WHERE id = ?1",
+                rusqlite::params![id, payload, updated],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} should exist");
+    }
+
+    #[test]
+    fn test_incremental_rescan_refuses_a_row_that_lost_its_tokens() {
+        // The row is still there, so the count guard sees nothing wrong, and
+        // the usage query no longer returns it, so the merge is never told to
+        // drop it. Only the disqualification probe can catch this.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_timed_v1_db(&db_path);
+        insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+        insert_timed_v1_message(&conn, "msg_b", 2_000, 22);
+        drop(conn);
+
+        let cold = scan_opencode_sqlite(&db_path);
+        let state = cold.incremental.clone().unwrap();
+        assert_eq!(cold.messages.len(), 2);
+
+        let conn = Connection::open(&db_path).unwrap();
+        disqualify_timed_v1_message(
+            &conn,
+            "msg_b",
+            9_000,
+            r#"{"id": "msg_b", "sessionID": "ses_1", "role": "assistant"}"#,
+        );
+        drop(conn);
+
+        assert!(
+            rescan_opencode_sqlite(&db_path, &state, cold.messages).is_none(),
+            "a row that stopped carrying tokens must force a full re-parse"
+        );
+
+        let full = scan_opencode_sqlite(&db_path);
+        assert_eq!(full.messages.len(), 1);
+        assert_eq!(full.messages[0].dedup_key.as_deref(), Some("msg_a"));
+    }
+
+    #[test]
+    fn test_incremental_rescan_refuses_a_row_that_stopped_being_an_assistant_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_timed_v1_db(&db_path);
+        insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+        insert_timed_v1_message(&conn, "msg_b", 2_000, 22);
+        drop(conn);
+
+        let cold = scan_opencode_sqlite(&db_path);
+        let state = cold.incremental.clone().unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        disqualify_timed_v1_message(
+            &conn,
+            "msg_b",
+            9_000,
+            r#"{"id": "msg_b", "sessionID": "ses_1", "role": "user",
+                "tokens": {"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}}"#,
+        );
+        drop(conn);
+
+        assert!(
+            rescan_opencode_sqlite(&db_path, &state, cold.messages).is_none(),
+            "a row whose role moved off assistant must force a full re-parse"
+        );
+    }
+
+    #[test]
+    fn test_incremental_rescan_keeps_going_when_a_never_counted_row_changes() {
+        // The guard above must not fire on ordinary traffic. User turns are
+        // rewritten constantly -- 92,002 of the 92,028 non-assistant rows on a
+        // real 14 GB database carry `time_updated > time_created` -- and none
+        // of them ever backed a cached message, so none of them is evidence
+        // that the cache went stale.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_timed_v1_db(&db_path);
+        insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data)
+             VALUES ('msg_user', 'ses_1', 2_000, 2_000, ?1)",
+            rusqlite::params![r#"{"id": "msg_user", "sessionID": "ses_1", "role": "user"}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let cold = scan_opencode_sqlite(&db_path);
+        let state = cold.incremental.clone().unwrap();
+        assert_eq!(cold.messages.len(), 1, "only the assistant turn is usage");
+
+        let conn = Connection::open(&db_path).unwrap();
+        disqualify_timed_v1_message(
+            &conn,
+            "msg_user",
+            9_000,
+            r#"{"id": "msg_user", "sessionID": "ses_1", "role": "user", "text": "edited"}"#,
+        );
+        drop(conn);
+
+        let warm = rescan_opencode_sqlite(&db_path, &state, cold.messages)
+            .expect("a rewritten user turn must not cost a full re-parse");
+        assert_eq!(
+            by_dedup_key(&warm.messages),
+            by_dedup_key(&scan_opencode_sqlite(&db_path).messages)
+        );
+    }
+
     #[test]
     fn test_a_table_without_the_time_columns_records_no_mark() {
         let dir = tempfile::tempdir().unwrap();
