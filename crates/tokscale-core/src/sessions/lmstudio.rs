@@ -17,31 +17,24 @@ use std::path::Path;
 
 const USAGE_MARKER: &[u8] = b"\"usage\"";
 
-/// Ceiling on one server log read into memory.
+/// Bytes of one server log held in memory at a time.
 ///
 /// `server-logs/` accumulates every request and response the local server
-/// handled, including full prompt and completion bodies, and nothing rotates
-/// or truncates it -- a long-running server produces a single file that grows
-/// without bound. The parser only ever reads the `usage` objects out of it, so
-/// declining an oversized log costs the usage recorded in that one file and
-/// leaves every other log intact, which is the same outcome an unreadable file
-/// already produces here.
+/// handled, prompt and completion bodies included, and nothing rotates it -- a
+/// long-running server produces one file that grows without bound. Reading it
+/// whole puts that growth into the scan's peak.
 ///
-/// Sized to match the sibling parsers that made the same trade
-/// (`droid::MAX_TRANSCRIPT_BYTES`, `dsh::MAX_TRANSCRIPT_FILE_BYTES`).
-const MAX_SERVER_LOG_BYTES: u64 = 32 * 1024 * 1024;
+/// Refusing an oversized log is not an option either: these logs only grow, so
+/// every mature install would eventually cross any fixed ceiling and then lose
+/// *all* of its usage, past and future, with no diagnostic. The window instead
+/// bounds what one file costs while still reading every record in it.
+///
+/// A record is a `usage` object plus the log lines immediately before it, so
+/// records are local and a window this size holds many at once.
+const SERVER_LOG_WINDOW_BYTES: usize = 8 * 1024 * 1024;
 
-/// Read a server log, refusing one past [`MAX_SERVER_LOG_BYTES`].
-///
-/// Reads one byte past the ceiling rather than trusting `metadata().len()`:
-/// the log is appended to while the scan runs, so a size checked before the
-/// read is a size that can grow before the read finishes.
-fn read_server_log_bounded(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= max_bytes).then_some(bytes)
-}
+/// Bytes pulled from the log per read.
+const SERVER_LOG_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Default, Deserialize)]
 struct PromptTokenDetails {
@@ -112,23 +105,45 @@ fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn usage_object_start(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+/// Find the next `"usage": {`, and report how far the scan is *certain* of.
+///
+/// The second value is the first offset that might still begin a match. A
+/// streaming caller must not advance its scan floor past it: `"usage"` is only
+/// accepted once a colon, any whitespace, and an opening brace follow, so a
+/// refill boundary landing anywhere in that run leaves a marker that this call
+/// rejects but a later one would accept. Advancing past it drops the record for
+/// good -- silently, because the bytes are then behind the window.
+fn scan_usage_object_start(bytes: &[u8], from: usize) -> (Option<(usize, usize)>, usize) {
     let mut cursor = from;
     while let Some(marker) = find_bytes(bytes, USAGE_MARKER, cursor) {
         cursor = marker + USAGE_MARKER.len();
         if marker > 0 && bytes[marker - 1] == b'\\' {
             continue;
         }
-        let mut value = skip_ascii_whitespace(bytes, cursor);
-        if bytes.get(value) != Some(&b':') {
+        let value = skip_ascii_whitespace(bytes, cursor);
+        // Ran out of buffer inside the run this match needs: undecidable here.
+        if value >= bytes.len() {
+            return (None, marker);
+        }
+        if bytes[value] != b':' {
             continue;
         }
-        value = skip_ascii_whitespace(bytes, value + 1);
-        if bytes.get(value) == Some(&b'{') {
-            return Some((marker, value));
+        let brace = skip_ascii_whitespace(bytes, value + 1);
+        if brace >= bytes.len() {
+            return (None, marker);
+        }
+        if bytes[brace] == b'{' {
+            return (Some((marker, brace)), marker);
         }
     }
-    None
+    // No marker matched. A marker split across the boundary could still start
+    // in the final `USAGE_MARKER.len() - 1` bytes.
+    (
+        None,
+        bytes
+            .len()
+            .saturating_sub(USAGE_MARKER.len().saturating_sub(1)),
+    )
 }
 
 fn balanced_object_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -298,63 +313,162 @@ fn fallback_dedup_key(path: &Path, marker: usize, model: &str, tokens: &TokenBre
 }
 
 pub fn parse_lmstudio_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Some(bytes) = read_server_log_bounded(path, MAX_SERVER_LOG_BYTES) else {
+    parse_lmstudio_file_windowed(path, SERVER_LOG_WINDOW_BYTES, SERVER_LOG_CHUNK_BYTES)
+}
+
+/// [`parse_lmstudio_file`] with the buffer sizes injected.
+///
+/// The window and chunk are parameters purely so tests can drive the boundary
+/// arithmetic with a few hundred bytes instead of writing an 8 MiB fixture --
+/// the paths that matter here are "a record straddles a refill" and "a record
+/// exceeds the window", and both are about the boundary, not its size.
+fn parse_lmstudio_file_windowed(
+    path: &Path,
+    window_bytes: usize,
+    chunk_bytes: usize,
+) -> Vec<UnifiedMessage> {
+    let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
+    let mut reader = std::io::BufReader::new(file);
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let session_id = format!("lmstudio:{}", source_hash(path));
     let mut messages = Vec::new();
-    let mut cursor = 0usize;
-    let mut metadata_start = 0usize;
 
-    while let Some((marker, object_start)) = usage_object_start(&bytes, cursor) {
-        let Some(object_end) = balanced_object_end(&bytes, object_start) else {
-            break;
-        };
-        cursor = object_end;
-        let Ok(usage) = serde_json::from_slice::<UsagePayload>(&bytes[object_start..object_end])
-        else {
-            metadata_start = object_end;
-            continue;
-        };
-        let Some(tokens) = normalized_tokens(&usage) else {
-            metadata_start = object_end;
-            continue;
-        };
-        let metadata = &bytes[metadata_start..marker];
-        let response_id = last_json_string_field(metadata, b"id").filter(|value| {
-            ["chatcmpl-", "cmpl-", "resp_"]
-                .iter()
-                .any(|prefix| value.starts_with(prefix))
-        });
-        let model = last_json_string_field(metadata, b"model")
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "unknown".to_string());
-        let timestamp = last_log_timestamp(metadata).unwrap_or(fallback_timestamp);
-        if timestamp <= 0 {
-            metadata_start = object_end;
-            continue;
+    // `window` is the part of the log not yet turned into messages.
+    // `window_start` is its absolute offset in the file, which is what keeps
+    // `fallback_dedup_key` addressing the same byte it addressed when this
+    // parser read the whole file at once -- a shifted offset would mint new
+    // dedup keys for records already submitted.
+    let mut window: Vec<u8> = Vec::new();
+    let mut window_start = 0usize;
+    // Absolute offset where the metadata for the next record begins.
+    let mut metadata_start = 0usize;
+    // Absolute offset the marker search has already ruled out, so refilling the
+    // window does not rescan what it has seen.
+    let mut scanned_to = 0usize;
+    let mut chunk = vec![0u8; chunk_bytes.max(1)];
+
+    loop {
+        let read = reader.read(&mut chunk).unwrap_or(0);
+        if read > 0 {
+            window.extend_from_slice(&chunk[..read]);
         }
-        let dedup_key = response_id
-            .map(|id| format!("lmstudio:{id}"))
-            .unwrap_or_else(|| fallback_dedup_key(path, marker, &model, &tokens));
-        let mut message = UnifiedMessage::new_with_dedup(
-            "lmstudio",
-            model,
-            "lmstudio",
-            session_id.clone(),
-            timestamp,
-            tokens,
-            0.0,
-            Some(dedup_key),
-        );
-        message.mark_provider_reported_cost();
-        message.is_turn_start = true;
-        messages.push(message);
-        metadata_start = object_end;
+        let at_eof = read == 0;
+
+        // Drain every record the window now holds in full.
+        loop {
+            let scan_from = scanned_to.saturating_sub(window_start).min(window.len());
+            let (found, certain_to) = scan_usage_object_start(&window, scan_from);
+            let Some((marker, object_start)) = found else {
+                // Only what the scan is certain about may be retired; the rest
+                // has to be rescanned once more bytes arrive.
+                scanned_to = window_start + certain_to;
+                break;
+            };
+            let Some(object_end) = balanced_object_end(&window, object_start) else {
+                // The object is cut off by the window edge. Leave the scan
+                // floor *behind* the marker so the next refill re-finds it;
+                // at EOF it will never complete, so retire it instead.
+                scanned_to = if at_eof {
+                    window_start + window.len()
+                } else {
+                    window_start + marker
+                };
+                break;
+            };
+            scanned_to = window_start + object_end;
+
+            let absolute_marker = window_start + marker;
+            let absolute_end = window_start + object_end;
+            let metadata_from = metadata_start.saturating_sub(window_start).min(marker);
+            if let Some(message) = message_from_record(
+                &window[object_start..object_end],
+                &window[metadata_from..marker],
+                path,
+                absolute_marker,
+                &session_id,
+                fallback_timestamp,
+            ) {
+                messages.push(message);
+            }
+            metadata_start = absolute_end;
+        }
+
+        // Release what is behind the next record's metadata. Everything before
+        // it has already produced whatever messages it was going to.
+        let keep_from = metadata_start
+            .max(window_start)
+            .saturating_sub(window_start)
+            .min(window.len());
+        if keep_from > 0 {
+            window.drain(..keep_from);
+            window_start += keep_from;
+        }
+
+        // A single record larger than the window would otherwise grow it
+        // without bound, which is the failure this window exists to prevent.
+        // Dropping it costs that one response and keeps the rest of the file.
+        if window.len() > window_bytes {
+            let overflow = window.len() - window_bytes;
+            window.drain(..overflow);
+            window_start += overflow;
+            metadata_start = metadata_start.max(window_start);
+            scanned_to = scanned_to.max(window_start);
+        }
+
+        if at_eof {
+            break;
+        }
     }
 
     messages
+}
+
+/// Build one message from a `usage` object and the log text before it.
+///
+/// Split out of the scan loop so the loop deals only in window arithmetic:
+/// this half sees two slices and never an offset it has to translate.
+fn message_from_record(
+    usage_object: &[u8],
+    metadata: &[u8],
+    path: &Path,
+    marker: usize,
+    session_id: &str,
+    fallback_timestamp: i64,
+) -> Option<UnifiedMessage> {
+    let usage = serde_json::from_slice::<UsagePayload>(usage_object).ok()?;
+    let tokens = normalized_tokens(&usage)?;
+
+    let response_id = last_json_string_field(metadata, b"id").filter(|value| {
+        ["chatcmpl-", "cmpl-", "resp_"]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    });
+    let model = last_json_string_field(metadata, b"model")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let timestamp = last_log_timestamp(metadata).unwrap_or(fallback_timestamp);
+    if timestamp <= 0 {
+        return None;
+    }
+
+    let dedup_key = response_id
+        .map(|id| format!("lmstudio:{id}"))
+        .unwrap_or_else(|| fallback_dedup_key(path, marker, &model, &tokens));
+    let mut message = UnifiedMessage::new_with_dedup(
+        "lmstudio",
+        model,
+        "lmstudio",
+        session_id.to_string(),
+        timestamp,
+        tokens,
+        0.0,
+        Some(dedup_key),
+    );
+    message.mark_provider_reported_cost();
+    message.is_turn_start = true;
+    Some(message)
 }
 
 #[cfg(test)]
@@ -363,34 +477,102 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// One response preceded by `pad_bytes` of log filler, so a record is only
+    /// reachable by a parse that carries state across refills.
+    fn padded_log(index: usize, pad_bytes: usize) -> String {
+        format!(
+            "[filler] {}\n[2026-07-09 10:00:{:02}][INFO][fixture-model]\n\
+             Final response: {{\"id\":\"chatcmpl-{index}\",\"model\":\"fixture-model\",\
+             \"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":5,\"total_tokens\":{}}}}}\n",
+            "p".repeat(pad_bytes),
+            index % 60,
+            10 + index,
+            15 + index,
+        )
+    }
+
+    /// Every record survives a log many times larger than the buffer holding
+    /// it, with records straddling refill boundaries.
+    ///
+    /// This is the regression that matters most in this file. Bounding the read
+    /// by *refusing* an oversized log turned "uses memory" into "loses every
+    /// record in that file, past and future, with no diagnostic" -- and these
+    /// logs only ever grow, so every mature install reaches it eventually.
     #[test]
-    fn reads_a_log_at_the_ceiling_and_refuses_one_past_it() {
-        let usage = br#"[2026-07-09 10:00:00][INFO][fixture-model]
-Final response: {"id":"chatcmpl-bound","model":"fixture-model","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
-"#;
+    fn reads_every_record_in_a_log_larger_than_the_window() {
+        let mut file = NamedTempFile::new().unwrap();
+        let records = 40;
+        for i in 0..records {
+            file.write_all(padded_log(i, 200).as_bytes()).unwrap();
+        }
+        file.flush().unwrap();
 
-        let mut at_ceiling = NamedTempFile::new().unwrap();
-        at_ceiling.write_all(usage).unwrap();
-        at_ceiling.flush().unwrap();
-        let size = at_ceiling.as_file().metadata().unwrap().len();
+        let size = file.as_file().metadata().unwrap().len() as usize;
+        // Deliberately far below the file: the window must not have to hold it.
+        let window = 512;
+        let chunk = 64;
+        assert!(size > window * 10, "fixture must dwarf the window");
+
+        let messages = parse_lmstudio_file_windowed(file.path(), window, chunk);
         assert_eq!(
-            read_server_log_bounded(at_ceiling.path(), size)
-                .as_deref()
-                .map(<[u8]>::len),
-            Some(usage.len()),
-            "a log exactly at the ceiling is still read"
+            messages.len(),
+            records,
+            "every record must survive a log the parse cannot hold at once"
         );
+        // Per-record values, so this also proves each usage object kept the
+        // metadata that preceded it rather than a neighbour's.
+        for (i, message) in messages.iter().enumerate() {
+            assert_eq!(message.tokens.input, 10 + i as i64);
+            assert_eq!(
+                message.dedup_key.as_deref(),
+                Some(&*format!("lmstudio:chatcmpl-{i}"))
+            );
+        }
+    }
 
+    /// Buffer sizes must not change what is parsed, only how much is resident.
+    #[test]
+    fn window_and_chunk_sizes_do_not_change_the_result() {
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..12 {
+            file.write_all(padded_log(i, 300).as_bytes()).unwrap();
+        }
+        file.flush().unwrap();
+
+        let reference = parse_lmstudio_file(file.path());
+        assert_eq!(reference.len(), 12);
+        // Windows below one record length legitimately drop records, so
+        // the agreement claim only covers windows that can hold one.
+        for (window, chunk) in [(512, 1), (1024, 7), (4096, 64), (1 << 20, 1 << 16)] {
+            let windowed = parse_lmstudio_file_windowed(file.path(), window, chunk);
+            assert_eq!(
+                windowed, reference,
+                "window={window} chunk={chunk} changed the parse"
+            );
+        }
+    }
+
+    /// A record whose own bytes exceed the window is dropped, and only it.
+    #[test]
+    fn a_record_larger_than_the_window_does_not_take_the_file_with_it() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(padded_log(0, 32).as_bytes()).unwrap();
+        file.write_all(padded_log(1, 4096).as_bytes()).unwrap();
+        file.write_all(padded_log(2, 32).as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let keys: Vec<String> = parse_lmstudio_file_windowed(file.path(), 512, 64)
+            .into_iter()
+            .filter_map(|m| m.dedup_key)
+            .collect();
         assert!(
-            read_server_log_bounded(at_ceiling.path(), size - 1).is_none(),
-            "a log past the ceiling is refused rather than buffered"
+            keys.contains(&"lmstudio:chatcmpl-0".to_string()),
+            "records before an oversized one survive: {keys:?}"
         );
-
-        // Refusing the read leaves the file contributing nothing, which is the
-        // same outcome an unreadable file already produces here.
-        assert!(parse_lmstudio_file(at_ceiling.path())
-            .first()
-            .is_some_and(|message| message.tokens.input == 10));
+        assert!(
+            keys.contains(&"lmstudio:chatcmpl-2".to_string()),
+            "records after an oversized one survive: {keys:?}"
+        );
     }
 
     #[test]

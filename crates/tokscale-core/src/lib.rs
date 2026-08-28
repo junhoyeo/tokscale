@@ -9753,10 +9753,14 @@ mod tests {
     fn create_timed_opencode_db(db_path: &std::path::Path) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(db_path).unwrap();
         conn.execute_batch(
+            // `session.time_updated` matches the real schema: a rename moves it
+            // without touching a message row, so it is what the incremental
+            // scan watches to know cached titles and workspaces are still good.
             "CREATE TABLE session (
                  id TEXT PRIMARY KEY,
                  directory TEXT NOT NULL,
-                 title TEXT
+                 title TEXT,
+                 time_updated INTEGER NOT NULL
              );
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
@@ -9765,8 +9769,8 @@ mod tests {
                  time_updated INTEGER NOT NULL,
                  data TEXT NOT NULL
              );
-             INSERT INTO session (id, directory, title)
-             VALUES ('session-1', '/tmp/project', 'A session');",
+             INSERT INTO session (id, directory, title, time_updated)
+             VALUES ('session-1', '/tmp/project', 'A session', 500);",
         )
         .unwrap();
         conn

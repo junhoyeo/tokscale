@@ -135,7 +135,7 @@ fn output_for_group(group: QuotaGroup) -> UsageOutput {
         credential_source: None,
         plan: None,
         email: None,
-        metrics: group.buckets.into_iter().map(metric).collect(),
+        metrics: group.buckets.into_iter().filter_map(metric).collect(),
         reset_credits: None,
         credit_status: None,
         spend_control: None,
@@ -157,13 +157,25 @@ fn slug(name: &str) -> String {
         .to_string()
 }
 
-fn metric(bucket: QuotaBucket) -> UsageMetric {
+/// Build a metric for one bucket, or `None` when the server did not say how
+/// much is left.
+///
+/// Defaulting a missing `remainingFraction` to zero renders as "100% used" --
+/// a full-exhaustion warning invented out of an absent field. Version skew or a
+/// partial response is exactly when that would fire, so a bucket that cannot
+/// state its own remainder is dropped instead of being reported as spent. A
+/// group whose buckets all drop shows no rows rather than a false alarm.
+fn metric(bucket: QuotaBucket) -> Option<UsageMetric> {
     // The wire format reports what is **left**; `UsageMetric` leads with what
     // has been used. Getting this backwards turns "7% left" into "7% used",
     // which is the most dangerous way to be wrong about a quota.
-    let remaining = bucket.remaining_fraction.unwrap_or(0.0).clamp(0.0, 1.0) * 100.0;
+    let remaining = bucket
+        .remaining_fraction
+        .filter(|fraction| fraction.is_finite())?
+        .clamp(0.0, 1.0)
+        * 100.0;
 
-    UsageMetric {
+    Some(UsageMetric {
         // `displayName` reads "Weekly Limit Remaining", which is too long for a
         // card once the group name is also shown; `window` is the short form.
         label: bucket
@@ -174,7 +186,7 @@ fn metric(bucket: QuotaBucket) -> UsageMetric {
         remaining_percent: remaining,
         remaining_label: None,
         resets_at: bucket.reset_time,
-    }
+    })
 }
 
 /// Byte ceiling for one quota response.
@@ -192,7 +204,16 @@ fn metric(bucket: QuotaBucket) -> UsageMetric {
 const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
 
 async fn call_rpc(port: u16) -> Result<QuotaSummary> {
-    let client = reqwest::Client::builder().timeout(PROBE_TIMEOUT).build()?;
+    // `.no_proxy()` because this only ever targets 127.0.0.1: the default
+    // builder honours HTTP_PROXY/system proxy settings, which would send a
+    // loopback quota request to a remote host unless the user happens to have
+    // a matching NO_PROXY. That both leaks quota metadata and lets the proxy
+    // forge the unauthenticated response that port discovery trusts. The IDE
+    // RPC client in `crate::antigravity` is built the same way.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(PROBE_TIMEOUT)
+        .build()?;
     let response = client
         .post(format!("http://127.0.0.1:{port}{RPC_PATH}"))
         // Connect-RPC rejects the request without this header.
@@ -348,7 +369,8 @@ mod tests {
             window: Some("weekly".to_string()),
             remaining_fraction: Some(0.414_529_86),
             reset_time: Some("2026-08-29T03:58:44Z".to_string()),
-        });
+        })
+        .expect("a bucket that states its remainder yields a metric");
 
         assert_eq!(m.label, "weekly");
         assert!((m.remaining_percent - 41.452_986).abs() < 1e-6);
@@ -362,7 +384,8 @@ mod tests {
             window: None,
             remaining_fraction: Some(1.0),
             reset_time: None,
-        });
+        })
+        .expect("a bucket that states its remainder yields a metric");
         assert_eq!(m.label, "Weekly Limit Remaining");
     }
 
@@ -374,10 +397,62 @@ mod tests {
                 window: None,
                 remaining_fraction: Some(fraction),
                 reset_time: None,
-            });
+            })
+            .expect("a finite fraction yields a metric");
             assert!((0.0..=100.0).contains(&m.remaining_percent));
             assert!((0.0..=100.0).contains(&m.used_percent));
         }
+    }
+
+    /// A bucket that does not say how much is left must not be rendered as
+    /// fully spent. Defaulting the absent value to zero remaining shows "100%
+    /// used" -- an exhaustion warning invented from a missing field, and
+    /// version skew or a truncated response is exactly when it would fire.
+    #[test]
+    fn a_bucket_without_a_usable_remainder_is_dropped_not_reported_as_spent() {
+        for fraction in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
+            let dropped = metric(QuotaBucket {
+                display_name: "Weekly Limit Remaining".to_string(),
+                window: Some("weekly".to_string()),
+                remaining_fraction: fraction,
+                reset_time: None,
+            });
+            assert!(
+                dropped.is_none(),
+                "remaining_fraction={fraction:?} must not render as a quota row"
+            );
+        }
+    }
+
+    /// The drop is per bucket: a group keeps the buckets that are readable.
+    #[test]
+    fn a_group_keeps_its_readable_buckets_when_one_is_unusable() {
+        let output = output_for_group(QuotaGroup {
+            display_name: "Gemini Models".to_string(),
+            buckets: vec![
+                QuotaBucket {
+                    display_name: "Weekly".to_string(),
+                    window: Some("weekly".to_string()),
+                    remaining_fraction: None,
+                    reset_time: None,
+                },
+                QuotaBucket {
+                    display_name: "Five Hour".to_string(),
+                    window: Some("5h".to_string()),
+                    remaining_fraction: Some(0.25),
+                    reset_time: None,
+                },
+            ],
+        });
+
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].label, "5h");
+        assert!((output.metrics[0].used_percent - 75.0).abs() < 1e-6);
     }
 
     #[test]

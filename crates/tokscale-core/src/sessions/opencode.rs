@@ -1791,7 +1791,8 @@ mod tests {
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
                 directory TEXT NOT NULL,
-                title TEXT
+                title TEXT,
+                time_updated INTEGER NOT NULL
             );
             CREATE TABLE message (
                 id TEXT PRIMARY KEY,
@@ -1800,8 +1801,8 @@ mod tests {
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
             );
-            INSERT INTO session (id, directory, title)
-            VALUES ('ses_1', '/tmp/project', 'A session');",
+            INSERT INTO session (id, directory, title, time_updated)
+            VALUES ('ses_1', '/tmp/project', 'A session', 500);",
         )
         .unwrap();
         conn
@@ -1999,6 +2000,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(changed, 1, "fixture row {id} should exist");
+    }
+
+    /// A rename touches the session row and nothing else, so the message
+    /// high-water does not move and the incremental scan reads no rows. Without
+    /// a metadata refresh the cached messages keep the old title forever, and a
+    /// cold parse disagrees with the cache indefinitely.
+    #[test]
+    fn test_incremental_rescan_picks_up_a_session_renamed_without_new_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = create_timed_v1_db(&db_path);
+        insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+        insert_timed_v1_message(&conn, "msg_b", 2_000, 22);
+        drop(conn);
+
+        let cold = scan_opencode_sqlite(&db_path);
+        let state = cold.incremental.clone().unwrap();
+        assert_eq!(cold.messages[0].session_title.as_deref(), Some("A session"));
+
+        // Rename the session and move its directory. No message row changes.
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE session SET title = 'Renamed session', directory = '/tmp/moved',
+                    time_updated = 9000 WHERE id = 'ses_1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let warm = rescan_opencode_sqlite(&db_path, &state, cold.messages)
+            .expect("a rename must not cost a full re-parse");
+        let full = scan_opencode_sqlite(&db_path);
+
+        assert_eq!(
+            by_dedup_key(&warm.messages),
+            by_dedup_key(&full.messages),
+            "a warm rescan must agree with a cold parse after a rename"
+        );
+        for message in &warm.messages {
+            assert_eq!(message.session_title.as_deref(), Some("Renamed session"));
+        }
     }
 
     #[test]
