@@ -5,6 +5,7 @@ import {
   planParserHighWaterSubmission,
   SUPPORTED_VERSIONED_PARSERS,
   type ParserClientHighWaterState,
+  type ParserHighWaterPlan,
 } from "../../src/lib/db/parserHighWater";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -90,6 +91,21 @@ function next(
     incomingDays,
     state,
   });
+}
+
+/**
+ * Assert a replay credited nothing *because there was nothing to credit*.
+ *
+ * `increments` alone cannot carry that meaning: a frozen plan returns
+ * `{ mode: "freeze", increments: {} }`, so asserting an empty increment map
+ * passes just as happily when the state was rejected on read. Those two
+ * outcomes could not be further apart -- one is correct idempotency, the other
+ * is a user whose high-water stopped accepting anything at all -- so the mode
+ * has to be checked alongside it.
+ */
+function expectCreditedNothing(plan: ParserHighWaterPlan) {
+  expect(plan.increments).toEqual({});
+  expect(plan.mode).not.toBe("freeze");
 }
 
 describe("non-destructive parser generation high-water", () => {
@@ -303,7 +319,7 @@ describe("non-destructive parser generation high-water", () => {
       cost: 0.5,
       messages: 1,
     });
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("normalizes old nested models that predate the reasoning bucket", () => {
@@ -337,7 +353,7 @@ describe("non-destructive parser generation high-water", () => {
     expect(
       first.nextState?.days["2026-07-01"].models["model-a"].reasoning
     ).toBe(0);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("is idempotent when the same v2 full snapshot is replayed", () => {
@@ -347,7 +363,7 @@ describe("non-destructive parser generation high-water", () => {
       snapshot(contribution("2026-07-01", 100))
     );
 
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
     expect(replay.nextState).toEqual(first.nextState);
   });
 
@@ -679,7 +695,7 @@ describe("non-destructive parser generation high-water", () => {
         0
       )
     ).toBe(260);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("recovers suppressed growth while migrating a legacy envelope state", () => {
@@ -730,7 +746,7 @@ describe("non-destructive parser generation high-water", () => {
     ).toBe(20);
     expect(migrated.nextState?.aggregate.tokens).toBe(260);
     expect(migrated.nextState?.aggregate.messages).toBe(3);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("spends provable lifetime growth when bucket budgets are jointly infeasible", () => {
@@ -755,7 +771,7 @@ describe("non-destructive parser generation high-water", () => {
     expect(grown.increments["2026-07-01"].models["model-a"].input).toBe(10);
     expect(grown.increments["2026-07-01"].models["model-b"].output).toBe(10);
     expect(grown.nextState?.aggregate.tokens).toBe(25);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("prefers genuine observed growth before deterministic residual capacity", () => {
@@ -838,7 +854,7 @@ describe("non-destructive parser generation high-water", () => {
 
     expect(grown.increments["2026-07-02"].models["model-a"].input).toBe(50);
     expect(grown.increments["2026-07-02"].tokens).toBe(50);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("does not reserve cross-cell inclusive growth for an unsupported cache shift", () => {
@@ -906,7 +922,7 @@ describe("non-destructive parser generation high-water", () => {
     expect(grown.increments["2026-07-01"].models["a-cache-shift"]).toBeUndefined();
     expect(grown.increments["2026-07-01"].models["z-growing"].input).toBe(50);
     expect(grown.increments["2026-07-01"].tokens).toBe(50);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("caps cell-supported cache moves by aggregate cache growth", () => {
@@ -954,7 +970,7 @@ describe("non-destructive parser generation high-water", () => {
     expect(grown.increments["2026-07-01"].models["a-cache-move"]).toBeUndefined();
     expect(grown.increments["2026-07-01"].models["z-input-growth"].input).toBe(50);
     expect(grown.increments["2026-07-01"].tokens).toBe(50);
-    expect(replay.increments).toEqual({});
+    expectCreditedNothing(replay);
   });
 
   it("allows genuine fully-cached inclusive-input growth", () => {
