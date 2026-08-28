@@ -1084,6 +1084,26 @@ pub fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Ve
     roots
 }
 
+/// Candidate roots for Devin CLI's Windows `sessions.db`.
+///
+/// Devin CLI stores its database under `%APPDATA%/devin/cli` on Windows,
+/// while the registered `PathRoot::XdgData` path remains the portable default.
+/// Keep the home-relative fallback alongside the environment-derived path so
+/// tests and explicit home overrides can exercise the same layout without
+/// depending on the process user's real AppData directory.
+fn devin_cli_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(app_data).join("devin/cli"));
+        }
+    }
+
+    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/devin/cli"));
+    roots
+}
+
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
     // Roo/KiloCode require local + remote and server task roots, and Crush
@@ -1972,6 +1992,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::DevinCli) || enabled.contains(&ClientId::DevinDesktop) {
+        devin_cli_roots.extend(devin_cli_additional_roots(home_dir, use_env_roots));
         let devin_db_path = ClientId::DevinCli
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
@@ -3723,6 +3744,34 @@ mod tests {
         );
 
         assert_eq!(result.get(ClientId::Codex).len(), 2);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_discovers_devin_cli_appdata_database() {
+        let previous_app_data = std::env::var("APPDATA").ok();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let app_data = home.join("appdata");
+        let app_data_db = app_data.join("devin/cli/sessions.db");
+        fs::create_dir_all(app_data_db.parent().unwrap()).unwrap();
+        File::create(&app_data_db).unwrap();
+        unsafe { std::env::set_var("APPDATA", &app_data) };
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-cli".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+
+        restore_env("APPDATA", previous_app_data);
+        assert!(
+            result.devin_dbs.contains(&app_data_db),
+            "expected Windows AppData database in {:?}",
+            result.devin_dbs
+        );
     }
 
     #[test]
