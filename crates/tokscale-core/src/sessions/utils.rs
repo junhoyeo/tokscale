@@ -314,11 +314,28 @@ pub(crate) enum SqliteScan {
     NotPrepared,
     /// The statement prepared but the query could not execute.
     NotExecuted,
+    /// Iteration started and then stopped on a step error, so the rows handed
+    /// to the sink are a prefix of the result, not the result.
+    ///
+    /// Separate from [`SqliteScan::Ran`] because the difference is invisible to
+    /// the sink -- it just sees fewer rows -- and a caller that resumes from a
+    /// high-water would treat the rows after the failure as already seen and
+    /// never read them again.
+    Incomplete,
 }
 
 impl SqliteScan {
-    /// True only when rows were iterated.
+    /// True when rows were iterated, complete or not.
     pub(crate) fn ran(self) -> bool {
+        matches!(self, SqliteScan::Ran | SqliteScan::Incomplete)
+    }
+
+    /// True only when every row was iterated.
+    ///
+    /// What incremental callers need: a partial result is indistinguishable
+    /// from a small one, and recording a high-water over it permanently skips
+    /// the rows the failure cut off.
+    pub(crate) fn completed(self) -> bool {
         matches!(self, SqliteScan::Ran)
     }
 
@@ -400,6 +417,7 @@ pub(crate) fn sqlite_for_each_row_on_with_params(
         }
     };
 
+    let mut stepped_off = false;
     loop {
         match rows.next() {
             Ok(Some(row)) => {
@@ -424,12 +442,17 @@ pub(crate) fn sqlite_for_each_row_on_with_params(
                         "Failed to decode session row"
                     );
                 }
+                stepped_off = true;
                 break;
             }
         }
     }
 
-    SqliteScan::Ran
+    if stepped_off {
+        SqliteScan::Incomplete
+    } else {
+        SqliteScan::Ran
+    }
 }
 
 /// Open `db_path` read-only, run `sql`, and hand every row to `sink`.

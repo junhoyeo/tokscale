@@ -2100,6 +2100,51 @@ mod tests {
         );
     }
 
+    /// A row that gains an embedded `$.id` changes dedup key, so the merge
+    /// cannot find the message it should replace. Appending instead would count
+    /// the same row twice while a cold parse counts it once.
+    ///
+    /// Two shapes, because the merge's content digest only catches one of them:
+    /// an identity-only rewrite has the same digest as the cached message, but
+    /// one that also changes usage does not.
+    #[test]
+    fn test_incremental_rescan_refuses_a_row_that_gained_an_embedded_id() {
+        for (label, output) in [("identity only", 11), ("identity and usage", 99)] {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("opencode.db");
+            let conn = create_timed_v1_db(&db_path);
+            insert_timed_v1_message(&conn, "msg_a", 1_000, 11);
+            drop(conn);
+
+            let cold = scan_opencode_sqlite(&db_path);
+            let state = cold.incremental.clone().unwrap();
+            assert_eq!(cold.messages.len(), 1);
+            assert_eq!(cold.messages[0].dedup_key.as_deref(), Some("msg_a"));
+
+            // The row keeps its SQLite id but starts carrying its own id, which
+            // is the key the parser prefers.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE message SET data = ?1, time_updated = 9000 WHERE id = 'msg_a'",
+                rusqlite::params![timed_v1_payload("embedded_a", output)],
+            )
+            .unwrap();
+            drop(conn);
+
+            let full = scan_opencode_sqlite(&db_path);
+            assert_eq!(full.messages.len(), 1, "{label}: a cold parse sees one row");
+
+            match rescan_opencode_sqlite(&db_path, &state, cold.messages) {
+                None => {}
+                Some(warm) => assert_eq!(
+                    by_dedup_key(&warm.messages),
+                    by_dedup_key(&full.messages),
+                    "{label}: a warm scan that proceeds must match a cold parse"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn test_incremental_rescan_refuses_a_row_that_lost_its_tokens() {
         // The row is still there, so the count guard sees nothing wrong, and

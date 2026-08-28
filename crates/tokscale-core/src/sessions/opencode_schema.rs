@@ -18,6 +18,7 @@
 
 use super::utils::{
     open_readonly_sqlite_opt, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
+    SqliteScan,
 };
 use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
@@ -597,6 +598,35 @@ const OPENCODE_V1_METADATA_STATS: &[&str] = &[
     "",
 ];
 
+/// Changed rows that now key themselves by an embedded id different from their
+/// SQLite row id.
+///
+/// The dedup key is the payload's `$.id` when it has one and the row id
+/// otherwise, so a row that *gains* an id changes key. The merge looks the new
+/// key up, does not find it, and appends -- leaving the message keyed by the row
+/// id in place and counting the row twice, while a cold parse counts it once.
+///
+/// The merge's content digest catches this only when the rewrite changed nothing
+/// else; a rewrite that also moved the token counts has a different digest and
+/// slips through. Nothing in a cached message records which row produced it, so
+/// the two cannot be linked after the fact -- the collision is detected here and
+/// answered with a full scan.
+const OPENCODE_V2_REKEYED_QUERY: &str = r#"
+    SELECT sm.id
+    FROM session_message sm
+    WHERE sm.time_updated >= ?1
+      AND json_extract(sm.data, '$.id') IS NOT NULL
+      AND json_extract(sm.data, '$.id') <> sm.id
+"#;
+
+const OPENCODE_V1_REKEYED_QUERY: &str = r#"
+    SELECT m.id
+    FROM message m
+    WHERE m.time_updated >= ?1
+      AND json_extract(m.data, '$.id') IS NOT NULL
+      AND json_extract(m.data, '$.id') <> m.id
+"#;
+
 /// Incremental support for one entry of [`OpenCodeSchemaConfig::query_groups`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OpenCodeIncrementalGroup {
@@ -610,6 +640,8 @@ pub(crate) struct OpenCodeIncrementalGroup {
     /// the whole group rather than one per variant: the variants differ only
     /// in the metadata join, which this does not read.
     disqualified: &'static str,
+    /// Changed rows whose dedup key moved off their row id.
+    rekeyed: &'static str,
     /// Session metadata changed since the mark, per variant.
     metadata: &'static [&'static str],
     /// Metadata-table high-water, per variant.
@@ -622,6 +654,7 @@ const OPENCODE_INCREMENTAL_GROUPS: &[OpenCodeIncrementalGroup] = &[
         queries: OPENCODE_V2_INCREMENTAL_QUERIES,
         stats: OPENCODE_V2_STATS_QUERY,
         disqualified: OPENCODE_V2_DISQUALIFIED_QUERY,
+        rekeyed: OPENCODE_V2_REKEYED_QUERY,
         metadata: OPENCODE_V2_METADATA_QUERIES,
         metadata_stats: OPENCODE_V2_METADATA_STATS,
     },
@@ -629,6 +662,7 @@ const OPENCODE_INCREMENTAL_GROUPS: &[OpenCodeIncrementalGroup] = &[
         queries: OPENCODE_V1_INCREMENTAL_QUERIES,
         stats: OPENCODE_V1_STATS_QUERY,
         disqualified: OPENCODE_V1_DISQUALIFIED_QUERY,
+        rekeyed: OPENCODE_V1_REKEYED_QUERY,
         metadata: OPENCODE_V1_METADATA_QUERIES,
         metadata_stats: OPENCODE_V1_METADATA_STATS,
     },
@@ -1079,10 +1113,10 @@ fn collect_rows(
     conn: &rusqlite::Connection,
     query: &str,
     on_row: &mut dyn FnMut(OpenCodeSchemaRow),
-) -> bool {
+) -> SqliteScan {
     // Quiet: these queries are schema probes — the caller tries each spelling
     // in turn, so a query the database does not understand is expected.
-    let scan = sqlite_for_each_row_on(conn, db_path, query, None, &mut |row| {
+    sqlite_for_each_row_on(conn, db_path, query, None, &mut |row| {
         let id: String = row.get(0)?;
         let session_id: String = row.get(1)?;
         let data_json: String = row.get(2)?;
@@ -1090,8 +1124,7 @@ fn collect_rows(
         let session_title: Option<String> = row.get(4)?;
         on_row((id, session_id, data_json, workspace_root, session_title));
         Ok(())
-    });
-    scan.prepared()
+    })
 }
 
 /// Run `query` with `since` bound to `?1`, handing every row to `on_row`.
@@ -1117,7 +1150,7 @@ fn collect_rows_since(
     // finished. `prepared()` also accepts a statement that failed while
     // stepping -- json_extract on a malformed payload, say -- and a truncated
     // delta read as a complete one keeps cached messages a cold parse drops.
-    scan.ran()
+    scan.completed()
 }
 
 /// Whether any row that stopped qualifying as usage backs a cached message.
@@ -1157,7 +1190,7 @@ fn disqualified_row_backs_cached_message(
         });
     // Completion required for the same reason as the delta: a probe that
     // stopped early has not proved the absence of a disqualified row.
-    scan.ran().then_some(hit)
+    scan.completed().then_some(hit)
 }
 
 /// Highest `time_updated` in a variant's metadata table, or `i64::MIN` when the
@@ -1175,7 +1208,7 @@ fn read_metadata_high_water(
         high_water = row.get::<_, Option<i64>>(0)?.unwrap_or(i64::MIN);
         Ok(())
     });
-    scan.ran().then_some(high_water)
+    scan.completed().then_some(high_water)
 }
 
 /// Re-apply session metadata that changed since `since` to already-cached
@@ -1217,7 +1250,7 @@ fn refresh_changed_session_metadata(
             changed.insert(session_id, (workspace_root, session_title));
             Ok(())
         });
-    if !scan.ran() || !usable {
+    if !scan.completed() || !usable {
         return None;
     }
 
@@ -1243,6 +1276,31 @@ fn refresh_changed_session_metadata(
     }
 
     read_metadata_high_water(db_path, conn, stats_query)
+}
+
+/// Whether a row that re-keyed itself still has a cached message under its old
+/// row-id key. See [`OPENCODE_V1_REKEYED_QUERY`] for why that is unsafe.
+fn rekeyed_row_backs_cached_message(
+    db_path: &Path,
+    conn: &rusqlite::Connection,
+    query: &str,
+    since: i64,
+    db_namespace: &str,
+    cached_keys: &std::collections::HashSet<&str>,
+) -> Option<bool> {
+    let mut hit = false;
+    let scan =
+        sqlite_for_each_row_on_with_params(conn, db_path, query, &[&since], None, &mut |row| {
+            if hit {
+                return Ok(());
+            }
+            let row_id: String = row.get(0)?;
+            let namespaced = format!("{db_namespace}:{row_id}");
+            hit =
+                cached_keys.contains(row_id.as_str()) || cached_keys.contains(namespaced.as_str());
+            Ok(())
+        });
+    scan.completed().then_some(hit)
 }
 
 /// Parse assistant turns out of a SQLite database that uses the OpenCode
@@ -1379,7 +1437,9 @@ fn read_table_stats(
             Ok(())
         },
     );
-    if scan.ran() {
+    // A truncated stats read yields a row count and high-waters that describe
+    // a prefix of the table, which is exactly the shape of a silent undercount.
+    if scan.completed() {
         stats
     } else {
         None
@@ -1423,18 +1483,30 @@ pub(crate) fn scan_opencode_schema_sqlite(
         let stats = incremental
             .and_then(|incremental| read_table_stats(db_path, &conn, incremental.stats, i64::MAX));
 
+        // `prepared()` selects the variant -- it is the schema probe, and a
+        // variant that prepared is the one this database understands, so
+        // falling through to an older query would read the wrong columns.
+        // `completed()` is a separate question: a variant that matched but
+        // stopped on a step error read only a prefix, and a mark written over
+        // that prefix would tell the next rescan those rows were already seen.
         let mut chosen = None;
+        let mut read_every_row = false;
         for (index, query) in group.iter().enumerate() {
-            if collect_rows(db_path, &conn, query, &mut |row| {
+            let scan = collect_rows(db_path, &conn, query, &mut |row| {
                 acc.ingest(row, &cfg, &db_namespace)
-            }) {
+            });
+            if scan.prepared() {
                 chosen = Some(index);
+                read_every_row = scan.completed();
                 break;
             }
         }
+        if chosen.is_some() && !read_every_row {
+            resumable = false;
+        }
 
         marks.push(match (chosen, stats) {
-            (Some(index), Some(stats)) => {
+            (Some(index), Some(stats)) if read_every_row => {
                 let metadata_high_water = cfg
                     .incremental_groups
                     .and_then(|groups| groups.get(group_index))
@@ -1565,6 +1637,20 @@ pub(crate) fn rescan_opencode_schema_sqlite(
             db_path,
             &conn,
             incremental.disqualified,
+            mark.updated_high_water,
+            &db_namespace,
+            &cached_keys,
+        ) != Some(false)
+        {
+            return None;
+        }
+
+        // A row whose key moved off its row id would be appended beside the
+        // message still keyed by that row id, counting it twice.
+        if rekeyed_row_backs_cached_message(
+            db_path,
+            &conn,
+            incremental.rekeyed,
             mark.updated_high_water,
             &db_namespace,
             &cached_keys,
