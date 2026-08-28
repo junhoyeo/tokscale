@@ -1601,10 +1601,17 @@ pub(crate) fn rescan_opencode_schema_sqlite(
 
         let (mark, stats) = match (cached_mark, stats) {
             (Some(mark), Some(stats)) => (mark, stats),
-            // The group's table was absent when the cache was written and
-            // still is, so it contributed nothing then and contributes
-            // nothing now.
+            // The group's table was absent when the cache was written, and the
+            // stats query still does not run. That is *usually* the same table
+            // still missing -- but the stats query also fails on a table that
+            // exists without `time_created`/`time_updated`, and the usage
+            // queries do not need those columns. Skipping such a table would
+            // omit its rows from every warm scan while a cold parse reads them,
+            // so the variants are probed before concluding it is absent.
             (None, None) => {
+                if group.iter().any(|query| conn.prepare(query).is_ok()) {
+                    return None;
+                }
                 marks.push(None);
                 continue;
             }
