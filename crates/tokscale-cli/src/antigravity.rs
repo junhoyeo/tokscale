@@ -2260,8 +2260,16 @@ fn antigravity_https_client() -> &'static reqwest::Client {
     })
 }
 
-#[cfg(not(target_os = "windows"))]
-async fn read_reqwest_response_with_cap(
+/// Reads at most `max_body_bytes` of a loopback RPC response.
+///
+/// `Content-Length` is consulted first so an oversized body is refused before a
+/// byte of it is read, but it is never the only check: the header is optional
+/// and a server is free to understate it, so the loop enforces the same ceiling
+/// on what actually arrives.
+///
+/// Shared with the `/usage` quota provider, which reaches the same language
+/// server over plain HTTP and needs the same ceiling for the same reason.
+pub(crate) async fn read_reqwest_response_with_cap(
     mut response: reqwest::Response,
     max_body_bytes: usize,
 ) -> Result<String> {

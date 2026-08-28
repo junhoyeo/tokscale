@@ -30,7 +30,8 @@
 //! `Antigravity (Gemini Models)`, rather than flattening every bucket into one
 //! list where no row can be attributed to a group.
 
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -176,18 +177,33 @@ fn metric(bucket: QuotaBucket) -> UsageMetric {
     }
 }
 
+/// Byte ceiling for one quota response.
+///
+/// `PROBE_TIMEOUT` bounds how long the language server may take, not how much
+/// it may send inside that window, and `Response::json` buffers the whole body
+/// before anything looks at it. Port discovery probes candidate ports, so this
+/// also runs against whatever else happens to be listening on loopback -- a
+/// port that answers with an endless stream would otherwise allocate until the
+/// timeout, and usage providers share a fan-out, so that takes the whole
+/// `tokscale usage` report down rather than one provider.
+///
+/// A real summary is a handful of bucket objects well under a kilobyte; 1 MiB
+/// leaves room for new fields while keeping the worst case bounded.
+const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
+
 async fn call_rpc(port: u16) -> Result<QuotaSummary> {
     let client = reqwest::Client::builder().timeout(PROBE_TIMEOUT).build()?;
-    let envelope: QuotaSummaryEnvelope = client
+    let response = client
         .post(format!("http://127.0.0.1:{port}{RPC_PATH}"))
         // Connect-RPC rejects the request without this header.
         .header("Connect-Protocol-Version", "1")
         .json(&serde_json::json!({}))
         .send()
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .error_for_status()?;
+    let body =
+        crate::antigravity::read_reqwest_response_with_cap(response, MAX_QUOTA_BODY_BYTES).await?;
+    let envelope: QuotaSummaryEnvelope = serde_json::from_str(&body)?;
     Ok(envelope.response)
 }
 
@@ -230,12 +246,37 @@ fn cli_log_path() -> Option<PathBuf> {
     )
 }
 
+/// Bytes of `cli.log` read when looking for logged ports.
+///
+/// The log is appended across every CLI run and nothing rotates it, so reading
+/// it whole grows without bound on a long-lived install. Only the most recent
+/// entries matter here -- the tail is where the current port is -- so reading
+/// the end is both bounded and the answer this function actually wants.
+const CLI_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Read the last `max_bytes` of a file, or the whole file when it is smaller.
+///
+/// The leading partial line the offset can land in is dropped by the caller's
+/// line parse, which requires a whole `listening on random port at NNNN` match.
+fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // Lossy because the tail offset can split a multi-byte character, and a
+    // replacement char in a line this parse ignores costs nothing.
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Ports the CLI logged, most recent first.
 fn ports_from_cli_log() -> Vec<u16> {
     let Some(path) = cli_log_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_tail(&path, CLI_LOG_TAIL_BYTES) else {
         return Vec::new();
     };
     let mut ports = parse_logged_ports(&text);
@@ -260,6 +301,45 @@ fn parse_logged_ports(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log is appended across every run and never rotated, so the read has
+    /// to be bounded -- and the bound has to keep the *end*, because that is
+    /// where the port of the currently running server was written.
+    #[test]
+    fn reads_the_end_of_an_oversized_log() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let filler = "noise from an earlier run\n".repeat(4096);
+        write!(file, "{filler}").unwrap();
+        writeln!(file, "listening on random port at 41234 for HTTP").unwrap();
+        file.flush().unwrap();
+
+        let tail = read_tail(file.path(), 512).expect("the log is readable");
+        assert!(
+            tail.len() as u64 <= 512,
+            "read {} bytes past the 512 byte ceiling",
+            tail.len()
+        );
+        assert_eq!(
+            parse_logged_ports(&tail),
+            vec![41234],
+            "the most recent port must survive the truncation"
+        );
+    }
+
+    #[test]
+    fn reads_a_whole_log_smaller_than_the_ceiling() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "listening on random port at 5001 for HTTP").unwrap();
+        writeln!(file, "listening on random port at 5002 for HTTP").unwrap();
+        file.flush().unwrap();
+
+        let tail = read_tail(file.path(), CLI_LOG_TAIL_BYTES).expect("the log is readable");
+        assert_eq!(parse_logged_ports(&tail), vec![5001, 5002]);
+    }
 
     #[test]
     fn remaining_fraction_becomes_used_percent() {
