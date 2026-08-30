@@ -112,28 +112,25 @@ pub fn fetch() -> Result<UsageOutput> {
                 };
 
                 match limit.limit_type.as_deref() {
-                    Some("TOKENS_LIMIT") => {
-                        let metric = UsageMetric {
-                            label: String::new(),
-                            used_percent: pct,
-                            remaining_percent: 100.0 - pct,
-                            remaining_label: None,
-                            resets_at: None,
+                    // V3 GLM Coding plans report the same (unit, number)
+                    // windows as CREDIT_LIMIT instead of TOKENS_LIMIT. Prefer
+                    // CREDIT_LIMIT so a plan that ever emits both for one
+                    // window cannot silently last-write-wins.
+                    Some("TOKENS_LIMIT") | Some("CREDIT_LIMIT") => {
+                        let prefer = limit.limit_type.as_deref() == Some("CREDIT_LIMIT");
+                        let (target, label) = match (limit.unit, limit.number) {
+                            (Some(3), Some(5)) => (&mut session_metric, "Session"),
+                            (Some(6), Some(1)) => (&mut weekly_metric, "Weekly"),
+                            _ => continue,
                         };
-                        match (limit.unit, limit.number) {
-                            (Some(3), Some(5)) => {
-                                session_metric = Some(UsageMetric {
-                                    label: "Session".into(),
-                                    ..metric
-                                });
-                            }
-                            (Some(6), Some(1)) => {
-                                weekly_metric = Some(UsageMetric {
-                                    label: "Weekly".into(),
-                                    ..metric
-                                });
-                            }
-                            _ => {}
+                        if target.is_none() || prefer {
+                            *target = Some(UsageMetric {
+                                label: label.to_string(),
+                                used_percent: pct,
+                                remaining_percent: 100.0 - pct,
+                                remaining_label: None,
+                                resets_at: None,
+                            });
                         }
                     }
                     Some("TIME_LIMIT") => {
