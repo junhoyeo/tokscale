@@ -36,7 +36,13 @@ const EXCLUDED_LITELLM_PREFIXES: &[&str] = &["github_copilot/"];
 /// that message, which is why it was impossible to tell a transport failure
 /// from an upstream schema change and the reporter guessed at TLS. Printing the
 /// chain makes the next such report actionable.
-pub(crate) fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
+///
+/// The same terseness hides transport failures. `send()` renders every one of
+/// them as "error sending request for url (...)", so a certificate rejected by
+/// an intercepting proxy, a refused connection and a DNS failure are one
+/// string. #1238 was reported against a Windows firewall with exactly that
+/// line, and neither the reporter nor I could tell which of the three it was.
+pub fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
     let mut parts = vec![error.to_string()];
     let mut source = error.source();
     while let Some(inner) = source {

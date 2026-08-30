@@ -6029,14 +6029,19 @@ fn run_submit_command(
             let status = resp.status();
             let body: SubmitResponse =
                 rt.block_on(async { resp.json().await })
-                    .unwrap_or_else(|_| SubmitResponse {
+                    .unwrap_or_else(|err| SubmitResponse {
                         submission_id: None,
                         username: None,
                         metrics: None,
                         warnings: None,
+                        // Same reason as the transport arm below: reqwest's
+                        // Display for a decode failure is the bare "error
+                        // decoding response body", and the serde cause naming
+                        // the offending field is only reachable via `source()`.
                         error: Some(format!(
-                            "Server returned {} with unparseable response",
-                            status
+                            "Server returned {} with unparseable response: {}",
+                            status,
+                            tokscale_core::pricing::describe_error(&err)
                         )),
                         details: None,
                     });
@@ -6111,10 +6116,17 @@ fn run_submit_command(
             }
         }
         Err(err) => {
+            // `err` alone renders every transport failure as the same
+            // "error sending request for url (...)" line, which is what left
+            // #1238 undiagnosable: a proxy rejecting the certificate, a
+            // refused connection and a DNS failure were indistinguishable in
+            // the output the reporter could paste. The cause hangs off
+            // `source()`, so walk it.
+            let described = tokscale_core::pricing::describe_error(&err);
             eprintln!("\n  {}", "Error: Failed to connect to server.".red());
-            eprintln!("{}\n", format!("  {}", err).bright_black());
+            eprintln!("{}\n", format!("  {}", described).bright_black());
             if mode == SubmitMode::Autosubmit {
-                return Err(anyhow::anyhow!("Failed to connect to server: {err}"));
+                return Err(anyhow::anyhow!("Failed to connect to server: {described}"));
             }
             std::process::exit(1);
         }
