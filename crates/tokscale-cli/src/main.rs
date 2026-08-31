@@ -4628,6 +4628,10 @@ struct TsDailyTotals {
     tokens: i64,
     cost: f64,
     messages: i32,
+    /// Absent means complete for compatibility with servers and clients that
+    /// predate #1044. Only incomplete days pay a wire-format cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_is_complete: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -4773,6 +4777,10 @@ fn to_ts_token_contribution_data(
                     tokens: d.totals.tokens,
                     cost: d.totals.cost,
                     messages: d.totals.messages,
+                    cost_is_complete: graph
+                        .incomplete_cost_dates
+                        .contains(&d.date)
+                        .then_some(false),
                 },
                 intensity: d.intensity,
                 token_breakdown: TsTokenBreakdown {
@@ -5751,28 +5759,19 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!();
 }
 
-fn report_unpriced_submission_exclusions(
-    excluded: &[tokscale_core::UnpricedSubmissionExclusion],
-    has_remaining_usage: bool,
-) {
+fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissionUsage]) {
     use colored::Colorize;
 
-    for row in excluded {
-        let remaining_usage_message = if has_remaining_usage {
-            " Remaining priced usage will be submitted."
-        } else {
-            ""
-        };
+    for row in unpriced {
         println!(
             "{}",
             format!(
-                "  Warning: excluded {} unpriced {}/{} message(s) ({} tokens): {}.{}",
+                "  Warning: submitting {} unpriced {}/{} message(s) ({} tokens) at $0.00: {}. Affected days are marked cost-incomplete so they cannot lower previously recorded spend.",
                 row.message_count,
                 row.provider_id,
                 row.model_id,
                 format_tokens_with_commas(row.total_tokens),
                 row.reason,
-                remaining_usage_message,
             )
             .yellow()
         );
@@ -5783,12 +5782,12 @@ fn report_unpriced_submission_exclusions(
     // custom-pricing docs added after them) all had to read core sources to
     // discover that an exact-match entry in custom-pricing.json — including
     // explicit 0 rates for free models and routing labels — is the supported fix.
-    if !excluded.is_empty() {
+    if !unpriced.is_empty() {
         let pricing_path = crate::paths::get_config_dir().join("custom-pricing.json");
         println!(
             "{}",
             format!(
-                "  Hint: excluded models stay unsubmitted until priced. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate, then\n          re-check with `tokscale submit --dry-run` and `tokscale pricing <model-id>`.",
+                "  Hint: unpriced usage is included in token totals with zero cost. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate. Re-check\n          with `tokscale submit --dry-run` and `tokscale pricing <model-id>`, then resubmit\n          to replace the temporary cost floor with a complete total.",
                 pricing_path.display(),
             )
             .bright_black()
@@ -5956,10 +5955,7 @@ fn run_submit_command(
     // left out, so a single legacy charge can't block the whole submission.
     let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
     report_excluded_tokenless_rows(&excluded_rows);
-    report_unpriced_submission_exclusions(
-        &graph_result.unpriced_submission_exclusions,
-        graph_result.summary.total_tokens > 0,
-    );
+    report_unpriced_submission_usage(&graph_result.unpriced_submission_usage);
 
     println!("{}", "  Data to submit:".white());
     println!(
@@ -7091,7 +7087,8 @@ mod tests {
             years: calculate_years(&contributions),
             contributions,
             time_metrics: None,
-            unpriced_submission_exclusions: Vec::new(),
+            unpriced_submission_usage: Vec::new(),
+            incomplete_cost_dates: std::collections::BTreeSet::new(),
         }
     }
 
@@ -8565,6 +8562,31 @@ mod tests {
             payload.device.as_ref().unwrap().name.as_deref(),
             Some("Test device")
         );
+    }
+
+    #[test]
+    fn submit_payload_marks_only_incomplete_cost_days() {
+        let mut graph = graph_result_with_contributions(vec![
+            daily_contribution("2026-12-30", 10, 0.0, "opencode", "unknown"),
+            daily_contribution("2026-12-31", 20, 2.50, "codex", "model-b"),
+        ]);
+        graph.incomplete_cost_dates.insert("2026-12-30".to_string());
+
+        let payload = to_ts_token_contribution_data(&graph, None, None);
+        assert_eq!(
+            payload.contributions[0].totals.cost_is_complete,
+            Some(false)
+        );
+        assert_eq!(payload.contributions[1].totals.cost_is_complete, None);
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json.pointer("/contributions/0/totals/costIsComplete"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert!(json
+            .pointer("/contributions/1/totals/costIsComplete")
+            .is_none());
     }
 
     #[test]

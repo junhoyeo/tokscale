@@ -523,13 +523,22 @@ pub struct GraphResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
     #[serde(skip)]
-    pub unpriced_submission_exclusions: Vec<UnpricedSubmissionExclusion>,
+    pub unpriced_submission_usage: Vec<UnpricedSubmissionUsage>,
+    /// Days whose submitted cost is only a floor because at least one
+    /// token-bearing message could not be priced authoritatively.
+    ///
+    /// The CLI serializes these days as `totals.costIsComplete: false`. Kept
+    /// outside `DailyTotals` because it is submission-only protocol metadata,
+    /// not part of local report aggregation or exported historical reports.
+    #[serde(skip)]
+    pub incomplete_cost_dates: BTreeSet<String>,
 }
 
-/// Token-bearing usage excluded only from a submission because it cannot be
-/// priced authoritatively. Local reports retain the original usage.
+/// Token-bearing usage submitted at zero cost because it cannot be priced
+/// authoritatively. The containing day is marked cost-incomplete so the server
+/// treats that amount as a floor rather than lowering a previously stored cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnpricedSubmissionExclusion {
+pub struct UnpricedSubmissionUsage {
     pub provider_id: String,
     pub model_id: String,
     pub message_count: usize,
@@ -4112,7 +4121,7 @@ async fn generate_graph_with_loaded_pricing(
 
 /// Messages buffered before a batch is folded away.
 ///
-/// Batching lets the sink reuse `exclude_unpriced_submission_messages` and
+/// Batching lets the sink reuse `prepare_submission_pricing` and
 /// `validate_priced_messages` verbatim rather than reimplementing their pricing
 /// rules, which is the part that would quietly diverge. Peak cost is one batch,
 /// not the corpus.
@@ -4124,7 +4133,7 @@ const GRAPH_SINK_BATCH: usize = 4_096;
 
 /// Folds a graph report as messages arrive instead of collecting them.
 ///
-/// The submit path made three passes over every message -- unpriced exclusion,
+/// The submit path made three passes over every message -- pricing preparation,
 /// sessionization, daily aggregation -- and so had to keep ~1M of them alive at
 /// once (#1209). All three are per message, so each runs as the message
 /// arrives and the message is dropped: what survives is the day map, an
@@ -4140,7 +4149,8 @@ struct GraphSink<'a> {
     interner: sessionize::SpanInterner,
     spans: Vec<sessionize::SessionSpan>,
     /// Merged across batches by (provider, model); counts and tokens add.
-    exclusions: HashMap<(String, String), (usize, i64, &'static str)>,
+    unpriced_usage: HashMap<(String, String), (usize, i64, &'static str)>,
+    incomplete_cost_dates: BTreeSet<String>,
     /// First batch error, surfaced from `finish` so the outcome matches the
     /// whole-corpus path's `?` on the first failure.
     failure: Option<String>,
@@ -4160,7 +4170,8 @@ impl<'a> GraphSink<'a> {
             daily: aggregator::DailyFold::default(),
             interner: sessionize::SpanInterner::default(),
             spans: Vec::new(),
-            exclusions: HashMap::new(),
+            unpriced_usage: HashMap::new(),
+            incomplete_cost_dates: BTreeSet::new(),
             failure: None,
         }
     }
@@ -4174,21 +4185,27 @@ impl<'a> GraphSink<'a> {
         let batch = match self.requirement {
             GraphPricingRequirement::Lenient => batch,
             GraphPricingRequirement::Submission => {
-                let (submitted, exclusions) =
-                    exclude_unpriced_submission_messages(batch, self.pricing);
-                for exclusion in exclusions {
+                let (mut submitted, zeroed, unpriced_usage, incomplete_cost_dates) =
+                    prepare_submission_pricing(batch, self.pricing);
+                for usage in unpriced_usage {
                     let entry = self
-                        .exclusions
-                        .entry((exclusion.provider_id, exclusion.model_id))
-                        .or_insert((0, 0, exclusion.reason));
-                    entry.0 += exclusion.message_count;
-                    entry.1 = entry.1.saturating_add(exclusion.total_tokens);
+                        .unpriced_usage
+                        .entry((usage.provider_id, usage.model_id))
+                        .or_insert((0, 0, usage.reason));
+                    entry.0 += usage.message_count;
+                    entry.1 = entry.1.saturating_add(usage.total_tokens);
                 }
+                self.incomplete_cost_dates.extend(incomplete_cost_dates);
+                // Validate only the authoritatively priced subset. The zeroed
+                // messages are intentionally unpriceable; their protection is
+                // the day-level completeness signal, not pretending they pass
+                // this validator.
                 if self.failure.is_none() {
                     if let Err(error) = validate_priced_messages(&submitted, self.pricing) {
                         self.failure = Some(error);
                     }
                 }
+                submitted.extend(zeroed);
                 submitted
             }
         };
@@ -4211,12 +4228,12 @@ impl<'a> GraphSink<'a> {
     ) -> Result<GraphResult, String> {
         self.drain_batch();
 
-        let mut unpriced_submission_exclusions: Vec<UnpricedSubmissionExclusion> = self
-            .exclusions
+        let mut unpriced_submission_usage: Vec<UnpricedSubmissionUsage> = self
+            .unpriced_usage
             .into_iter()
             .map(
                 |((provider_id, model_id), (message_count, total_tokens, reason))| {
-                    UnpricedSubmissionExclusion {
+                    UnpricedSubmissionUsage {
                         provider_id,
                         model_id,
                         message_count,
@@ -4226,12 +4243,12 @@ impl<'a> GraphSink<'a> {
                 },
             )
             .collect();
-        // `exclude_unpriced_submission_messages` emits these from a BTreeMap
+        // `prepare_submission_pricing` emits these from a BTreeMap
         // keyed the same way, so sorting here keeps the reported order stable.
-        unpriced_submission_exclusions
+        unpriced_submission_usage
             .sort_by(|a, b| (&a.provider_id, &a.model_id).cmp(&(&b.provider_id, &b.model_id)));
 
-        require_trustworthy_exclusions(self.pricing, &unpriced_submission_exclusions)?;
+        require_trustworthy_unpriced_usage(self.pricing, &unpriced_submission_usage)?;
         if let Some(failure) = self.failure {
             return Err(failure);
         }
@@ -4254,7 +4271,8 @@ impl<'a> GraphSink<'a> {
         let processing_time_ms = start.elapsed().as_millis() as u32;
         let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
         result.time_metrics = Some(time_metrics);
-        result.unpriced_submission_exclusions = unpriced_submission_exclusions;
+        result.unpriced_submission_usage = unpriced_submission_usage;
+        result.incomplete_cost_dates = self.incomplete_cost_dates;
 
         for contribution in &mut result.contributions {
             if let Some(&ms) = daily_active_time.get(&contribution.date) {
@@ -4301,7 +4319,7 @@ fn parse_all_messages_streaming_with_env_strategy<S: MessageSink>(
 
 /// Collecting form of the submit-report build, retained as the test surface for
 /// [`GraphSink`]: it feeds an already-filtered `Vec` through the same sink the
-/// streaming path uses, so the sink's folding, exclusion-merging and ordering
+/// streaming path uses, so the sink's folding, diagnostic merging and ordering
 /// behaviour stay under test without a full parse. Production callers stream
 /// into [`GraphSink`] directly and never collect, which is why this is
 /// `#[cfg(test)]` rather than dead code.
@@ -4338,7 +4356,7 @@ const UNVERIFIED_PROVIDER_IDENTITY_REASON: &str =
 /// Routing labels name the router that served the request, never the model
 /// that answered it, so they have no authoritative model-to-price mapping.
 /// This defers to `lookup::is_routing_label` (lookup.rs) rather than restating
-/// its `ROUTING_LABELS` list: the reason a row is excluded has to name the same
+/// its `ROUTING_LABELS` list: the reason a row is zeroed has to name the same
 /// labels the resolver refuses at its top, and a second copy of the list would
 /// drift the moment a label is added to one side. Trimming matches for the same
 /// reason — the resolver trims, so ` auto ` must not read as a routing label
@@ -4358,21 +4376,30 @@ fn has_positive_token_usage(tokens: &TokenBreakdown) -> bool {
         || tokens.reasoning > 0
 }
 
-fn exclude_unpriced_submission_messages(
+fn prepare_submission_pricing(
     messages: Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
-) -> (Vec<UnifiedMessage>, Vec<UnpricedSubmissionExclusion>) {
+) -> (
+    Vec<UnifiedMessage>,
+    Vec<UnifiedMessage>,
+    Vec<UnpricedSubmissionUsage>,
+    BTreeSet<String>,
+) {
     use pricing::lookup::SubmissionSafetyGap;
 
     let Some(pricing) = pricing else {
-        return (messages, Vec::new());
+        return (messages, Vec::new(), Vec::new(), BTreeSet::new());
     };
 
-    let mut submitted = Vec::with_capacity(messages.len());
-    let mut exclusions: std::collections::BTreeMap<(String, String), (usize, i64, &'static str)> =
-        std::collections::BTreeMap::new();
+    let mut priced = Vec::with_capacity(messages.len());
+    let mut zeroed = Vec::new();
+    let mut unpriced_usage: std::collections::BTreeMap<
+        (String, String),
+        (usize, i64, &'static str),
+    > = std::collections::BTreeMap::new();
+    let mut incomplete_cost_dates = BTreeSet::new();
 
-    for message in messages {
+    for mut message in messages {
         let is_unpriced = has_positive_token_usage(&message.tokens)
             && !message.has_authoritative_cost()
             && !pricing.covers_usage_with_provider(
@@ -4400,7 +4427,7 @@ fn exclude_unpriced_submission_messages(
             );
             // The gap is read from the resolution that made the row
             // unpublishable rather than restated here: a lookup with a single
-            // candidate is excluded for not naming the model, and reporting it
+            // candidate is unsafe for not naming the model, and reporting it
             // as ambiguous across candidates would describe a disagreement
             // that never happened.
             let safety_gap = resolution
@@ -4423,23 +4450,31 @@ fn exclude_unpriced_submission_messages(
             } else {
                 MISSING_MODEL_PRICING_REASON
             };
-            let entry = exclusions
+            let entry = unpriced_usage
                 .entry((message.provider_id.clone(), message.model_id.clone()))
                 .or_insert((0, 0, reason));
             entry.0 = entry
                 .0
                 .saturating_add(message.message_count.max(0) as usize);
             entry.1 = entry.1.saturating_add(message.tokens.total());
+            incomplete_cost_dates.insert(message.date.clone());
+            // An unsafe estimate must not cross the submission boundary. Keep
+            // the usage, but represent the unknown part honestly as zero and
+            // let `costIsComplete: false` make the server preserve any higher
+            // cost it already has for this day.
+            message.cost = 0.0;
+            message.cost_source = CostSource::Unknown;
+            zeroed.push(message);
         } else {
-            submitted.push(message);
+            priced.push(message);
         }
     }
 
-    let exclusions = exclusions
+    let unpriced_usage = unpriced_usage
         .into_iter()
         .map(
             |((provider_id, model_id), (message_count, total_tokens, reason))| {
-                UnpricedSubmissionExclusion {
+                UnpricedSubmissionUsage {
                     provider_id,
                     model_id,
                     message_count,
@@ -4449,7 +4484,7 @@ fn exclude_unpriced_submission_messages(
             },
         )
         .collect();
-    (submitted, exclusions)
+    (priced, zeroed, unpriced_usage, incomplete_cost_dates)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4516,18 +4551,18 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
 const UNAVAILABLE_SUBMISSION_PRICING: &str = "pricing data is unavailable for submission";
 
 // @keep: the two conditions are load-bearing together; either alone is wrong.
-/// Refuse to act on exclusions that no pricing dataset backs.
+/// Refuse to zero costs when no pricing dataset backs that decision.
 ///
-/// `exclude_unpriced_submission_messages` drops what the pricing service cannot
-/// cover, but a service with no dataset covers *nothing*, so "unpriced" and "we
-/// have no prices" produce identical exclusions. Left alone, a cold cache with
-/// no network excludes the entire batch, leaves `total_tokens == 0`, and lets
-/// the CLI print "No usage data found to submit" and exit 0 — indistinguishable
-/// from genuinely having no usage, and reported as success to autosubmit.
+/// `prepare_submission_pricing` zeroes what the pricing service cannot cover,
+/// but a service with no dataset covers *nothing*, so "unpriced" and "we have
+/// no prices" produce identical diagnostics. Left alone, a cold cache with no
+/// network would submit every cost as zero. The completeness protocol prevents
+/// a decrease on the server, but silently accepting a wholly ungrounded local
+/// payload is still indistinguishable from a real all-free history.
 ///
 /// Both conditions matter:
 ///
-/// - Only when something was excluded. A batch whose messages all carry
+/// - Only when something needed zeroing. A batch whose messages all carry
 ///   provider-reported costs never consults pricing, so a missing dataset is
 ///   irrelevant and must not block it.
 /// - Only when no dataset loaded. A populated dataset that simply lacks a price
@@ -4535,14 +4570,15 @@ const UNAVAILABLE_SUBMISSION_PRICING: &str = "pricing data is unavailable for su
 ///   break autosubmit for anyone whose usage is legitimately unpriceable, which
 ///   is the trap #1044 documents.
 ///
-/// This runs after exclusion because the exclusion list is the signal. It
-/// cannot move into `validate_priced_messages`, which sees only the survivors —
-/// and when everything is excluded that slice is empty and validates trivially.
-fn require_trustworthy_exclusions(
+/// This runs after classification because the unpriced-usage list is the
+/// signal. It cannot move into `validate_priced_messages`, which sees only the
+/// authoritatively priced subset — and when everything is zeroed that slice is
+/// empty and validates trivially.
+fn require_trustworthy_unpriced_usage(
     pricing: Option<&pricing::PricingService>,
-    exclusions: &[UnpricedSubmissionExclusion],
+    unpriced_usage: &[UnpricedSubmissionUsage],
 ) -> Result<(), String> {
-    if exclusions.is_empty() {
+    if unpriced_usage.is_empty() {
         return Ok(());
     }
 
@@ -5959,18 +5995,18 @@ mod tests {
     use super::{
         aggregate_hourly_usage_entries, aggregate_model_usage_entries,
         aggregate_monthly_usage_v2_entries, apply_pricing_if_available, build_graph_from_messages,
-        dedupe_latest_trae_messages, exclude_unpriced_submission_messages,
-        filter_messages_for_report, generate_graph_with_loaded_pricing, get_home_dir_string,
-        is_generic_routing_label, merge_claude_cross_file_duplicate, message_cache,
-        message_passes_report_filter, normalize_model_for_grouping,
-        opencode_json_superseded_by_sqlite, parse_all_messages_with_pricing_with_cache_policy,
+        dedupe_latest_trae_messages, filter_messages_for_report,
+        generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
+        merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
+        normalize_model_for_grouping, opencode_json_superseded_by_sqlite,
+        parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
-        paths, pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        sessions, unified_to_parsed, validate_priced_messages, ClientId, GraphPricingRequirement,
-        GraphSink, GroupBy, LocalParseOptions, MessageSink, MonthlyReportV2, MonthlyUsage,
-        MonthlyUsageV2, ReportOptions, SourceCachePolicy, TokenBreakdown, UnifiedMessage,
-        UnpricedSubmissionExclusion, AMBIGUOUS_MODEL_PRICING_REASON, GRAPH_SINK_BATCH,
-        INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
+        paths, prepare_submission_pricing, pricing, retain_for_requested_clients, scanner,
+        select_local_parse_pricing, sessions, unified_to_parsed, validate_priced_messages,
+        ClientId, GraphPricingRequirement, GraphSink, GroupBy, LocalParseOptions, MessageSink,
+        MonthlyReportV2, MonthlyUsage, MonthlyUsageV2, ReportOptions, SourceCachePolicy,
+        TokenBreakdown, UnifiedMessage, UnpricedSubmissionUsage, AMBIGUOUS_MODEL_PRICING_REASON,
+        GRAPH_SINK_BATCH, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
         ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL, UNVERIFIED_MODEL_IDENTITY_REASON,
         UNVERIFIED_PROVIDER_IDENTITY_REASON,
     };
@@ -5979,7 +6015,7 @@ mod tests {
     // this branch conflict on every single upstream merge.
     use super::{aggregate_model_usage_entries_with_rollup, WorktreeRollup};
     use serial_test::serial;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::io::Write;
 
     #[test]
@@ -6005,7 +6041,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_merges_exclusions_across_bounded_batches() {
+    fn submission_merges_unpriced_usage_across_bounded_batches() {
         let messages: Vec<UnifiedMessage> = (0..=GRAPH_SINK_BATCH)
             .map(|offset| {
                 UnifiedMessage::new(
@@ -6032,17 +6068,27 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("unpriced rows should be excluded across every batch");
+        .expect("unpriced rows should be zeroed and retained across every batch");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        let expected_tokens = (GRAPH_SINK_BATCH as i64 + 1) * 3;
+        assert_eq!(graph.summary.total_tokens, expected_tokens);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.contributions.len(), 1);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        assert!(
+            graph
+                .incomplete_cost_dates
+                .contains(&graph.contributions[0].date),
+            "the retained zero-cost batch must mark its day as incomplete"
+        );
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].message_count,
+            graph.unpriced_submission_usage[0].message_count,
             GRAPH_SINK_BATCH + 1
         );
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].total_tokens,
-            (GRAPH_SINK_BATCH as i64 + 1) * 3
+            graph.unpriced_submission_usage[0].total_tokens,
+            expected_tokens
         );
     }
 
@@ -11954,7 +12000,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_pricing_policy_excludes_unpriced_only_from_submission() {
+    fn submission_keeps_unpriced_tokens_and_marks_their_day_incomplete() {
         let message = UnifiedMessage::new(
             "opencode",
             "genuinely-unpriced-model",
@@ -11986,15 +12032,85 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("submission graphs should exclude unpriced usage");
+        .expect("submission graphs should retain unpriced usage safely");
 
         assert_eq!(report.summary.total_tokens, 1);
-        assert_eq!(submission.summary.total_tokens, 0);
-        assert_eq!(submission.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(submission.summary.total_tokens, 1);
+        assert_eq!(submission.summary.total_cost, 0.0);
+        assert_eq!(submission.contributions.len(), 1);
+        assert_eq!(submission.incomplete_cost_dates.len(), 1);
+        assert!(submission
+            .incomplete_cost_dates
+            .contains(&submission.contributions[0].date));
+        assert_eq!(submission.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            submission.unpriced_submission_exclusions[0].model_id,
+            submission.unpriced_submission_usage[0].model_id,
             "genuinely-unpriced-model"
         );
+    }
+
+    #[test]
+    fn submission_cost_completeness_is_day_scoped_and_zeroes_unsafe_estimates() {
+        let pricing = pricing::PricingService::new(unrelated_litellm_dataset(), HashMap::new());
+        let mut unpriced = UnifiedMessage::new(
+            "synthetic",
+            "unlisted-model",
+            "unknown",
+            "unpriced-day",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 10,
+                ..Default::default()
+            },
+            9.0,
+        );
+        unpriced.date = "2026-01-01".to_string();
+        unpriced.mark_estimated_cost();
+
+        let mut complete = UnifiedMessage::new(
+            "opencode",
+            "provider-priced",
+            "anthropic",
+            "complete-day",
+            1_736_596_800_000,
+            TokenBreakdown {
+                input: 20,
+                ..Default::default()
+            },
+            2.0,
+        );
+        complete.date = "2026-01-02".to_string();
+        complete.mark_provider_reported_cost();
+
+        let graph = build_graph_from_messages(
+            vec![unpriced, complete],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .expect("partial pricing should produce an honest incomplete payload");
+
+        assert_eq!(graph.summary.total_tokens, 30);
+        assert_eq!(graph.summary.total_cost, 2.0);
+        assert_eq!(
+            graph.incomplete_cost_dates,
+            BTreeSet::from(["2026-01-01".to_string()])
+        );
+        let unpriced_day = graph
+            .contributions
+            .iter()
+            .find(|day| day.date == "2026-01-01")
+            .unwrap();
+        assert_eq!(unpriced_day.totals.tokens, 10);
+        assert_eq!(unpriced_day.totals.cost, 0.0);
+        assert_eq!(unpriced_day.clients[0].cost, 0.0);
+        let complete_day = graph
+            .contributions
+            .iter()
+            .find(|day| day.date == "2026-01-02")
+            .unwrap();
+        assert_eq!(complete_day.totals.cost, 2.0);
     }
 
     /// A dataset that loaded successfully but prices an unrelated model.
@@ -12085,11 +12201,11 @@ mod tests {
         .expect("authoritative costs must not need a pricing dataset");
 
         assert_eq!(graph.summary.total_tokens, 1_500);
-        assert!(graph.unpriced_submission_exclusions.is_empty());
+        assert!(graph.unpriced_submission_usage.is_empty());
     }
 
     #[test]
-    fn submission_excludes_unpriced_generic_gemini_default_but_keeps_priceable_usage() {
+    fn submission_zeroes_unpriced_generic_gemini_default_and_keeps_priceable_usage() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-4o".to_string(),
@@ -12135,13 +12251,17 @@ mod tests {
         )
         .expect("generic routing label must not block fully priced submission usage");
 
-        assert_eq!(graph.summary.total_tokens, 13);
-        assert_eq!(graph.contributions[0].clients.len(), 1);
-        assert_eq!(graph.contributions[0].clients[0].model_id, "gpt-4o");
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 31);
+        assert_eq!(graph.contributions[0].clients.len(), 2);
+        assert!(graph.contributions[0]
+            .clients
+            .iter()
+            .any(|client| client.model_id == "gpt-4o"));
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0],
-            UnpricedSubmissionExclusion {
+            graph.unpriced_submission_usage[0],
+            UnpricedSubmissionUsage {
                 provider_id: "google".to_string(),
                 model_id: "gemini-default".to_string(),
                 message_count: 7,
@@ -12152,7 +12272,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_excludes_unpriced_auto_routing_label() {
+    fn submission_zeroes_unpriced_auto_routing_label() {
         // `auto` is the unknown-model label Kiro emits and the default-model
         // label Cursor/Copilot record in usage rows. A models.dev `morph/auto`
         // paid row exists, so before the resolver refused routing labels the
@@ -12161,8 +12281,8 @@ mod tests {
         // pre-fix fallback covers all three populated buckets (7 input, 11
         // cache-read, 0 output) and submits the row — without it, the row
         // would fail coverage on the missing cache rate and the test would
-        // pass even with the bug. The label must instead be excluded with the
-        // routing-label reason.
+        // pass even with the bug. The label must instead be zeroed with the
+        // routing-label reason and an incomplete-cost marker.
         let mut models_dev = HashMap::new();
         models_dev.insert(
             "morph/auto".to_string(),
@@ -12203,11 +12323,12 @@ mod tests {
         )
         .expect("routing label must not abort submission");
 
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 18);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0],
-            UnpricedSubmissionExclusion {
+            graph.unpriced_submission_usage[0],
+            UnpricedSubmissionUsage {
                 provider_id: "amazon-bedrock".to_string(),
                 model_id: "auto".to_string(),
                 message_count: 7,
@@ -12220,7 +12341,7 @@ mod tests {
     #[test]
     fn whitespace_padded_routing_label_is_classified_the_same_by_resolver_and_reason() {
         // `lookup::is_routing_label` trims before comparing, so the resolver
-        // refuses to price ` auto `. The exclusion reason has to agree, or the
+        // refuses to price ` auto `. The zeroing reason has to agree, or the
         // row is reported as having no model-to-price mapping while the reason
         // it is unpriced is that it names a router. Both paths now read the
         // same list, so a label added to `lookup::ROUTING_LABELS` cannot drift
@@ -12228,12 +12349,12 @@ mod tests {
         assert_eq!(
             crate::pricing::lookup::is_routing_label(" auto "),
             is_generic_routing_label("amazon-bedrock", " auto "),
-            "resolver and exclusion reason must classify a padded routing label alike"
+            "resolver and zeroing reason must classify a padded routing label alike"
         );
 
         // The models.dev `morph/auto` row is fully priced, so if the resolver
         // did not refuse the padded label the row would submit at Morph rates
-        // (#1062) instead of reaching the exclusion path at all.
+        // (#1062) instead of reaching the zeroing path at all.
         let mut models_dev = HashMap::new();
         models_dev.insert(
             "morph/auto".to_string(),
@@ -12274,10 +12395,11 @@ mod tests {
         )
         .expect("routing label must not abort submission");
 
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 18);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].reason, ROUTING_LABEL_UNPRICED_REASON,
+            graph.unpriced_submission_usage[0].reason, ROUTING_LABEL_UNPRICED_REASON,
             "padded routing label must report the routing-label reason"
         );
     }
@@ -12330,10 +12452,10 @@ mod tests {
         )
         .expect("routing label must not abort submission");
 
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0],
-            UnpricedSubmissionExclusion {
+            graph.unpriced_submission_usage[0],
+            UnpricedSubmissionUsage {
                 provider_id: "amazon-bedrock".to_string(),
                 model_id: "auto".to_string(),
                 message_count: 7,
@@ -12344,7 +12466,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_excludes_unpriced_concrete_models() {
+    fn submission_zeroes_unpriced_concrete_models() {
         let concrete = UnifiedMessage::new(
             "synthetic",
             "gemini-3.5-pro",
@@ -12369,11 +12491,12 @@ mod tests {
         )
         .expect("one unpriced model must not block the submission");
 
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.summary.total_tokens, 1);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions,
-            vec![UnpricedSubmissionExclusion {
+            graph.unpriced_submission_usage,
+            vec![UnpricedSubmissionUsage {
                 provider_id: "google".to_string(),
                 model_id: "gemini-3.5-pro".to_string(),
                 message_count: 1,
@@ -12385,9 +12508,9 @@ mod tests {
 
     /// An unscoped model-part fallback proves only the model spelling, not
     /// which provider served it. The estimate remains available locally, while
-    /// submission excludes it with the provider-specific evidence gap.
+    /// submission zeroes it with the provider-specific evidence gap.
     #[test]
-    fn submission_excludes_cross_provider_model_part_estimate() {
+    fn submission_zeroes_cross_provider_model_part_estimate() {
         let openrouter = HashMap::from([(
             "vendor/atlas-chat".to_string(),
             pricing::ModelPricing {
@@ -12427,12 +12550,14 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("the unsafe estimate must be excluded, not abort the graph");
+        .expect("the unsafe estimate must be zeroed, not abort the graph");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 150);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].reason,
+            graph.unpriced_submission_usage[0].reason,
             UNVERIFIED_PROVIDER_IDENTITY_REASON
         );
     }
@@ -12441,7 +12566,7 @@ mod tests {
     /// not proof that the recorded provider used the candidate's billing
     /// endpoint. Both stay estimate-only at the submission boundary.
     #[test]
-    fn submission_excludes_provider_prefix_and_cross_endpoint_alias_estimates() {
+    fn submission_zeroes_provider_prefix_and_cross_endpoint_alias_estimates() {
         let litellm = HashMap::from([
             (
                 "anthropic/atlas-chat".to_string(),
@@ -12511,12 +12636,13 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("unsafe estimates must be excluded, not abort the graph");
+        .expect("unsafe estimates must be zeroed, not abort the graph");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 3);
-        for exclusion in graph.unpriced_submission_exclusions {
-            assert_eq!(exclusion.reason, UNVERIFIED_PROVIDER_IDENTITY_REASON);
+        assert_eq!(graph.summary.total_tokens, 450);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.unpriced_submission_usage.len(), 3);
+        for usage in graph.unpriced_submission_usage {
+            assert_eq!(usage.reason, UNVERIFIED_PROVIDER_IDENTITY_REASON);
         }
 
         // Source-constrained OpenRouter uses a separate scoped wrapper. Keep a
@@ -12552,21 +12678,22 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("the OpenRouter alias estimate must be excluded");
-        assert!(openrouter_graph.contributions.is_empty());
+        .expect("the OpenRouter alias estimate must be zeroed");
+        assert_eq!(openrouter_graph.summary.total_tokens, 150);
+        assert_eq!(openrouter_graph.summary.total_cost, 0.0);
         assert_eq!(
-            openrouter_graph.unpriced_submission_exclusions[0].reason,
+            openrouter_graph.unpriced_submission_usage[0].reason,
             UNVERIFIED_PROVIDER_IDENTITY_REASON
         );
     }
 
-    /// A fuzzy lookup with one candidate is excluded because nothing proves
+    /// A fuzzy lookup with one candidate is zeroed because nothing proves
     /// the priced key names the model that was used — not because candidates
     /// disagreed. There is only one candidate, so it cannot disagree with
     /// anything, and reporting a disagreement would send audit and submission
     /// diagnostics after a conflict that does not exist.
     #[test]
-    fn submission_excludes_single_candidate_fuzzy_price_for_unverified_identity() {
+    fn submission_zeroes_single_candidate_fuzzy_price_for_unverified_identity() {
         let litellm = HashMap::from([(
             "vendor-a/atlas-chat-preview".to_string(),
             pricing::ModelPricing {
@@ -12607,18 +12734,19 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("an unverified estimate must be excluded, not abort the graph");
+        .expect("an unverified estimate must be zeroed, not abort the graph");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 150);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].reason,
+            graph.unpriced_submission_usage[0].reason,
             UNVERIFIED_MODEL_IDENTITY_REASON
         );
     }
 
     #[test]
-    fn submission_excludes_ambiguous_fuzzy_price_with_specific_reason() {
+    fn submission_zeroes_ambiguous_fuzzy_price_with_specific_reason() {
         let litellm = HashMap::from([
             (
                 "vendor-a/atlas-chat-preview".to_string(),
@@ -12659,12 +12787,13 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("an ambiguous estimate must be excluded, not abort the graph");
+        .expect("an ambiguous estimate must be zeroed, not abort the graph");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 150);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].reason,
+            graph.unpriced_submission_usage[0].reason,
             AMBIGUOUS_MODEL_PRICING_REASON
         );
     }
@@ -12741,11 +12870,13 @@ mod tests {
             ),
         ];
 
-        let (submitted, exclusions) =
-            exclude_unpriced_submission_messages(messages, Some(&pricing));
+        let (submitted, zeroed, unpriced_usage, incomplete_dates) =
+            prepare_submission_pricing(messages, Some(&pricing));
 
         assert_eq!(submitted.len(), 2);
-        assert!(exclusions.is_empty());
+        assert!(zeroed.is_empty());
+        assert!(unpriced_usage.is_empty());
+        assert!(incomplete_dates.is_empty());
     }
 
     #[test]
@@ -12809,18 +12940,19 @@ mod tests {
             std::time::Instant::now(),
             &crate::bucket_tz::BucketTimezone::Local,
         )
-        .expect("ambiguous borrowed pricing must be excluded, not abort the graph");
+        .expect("ambiguous borrowed pricing must be zeroed, not abort the graph");
 
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(graph.summary.total_tokens, 170);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
         assert_eq!(
-            graph.unpriced_submission_exclusions[0].reason,
+            graph.unpriced_submission_usage[0].reason,
             AMBIGUOUS_MODEL_PRICING_REASON
         );
     }
 
     #[test]
-    fn submission_excludes_usage_with_an_unpriced_cache_write_bucket() {
+    fn submission_zeroes_usage_with_an_unpriced_cache_write_bucket() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-5.5".to_string(),
@@ -12875,11 +13007,18 @@ mod tests {
         )
         .expect("an incomplete cache rate must not block covered usage");
 
-        assert_eq!(graph.summary.total_tokens, 40);
-        assert_eq!(graph.contributions[0].clients[0].model_id, "gpt-4o");
+        assert_eq!(graph.summary.total_tokens, 100);
+        assert_eq!(graph.incomplete_cost_dates.len(), 1);
+        let incomplete_client = graph.contributions[0]
+            .clients
+            .iter()
+            .find(|client| client.model_id == "gpt-5.5")
+            .expect("the unpriced model's tokens must stay in the payload");
+        assert_eq!(incomplete_client.tokens.total(), 60);
+        assert_eq!(incomplete_client.cost, 0.0);
         assert_eq!(
-            graph.unpriced_submission_exclusions,
-            vec![UnpricedSubmissionExclusion {
+            graph.unpriced_submission_usage,
+            vec![UnpricedSubmissionUsage {
                 provider_id: "custom".to_string(),
                 model_id: "gpt-5.5".to_string(),
                 message_count: 1,

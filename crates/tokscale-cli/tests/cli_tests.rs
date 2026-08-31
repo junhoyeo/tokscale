@@ -5022,7 +5022,7 @@ fn test_root_with_group_by() {
 }
 
 #[test]
-fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
+fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
     let tmp = create_temp_fixture_dir();
     // Healthy pricing that does not happen to cover the unpriced model below.
     // Without this the fixture holds no pricing at all, which is a different
@@ -5066,17 +5066,17 @@ fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(
-            "excluded 1 unpriced unknown_provider/genuinely-unpriced-model message(s) (1 tokens)"
+            "submitting 1 unpriced unknown_provider/genuinely-unpriced-model message(s) (1 tokens) at $0.00"
         ),
-        "the excluded model must be named: {stdout}"
+        "the zeroed model must be named: {stdout}"
     );
     assert!(
-        stdout.contains("Remaining priced usage will be submitted."),
-        "the warning must say covered usage remains: {stdout}"
+        stdout.contains("Affected days are marked cost-incomplete"),
+        "the warning must explain the server-side floor: {stdout}"
     );
     assert!(
-        stdout.contains("Hint: excluded models stay unsubmitted until priced"),
-        "the exclusion must be followed by a fix hint: {stdout}"
+        stdout.contains("Hint: unpriced usage is included in token totals with zero cost"),
+        "the zero-cost fallback must be followed by a fix hint: {stdout}"
     );
     assert!(
         stdout.contains("custom-pricing.json"),
@@ -5099,9 +5099,9 @@ fn test_submit_excludes_unpriced_usage_and_keeps_the_rest() {
 /// Regression: a cold cache with no network must not look like "no usage".
 ///
 /// Every fetchable upstream is unreachable here and nothing is cached, so the
-/// pricing service loads empty and covers nothing. Excluding on that basis would
-/// consume the whole batch and exit 0 reporting no usage to submit, which is
-/// indistinguishable from an empty history and reads as success to autosubmit.
+/// pricing service loads empty and covers nothing. Zeroing on that basis would
+/// make every local cost ungrounded; the day floor prevents a server-side
+/// decrease, but the CLI must still report the total pricing outage as failure.
 #[test]
 fn test_submit_offline_without_pricing_cache_fails() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
@@ -5156,7 +5156,7 @@ fn test_submit_offline_without_pricing_cache_fails() {
 }
 
 #[test]
-fn test_submit_excluding_only_generic_gemini_usage_does_not_promise_submission() {
+fn test_submit_with_only_generic_gemini_usage_keeps_its_tokens() {
     let tmp = create_empty_fixture_dir();
     let message_dir = tmp
         .path()
@@ -5182,10 +5182,10 @@ fn test_submit_excluding_only_generic_gemini_usage_does_not_promise_submission()
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "excluded 1 unpriced google/gemini-default message(s) (1 tokens)",
+            "submitting 1 unpriced google/gemini-default message(s) (1 tokens) at $0.00",
         ))
-        .stdout(predicate::str::contains("Remaining priced usage will be submitted.").not())
-        .stdout(predicate::str::contains("No usage data found to submit."));
+        .stdout(predicate::str::contains("Total tokens: 1"))
+        .stdout(predicate::str::contains("No usage data found to submit.").not());
 }
 // ── gjc client filter tests ────────────────────────────────────────────────
 
