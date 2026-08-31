@@ -14,11 +14,163 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 
 pub use litellm::ModelPricing;
 
 static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
+
+/// Last known per-token tariff for a provider model that may disappear from
+/// the live pricing datasets after retirement.
+struct ArchivedPriceRow {
+    provider_id: &'static str,
+    model_id: &'static str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+}
+
+// @keep: these are immutable retirement snapshots, not aliases or estimates
+// that should track a similarly named current model.
+//
+// The Claude rows preserve the final rates Tokscale resolved from LiteLLM on
+// 2026-08-31 before the upstream lifecycle could remove them:
+//   Haiku 4.5  $1/$5,   cache read/write $0.10/$1.25 per 1M
+//   Opus 4.7   $5/$25,  cache read/write $0.50/$6.25 per 1M
+//   Opus 4.8   $5/$25,  cache read/write $0.50/$6.25 per 1M
+//   Sonnet 4.6 $3/$15,  cache read/write $0.30/$3.75 per 1M
+//
+// OpenAI's Codex catalog exposes `codex-auto-review` as a concrete hidden API
+// model ("Automatic approval review model for Codex") but publishes no tariff.
+// Before strict submission evidence rejected the fuzzy result, Tokscale's last
+// deterministic selection was OpenRouter's `openai/gpt-5.1-codex-mini` row:
+// $0.25/$2 and $0.025 cached input per 1M. Cache creation is explicitly free
+// for OpenAI prompt caching, so the snapshot covers every Tokscale bucket.
+const ARCHIVED_MODEL_PRICES: &[ArchivedPriceRow] = &[
+    ArchivedPriceRow {
+        provider_id: "anthropic",
+        model_id: "claude-haiku-4-5",
+        input: 1e-6,
+        output: 5e-6,
+        cache_read: 1e-7,
+        cache_write: 1.25e-6,
+    },
+    ArchivedPriceRow {
+        provider_id: "anthropic",
+        model_id: "claude-opus-4-7",
+        input: 5e-6,
+        output: 25e-6,
+        cache_read: 5e-7,
+        cache_write: 6.25e-6,
+    },
+    ArchivedPriceRow {
+        provider_id: "anthropic",
+        model_id: "claude-opus-4-8",
+        input: 5e-6,
+        output: 25e-6,
+        cache_read: 5e-7,
+        cache_write: 6.25e-6,
+    },
+    ArchivedPriceRow {
+        provider_id: "anthropic",
+        model_id: "claude-sonnet-4-6",
+        input: 3e-6,
+        output: 15e-6,
+        cache_read: 3e-7,
+        cache_write: 3.75e-6,
+    },
+    ArchivedPriceRow {
+        provider_id: "openai",
+        model_id: "codex-auto-review",
+        input: 2.5e-7,
+        output: 2e-6,
+        cache_read: 2.5e-8,
+        cache_write: 0.0,
+    },
+];
+
+fn strip_archived_reasoning_suffix(model_id: &str) -> &str {
+    for suffix in [
+        "-thinking-xhigh",
+        "-thinking-high",
+        "-thinking-medium",
+        "-thinking-low",
+        "-thinking",
+    ] {
+        if let Some(base) = model_id.strip_suffix(suffix) {
+            return base;
+        }
+    }
+    model_id
+}
+
+fn archived_pricing_result(model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
+    let lower = model_id.trim().to_ascii_lowercase();
+    let (embedded_provider, bare_model) = lower
+        .rsplit_once('/')
+        .map(|(provider, model)| (provider_identity::canonical_provider(provider), model))
+        .unwrap_or((None, lower.as_str()));
+    let requested_provider = provider_id.and_then(provider_identity::canonical_provider);
+
+    if requested_provider.is_some()
+        && embedded_provider.is_some()
+        && requested_provider != embedded_provider
+    {
+        return None;
+    }
+
+    let effective_provider = requested_provider.or(embedded_provider);
+    let bare_model = strip_archived_reasoning_suffix(bare_model);
+    let row = ARCHIVED_MODEL_PRICES.iter().find(|row| {
+        effective_provider
+            .as_deref()
+            .is_none_or(|provider| provider == row.provider_id)
+            && bare_model == row.model_id
+    })?;
+
+    Some(LookupResult {
+        pricing: ModelPricing {
+            input_cost_per_token: Some(row.input),
+            output_cost_per_token: Some(row.output),
+            cache_read_input_token_cost: Some(row.cache_read),
+            cache_creation_input_token_cost: Some(row.cache_write),
+            ..Default::default()
+        },
+        source: "Tokscale Archive".into(),
+        matched_key: format!("{}/{}", row.provider_id, row.model_id),
+        evidence: ResolutionEvidence::deterministic(ResolutionKind::BuiltIn),
+    })
+}
+
+fn prefer_submission_safe_or_archived(
+    dynamic: Option<LookupResult>,
+    model_id: &str,
+    provider_id: Option<&str>,
+    usage: Option<&TokenBreakdown>,
+) -> Option<LookupResult> {
+    let dynamic_is_complete = dynamic.as_ref().is_some_and(|result| {
+        result.evidence.is_submission_safe()
+            && usage.is_none_or(|usage| result.pricing.covers_usage(usage))
+    });
+    if dynamic_is_complete {
+        return dynamic;
+    }
+
+    let archived = archived_pricing_result(model_id, provider_id).or_else(|| {
+        dynamic
+            .as_ref()
+            .and_then(|result| archived_pricing_result(&result.matched_key, provider_id))
+    });
+    if archived
+        .as_ref()
+        .is_some_and(|result| usage.is_none_or(|usage| result.pricing.covers_usage(usage)))
+    {
+        return archived;
+    }
+
+    dynamic
+}
 
 // @keep: documents non-obvious filtering behavior — without this, the next person
 // will wonder why github_copilot entries disappear from the pricing data.
@@ -389,7 +541,12 @@ impl PricingService {
             Some(_) => {}
         }
 
-        self.lookup.lookup_with_source(model_id, force_source)
+        let dynamic = self.lookup.lookup_with_source(model_id, force_source);
+        if force_source.is_some() {
+            dynamic
+        } else {
+            prefer_submission_safe_or_archived(dynamic, model_id, None, None)
+        }
     }
 
     pub fn lookup_with_source_and_provider(
@@ -410,8 +567,14 @@ impl PricingService {
             Some(_) => {}
         }
 
-        self.lookup
-            .lookup_with_source_and_provider(model_id, force_source, provider_id)
+        let dynamic =
+            self.lookup
+                .lookup_with_source_and_provider(model_id, force_source, provider_id);
+        if force_source.is_some() {
+            dynamic
+        } else {
+            prefer_submission_safe_or_archived(dynamic, model_id, provider_id, None)
+        }
     }
 
     pub fn calculate_cost(
@@ -442,6 +605,18 @@ impl PricingService {
         if let Some(result) = self.custom.lookup_with_key(model_id) {
             return compute_cost(
                 result.pricing,
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write,
+                usage.reasoning,
+            );
+        }
+
+        let resolved = self.resolve_for_usage_with_provider(model_id, provider_id, usage);
+        if let Some(result) = resolved.filter(|result| result.source == "Tokscale Archive") {
+            return compute_cost(
+                &result.pricing,
                 usage.input,
                 usage.output,
                 usage.cache_read,
@@ -484,7 +659,8 @@ impl PricingService {
             return Some(result);
         }
 
-        self.lookup.resolve_for_usage(model_id, provider_id, usage)
+        let dynamic = self.lookup.resolve_for_usage(model_id, provider_id, usage);
+        prefer_submission_safe_or_archived(dynamic, model_id, provider_id, Some(usage))
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -550,6 +726,136 @@ mod tests {
             openrouter,
             models_dev,
         )
+    }
+
+    fn all_bucket_usage() -> TokenBreakdown {
+        TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+            reasoning: 0,
+        }
+    }
+
+    fn assert_retired_anthropic_price(
+        model: &str,
+        input: f64,
+        output: f64,
+        cache_read: f64,
+        cache_write: f64,
+    ) {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = all_bucket_usage();
+        let resolved = service
+            .resolve_for_usage_with_provider(model, Some("anthropic"), &usage)
+            .unwrap_or_else(|| panic!("{model} must retain its archived price"));
+        assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
+        assert!(resolved.evidence.is_submission_safe(), "model: {model}");
+
+        let expected = input + output + cache_read + cache_write;
+        let actual = service.calculate_cost_with_provider(model, Some("anthropic"), &usage);
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "model: {model}, expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn retired_claude_haiku_4_5_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25);
+    }
+
+    #[test]
+    fn retired_claude_opus_4_7_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-opus-4-7", 5.0, 25.0, 0.5, 6.25);
+    }
+
+    #[test]
+    fn retired_claude_opus_4_8_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25);
+    }
+
+    #[test]
+    fn retired_claude_sonnet_4_6_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75);
+    }
+
+    #[test]
+    fn retired_anthropic_price_does_not_cross_provider_boundaries() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = all_bucket_usage();
+
+        assert!(!service.covers_usage_with_provider("claude-opus-4-8", Some("bedrock"), &usage,));
+    }
+
+    #[test]
+    fn live_upstream_price_wins_over_the_retired_model_archive() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "anthropic/claude-opus-4-8".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(4e-6),
+                output_cost_per_token: Some(20e-6),
+                cache_read_input_token_cost: Some(4e-7),
+                cache_creation_input_token_cost: Some(5e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = all_bucket_usage();
+
+        let resolved = service
+            .resolve_for_usage_with_provider("claude-opus-4-8", Some("anthropic"), &usage)
+            .expect("live upstream row must resolve");
+        assert_eq!(resolved.source, "LiteLLM");
+        assert!(
+            (service.calculate_cost_with_provider("claude-opus-4-8", Some("anthropic"), &usage,)
+                - 29.4)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn retired_claude_reasoning_suffix_uses_the_archived_base_price() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = all_bucket_usage();
+
+        let resolved = service
+            .resolve_for_usage_with_provider(
+                "claude-opus-4-7-thinking-xhigh",
+                Some("anthropic"),
+                &usage,
+            )
+            .expect("reasoning suffix must retain the base model price");
+        assert_eq!(resolved.source, "Tokscale Archive");
+        assert_eq!(resolved.matched_key, "anthropic/claude-opus-4-7");
+    }
+
+    #[test]
+    fn codex_auto_review_keeps_its_last_resolved_price() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolved = service
+            .resolve_for_usage_with_provider("codex-auto-review", Some("openai"), &usage)
+            .expect("codex-auto-review must retain its archived price");
+        assert_eq!(resolved.source, "Tokscale Archive");
+        assert_eq!(resolved.matched_key, "openai/codex-auto-review");
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(
+            (service.calculate_cost_with_provider("codex-auto-review", Some("openai"), &usage,)
+                - 2.275)
+                .abs()
+                < 1e-9
+        );
     }
 
     /// The same Grok request must cost the same whichever dataset priced it.
