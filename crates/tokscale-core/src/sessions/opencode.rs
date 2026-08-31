@@ -1949,6 +1949,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_randomized_incremental_mutations_match_a_full_parse() {
         const SEEDS: usize = 48;
         const MUTATIONS_PER_SEED: usize = 4;
