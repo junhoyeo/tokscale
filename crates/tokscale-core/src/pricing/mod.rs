@@ -105,12 +105,46 @@ fn strip_archived_reasoning_suffix(model_id: &str) -> &str {
     model_id
 }
 
+/// Provider spellings that [`provider_identity::canonical_provider`] folds into
+/// a first-party vendor tag even though they name a different commercial
+/// endpoint with its own price sheet.
+///
+/// Folding is right for attribution — a Vertex-served Claude is still a Claude —
+/// but wrong for authorising a *first-party* archived tariff, for exactly the
+/// reason `provider_identity` refuses to fold the `-cn` regional endpoints: the
+/// hosted rates can differ, and the archive only holds the vendor's own. Note
+/// this is not the same question as spelling variants like `openai_codex`,
+/// which is first-party OpenAI and must keep resolving.
+fn is_rehosted_endpoint(raw: &str) -> bool {
+    raw.split('/').any(|segment| {
+        matches!(
+            segment
+                .trim()
+                .to_ascii_lowercase()
+                .replace('-', "_")
+                .as_str(),
+            "vertex" | "vertex_ai"
+        )
+    })
+}
+
 fn archived_pricing_result(model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
     let lower = model_id.trim().to_ascii_lowercase();
-    let (embedded_provider, bare_model) = lower
+    let (embedded_raw, bare_model) = lower
         .rsplit_once('/')
-        .map(|(provider, model)| (provider_identity::canonical_provider(provider), model))
+        .map(|(provider, model)| (Some(provider), model))
         .unwrap_or((None, lower.as_str()));
+
+    // The archive carries first-party tariffs only, so an endpoint that merely
+    // shares the canonical vendor tag must fall through to a live resolver
+    // rather than be priced — and marked submission-safe — from it.
+    if provider_id.is_some_and(is_rehosted_endpoint)
+        || embedded_raw.is_some_and(is_rehosted_endpoint)
+    {
+        return None;
+    }
+
+    let embedded_provider = embedded_raw.and_then(provider_identity::canonical_provider);
     let requested_provider = provider_id.and_then(provider_identity::canonical_provider);
 
     if requested_provider.is_some()
@@ -691,6 +725,29 @@ impl PricingService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archived_tariff_is_not_shared_across_hosted_endpoints() {
+        // `vertex` and `vertex_ai` canonicalise to `anthropic`, but a hosted
+        // endpoint publishes its own tariff -- the same reason
+        // `provider_identity` refuses to fold the `-cn` regional endpoints. The
+        // first-party archive must not authorise Vertex usage at Anthropic
+        // rates, whether the endpoint arrives as the provider or embedded in
+        // the model id.
+        for provider in ["vertex", "vertex_ai", "Vertex"] {
+            assert!(
+                archived_pricing_result("claude-opus-4-7", Some(provider)).is_none(),
+                "{provider} must not be priced from the Anthropic archive"
+            );
+        }
+        assert!(archived_pricing_result("vertex/claude-opus-4-7", None).is_none());
+
+        // First-party Anthropic still resolves, including its own spellings.
+        assert!(archived_pricing_result("claude-opus-4-7", Some("anthropic")).is_some());
+        assert!(archived_pricing_result("claude-opus-4-7", Some("Anthropic")).is_some());
+        assert!(archived_pricing_result("anthropic/claude-opus-4-7", None).is_some());
+        assert!(archived_pricing_result("claude-opus-4-7", None).is_some());
+    }
+
     use super::*;
 
     fn model_pricing(input: f64, output: f64) -> ModelPricing {
