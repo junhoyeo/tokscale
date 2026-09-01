@@ -47,8 +47,12 @@ const CURSOR_MAX_CSV_BYTES: usize = 64 * 1024 * 1024;
 pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 
 fn build_cursor_http_client() -> Result<reqwest::Client> {
+    // cursor.com sits behind Vercel bot protection that fingerprints TLS
+    // ClientHello. The workspace default is rustls; only Cursor requests need
+    // native TLS (Security.framework / schannel / OpenSSL) to pass (#1250).
     reqwest::Client::builder()
         .timeout(CURSOR_HTTP_TIMEOUT)
+        .use_native_tls()
         .build()
         .context("Failed to build Cursor HTTP client")
 }
