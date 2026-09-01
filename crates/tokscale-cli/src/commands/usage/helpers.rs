@@ -37,26 +37,27 @@ pub fn read_keychain(service: &str) -> Result<String> {
 fn read_wincred(service: &str) -> Result<String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC};
+    use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC};
 
     // CredReadW expects a null-terminated UTF-16 target name.
     let wide: Vec<u16> = OsStr::new(service)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let mut cred_ptr: *mut windows::Win32::Security::Credentials::CREDENTIALW =
+    let mut cred_ptr: *mut windows_sys::Win32::Security::Credentials::CREDENTIALW =
         std::ptr::null_mut();
 
-    // On windows-rs 0.62 CredReadW returns Result<()>; on failure it carries
-    // the Win32 error (e.g. ERROR_NOT_FOUND when the user never ran `gh auth login`).
+    // On windows-sys CredReadW returns BOOL (i32); 0 means failure and the
+    // error code is in GetLastError (e.g. ERROR_NOT_FOUND when the user never
+    // ran `gh auth login`).
     unsafe {
-        CredReadW(
-            PCWSTR(wide.as_ptr()),
-            CRED_TYPE_GENERIC,
-            None,
-            &mut cred_ptr,
-        )?;
+        let ok = CredReadW(wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred_ptr);
+        if ok == 0 {
+            anyhow::bail!(
+                "CredReadW failed for service '{service}': {}",
+                std::io::Error::last_os_error()
+            );
+        }
         if cred_ptr.is_null() {
             anyhow::bail!("CredReadW returned null credential for service '{service}'");
         }
