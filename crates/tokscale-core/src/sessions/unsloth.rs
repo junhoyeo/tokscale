@@ -4,50 +4,64 @@
 //! `$UNSLOTH_STUDIO_HOME` (normally `~/.unsloth/studio`). Internal Studio
 //! responses keep usage in assistant-message metadata; authenticated external
 //! API requests are copied into the content-free `api_usage_events` table.
-//! Neither query selects message content, prompts, or response previews.
+//! `responseDetails.providerType` distinguishes local zero-cost inference from
+//! recognized metered providers; routes without reliable billing identity stay
+//! unpriced. Neither query selects message content, prompts, or response previews.
 
 use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on, timestamp_secs_to_ms};
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
-use serde::Deserialize;
 use std::path::Path;
 
 const CLIENT_ID: &str = "unsloth";
 const STUDIO_AGENT: &str = "Unsloth";
 const API_AGENT: &str = "Unsloth API";
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ContextUsage {
-    #[serde(default)]
-    prompt_tokens: i64,
-    #[serde(default)]
-    completion_tokens: i64,
-    #[serde(default)]
-    total_tokens: i64,
-    #[serde(default)]
-    cached_tokens: i64,
-    #[serde(default)]
-    cache_write_tokens: i64,
-    #[serde(default)]
-    reasoning_tokens: i64,
-    #[serde(default)]
-    model_id: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MessageMetadata {
-    #[serde(default)]
-    context_usage: Option<ContextUsage>,
-}
+const METERED_PROVIDER_TYPES: &[&str] = &[
+    "anthropic",
+    "deepseek",
+    "gemini",
+    "huggingface",
+    "kimi",
+    "mistral",
+    "openai",
+    "openrouter",
+    "qwen",
+];
 
 fn non_blank(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn provider_for_pricing(provider_type: Option<String>) -> (String, bool) {
+    let provider_type = non_blank(provider_type)
+        .map(|provider| provider.to_ascii_lowercase())
+        .unwrap_or_else(|| "unknown".to_string());
+    if provider_type == "local" {
+        return (provider_type, true);
+    }
+    if METERED_PROVIDER_TYPES.contains(&provider_type.as_str()) {
+        // Unsloth names the Kimi route by its product brand, while TokScale's
+        // metered catalog uses Moonshot AI as the canonical provider.
+        let provider = if provider_type == "kimi" {
+            "moonshotai".to_string()
+        } else {
+            provider_identity::canonical_provider(&provider_type)
+                .unwrap_or_else(|| provider_type.clone())
+        };
+        return (provider, false);
+    }
+
+    // Custom, subscription-backed, and future routes do not carry enough
+    // billing metadata to justify an upstream model-price estimate. The
+    // reserved provider namespace keeps the responding model visible while
+    // making the usage explicitly unpriceable unless the user supplies an
+    // exact custom-pricing override for that model.
+    (format!("unpriced:{provider_type}"), false)
 }
 
 fn normalized_tokens(
@@ -83,14 +97,32 @@ fn normalized_tokens(
 }
 
 fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMessage> {
-    // `content_json` is deliberately absent. The metadata block carries exact
-    // scalar usage and the model that produced the assistant response.
+    // SQLite projects only the scalar usage and routing fields used below.
+    // `content_json`, attachments, private metadata, prompts, and response
+    // previews never cross the database boundary.
     let query = r#"
         SELECT
             m.id,
             m.thread_id,
             m.created_at,
-            m.metadata_json,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.promptTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.completionTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.totalTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.cachedTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.cacheWriteTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.reasoningTokens') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.contextUsage.modelId') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.responseDetails.responseModelId') END,
+            CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.responseDetails.providerType') END,
             t.model_id
         FROM chat_messages m
         LEFT JOIN chat_threads t ON t.id = m.thread_id
@@ -108,25 +140,24 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
             let message_id: String = row.get(0)?;
             let thread_id: String = row.get(1)?;
             let created_at: i64 = row.get(2)?;
-            let metadata_json: Option<String> = row.get(3)?;
-            let thread_model: Option<String> = row.get(4)?;
+            let prompt_tokens: Option<i64> = row.get(3)?;
+            let completion_tokens: Option<i64> = row.get(4)?;
+            let total_tokens: Option<i64> = row.get(5)?;
+            let cached_tokens: Option<i64> = row.get(6)?;
+            let cache_write_tokens: Option<i64> = row.get(7)?;
+            let reasoning_tokens: Option<i64> = row.get(8)?;
+            let requested_model: Option<String> = row.get(9)?;
+            let response_model: Option<String> = row.get(10)?;
+            let provider_type: Option<String> = row.get(11)?;
+            let thread_model: Option<String> = row.get(12)?;
 
-            let Some(metadata) = metadata_json
-                .as_deref()
-                .and_then(|value| serde_json::from_str::<MessageMetadata>(value).ok())
-            else {
-                return Ok(());
-            };
-            let Some(usage) = metadata.context_usage else {
-                return Ok(());
-            };
             let Some(tokens) = normalized_tokens(
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.total_tokens,
-                usage.cached_tokens,
-                usage.cache_write_tokens,
-                usage.reasoning_tokens,
+                prompt_tokens.unwrap_or_default(),
+                completion_tokens.unwrap_or_default(),
+                total_tokens.unwrap_or_default(),
+                cached_tokens.unwrap_or_default(),
+                cache_write_tokens.unwrap_or_default(),
+                reasoning_tokens.unwrap_or_default(),
             ) else {
                 return Ok(());
             };
@@ -135,9 +166,11 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
                 return Ok(());
             }
 
-            let model = non_blank(usage.model_id)
+            let model = non_blank(response_model)
+                .or_else(|| non_blank(requested_model))
                 .or_else(|| non_blank(thread_model))
                 .unwrap_or_else(|| "unknown".to_string());
+            let (provider, authoritative_zero_cost) = provider_for_pricing(provider_type);
             let session_id = if thread_id.trim().is_empty() {
                 format!("unsloth:chat:{message_id}")
             } else {
@@ -146,7 +179,7 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
             let mut message = UnifiedMessage::new_with_dedup(
                 CLIENT_ID,
                 model,
-                CLIENT_ID,
+                provider,
                 session_id,
                 timestamp,
                 tokens,
@@ -155,7 +188,9 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
             );
             message.agent = Some(STUDIO_AGENT.to_string());
             message.is_turn_start = true;
-            message.mark_provider_reported_cost();
+            if authoritative_zero_cost {
+                message.mark_provider_reported_cost();
+            }
             messages.push(message);
             Ok(())
         },
@@ -203,7 +238,7 @@ fn parse_external_api_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMes
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
             model,
-            CLIENT_ID,
+            "local",
             "unsloth:api".to_string(),
             timestamp,
             tokens,
@@ -282,6 +317,39 @@ mod tests {
     }
 
     #[test]
+    fn classifies_local_metered_and_unknown_provider_routes() {
+        assert_eq!(
+            provider_for_pricing(Some(" local ".to_string())),
+            ("local".to_string(), true)
+        );
+        for (provider_type, canonical_provider) in [
+            ("anthropic", "anthropic"),
+            ("deepseek", "deepseek"),
+            ("Gemini", "google"),
+            ("huggingface", "huggingface"),
+            ("kimi", "moonshotai"),
+            ("mistral", "mistralai"),
+            ("openai", "openai"),
+            ("openrouter", "openrouter"),
+            ("qwen", "qwen"),
+        ] {
+            assert_eq!(
+                provider_for_pricing(Some(provider_type.to_string())),
+                (canonical_provider.to_string(), false),
+                "provider type: {provider_type}"
+            );
+        }
+        assert_eq!(
+            provider_for_pricing(Some("custom".to_string())),
+            ("unpriced:custom".to_string(), false)
+        );
+        assert_eq!(
+            provider_for_pricing(None),
+            ("unpriced:unknown".to_string(), false)
+        );
+    }
+
+    #[test]
     fn parses_internal_chat_and_content_free_api_usage() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("studio.db");
@@ -296,7 +364,7 @@ mod tests {
             params![
                 "message-1",
                 "thread-1",
-                r#"{"contextUsage":{"promptTokens":100,"completionTokens":40,"totalTokens":140,"cachedTokens":30,"cacheWriteTokens":10,"reasoningTokens":5,"modelId":"unsloth/Qwen-test"}}"#,
+                r#"{"privatePreview":"never select this","contextUsage":{"promptTokens":100,"completionTokens":40,"totalTokens":140,"cachedTokens":30,"cacheWriteTokens":10,"reasoningTokens":5,"modelId":"requested-model"},"responseDetails":{"responseModelId":"claude-sonnet-4-6","providerType":"anthropic"}}"#,
                 1_788_000_000_123_i64,
             ],
         )
@@ -321,7 +389,8 @@ mod tests {
         assert_eq!(messages.len(), 2);
 
         let chat = &messages[0];
-        assert_eq!(chat.model_id, "unsloth/Qwen-test");
+        assert_eq!(chat.model_id, "claude-sonnet-4-6");
+        assert_eq!(chat.provider_id, "anthropic");
         assert_eq!(chat.session_id, "thread-1");
         assert_eq!(chat.timestamp, 1_788_000_000_123);
         assert_eq!(chat.tokens.input, 60);
@@ -334,6 +403,7 @@ mod tests {
         assert_eq!(chat.agent.as_deref(), Some(STUDIO_AGENT));
         assert!(chat.is_turn_start);
         assert_eq!(chat.cost, 0.0);
+        assert_eq!(chat.cost_source, super::super::CostSource::Unknown);
 
         let api = &messages[1];
         assert_eq!(api.model_id, "unsloth/local-api-model");
@@ -345,6 +415,8 @@ mod tests {
         assert_eq!(api.session_title.as_deref(), Some("/v1/chat/completions"));
         assert_eq!(api.dedup_key.as_deref(), Some("unsloth:api:request-1"));
         assert_eq!(api.session_id, "unsloth:api");
+        assert_eq!(api.provider_id, "local");
+        assert_eq!(api.cost_source, super::super::CostSource::ProviderReported);
     }
 
     #[test]
@@ -372,7 +444,59 @@ mod tests {
         let messages = parse_unsloth_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "fallback-model");
+        assert_eq!(messages[0].provider_id, "unpriced:unknown");
         assert_eq!(messages[0].tokens.total(), 8);
+    }
+
+    #[test]
+    fn local_routes_are_free_and_unknown_routes_remain_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("studio.db");
+        let conn = create_database(&db_path, false);
+        conn.execute(
+            "INSERT INTO chat_threads (id, model_id) VALUES ('thread-1', 'fallback-model')",
+            [],
+        )
+        .unwrap();
+        for (id, metadata) in [
+            (
+                "local-message",
+                r#"{"contextUsage":{"promptTokens":10,"completionTokens":2,"totalTokens":12},"responseDetails":{"responseModelId":"local-model","providerType":"local"}}"#,
+            ),
+            (
+                "custom-message",
+                r#"{"contextUsage":{"promptTokens":20,"completionTokens":4,"totalTokens":24},"responseDetails":{"responseModelId":"gpt-5.4","providerType":"custom"}}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO chat_messages (id, thread_id, role, metadata_json, created_at) VALUES (?1, 'thread-1', 'assistant', ?2, ?3)",
+                params![id, metadata, 1_788_000_000_i64],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let messages = parse_unsloth_sqlite(&db_path);
+        assert_eq!(messages.len(), 2);
+
+        let custom = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("unsloth:chat:custom-message"))
+            .unwrap();
+        assert_eq!(custom.model_id, "gpt-5.4");
+        assert_eq!(custom.provider_id, "unpriced:custom");
+        assert_eq!(custom.cost_source, super::super::CostSource::Unknown);
+
+        let local = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("unsloth:chat:local-message"))
+            .unwrap();
+        assert_eq!(local.model_id, "local-model");
+        assert_eq!(local.provider_id, "local");
+        assert_eq!(
+            local.cost_source,
+            super::super::CostSource::ProviderReported
+        );
     }
 
     #[test]

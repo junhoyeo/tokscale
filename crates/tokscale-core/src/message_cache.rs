@@ -1196,6 +1196,11 @@ fn parser_version(client: ClientId) -> u32 {
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
         ClientId::Hermes => 2,
+        // v1->v2: Unsloth Studio now reads the responding model and provider
+        // route from scalar responseDetails fields. Reparse cached rows so
+        // local usage stays authoritatively free, metered providers receive
+        // estimates, and unknown/custom routes remain explicitly unpriced.
+        ClientId::Unsloth => 2,
         // v2 added per-turn usage records. v3 adds the canonical unified log,
         // non-overlapping output/cache/reasoning buckets, and session metadata.
         // v4 scopes unified model attribution by PID generation and exact child
@@ -3421,6 +3426,11 @@ mod tests {
     #[test]
     fn test_hermes_parser_version_invalidates_v1_entries() {
         assert_eq!(parser_version(ClientId::Hermes), 2);
+    }
+
+    #[test]
+    fn test_unsloth_provider_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Unsloth), 2);
     }
 
     #[test]

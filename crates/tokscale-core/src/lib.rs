@@ -8263,7 +8263,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_unsloth_lane_reads_sqlite_and_invalidates_on_wal_changes() {
+    fn test_unsloth_lane_prices_metered_routes_and_invalidates_on_wal_changes() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
@@ -8304,7 +8304,7 @@ mod tests {
                     'message-1',
                     'thread-1',
                     'assistant',
-                    '{"contextUsage":{"promptTokens":100,"completionTokens":40,"totalTokens":140,"cachedTokens":25,"modelId":"fixture-local-model"}}',
+                    '{"contextUsage":{"promptTokens":100,"completionTokens":40,"totalTokens":140,"cachedTokens":25,"modelId":"requested-model"},"responseDetails":{"responseModelId":"fixture-local-model","providerType":"openai"}}',
                     1788000000
                 );
                 INSERT INTO api_usage_events (
@@ -8343,9 +8343,20 @@ mod tests {
                 .sum::<i64>(),
             150
         );
-        assert!(cold
+        let chat = cold
             .iter()
-            .all(|message| message.cost == 0.0 && message.has_authoritative_cost()));
+            .find(|message| message.dedup_key.as_deref() == Some("unsloth:chat:message-1"))
+            .unwrap();
+        assert_eq!(chat.provider_id, "openai");
+        assert_eq!(chat.cost, 115.0);
+        assert_eq!(chat.cost_source, sessions::CostSource::Estimated);
+        let api = cold
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("unsloth:api:request-1"))
+            .unwrap();
+        assert_eq!(api.provider_id, "local");
+        assert_eq!(api.cost, 0.0);
+        assert!(api.has_authoritative_cost());
 
         let warm = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
@@ -8363,7 +8374,7 @@ mod tests {
                 rusqlite::params![
                     "message-2",
                     "thread-1",
-                    r#"{"contextUsage":{"promptTokens":9,"completionTokens":1,"totalTokens":10,"modelId":"fixture-local-model"}}"#,
+                    r#"{"contextUsage":{"promptTokens":9,"completionTokens":1,"totalTokens":10,"modelId":"fixture-local-model"},"responseDetails":{"responseModelId":"fixture-local-model","providerType":"local"}}"#,
                     1_788_000_200_i64,
                 ],
             )
@@ -8383,9 +8394,13 @@ mod tests {
                 .sum::<i64>(),
             160
         );
-        assert!(refreshed
+        let new_local = refreshed
             .iter()
-            .all(|message| message.cost == 0.0 && message.has_authoritative_cost()));
+            .find(|message| message.dedup_key.as_deref() == Some("unsloth:chat:message-2"))
+            .unwrap();
+        assert_eq!(new_local.provider_id, "local");
+        assert_eq!(new_local.cost, 0.0);
+        assert!(new_local.has_authoritative_cost());
     }
 
     /// MiMo Code records carry an authoritative per-message cost. The micode

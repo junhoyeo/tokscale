@@ -577,6 +577,16 @@ impl PricingLookup {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        // Parsers use this namespace when they know which model responded but
+        // the source does not establish whether the route was metered,
+        // subscription-backed, or custom. Preserve the model for reporting,
+        // but never turn that incomplete route into an upstream API estimate.
+        // An exact custom-pricing entry is still consulted by PricingService
+        // before this lookup and remains the explicit user escape hatch.
+        if provider_id.is_some_and(is_unpriced_provider) {
+            return None;
+        }
+
         if force_source.is_none() {
             if let Some(result) = self_hosted::lookup(model_id, provider_id) {
                 return Some(result);
@@ -2749,6 +2759,11 @@ const ROUTING_LABELS: &[&str] = &["auto", "agent_review"];
 pub(crate) fn is_routing_label(model_id: &str) -> bool {
     let lower = model_id.trim().to_lowercase();
     ROUTING_LABELS.contains(&lower.as_str())
+}
+
+pub(crate) fn is_unpriced_provider(provider_id: &str) -> bool {
+    let lower = provider_id.trim().to_ascii_lowercase();
+    lower == "unpriced" || lower.starts_with("unpriced:")
 }
 
 fn is_original_provider(key: &str) -> bool {
@@ -8170,6 +8185,37 @@ mod tests {
 
         // A qualified id names a real vendor's model and still prices.
         assert!(lookup.lookup("morph/auto").is_some());
+    }
+
+    #[test]
+    fn explicitly_unpriced_provider_routes_do_not_inherit_model_pricing() {
+        let litellm = HashMap::from([(
+            "openai/gpt-5.4".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        )]);
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000,
+            output: 100,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        assert!(super::is_unpriced_provider("unpriced:custom"));
+        assert!(super::is_unpriced_provider(" UNPRICED "));
+        assert!(!super::is_unpriced_provider("openai"));
+        assert!(lookup
+            .lookup_with_provider("gpt-5.4", Some("unpriced:custom"))
+            .is_none());
+        assert_eq!(
+            lookup.calculate_cost_with_provider("gpt-5.4", Some("unpriced:subscription"), &usage,),
+            0.0
+        );
     }
 
     /// The shortest-key tie-break is a coin flip. Preferring the original
