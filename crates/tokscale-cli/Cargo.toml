@@ -120,9 +120,11 @@ arboard = { version = "3", default-features = false }
 reqwest = { workspace = true, features = ["native-tls-vendored"] }
 
 [target.'cfg(windows)'.dependencies]
-# windows-sys 0.61 is already in the lockfile via clap/colored/rpassword,
-# so this adds no new dependency versions. Unlike the windows crate it needs
-# no `Win32_Foundation` feature — the foundation types live in `windows_sys::core`.
+# windows-sys 0.61 is already in the lockfile via tokio and mio, and via
+# clap's anstyle-wincon/anstyle-query, so this adds no new dependency
+# versions. (colored and rpassword pull 0.59, not 0.61.) Unlike the windows
+# crate it needs no `Win32_Foundation` feature — the foundation types live in
+# `windows_sys::core`.
 windows-sys = { version = "0.61", features = ["Win32_Security_Credentials"] }
 
 [target.'cfg(unix)'.dependencies]
