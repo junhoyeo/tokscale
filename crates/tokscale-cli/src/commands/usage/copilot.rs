@@ -134,26 +134,45 @@ fn github_copilot_apps_json_probe() -> String {
         .join(".config")
         .join("github-copilot")
         .join("apps.json");
-    if !path.exists() {
-        return format!("apps.json={} (missing)", path.display());
-    }
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return format!("apps.json={} (exists, unreadable)", path.display());
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!("apps.json={} (missing)", path.display());
+        }
+        Err(_) => return format!("apps.json={} (exists, unreadable)", path.display()),
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
         return format!("apps.json={} (exists, not valid JSON)", path.display());
     };
 
     // Only report the shape, never any value: `oauth`/`github.com`/`token`
-    // keys may hold the OAuth token. The text search is case-insensitive so
-    // an embedded token field is detected regardless of casing.
-    let mut fields: Vec<&str> = Vec::new();
-    let lower = content.to_lowercase();
-    for needle in ["oauth", "github.com", "token"] {
-        if lower.contains(needle) {
-            fields.push(needle);
+    // keys may hold the OAuth token. Walk the parsed JSON and match object
+    // keys case-insensitively, so an embedded token field is detected
+    // without a raw text search that would also flag token values.
+    let mut found = std::collections::HashSet::new();
+    let mut stack = vec![&json];
+    while let Some(value) = stack.pop() {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if ["oauth", "github.com", "token"]
+                        .iter()
+                        .any(|n| key.eq_ignore_ascii_case(n))
+                    {
+                        found.insert(key.to_lowercase());
+                    }
+                    stack.push(child);
+                }
+            }
+            serde_json::Value::Array(arr) => stack.extend(arr),
+            _ => {}
         }
     }
+    let fields: Vec<&str> = ["oauth", "github.com", "token"]
+        .iter()
+        .copied()
+        .filter(|n| found.contains(*n))
+        .collect();
     let top_level_keys = json.as_object().map(|o| o.keys().count()).unwrap_or(0);
     let fields_desc = if fields.is_empty() {
         "no oauth/token fields".to_string()
@@ -445,9 +464,51 @@ pub fn fetch() -> Result<UsageOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::{OsStr, OsString};
     use tempfile::TempDir;
 
+    /// RAII restore of process-global env vars, mirroring
+    /// `tokscale_core::paths::test_env::EnvGuard` (which is `pub(crate)` to
+    /// the core crate and cannot be imported here). The manual
+    /// save/restore pairs this replaces only ran the restore when the test
+    /// reached the end of its body — a failing assertion panics first and
+    /// leaves the redirect in place. Restoring on `Drop` unwinds correctly.
+    struct EnvGuard(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+
+        fn set(&mut self, key: &str, value: impl AsRef<OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &str) {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, previous) in self.0.drain(..) {
+                unsafe {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
+    #[serial]
     fn wincred_probe_never_leaks_token_on_non_windows() {
         // On Linux the probe must not attempt a credential read at all.
         // The compile-time cfg keeps the windows import out of non-windows
@@ -462,23 +523,16 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apps_json_probe_reports_missing_file_without_error() {
         let temp = TempDir::new().unwrap();
         // Point HOME at an empty dir so the probe resolves a missing path
         // and reports it as such (silent not-found, no panic).
         let dir = temp.path().join("home");
         std::fs::create_dir_all(&dir).unwrap();
-        let _prev_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", &dir);
-        }
+        let mut guard = EnvGuard::capture(&["HOME"]);
+        guard.set("HOME", &dir);
         let probe = github_copilot_apps_json_probe();
-        unsafe {
-            match _prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         assert!(
             probe.contains("(missing)") || probe.contains("home dir unavailable"),
             "expected missing-file probe, got: {probe}"
@@ -486,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apps_json_probe_flags_token_fields_without_printing_values() {
         let temp = TempDir::new().unwrap();
         let dir = temp.path().join("home");
@@ -498,17 +553,9 @@ mod tests {
         )
         .unwrap();
 
-        let _prev_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", &dir);
-        }
+        let mut guard = EnvGuard::capture(&["HOME"]);
+        guard.set("HOME", &dir);
         let probe = github_copilot_apps_json_probe();
-        unsafe {
-            match _prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(probe.contains("valid JSON"), "got: {probe}");
         assert!(
@@ -526,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apps_json_probe_handles_invalid_json_gracefully() {
         let temp = TempDir::new().unwrap();
         let dir = temp.path().join("home");
@@ -533,17 +581,9 @@ mod tests {
         std::fs::create_dir_all(apps.parent().unwrap()).unwrap();
         std::fs::write(&apps, "this is { not json").unwrap();
 
-        let _prev_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", &dir);
-        }
+        let mut guard = EnvGuard::capture(&["HOME"]);
+        guard.set("HOME", &dir);
         let probe = github_copilot_apps_json_probe();
-        unsafe {
-            match _prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(
             probe.contains("not valid JSON"),
@@ -552,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn credential_probe_contains_wincred_and_apps_json_entries() {
         let probes = credential_probe();
         assert!(

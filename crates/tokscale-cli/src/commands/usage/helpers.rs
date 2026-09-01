@@ -51,7 +51,12 @@ fn read_wincred(service: &str) -> Result<String> {
     // On windows-rs 0.62 CredReadW returns Result<()>; on failure it carries
     // the Win32 error (e.g. ERROR_NOT_FOUND when the user never ran `gh auth login`).
     unsafe {
-        CredReadW(PCWSTR(wide.as_ptr()), CRED_TYPE_GENERIC, None, &mut cred_ptr)?;
+        CredReadW(
+            PCWSTR(wide.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+            &mut cred_ptr,
+        )?;
         if cred_ptr.is_null() {
             anyhow::bail!("CredReadW returned null credential for service '{service}'");
         }
@@ -65,8 +70,9 @@ fn read_wincred(service: &str) -> Result<String> {
         // `go-keyring` / `gh` stores the token as raw UTF-8 bytes (with an
         // optional `go-keyring-base64:` prefix handled by the caller).
         let slice = std::slice::from_raw_parts(blob_ptr, blob_size);
-        let raw = String::from_utf8(slice.to_vec())?;
+        let raw = String::from_utf8(slice.to_vec());
         CredFree(cred_ptr as *const std::ffi::c_void);
+        let raw = raw?;
         let token = raw.trim_end_matches('\0').trim_end().to_string();
         if token.is_empty() {
             anyhow::bail!("Empty token for service '{service}'");
