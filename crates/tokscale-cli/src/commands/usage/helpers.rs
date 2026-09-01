@@ -51,7 +51,7 @@ fn read_wincred(service: &str) -> Result<String> {
     // On windows-rs 0.62 CredReadW returns Result<()>; on failure it carries
     // the Win32 error (e.g. ERROR_NOT_FOUND when the user never ran `gh auth login`).
     unsafe {
-        CredReadW(PCWSTR(wide.as_ptr()), CRED_TYPE_GENERIC, 0, &mut cred_ptr)?;
+        CredReadW(PCWSTR(wide.as_ptr()), CRED_TYPE_GENERIC, None, &mut cred_ptr)?;
         if cred_ptr.is_null() {
             anyhow::bail!("CredReadW returned null credential for service '{service}'");
         }
