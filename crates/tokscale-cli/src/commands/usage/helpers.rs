@@ -10,16 +10,69 @@ pub fn capitalize(s: &str) -> String {
 }
 
 pub fn read_keychain(service: &str) -> Result<String> {
-    if cfg!(not(target_os = "macos")) {
-        anyhow::bail!("Keychain lookup is only available on macOS");
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", service, "-w"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("Keychain lookup failed for service '{service}'");
+        }
+        return Ok(String::from_utf8(out.stdout)?.trim_end().to_string());
     }
-    let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!("Keychain lookup failed for service '{service}'");
+
+    #[cfg(target_os = "windows")]
+    {
+        return read_wincred(service);
     }
-    Ok(String::from_utf8(out.stdout)?.trim_end().to_string())
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = service;
+        anyhow::bail!("Keychain lookup is only available on macOS and Windows");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_wincred(service: &str) -> Result<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC};
+
+    // CredReadW expects a null-terminated UTF-16 target name.
+    let wide: Vec<u16> = OsStr::new(service)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut cred_ptr: *mut windows::Win32::Security::Credentials::CREDENTIALW =
+        std::ptr::null_mut();
+
+    // On windows-rs 0.62 CredReadW returns Result<()>; on failure it carries
+    // the Win32 error (e.g. ERROR_NOT_FOUND when the user never ran `gh auth login`).
+    unsafe {
+        CredReadW(PCWSTR(wide.as_ptr()), CRED_TYPE_GENERIC, 0, &mut cred_ptr)?;
+        if cred_ptr.is_null() {
+            anyhow::bail!("CredReadW returned null credential for service '{service}'");
+        }
+        let cred = &*cred_ptr;
+        let blob_size = cred.CredentialBlobSize as usize;
+        let blob_ptr = cred.CredentialBlob;
+        if blob_ptr.is_null() || blob_size == 0 {
+            CredFree(cred_ptr as *const std::ffi::c_void);
+            anyhow::bail!("Empty credential blob for service '{service}'");
+        }
+        // `go-keyring` / `gh` stores the token as raw UTF-8 bytes (with an
+        // optional `go-keyring-base64:` prefix handled by the caller).
+        let slice = std::slice::from_raw_parts(blob_ptr, blob_size);
+        let raw = String::from_utf8(slice.to_vec())?;
+        CredFree(cred_ptr as *const std::ffi::c_void);
+        let token = raw.trim_end_matches('\0').trim_end().to_string();
+        if token.is_empty() {
+            anyhow::bail!("Empty token for service '{service}'");
+        }
+        Ok(token)
+    }
 }
 
 pub fn format_reset_time(resets_at: &str) -> String {

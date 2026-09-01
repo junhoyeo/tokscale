@@ -83,6 +83,7 @@ pub(super) fn credential_probe() -> Vec<String> {
             }
         ));
     }
+    probes.push(wincred_probe());
     for path in hosts_candidates() {
         probes.push(format!(
             "hosts={} ({})",
@@ -90,7 +91,79 @@ pub(super) fn credential_probe() -> Vec<String> {
             if path.exists() { "exists" } else { "missing" }
         ));
     }
+    probes.push(github_copilot_apps_json_probe());
     probes
+}
+
+/// Probe-only: reports whether a credential is stored in the Windows
+/// Credential Manager for the `gh:github.com` target. Never returns the
+/// token itself — only presence, blob length, and whether it is
+/// base64-encoded. On non-Windows this probe is not applicable.
+fn wincred_probe() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        const SERVICE: &str = "gh:github.com";
+        match super::helpers::read_keychain(SERVICE) {
+            Ok(cred) => {
+                let (prefix, blob_len) = match cred.strip_prefix("go-keyring-base64:") {
+                    Some(encoded) => ("go-keyring-base64", encoded.len()),
+                    None => ("plain", cred.len()),
+                };
+                format!("wincred={SERVICE} (found, {prefix}, blob={blob_len} bytes, token omitted)")
+            }
+            Err(_) => format!("wincred={SERVICE} (missing)"),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "wincred=gh:github.com (not-applicable on non-windows)".to_string()
+    }
+}
+
+/// Probe-only: checks whether the VS Code Copilot extension keeps a
+/// credential file at `~/.config/github-copilot/apps.json` (Worth checking:
+/// it may hold an OAuth token similar to the one the CLI uses). The probe
+/// reports presence, JSON validity, and which token-like fields exist, but
+/// the value is never read into `read_credentials` — this is observability
+/// only, to be verified before any automatic use is considered.
+fn github_copilot_apps_json_probe() -> String {
+    let Some(home) = crate::paths::home_dir() else {
+        return "apps.json (home dir unavailable)".to_string();
+    };
+    let path = home
+        .join(".config")
+        .join("github-copilot")
+        .join("apps.json");
+    if !path.exists() {
+        return format!("apps.json={} (missing)", path.display());
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return format!("apps.json={} (exists, unreadable)", path.display());
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return format!("apps.json={} (exists, not valid JSON)", path.display());
+    };
+
+    // Only report the shape, never any value: `oauth`/`github.com`/`token`
+    // keys may hold the OAuth token. The text search is case-insensitive so
+    // an embedded token field is detected regardless of casing.
+    let mut fields: Vec<&str> = Vec::new();
+    let lower = content.to_lowercase();
+    for needle in ["oauth", "github.com", "token"] {
+        if lower.contains(needle) {
+            fields.push(needle);
+        }
+    }
+    let top_level_keys = json.as_object().map(|o| o.keys().count()).unwrap_or(0);
+    let fields_desc = if fields.is_empty() {
+        "no oauth/token fields".to_string()
+    } else {
+        format!("fields=[{}]", fields.join(","))
+    };
+    format!(
+        "apps.json={} (exists, valid JSON, top_level_keys={top_level_keys}, {fields_desc}, probe-only)",
+        path.display()
+    )
 }
 
 fn gh_config_dir() -> std::path::PathBuf {
@@ -367,4 +440,127 @@ pub fn fetch() -> Result<UsageOutput> {
             spend_control: None,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn wincred_probe_never_leaks_token_on_non_windows() {
+        // On Linux the probe must not attempt a credential read at all.
+        // The compile-time cfg keeps the windows import out of non-windows
+        // builds, so this is both a behavioral and a linkage check.
+        let probe = wincred_probe();
+        if cfg!(not(target_os = "windows")) {
+            assert!(
+                probe.contains("not-applicable"),
+                "non-windows probe should report not-applicable, got: {probe}"
+            );
+        }
+    }
+
+    #[test]
+    fn apps_json_probe_reports_missing_file_without_error() {
+        let temp = TempDir::new().unwrap();
+        // Point HOME at an empty dir so the probe resolves a missing path
+        // and reports it as such (silent not-found, no panic).
+        let dir = temp.path().join("home");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &dir);
+        }
+        let probe = github_copilot_apps_json_probe();
+        unsafe {
+            match _prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert!(
+            probe.contains("(missing)") || probe.contains("home dir unavailable"),
+            "expected missing-file probe, got: {probe}"
+        );
+    }
+
+    #[test]
+    fn apps_json_probe_flags_token_fields_without_printing_values() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("home");
+        let apps = dir.join(".config").join("github-copilot").join("apps.json");
+        std::fs::create_dir_all(apps.parent().unwrap()).unwrap();
+        // A realistic-ish VS Code Copilot apps.json with an OAuth token.
+        std::fs::write(
+            &apps,
+            r#"{"github.com":{"oauth":"gho_AAAA_secret","token":"gho_BBBB"}}"#,
+        )
+        .unwrap();
+
+        let _prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &dir);
+        }
+        let probe = github_copilot_apps_json_probe();
+        unsafe {
+            match _prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(probe.contains("valid JSON"), "got: {probe}");
+        assert!(
+            probe.contains("fields=[oauth,github.com,token]"),
+            "got: {probe}"
+        );
+        assert!(
+            !probe.contains("gho_"),
+            "probe must not leak token values, got: {probe}"
+        );
+        assert!(
+            probe.contains("probe-only"),
+            "probe should be marked probe-only, got: {probe}"
+        );
+    }
+
+    #[test]
+    fn apps_json_probe_handles_invalid_json_gracefully() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("home");
+        let apps = dir.join(".config").join("github-copilot").join("apps.json");
+        std::fs::create_dir_all(apps.parent().unwrap()).unwrap();
+        std::fs::write(&apps, "this is { not json").unwrap();
+
+        let _prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &dir);
+        }
+        let probe = github_copilot_apps_json_probe();
+        unsafe {
+            match _prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(
+            probe.contains("not valid JSON"),
+            "invalid JSON should be reported without error, got: {probe}"
+        );
+    }
+
+    #[test]
+    fn credential_probe_contains_wincred_and_apps_json_entries() {
+        let probes = credential_probe();
+        assert!(
+            probes.iter().any(|p| p.starts_with("wincred=")),
+            "missing wincred probe: {probes:?}"
+        );
+        assert!(
+            probes.iter().any(|p| p.starts_with("apps.json=")),
+            "missing apps.json probe: {probes:?}"
+        );
+    }
 }

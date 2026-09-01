@@ -119,6 +119,9 @@ arboard = { version = "3", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 reqwest = { workspace = true, features = ["native-tls-vendored"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Security_Credentials", "Win32_Foundation"] }
+
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }
 
