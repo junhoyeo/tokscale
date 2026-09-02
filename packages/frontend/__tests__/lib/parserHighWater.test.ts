@@ -1487,7 +1487,7 @@ describe("droid parser high-water", () => {
   it("moves a re-attributed session onto the days the current parser reports", () => {
     const plan = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays);
 
-    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.mode).toBe("replace");
     expect(plan.increments).toEqual({});
     expect(plan.layoutDays?.["2026-08-07"]?.tokens).toBe(21_000);
     expect(plan.layoutDays?.["2026-08-08"]?.tokens).toBe(152_000);
@@ -1506,7 +1506,7 @@ describe("droid parser high-water", () => {
 
     const plan = droidPlan({}, grown, state);
 
-    expect(plan.mode).toBe("incremental");
+    expect(plan.mode).toBe("replace");
     expect(plan.layoutDays?.["2026-08-10"]?.tokens).toBe(79_000);
     expect(plan.nextState?.aggregate.tokens).toBe(400_000);
   });

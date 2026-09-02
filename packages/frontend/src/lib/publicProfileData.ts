@@ -10,6 +10,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { calculateIntensity } from "@/lib/utils";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -648,18 +649,7 @@ export async function getPublicProfileResponse(
 
     // Build contribution graph data
     const graphContributions = visibleContributions.map((day) => {
-      const intensity =
-        maxTokens === 0
-          ? 0
-          : day.tokens === 0
-            ? 0
-            : day.tokens <= maxTokens * 0.25
-              ? 1
-              : day.tokens <= maxTokens * 0.5
-                ? 2
-                : day.tokens <= maxTokens * 0.75
-                  ? 3
-                  : 4;
+      const intensity = calculateIntensity(day.tokens, maxTokens);
 
       let dayCacheRead = 0;
       let dayCacheWrite = 0;

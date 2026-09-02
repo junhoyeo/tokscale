@@ -112,18 +112,13 @@ export type ParserHighWaterMode =
   | "freeze"
   | "baseline-legacy"
   | "baseline-new"
-  | "incremental";
+  | "incremental"
+  | "replace";
 
 export interface ParserHighWaterPlan {
   mode: ParserHighWaterMode;
   increments: Record<string, ClientBreakdownData>;
-  /**
-   * Absolute per-day cells for parsers whose snapshot is the day layout
-   * source of truth. When set, the submit route replaces stored client cells
-   * instead of adding bounded increments, so a re-attribution moves tokens
-   * onto the days the current parser reports without changing the lifetime
-   * high-water.
-   */
+  /** Absolute cells when `mode` is `replace`; omitted otherwise. */
   layoutDays?: Record<string, ClientBreakdownData>;
   nextState?: ParserClientHighWaterState;
 }
@@ -363,13 +358,12 @@ function stateFromSnapshot(
   };
 }
 
-function layoutFollowsSnapshot(args: {
+function replaceLayoutPlan(args: {
   client: string;
   version: number;
   incoming: ParserAggregateHighWater;
   credited: ParserAggregateHighWater;
   incomingDays: Record<string, ClientBreakdownData>;
-  mode: Extract<ParserHighWaterMode, "baseline-legacy" | "incremental">;
 }): ParserHighWaterPlan | null {
   if (
     !SNAPSHOT_LAYOUT_CLIENTS.has(args.client) ||
@@ -378,7 +372,7 @@ function layoutFollowsSnapshot(args: {
     return null;
   }
   return {
-    mode: args.mode,
+    mode: "replace",
     increments: createSafeRecord<ClientBreakdownData>(),
     layoutDays: normalizeStateDays(args.incomingDays),
     nextState: stateFromSnapshot(args.version, args.incomingDays),
@@ -728,13 +722,12 @@ export function planParserHighWaterSubmission(args: {
     const hasLegacy =
       legacyAggregate.tokens > 0 || legacyAggregate.messages > 0;
     if (hasLegacy) {
-      const followed = layoutFollowsSnapshot({
+      const followed = replaceLayoutPlan({
         client: args.client,
         version: args.incomingVersion,
         incoming: incomingAggregate,
         credited: legacyAggregate,
         incomingDays: args.incomingDays,
-        mode: "baseline-legacy",
       });
       if (followed) return followed;
     }
@@ -789,13 +782,12 @@ export function planParserHighWaterSubmission(args: {
     args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION
       ? args.state.observedDays!
       : previousCreditedDays;
-  const followed = layoutFollowsSnapshot({
+  const followed = replaceLayoutPlan({
     client: args.client,
-    version: supportedVersion,
+    version: args.incomingVersion,
     incoming: incomingAggregate,
     credited: previousAggregate,
     incomingDays: args.incomingDays,
-    mode: "incremental",
   });
   if (followed) return followed;
   const increments = allocateIncrements(

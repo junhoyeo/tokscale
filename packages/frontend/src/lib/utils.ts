@@ -187,7 +187,7 @@ export function recalculateIntensity(contributions: DailyContribution[]): DailyC
   }));
 }
 
-function calculateIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 4 {
+export function calculateIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 4 {
   if (tokens === 0 || maxTokens === 0) return 0;
   const ratio = tokens / maxTokens;
   if (ratio >= 0.75) return 4;
@@ -344,10 +344,10 @@ export function calculateLongestStreak(contributions: DailyContribution[]): numb
 export function findBestDay(contributions: DailyContribution[]): DailyContribution | null {
   if (contributions.length === 0) return null;
   return contributions.reduce((best, current) => {
-    if (current.totals.tokens !== best.totals.tokens) {
-      return current.totals.tokens > best.totals.tokens ? current : best;
+    if (current.totals.cost !== best.totals.cost) {
+      return current.totals.cost > best.totals.cost ? current : best;
     }
-    return current.totals.cost > best.totals.cost ? current : best;
+    return current.totals.tokens > best.totals.tokens ? current : best;
   });
 }
 

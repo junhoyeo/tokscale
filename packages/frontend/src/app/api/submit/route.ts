@@ -17,6 +17,7 @@ import {
   mergeTimestampMs,
   breakdownCostIsComplete,
   tagBreakdownCostCompleteness,
+  applyCostCompleteness,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
 import {
@@ -79,16 +80,59 @@ function emptyLayoutDay(date: string): SubmissionData["contributions"][number] {
   };
 }
 
-function applySnapshotLayoutDays(
+function isReplacePlan(plan: ParserHighWaterPlan): boolean {
+  return plan.mode === "replace";
+}
+
+function applyReplaceLayouts(
   merged: Record<string, ClientBreakdownData>,
   date: string,
-  parserPlans: Map<string, ParserHighWaterPlan>
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  incomingCostIsComplete: boolean
 ): void {
   for (const [client, plan] of parserPlans) {
-    if (!plan.layoutDays) continue;
+    if (!isReplacePlan(plan) || !plan.layoutDays) continue;
     const next = ownValue(plan.layoutDays, date);
-    if (next) merged[client] = next;
-    else delete merged[client];
+    if (next) {
+      merged[client] = applyCostCompleteness(
+        next,
+        ownValue(merged, client),
+        incomingCostIsComplete
+      );
+    } else {
+      delete merged[client];
+    }
+  }
+}
+
+function expandDaysForReplaceLayouts(
+  daysToProcess: Map<string, SubmissionData["contributions"][number]>,
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  existingDeviceDays: Array<{
+    date: string;
+    sourceBreakdown: unknown;
+  }>
+): void {
+  for (const [client, plan] of parserPlans) {
+    if (!isReplacePlan(plan) || !plan.layoutDays) continue;
+    for (const date of Object.keys(plan.layoutDays)) {
+      if (!daysToProcess.has(date)) {
+        daysToProcess.set(date, emptyLayoutDay(date));
+      }
+    }
+    for (const existing of existingDeviceDays) {
+      const breakdown = existing.sourceBreakdown as Record<
+        string,
+        ClientBreakdownData
+      > | null;
+      if (
+        breakdown &&
+        ownValue(breakdown, client) &&
+        !daysToProcess.has(existing.date)
+      ) {
+        daysToProcess.set(existing.date, emptyLayoutDay(existing.date));
+      }
+    }
   }
 }
 
@@ -783,6 +827,10 @@ export async function POST(request: Request) {
           warnings.push(
             `Established the ${label} parser generation ${supportedVersion} baseline; existing same-device history was preserved and only bounded lifetime growth was added.`
           );
+        } else if (plan.mode === "replace") {
+          warnings.push(
+            `Rewrote ${label} daily layout from the full parser snapshot without changing the lifetime high-water.`
+          );
         } else if (plan.mode === "freeze") {
           warnings.push(
             `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
@@ -791,8 +839,7 @@ export async function POST(request: Request) {
       }
       const plannedIncrementClients = [...parserPlans].filter(
         ([, plan]) =>
-          !plan.layoutDays &&
-          (plan.mode === "incremental" || plan.mode === "baseline-legacy")
+          plan.mode === "incremental" || plan.mode === "baseline-legacy"
       );
 
       const existingDaysMap = new Map(
@@ -802,27 +849,11 @@ export async function POST(request: Request) {
       const daysToProcess = new Map(
         data.contributions.map((day) => [day.date, day] as const)
       );
-      for (const [client, plan] of parserPlans) {
-        if (!plan.layoutDays) continue;
-        for (const date of Object.keys(plan.layoutDays)) {
-          if (!daysToProcess.has(date)) {
-            daysToProcess.set(date, emptyLayoutDay(date));
-          }
-        }
-        for (const existing of existingDeviceDays) {
-          const breakdown = existing.sourceBreakdown as Record<
-            string,
-            ClientBreakdownData
-          > | null;
-          if (
-            breakdown &&
-            ownValue(breakdown, client) &&
-            !daysToProcess.has(existing.date)
-          ) {
-            daysToProcess.set(existing.date, emptyLayoutDay(existing.date));
-          }
-        }
-      }
+      expandDaysForReplaceLayouts(
+        daysToProcess,
+        parserPlans,
+        existingDeviceDays
+      );
 
       // ------------------------------------------
       // STEP 3c: Compute merge results in memory, then batch write
@@ -873,21 +904,12 @@ export async function POST(request: Request) {
         }
 
         for (const [client, plan] of parserPlans) {
-          if (plan.mode === "freeze") {
+          if (plan.mode === "freeze" || plan.mode === "replace") {
             delete incomingClientBreakdown[client];
-          } else if (plan.layoutDays) {
-            const layout = ownValue(plan.layoutDays, incomingDay.date);
-            if (layout) {
-              incomingClientBreakdown[client] = layout;
-            } else {
-              delete incomingClientBreakdown[client];
-            }
           } else if (
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy"
           ) {
-            // The full snapshot itself is never merged. Only the bounded growth
-            // calculated against the persisted generation high-water is eligible.
             const increment = ownValue(plan.increments, incomingDay.date);
             if (increment) {
               incomingClientBreakdown[client] = increment;
@@ -899,17 +921,15 @@ export async function POST(request: Request) {
 
         const clientsToMerge = new Set(submittedClients);
         for (const [client, plan] of parserPlans) {
+          if (plan.mode === "replace") {
+            clientsToMerge.delete(client);
+            continue;
+          }
           const planRewroteClient =
             plan.mode === "freeze" ||
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy";
-          if (
-            planRewroteClient &&
-            !plan.layoutDays &&
-            !incomingClientBreakdown[client]
-          ) {
-            // A frozen/zero-increment plan is a no-op for that client, not a
-            // request to delete its stored row from this day.
+          if (planRewroteClient && !incomingClientBreakdown[client]) {
             clientsToMerge.delete(client);
           }
         }
@@ -979,10 +999,11 @@ export async function POST(request: Request) {
               }
             }
           }
-          applySnapshotLayoutDays(
+          applyReplaceLayouts(
             mergedClientBreakdown,
             incomingDay.date,
-            parserPlans
+            parserPlans,
+            incomingDay.totals?.costIsComplete ?? true
           );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
 
@@ -1009,10 +1030,11 @@ export async function POST(request: Request) {
             incomingClientBreakdown,
             incomingDay.totals?.costIsComplete ?? true
           );
-          applySnapshotLayoutDays(
+          applyReplaceLayouts(
             insertedClientBreakdown,
             incomingDay.date,
-            parserPlans
+            parserPlans,
+            incomingDay.totals?.costIsComplete ?? true
           );
           const dayTotals = recalculateDayTotals(insertedClientBreakdown);
           if (Object.keys(insertedClientBreakdown).length === 0) continue;

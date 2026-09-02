@@ -677,6 +677,44 @@ describe("POST /api/submit droid snapshot layout", () => {
     expect(store.days.find((day) => day.date === "2026-08-09")?.sourceBreakdown.droid.tokens).toBe(
       80_000,
     );
+    expect(
+      secondJson.warnings.some((warning: string) =>
+        warning.includes("Preserved droid"),
+      ),
+    ).toBe(false);
+    expect(
+      secondJson.warnings.some((warning: string) =>
+        warning.includes("Rewrote Droid daily layout"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the stored Droid cost floor when a full unpriced snapshot replaces the layout", async () => {
+    const store = newStore();
+
+    installTx(store);
+    const priced = submissionBody("droid", SESSION_START_DATING);
+    mockSubmit(priced);
+    expect((await post(priced)).status).toBe(200);
+
+    installTx(store);
+    const unpriced = submissionBody("droid", PER_GENERATION_DATING);
+    for (const day of unpriced.contributions) {
+      day.clients[0].cost = 0;
+      (day as { totals?: { costIsComplete: boolean } }).totals = {
+        costIsComplete: false,
+      };
+    }
+    mockSubmit(unpriced);
+    const response = await post(unpriced);
+    expect(response.status).toBe(200);
+
+    const startDay = store.days.find((day) => day.date === "2026-08-07");
+    expect(startDay?.sourceBreakdown.droid.tokens).toBe(40_000);
+    expect(Number(startDay?.sourceBreakdown.droid.cost)).toBe(240);
+    expect(startDay?.sourceBreakdown.droid.provenance?.costIsComplete).toBe(
+      false,
+    );
   });
 
   it("still credits genuinely new Droid usage after the layout rewrite", async () => {

@@ -300,7 +300,7 @@ export function mergeClientBreakdownsWithRegressionGuard(
  * mark a client complete whenever an incomplete rescan happened to report less
  * than the old total for a *larger* token set.
  */
-function applyCostCompleteness(
+export function applyCostCompleteness(
   next: ClientBreakdownData,
   existing: ClientBreakdownData | undefined,
   incomingCostIsComplete: boolean

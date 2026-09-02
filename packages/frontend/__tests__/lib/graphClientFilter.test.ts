@@ -5,6 +5,7 @@ import {
   resolveSelectedDay,
   filterByClient,
   dayHasActivity,
+  findBestDay,
 } from "../../src/lib/utils";
 import type { ClientType, DailyContribution } from "../../src/lib/types";
 
@@ -148,5 +149,33 @@ describe("unpriced Droid days still count as activity", () => {
     const filtered = filterByClient(data, ["droid"]);
     expect(filtered.summary.totalTokens).toBe(150_000_000);
     expect(filtered.summary.activeDays).toBe(1);
+  });
+});
+
+describe("findBestDay", () => {
+  it("ranks by cost first so a free high-token day does not beat a priced day", () => {
+    const free = {
+      ...day("2026-08-01"),
+      totals: { tokens: 9_000, cost: 0, messages: 9 },
+    };
+    const priced = {
+      ...day("2026-08-02"),
+      totals: { tokens: 1_000, cost: 12, messages: 2 },
+    };
+
+    expect(findBestDay([free, priced])).toBe(priced);
+  });
+
+  it("breaks cost ties with tokens so all-free data still picks a real usage day", () => {
+    const quiet = {
+      ...day("2026-08-01"),
+      totals: { tokens: 100, cost: 0, messages: 1 },
+    };
+    const busy = {
+      ...day("2026-08-02"),
+      totals: { tokens: 9_000, cost: 0, messages: 9 },
+    };
+
+    expect(findBestDay([quiet, busy])).toBe(busy);
   });
 });
