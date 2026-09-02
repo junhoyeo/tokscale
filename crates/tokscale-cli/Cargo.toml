@@ -83,6 +83,12 @@ base64 = { workspace = true }
 # Cursor desktop state.vscdb accessToken import
 rusqlite = { workspace = true }
 
+# musl has no system OpenSSL to link; Android NDK builds do not ship one
+# either. linux-gnu keeps the workspace `native-tls` feature and links
+# libssl dynamically so the #1138 size win stays on that artifact.
+[target.'cfg(any(target_env = "musl", target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["native-tls-vendored"] }
+
 # arboard has no Android backend and fails to compile for
 # aarch64-linux-android. The clipboard module in tui/ provides a
 # no-op fallback on Android so the rest of the code stays portable.

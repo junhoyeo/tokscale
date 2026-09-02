@@ -48,8 +48,10 @@ pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 
 fn build_cursor_http_client() -> Result<reqwest::Client> {
     // cursor.com sits behind Vercel bot protection that fingerprints TLS
-    // ClientHello. The workspace default is rustls; only Cursor requests need
-    // native TLS (Security.framework / schannel / OpenSSL) to pass (#1250).
+    // ClientHello. Other clients keep the rustls runtime default; only
+    // Cursor requests switch to native TLS (Security.framework / schannel /
+    // OpenSSL) to pass (#1250). linux-gnu links system libssl; musl and
+    // Android vendor OpenSSL via target cfg on the crate manifests.
     reqwest::Client::builder()
         .timeout(CURSOR_HTTP_TIMEOUT)
         .use_native_tls()

@@ -32,6 +32,13 @@ sha2 = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
 
+# Same vendored-OpenSSL gate as tokscale-cli: musl/Android have nothing to
+# dynamically link. Feature unification from the CLI binary would cover the
+# published artifact, but a standalone `tokscale-core` musl build would
+# otherwise look for system libssl and fail.
+[target.'cfg(any(target_env = "musl", target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["native-tls-vendored"] }
+
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"

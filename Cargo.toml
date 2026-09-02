@@ -64,11 +64,17 @@ libc = "0.2"
 # would silently break anyone behind a corporate MITM proxy or using a private
 # CA. Reading the OS trust store keeps today's behaviour.
 #
-# `native-tls` (+ `native-tls-vendored` for musl/cross Linux) is enabled
-# alongside rustls so the Cursor API client can opt into system TLS and avoid
-# Vercel bot protection that fingerprints rustls (#1250). Every other client
-# keeps the rustls default.
-reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "native-tls", "native-tls-vendored"], default-features = false }
+# `native-tls` is also enabled so the Cursor API client can call
+# `.use_native_tls()` and pass Vercel bot protection that fingerprints rustls
+# (#1250). Other clients still construct a rustls client (`Client::new()` /
+# builder without `.use_native_tls()`). Cargo unifies reqwest features across
+# the graph, so this is a runtime default, not a separate crate.
+#
+# Do not put `native-tls-vendored` here: that feature is unified for every
+# target and statically links OpenSSL into linux-gnu (~25.8 MB). musl and
+# Android enable it on the member crates via target cfg instead; linux-gnu
+# links system libssl dynamically.
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "native-tls"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 # For disk caching (XDG paths)
