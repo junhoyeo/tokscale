@@ -516,12 +516,21 @@ fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
     // reconciliation would treat the previous account's `usage.json` as the new
     // active account's and could drop the new account's only cache.
     let old_active_id = store.active_account_id.clone();
-    if old_active_id != account_id {
-        let _ = reconcile_cache_files(&old_active_id, &account_id);
-    }
+    let reconciled = if old_active_id != account_id {
+        reconcile_cache_files(&old_active_id, &account_id)
+    } else {
+        Ok(())
+    };
 
-    store.active_account_id = account_id.clone();
+    // A freshly read desktop token is worth keeping even when the cache files
+    // could not be moved, so the accounts are saved either way. Only point
+    // `active_account_id` at the new account once its cache really is
+    // `usage.json`.
+    if reconciled.is_ok() {
+        store.active_account_id = account_id.clone();
+    }
     save_credentials_store(&store)?;
+    reconciled?;
     Ok(account_id)
 }
 
@@ -825,7 +834,11 @@ pub fn set_active_account(name_or_id: &str) -> Result<()> {
     let old_active_id = store.active_account_id.clone();
 
     if resolved != old_active_id {
-        let _ = reconcile_cache_files(&old_active_id, &resolved);
+        // Do not record the switch when the caches could not be moved: the active
+        // `usage.*` would then belong to a different account than
+        // `active_account_id` claims, and the next sync would file one account's
+        // usage under the other.
+        reconcile_cache_files(&old_active_id, &resolved)?;
     }
 
     store.active_account_id = resolved;
@@ -836,9 +849,30 @@ pub fn set_active_account(name_or_id: &str) -> Result<()> {
 
 fn reconcile_cache_files(old_account_id: &str, new_account_id: &str) -> Result<()> {
     let cache_dir = get_cursor_cache_dir()?;
+    reconcile_cache_files_in_dir(&cache_dir, old_account_id, new_account_id)
+}
+
+/// Moves `usage.<ext>` back under `old_account_id` and promotes
+/// `usage.<new_account_id>.<ext>` into its place, for every cache extension.
+///
+/// Kept `cache_dir`-relative for the same reason as [`archive_cache_file_in_dir`]:
+/// so tests can point it at a temporary home.
+///
+/// A failure on one extension does not abort the others. Each extension is an
+/// independent pair of caches, so returning early would leave the JSON cache
+/// moved while the legacy CSV cache stays under the wrong account. Every failure
+/// is collected and reported instead, so the caller can decline to record the
+/// switch rather than pointing `active_account_id` at another account's cache.
+fn reconcile_cache_files_in_dir(
+    cache_dir: &Path,
+    old_account_id: &str,
+    new_account_id: &str,
+) -> Result<()> {
     if !cache_dir.exists() {
         return Ok(());
     }
+
+    let mut failures: Vec<String> = Vec::new();
 
     // Move both the current JSON cache and any legacy CSV cache so a switch
     // never strands one format under the wrong account.
@@ -855,20 +889,43 @@ fn reconcile_cache_files(old_account_id: &str, new_account_id: &str) -> Result<(
 
         if active_file.exists() {
             if old_account_file.exists() {
-                let _ = archive_cache_file(&old_account_file, old_account_id);
+                let _ = archive_cache_file_in_dir(cache_dir, &old_account_file, old_account_id);
             }
-            fs::rename(&active_file, &old_account_file)?;
+            if let Err(err) = fs::rename(&active_file, &old_account_file) {
+                failures.push(format!(
+                    "could not move usage.{ext} to {}: {err}",
+                    old_account_file.display()
+                ));
+                // `usage.{ext}` still holds the old account's data. Promoting the
+                // new account's cache over it would destroy the old account's only
+                // copy, so leave this extension untouched.
+                continue;
+            }
         }
 
         if new_account_file.exists() {
             if active_file.exists() {
-                let _ = archive_cache_file(&active_file, "usage.active");
+                let _ = archive_cache_file_in_dir(cache_dir, &active_file, "usage.active");
             }
-            fs::rename(&new_account_file, &active_file)?;
+            if let Err(err) = fs::rename(&new_account_file, &active_file) {
+                failures.push(format!(
+                    "could not promote {} to usage.{ext}: {err}",
+                    new_account_file.display()
+                ));
+            }
         }
     }
 
-    Ok(())
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "failed to move Cursor cache files while switching from {} to {}: {}",
+        old_account_id,
+        new_account_id,
+        failures.join("; ")
+    ))
 }
 
 pub fn load_active_credentials() -> Option<CursorCredentials> {
@@ -3115,6 +3172,136 @@ mod tests {
         assert!(
             cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER).exists(),
             "marker must be written even when a secondary account fetch fails"
+        );
+        Ok(())
+    }
+
+    /// A switch has to move the JSON cache and the legacy CSV cache together:
+    /// the previous account's data ends up under its own name and the incoming
+    /// account's cache is promoted to `usage.<ext>`.
+    #[test]
+    fn reconcile_cache_files_moves_both_extensions() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cache_dir = temp_dir.path().join("cache");
+        fs::create_dir_all(&cache_dir)?;
+
+        let old_id = "old-account";
+        let new_id = "new-account";
+        let old_stem = sanitize_account_id_for_filename(old_id);
+        let new_stem = sanitize_account_id_for_filename(new_id);
+
+        for ext in CURSOR_CACHE_EXTENSIONS {
+            fs::write(cache_dir.join(format!("usage.{ext}")), format!("old-{ext}"))?;
+            fs::write(
+                cache_dir.join(format!("usage.{new_stem}.{ext}")),
+                format!("new-{ext}"),
+            )?;
+        }
+
+        reconcile_cache_files_in_dir(&cache_dir, old_id, new_id)?;
+
+        for ext in CURSOR_CACHE_EXTENSIONS {
+            assert_eq!(
+                fs::read_to_string(cache_dir.join(format!("usage.{ext}")))?,
+                format!("new-{ext}"),
+                "the incoming account's cache must become usage.{ext}"
+            );
+            assert_eq!(
+                fs::read_to_string(cache_dir.join(format!("usage.{old_stem}.{ext}")))?,
+                format!("old-{ext}"),
+                "the previous account's cache must be filed under its own id"
+            );
+            assert!(
+                !cache_dir.join(format!("usage.{new_stem}.{ext}")).exists(),
+                "the promoted cache must not be left behind as a duplicate"
+            );
+        }
+        Ok(())
+    }
+
+    /// #1247 follow-up: a failed cache move used to be discarded with `let _`, so
+    /// the switch was recorded anyway and the next sync filed one account's usage
+    /// under the other. Every extension must be attempted, and every failure must
+    /// reach the caller.
+    #[test]
+    fn reconcile_cache_files_reports_every_failed_extension() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cache_dir = temp_dir.path().join("cache");
+        fs::create_dir_all(&cache_dir)?;
+
+        let old_id = "old-account";
+        let new_id = "new-account";
+        let old_stem = sanitize_account_id_for_filename(old_id);
+
+        // A regular file named `archive` makes `archive_cache_file_in_dir` fail,
+        // so the blocking entries below are not archived out of the way first.
+        fs::write(cache_dir.join("archive"), b"not a directory")?;
+
+        for ext in CURSOR_CACHE_EXTENSIONS {
+            fs::write(
+                cache_dir.join(format!("usage.{ext}")),
+                b"active-account-data",
+            )?;
+            // Renaming a file onto a non-empty directory fails on every platform.
+            let blocked = cache_dir.join(format!("usage.{old_stem}.{ext}"));
+            fs::create_dir_all(&blocked)?;
+            fs::write(blocked.join("occupied"), b"x")?;
+        }
+
+        let err = reconcile_cache_files_in_dir(&cache_dir, old_id, new_id)
+            .expect_err("a blocked rename must be reported, not discarded");
+        let message = err.to_string();
+
+        for ext in CURSOR_CACHE_EXTENSIONS {
+            assert!(
+                message.contains(&format!("usage.{ext}")),
+                "every extension must be attempted and reported, got: {message}"
+            );
+            assert_eq!(
+                fs::read(cache_dir.join(format!("usage.{ext}")))?,
+                b"active-account-data",
+                "a failed move must leave usage.{ext} in place"
+            );
+        }
+        Ok(())
+    }
+
+    /// Failing to move the active cache out of the way must not fall through to
+    /// promoting the incoming account's cache: `usage.<ext>` still holds the
+    /// previous account's only copy at that point.
+    #[test]
+    fn reconcile_cache_files_does_not_promote_over_a_stuck_active_cache() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cache_dir = temp_dir.path().join("cache");
+        fs::create_dir_all(&cache_dir)?;
+
+        let old_id = "old-account";
+        let new_id = "new-account";
+        let old_stem = sanitize_account_id_for_filename(old_id);
+        let new_stem = sanitize_account_id_for_filename(new_id);
+
+        fs::write(cache_dir.join("archive"), b"not a directory")?;
+        fs::write(cache_dir.join("usage.json"), b"old-account-data")?;
+
+        let blocked = cache_dir.join(format!("usage.{old_stem}.json"));
+        fs::create_dir_all(&blocked)?;
+        fs::write(blocked.join("occupied"), b"x")?;
+
+        let incoming = cache_dir.join(format!("usage.{new_stem}.json"));
+        fs::write(&incoming, b"new-account-data")?;
+
+        reconcile_cache_files_in_dir(&cache_dir, old_id, new_id)
+            .expect_err("the blocked rename must be reported");
+
+        assert_eq!(
+            fs::read(cache_dir.join("usage.json"))?,
+            b"old-account-data",
+            "the previous account's cache must survive a failed switch"
+        );
+        assert_eq!(
+            fs::read(&incoming)?,
+            b"new-account-data",
+            "the incoming cache must stay under its own account id"
         );
         Ok(())
     }
