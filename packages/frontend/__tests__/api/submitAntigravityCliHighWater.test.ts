@@ -204,19 +204,36 @@ function storedTokens(store: Store): number {
   );
 }
 
+function storedCost(store: Store): number {
+  return store.days.reduce(
+    (total, day) =>
+      total +
+      Object.values(day.sourceBreakdown).reduce(
+        (sum, client) => sum + (client.cost ?? 0),
+        0,
+      ),
+    0,
+  );
+}
+
 function aggregatesRow(store: Store) {
   const totalTokens = storedTokens(store);
-  const dates = store.days.map((day) => day.date).sort();
+  const dates = store.days
+    .filter((day) =>
+      Object.values(day.sourceBreakdown).some((client) => client.tokens > 0),
+    )
+    .map((day) => day.date)
+    .sort();
   return {
     totalTokens,
-    totalCost: (totalTokens / 1000).toFixed(4),
+    totalCost: storedCost(store).toFixed(4),
     inputTokens: totalTokens,
     outputTokens: 0,
     dateStart: dates[0] ?? null,
     dateEnd: dates[dates.length - 1] ?? null,
-    activeDays: store.days.length,
-    totalActiveTimeMs: 0,
+    activeDays: dates.length,
     rowCount: store.days.length,
+    totalActiveTimeMs: 0,
   };
 }
 
@@ -274,7 +291,8 @@ function installTx(store: Store) {
     collectStrings(sqlArg, strings);
     const text = strings.join("\n");
     if (text.includes("DELETE FROM daily_breakdown")) {
-      throw new Error("submit route deleted a daily_breakdown row");
+      store.days = store.days.filter((day) => !strings.includes(day.id));
+      return;
     }
     const insert = isDailyBreakdownInsert(text);
     // The batch row update; NOT the legacy-adoption `UPDATE ... AS db`, which
@@ -686,7 +704,7 @@ describe("POST /api/submit droid snapshot layout", () => {
     );
     expect(
       secondJson.warnings.some((warning: string) =>
-        warning.includes("Preserved droid"),
+        warning.includes("Established the Droid parser generation"),
       ),
     ).toBe(false);
     expect(
@@ -722,6 +740,39 @@ describe("POST /api/submit droid snapshot layout", () => {
     expect(startDay?.sourceBreakdown.droid.provenance?.costIsComplete).toBe(
       false,
     );
+  });
+
+  it("carries the stored Droid cost onto new days when an unpriced snapshot moves every token", async () => {
+    const store = newStore();
+
+    installTx(store);
+    const priced = submissionBody("droid", SESSION_START_DATING);
+    mockSubmit(priced);
+    expect((await post(priced)).status).toBe(200);
+
+    installTx(store);
+    const moved = submissionBody("droid", [
+      { date: "2026-08-08", tokens: 120_000, messages: 6 },
+      { date: "2026-08-09", tokens: 120_000, messages: 6 },
+    ]);
+    for (const day of moved.contributions) {
+      day.clients[0].cost = 0;
+      (day as { totals?: { costIsComplete: boolean } }).totals = {
+        costIsComplete: false,
+      };
+    }
+    mockSubmit(moved);
+    const response = await post(moved);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    expect(storedCost(store)).toBe(240);
+    expect(json.metrics.dateRange.start).toBe("2026-08-08");
+    expect(json.metrics.dateRange.end).toBe("2026-08-09");
   });
 
   it("still credits genuinely new Droid usage after the layout rewrite", async () => {

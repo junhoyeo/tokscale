@@ -18,6 +18,8 @@ import {
   breakdownCostIsComplete,
   tagBreakdownCostCompleteness,
   applyCostCompleteness,
+  replaceLayoutCostFloors,
+  reapplyReplaceLayoutCostFloors,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
 import {
@@ -841,6 +843,14 @@ export async function POST(request: Request) {
         ([, plan]) =>
           plan.mode === "incremental" || plan.mode === "baseline-legacy"
       );
+      const replaceClients = [...parserPlans]
+        .filter(([, plan]) => isReplacePlan(plan))
+        .map(([client]) => client);
+      const replaceCostFloors = replaceLayoutCostFloors(
+        existingDeviceDays,
+        replaceClients
+      );
+      const incompleteReplaceClients = new Set<string>();
 
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
@@ -884,7 +894,12 @@ export async function POST(request: Request) {
         costIsComplete: boolean;
       }> = [];
 
+      const toDelete: string[] = [];
+
       for (const incomingDay of daysToProcess.values()) {
+        if (incomingDay.totals?.costIsComplete === false) {
+          for (const client of replaceClients) incompleteReplaceClients.add(client);
+        }
         const incomingClientBreakdown = foldIncomingClientContributions(
           incomingDay.clients
         );
@@ -1005,6 +1020,10 @@ export async function POST(request: Request) {
             parserPlans,
             incomingDay.totals?.costIsComplete ?? true
           );
+          if (Object.keys(mergedClientBreakdown).length === 0) {
+            toDelete.push(existingDay.id);
+            continue;
+          }
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
 
           toUpdate.push({
@@ -1053,6 +1072,20 @@ export async function POST(request: Request) {
             costIsComplete: breakdownCostIsComplete(insertedClientBreakdown),
           });
         }
+      }
+
+      reapplyReplaceLayoutCostFloors(
+        [...toInsert, ...toUpdate],
+        replaceCostFloors,
+        incompleteReplaceClients
+      );
+      for (const row of [...toInsert, ...toUpdate]) {
+        const dayTotals = recalculateDayTotals(row.sourceBreakdown);
+        row.tokens = dayTotals.tokens;
+        row.cost = dayTotals.cost.toFixed(4);
+        row.inputTokens = dayTotals.inputTokens;
+        row.outputTokens = dayTotals.outputTokens;
+        row.costIsComplete = breakdownCostIsComplete(row.sourceBreakdown);
       }
 
       const advancedParserStates = [...parserPlans].flatMap(([client, plan]) =>
@@ -1153,6 +1186,17 @@ export async function POST(request: Request) {
         `);
       }
 
+      if (toDelete.length > 0) {
+        const deleteIds = sql.join(
+          toDelete.map((id) => sql`${id}::uuid`),
+          sql`, `
+        );
+        await tx.execute(sql`
+          DELETE FROM daily_breakdown
+          WHERE id IN (${deleteIds})
+        `);
+      }
+
       // Phase 4a observation write — same transaction as the daily rows above,
       // so an explicitly reported cell cannot commit without its guarded
       // daily_breakdown counterpart. Last-write-wins (no GREATEST) for that cell only: omitted
@@ -1181,8 +1225,8 @@ export async function POST(request: Request) {
           totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(14,4))), 0)::text`,
           inputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.inputTokens}), 0), 9223372036854775807)::bigint`,
           outputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.outputTokens}), 0), 9223372036854775807)::bigint`,
-          dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
-          dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
+          dateStart: sql<string>`MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
+          dateEnd: sql<string>`MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,

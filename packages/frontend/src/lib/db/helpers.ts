@@ -388,6 +388,84 @@ export function breakdownCostIsComplete(
   );
 }
 
+export function replaceLayoutCostFloors(
+  existingDays: Array<{ sourceBreakdown: unknown }>,
+  replaceClients: Iterable<string>
+): Map<string, number> {
+  const floors = new Map<string, number>();
+  for (const client of replaceClients) {
+    let cost = 0;
+    for (const day of existingDays) {
+      const breakdown = day.sourceBreakdown as Record<
+        string,
+        ClientBreakdownData
+      > | null;
+      cost += ownValue(breakdown ?? {}, client)?.cost ?? 0;
+    }
+    if (cost > 0) floors.set(client, cost);
+  }
+  return floors;
+}
+
+const COST_SCALE = 10_000;
+
+function quantizeCost(value: number): number {
+  return Math.round((value + Number.EPSILON) * COST_SCALE) / COST_SCALE;
+}
+
+function addClientCostFloor(
+  cell: ClientBreakdownData,
+  extra: number
+): void {
+  if (extra <= 0) return;
+  cell.cost = quantizeCost((cell.cost || 0) + extra);
+  const modelIds = Object.keys(cell.models ?? {});
+  if (modelIds.length > 0) {
+    const model = cell.models[modelIds[0]];
+    model.cost = quantizeCost((model.cost || 0) + extra);
+  }
+  cell.provenance = {
+    ...(cell.provenance ?? deriveClientBreakdownProvenance(cell)),
+    costIsComplete: false,
+  };
+}
+
+/**
+ * Same-day cost floors cannot follow tokens that a snapshot layout moves onto
+ * a day with no previously stored cell. Re-apply the pre-rewrite client total
+ * across the new cells so an unpriced re-date cannot drop lifetime cost.
+ */
+export function reapplyReplaceLayoutCostFloors(
+  rows: Array<{ sourceBreakdown: Record<string, ClientBreakdownData> }>,
+  floors: Map<string, number>,
+  incompleteClients: Set<string>
+): void {
+  for (const [client, floor] of floors) {
+    if (!incompleteClients.has(client)) continue;
+    const cells: ClientBreakdownData[] = [];
+    for (const row of rows) {
+      const cell = ownValue(row.sourceBreakdown, client);
+      if (cell) cells.push(cell);
+    }
+    if (cells.length === 0) continue;
+    const current = cells.reduce((sum, cell) => sum + (cell.cost || 0), 0);
+    const deficit = quantizeCost(floor - current);
+    if (deficit <= 0) continue;
+    const tokenTotal = cells.reduce((sum, cell) => sum + (cell.tokens || 0), 0);
+    let assigned = 0;
+    for (let i = 0; i < cells.length; i++) {
+      const share =
+        i === cells.length - 1
+          ? quantizeCost(deficit - assigned)
+          : tokenTotal > 0
+            ? quantizeCost((deficit * cells[i].tokens) / tokenTotal)
+            : quantizeCost(deficit / cells.length);
+      addClientCostFloor(cells[i], share);
+      assigned = quantizeCost(assigned + share);
+    }
+  }
+}
+
 export function clientContributionToBreakdownData(
   client_contrib: {
     tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number };

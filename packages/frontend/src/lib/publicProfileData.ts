@@ -605,7 +605,7 @@ export async function getPublicProfileResponse(
       }
     }
 
-    // Calculate max cost for intensity
+    // Calculate max tokens for intensity
     const contributions = Array.from(aggregatedDaily.values());
     const scopedContributions = contributions.filter(
       ({ date }) => date >= chartRange.start && date <= chartRange.end,

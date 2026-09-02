@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyCostCompleteness,
   mergeClientBreakdownsWithRegressionGuard,
+  reapplyReplaceLayoutCostFloors,
+  type ClientBreakdownData,
 } from "../../src/lib/db/helpers";
 
 // Minimal client breakdown fixture
@@ -220,5 +222,23 @@ describe("applyCostCompleteness", () => {
     expect(next.tokens).toBe(40_000);
     expect(next.cost).toBe(240);
     expect(next.provenance?.costIsComplete).toBe(false);
+  });
+});
+
+describe("reapplyReplaceLayoutCostFloors", () => {
+  it("spreads a pre-rewrite cost floor onto days that had no stored cell", () => {
+    const first = makeClient(120_000, 6, 1) as ClientBreakdownData;
+    const second = makeClient(120_000, 6, 1) as ClientBreakdownData;
+    const rows = [{ sourceBreakdown: { droid: first } }, { sourceBreakdown: { droid: second } }];
+
+    reapplyReplaceLayoutCostFloors(
+      rows,
+      new Map([["droid", 240]]),
+      new Set(["droid"])
+    );
+
+    expect(first.cost + second.cost).toBe(240);
+    expect(first.provenance?.costIsComplete).toBe(false);
+    expect(second.provenance?.costIsComplete).toBe(false);
   });
 });
