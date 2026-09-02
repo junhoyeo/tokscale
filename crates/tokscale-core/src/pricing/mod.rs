@@ -281,12 +281,29 @@ impl PricingService {
         /// `(model id, input, output, cache read, cache creation)`, per token.
         type ArchivedRateRow = (&'static str, f64, f64, f64, f64);
 
+        // Every first-party Claude row the narrowest dataset still carries, so
+        // whichever one is retired next already has its last published rate
+        // here. models.dev is that dataset: as of 2026-09-02 it lists
+        // haiku-4-5, sonnet-4-5, sonnet-4-6, opus-4-5, opus-4-6, opus-4-7,
+        // opus-4-8, opus-5, sonnet-5 and the two fable-5 rows. The current
+        // flagships (opus-5, sonnet-5, fable-5*) are left out on purpose --
+        // nothing retires the model that is shipping.
         let entries: &[ArchivedRateRow] = &[
             // Claude Haiku 4.5: $1.00/$5.00 per 1M, $0.10 cache read, $1.25 cache write.
             ("anthropic/claude-haiku-4-5", 1e-6, 5e-6, 1e-7, 1.25e-6),
-            // Claude Sonnet 4.6: $3.00/$15.00 per 1M, $0.30 cache read, $3.75 cache write.
+            // Claude Sonnet 4.5 / 4.6: $3.00/$15.00 per 1M, $0.30 cache read,
+            // $3.75 cache write. 4.5 is the oldest Sonnet any of the three
+            // still carries.
+            ("anthropic/claude-sonnet-4-5", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
             ("anthropic/claude-sonnet-4-6", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
-            // Claude Opus 4.7 / 4.8: $5.00/$25.00 per 1M, $0.50 cache read, $6.25 cache write.
+            // Claude Opus 4.5 / 4.6 / 4.7 / 4.8: $5.00/$25.00 per 1M, $0.50
+            // cache read, $6.25 cache write. 4.5 is the oldest Opus carried by
+            // all three, so it is the next one due to fall off -- LiteLLM and
+            // OpenRouter still list opus-4 and opus-4-1 (and LiteLLM
+            // claude-3-opus), but models.dev has already dropped them, so
+            // their rates cannot be cross-checked and they are not archived.
+            ("anthropic/claude-opus-4-5", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
+            ("anthropic/claude-opus-4-6", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
             ("anthropic/claude-opus-4-7", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
             ("anthropic/claude-opus-4-8", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
         ];
@@ -652,6 +669,21 @@ mod tests {
     #[test]
     fn retired_claude_haiku_4_5_keeps_its_last_known_price() {
         assert_retired_anthropic_price("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25);
+    }
+
+    #[test]
+    fn retired_claude_sonnet_4_5_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75);
+    }
+
+    #[test]
+    fn retired_claude_opus_4_5_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-opus-4-5", 5.0, 25.0, 0.5, 6.25);
+    }
+
+    #[test]
+    fn retired_claude_opus_4_6_keeps_its_last_known_price() {
+        assert_retired_anthropic_price("claude-opus-4-6", 5.0, 25.0, 0.5, 6.25);
     }
 
     #[test]
