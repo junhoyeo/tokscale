@@ -68,21 +68,61 @@ fn gh_wincred_targets_display() -> String {
         .join(", ")
 }
 
+/// Fold per-target lookup outcomes into the first hit, or into one error that
+/// says what each candidate actually reported.
+///
+/// Split out of `read_gh_wincred` because only the `read_wincred` call is
+/// Windows-specific — deciding what to tell the user is not, and inside a
+/// `#[cfg(target_os = "windows")]` function it was compiled by no CI job that
+/// could run its tests.
+///
+/// The behaviour is also new. The loop this replaces matched with
+/// `if let Ok(value)`, which discarded the error from every candidate, so a
+/// credential store that answered `ERROR_ACCESS_DENIED` was reported in the
+/// same words as one that had simply never been written: "missing". That is
+/// the opposite of what a diagnostic probe is for, and it is the failure mode
+/// #1194 was opened about.
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(
+        dead_code,
+        reason = "windows-only caller; the tests below cover it everywhere"
+    )
+)]
+fn first_wincred_hit<E: std::fmt::Display>(
+    attempts: impl IntoIterator<Item = (String, std::result::Result<String, E>)>,
+) -> Result<(String, String)> {
+    let mut failures = Vec::new();
+    for (target, outcome) in attempts {
+        match outcome {
+            Ok(value) => return Ok((target, value)),
+            Err(error) => failures.push(format!("\"{target}\" -> {error}")),
+        }
+    }
+    anyhow::bail!(
+        "No `gh` credential in the Windows Credential Manager. \
+         Run `gh auth login`, or run `cmdkey /list` and report the target name \
+         it shows for GitHub. Tried {}",
+        if failures.is_empty() {
+            "no targets".to_string()
+        } else {
+            failures.join("; ")
+        }
+    )
+}
+
 /// Windows only: the first candidate target that holds a credential, together
 /// with the target it was found at, so callers can report what actually
 /// matched instead of what they hoped would match.
 #[cfg(target_os = "windows")]
 fn read_gh_wincred() -> Result<(String, String)> {
-    for target in gh_wincred_targets(GH_KEYRING_SERVICE) {
-        if let Ok(value) = super::helpers::read_wincred(&target) {
-            return Ok((target, value));
-        }
-    }
-    anyhow::bail!(
-        "No `gh` credential in the Windows Credential Manager (tried: {}). \
-         Run `gh auth login`, or run `cmdkey /list` and report the target name \
-         it shows for GitHub.",
-        gh_wincred_targets_display()
+    first_wincred_hit(
+        gh_wincred_targets(GH_KEYRING_SERVICE)
+            .into_iter()
+            .map(|target| {
+                let outcome = super::helpers::read_wincred(&target);
+                (target, outcome)
+            }),
     )
 }
 
@@ -187,7 +227,9 @@ fn wincred_probe() -> String {
                     "wincred=\"{target}\" (found, {prefix}, blob={blob_len} bytes, token omitted)"
                 )
             }
-            Err(_) => format!("wincred=missing (tried: {})", gh_wincred_targets_display()),
+            // Not "missing": the read can also fail because the store refused
+            // us. `error` names every target tried and what each one said.
+            Err(error) => format!("wincred=none ({error})"),
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -577,6 +619,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::ffi::{OsStr, OsString};
+    use std::path::Path;
     use tempfile::TempDir;
 
     /// RAII restore of process-global env vars, mirroring
@@ -615,6 +658,55 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every environment variable that can steer `github_copilot_apps_json_candidates`
+    /// to a real user's file.
+    ///
+    /// `HOME` alone is not enough. On Windows the `%LOCALAPPDATA%` candidate is
+    /// tried *first*, and the probe takes the first path that exists, so a test
+    /// that redirects only `HOME` reads the developer's or the runner's real
+    /// `github-copilot/apps.json` — a file that holds a live GitHub OAuth
+    /// token. `USERPROFILE` is here because `dirs::home_dir()` falls back to it
+    /// whenever the `HOME` override is rejected as non-absolute.
+    const HOME_ENV_KEYS: [&str; 3] = ["HOME", "LOCALAPPDATA", "USERPROFILE"];
+
+    /// Point every home-ish variable at `dir`, so the probe can only ever
+    /// resolve inside the caller's `TempDir`.
+    fn redirect_home(guard: &mut EnvGuard, dir: &Path) {
+        guard.set("HOME", dir);
+        guard.set("LOCALAPPDATA", dir.join("AppData").join("Local"));
+        guard.set("USERPROFILE", dir);
+    }
+
+    /// The guard above is only worth anything if it actually contains every
+    /// candidate. This asserts that on whichever platform it runs, rather than
+    /// trusting that the `#[cfg(windows)]` arm of the candidate list was
+    /// remembered when someone adds a fourth location.
+    #[test]
+    #[serial]
+    fn apps_json_candidates_stay_inside_a_redirected_home() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("home");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut guard = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home(&mut guard, &dir);
+        let candidates = github_copilot_apps_json_candidates();
+
+        assert!(
+            !candidates.is_empty(),
+            "the probe must offer at least one candidate under a redirected home"
+        );
+        for candidate in &candidates {
+            assert!(
+                candidate.starts_with(&dir),
+                "candidate {} escapes the redirected home {}; a test using it \
+                 would read the real user's Copilot credentials",
+                candidate.display(),
+                dir.display()
+            );
         }
     }
 
@@ -665,6 +757,64 @@ mod tests {
         assert_eq!(display, "\"gh:github.com:\", \"gh:github.com\"");
     }
 
+    /// The whole point of the split: these run on Linux and macOS, where the
+    /// Windows credential path is not even compiled.
+    #[test]
+    fn first_wincred_hit_returns_the_target_that_matched() {
+        let attempts: Vec<(String, std::result::Result<String, String>)> = vec![
+            ("gh:github.com:".to_string(), Err("not found".to_string())),
+            ("gh:github.com".to_string(), Ok("gho_token".to_string())),
+        ];
+        let (target, value) = first_wincred_hit(attempts).unwrap();
+        assert_eq!(target, "gh:github.com");
+        assert_eq!(value, "gho_token");
+    }
+
+    #[test]
+    fn first_wincred_hit_stops_at_the_first_match() {
+        let attempts: Vec<(String, std::result::Result<String, String>)> = vec![
+            ("first".to_string(), Ok("a".to_string())),
+            ("second".to_string(), Ok("b".to_string())),
+        ];
+        assert_eq!(first_wincred_hit(attempts).unwrap().0, "first");
+    }
+
+    /// The regression this replaced: `if let Ok(..)` threw the reason away, so
+    /// a store that refused the read and a store that was never written both
+    /// came out as the word "missing".
+    #[test]
+    fn first_wincred_hit_reports_why_each_target_failed() {
+        let attempts: Vec<(String, std::result::Result<String, String>)> = vec![
+            (
+                "gh:github.com:".to_string(),
+                Err("CredReadW failed: Access is denied. (os error 5)".to_string()),
+            ),
+            (
+                "gh:github.com".to_string(),
+                Err("CredReadW failed: Element not found. (os error 1168)".to_string()),
+            ),
+        ];
+        let error = first_wincred_hit(attempts).unwrap_err().to_string();
+
+        assert!(error.contains("Access is denied"), "got: {error}");
+        assert!(error.contains("Element not found"), "got: {error}");
+        for target in ["gh:github.com:", "gh:github.com"] {
+            assert!(
+                error.contains(&format!("\"{target}\"")),
+                "error must name every target it tried ({target}), got: {error}"
+            );
+        }
+    }
+
+    /// `gh_wincred_targets` returns two, so this cannot happen today; the
+    /// helper is generic and must not produce a dangling "Tried " either way.
+    #[test]
+    fn first_wincred_hit_survives_an_empty_candidate_list() {
+        let attempts: Vec<(String, std::result::Result<String, String>)> = Vec::new();
+        let error = first_wincred_hit(attempts).unwrap_err().to_string();
+        assert!(error.contains("no targets"), "got: {error}");
+    }
+
     #[test]
     #[serial]
     fn wincred_probe_names_every_target_it_tries() {
@@ -713,8 +863,8 @@ mod tests {
         // and reports it as such (silent not-found, no panic).
         let dir = temp.path().join("home");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut guard = EnvGuard::capture(&["HOME"]);
-        guard.set("HOME", &dir);
+        let mut guard = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home(&mut guard, &dir);
         let probe = github_copilot_apps_json_probe();
         assert!(
             probe.contains("(missing)") || probe.contains("home dir unavailable"),
@@ -736,8 +886,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut guard = EnvGuard::capture(&["HOME"]);
-        guard.set("HOME", &dir);
+        let mut guard = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home(&mut guard, &dir);
         let probe = github_copilot_apps_json_probe();
 
         assert!(probe.contains("valid JSON"), "got: {probe}");
@@ -764,8 +914,8 @@ mod tests {
         std::fs::create_dir_all(apps.parent().unwrap()).unwrap();
         std::fs::write(&apps, "this is { not json").unwrap();
 
-        let mut guard = EnvGuard::capture(&["HOME"]);
-        guard.set("HOME", &dir);
+        let mut guard = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home(&mut guard, &dir);
         let probe = github_copilot_apps_json_probe();
 
         assert!(
