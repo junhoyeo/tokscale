@@ -655,3 +655,47 @@ describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
     ).toBe(55_000);
   });
 });
+
+describe("POST /api/submit droid snapshot layout", () => {
+  it("replaces stored Droid days when a full snapshot re-dates the same lifetime", async () => {
+    const { store, firstJson, secondJson } = await submitOldThenNew("droid");
+
+    expect(firstJson.metrics.totalTokens).toBe(240_000);
+    expect(secondJson.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-07",
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    expect(store.days.find((day) => day.date === "2026-08-07")?.sourceBreakdown.droid.tokens).toBe(
+      40_000,
+    );
+    expect(store.days.find((day) => day.date === "2026-08-08")?.sourceBreakdown.droid.tokens).toBe(
+      120_000,
+    );
+    expect(store.days.find((day) => day.date === "2026-08-09")?.sourceBreakdown.droid.tokens).toBe(
+      80_000,
+    );
+  });
+
+  it("still credits genuinely new Droid usage after the layout rewrite", async () => {
+    const { store } = await submitOldThenNew("droid");
+
+    installTx(store);
+    const grown = submissionBody("droid", [
+      ...PER_GENERATION_DATING,
+      { date: "2026-08-10", tokens: 55_000, messages: 3 },
+    ]);
+    mockSubmit(grown);
+    const response = await post(grown);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(295_000);
+    expect(
+      store.days.find((day) => day.date === "2026-08-10")?.sourceBreakdown.droid
+        .tokens,
+    ).toBe(55_000);
+  });
+});
