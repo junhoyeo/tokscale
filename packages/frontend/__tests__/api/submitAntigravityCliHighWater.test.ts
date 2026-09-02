@@ -155,7 +155,14 @@ function collectStrings(
   }
 }
 
-type StoredBreakdown = Record<string, { tokens: number }>;
+type StoredBreakdown = Record<
+  string,
+  {
+    tokens: number;
+    cost?: number;
+    provenance?: { costIsComplete?: boolean };
+  }
+>;
 
 type PersistedDay = {
   id: string;
