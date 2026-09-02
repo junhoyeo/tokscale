@@ -236,7 +236,7 @@ pub async fn login() -> Result<()> {
     println!("\n  {}\n", "Tokscale - Login".cyan());
     println!("{}", "  Requesting authorization code...".bright_black());
 
-    let client = reqwest::Client::builder()
+    let client = tokscale_core::http::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
@@ -358,7 +358,7 @@ pub async fn login_with_token(token: &str) -> Result<()> {
     }
 
     let base_url = get_api_base_url();
-    let client = reqwest::Client::builder()
+    let client = tokscale_core::http::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 

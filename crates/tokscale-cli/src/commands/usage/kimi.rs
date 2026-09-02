@@ -202,7 +202,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
 
         // Proactive refresh if token is about to expire
         if needs_refresh(expires_at) {

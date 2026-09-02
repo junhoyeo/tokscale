@@ -1391,7 +1391,7 @@ async fn fetch_with_auth_async(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
 
-    let client = reqwest::Client::new();
+    let client = tokscale_core::http::client();
     let mut effective_tokens = tokens.clone();
     let mut effective_access_token = access_token.clone();
     let resp = match fetch_usage(
@@ -1821,7 +1821,7 @@ async fn consume_reset_credit_with_auth_async(
         .access_token
         .clone()
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
-    let client = reqwest::Client::new();
+    let client = tokscale_core::http::client();
     let redeem_request_id = uuid::Uuid::new_v4().to_string();
 
     match consume_reset_credit(

@@ -304,7 +304,7 @@ async fn sync_warp_cache() -> SyncWarpResult {
 }
 
 async fn fetch_warp_usage(credentials: &WarpCredentials) -> Result<WarpUsageCache> {
-    let client = reqwest::Client::builder()
+    let client = tokscale_core::http::client_builder()
         .timeout(WARP_HTTP_TIMEOUT)
         .build()
         .context("Failed to build Warp HTTP client")?;

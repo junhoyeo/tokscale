@@ -4936,7 +4936,7 @@ fn run_delete_data_command() -> Result<()> {
     let rt = Runtime::new()?;
 
     let response = rt.block_on(async {
-        reqwest::Client::new()
+        tokscale_core::http::client()
             .delete(format!("{}/api/settings/submitted-data", api_url))
             .header("Authorization", format!("Bearer {}", auth_token.token))
             .send()
@@ -6015,7 +6015,7 @@ fn run_submit_command(
         to_ts_token_contribution_data(&graph_result, Some(&submit_device), scan_scope);
 
     let response = rt.block_on(async {
-        reqwest::Client::new()
+        tokscale_core::http::client()
             .post(format!("{}/api/submit", api_url))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", auth_token.token))

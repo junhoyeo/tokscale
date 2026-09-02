@@ -1,0 +1,10 @@
+# Only the Cursor client may pick a TLS backend of its own (#1250). reqwest's
+# `native-tls` feature implies `default-tls`, and `default-tls` alone decides
+# `TlsBackend::default()`, so an unqualified `reqwest::Client::new()` is a
+# *native-tls* client on every target where Cursor's opt-in applies. Route
+# everything else through `tokscale_core::http`, which pins rustls explicitly.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "use tokscale_core::http::client() so the TLS backend is explicit (#1250)" },
+    { path = "reqwest::Client::builder", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
+    { path = "reqwest::ClientBuilder::new", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
+]

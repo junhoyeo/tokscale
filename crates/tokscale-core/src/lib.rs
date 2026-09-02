@@ -6,6 +6,7 @@ mod cc_mirror;
 pub mod clients;
 pub mod content_extractor;
 pub mod fs_atomic;
+pub mod http;
 pub mod mcp;
 mod message_cache;
 pub mod model_alias;

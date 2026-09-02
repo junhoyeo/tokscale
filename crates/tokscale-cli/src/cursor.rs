@@ -46,15 +46,34 @@ const CURSOR_MAX_CSV_BYTES: usize = 64 * 1024 * 1024;
 /// always honored.
 pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 
+/// The Cursor client's builder, split out of `build_cursor_http_client` so a
+/// test can assert which TLS backend it ends up on.
+///
+/// cursor.com sits behind Vercel bot protection that fingerprints the TLS
+/// ClientHello, and rustls' hello is on the block list — since #1138 moved the
+/// workspace to rustls, `cursor login` / `cursor sync` have received a
+/// challenge page instead of the API response (#1250). This is the one client
+/// that asks for the platform's own TLS stack: Security.framework on macOS,
+/// schannel on Windows, OpenSSL on Linux. Every other client stays on rustls
+/// through `tokscale_core::http`.
+fn cursor_http_client_builder() -> reqwest::ClientBuilder {
+    #[allow(clippy::disallowed_methods)]
+    let builder = reqwest::Client::builder().timeout(CURSOR_HTTP_TIMEOUT);
+
+    // Android is excluded from `native-tls` in crates/tokscale-cli/Cargo.toml,
+    // because openssl-src builds Android with `no-stdio` and that leaves
+    // OpenSSL unable to read a CA file at all. Keep this predicate textually
+    // identical to the manifest's; `tests/tls_policy.rs` checks that it is.
+    // The cost is that Cursor login stays broken on Android, where it reports
+    // itself as an expired session (see `sync_cursor_usage`).
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.use_native_tls();
+
+    builder
+}
+
 fn build_cursor_http_client() -> Result<reqwest::Client> {
-    // cursor.com sits behind Vercel bot protection that fingerprints TLS
-    // ClientHello. Other clients keep the rustls runtime default; only
-    // Cursor requests switch to native TLS (Security.framework / schannel /
-    // OpenSSL) to pass (#1250). linux-gnu links system libssl; musl and
-    // Android vendor OpenSSL via target cfg on the crate manifests.
-    reqwest::Client::builder()
-        .timeout(CURSOR_HTTP_TIMEOUT)
-        .use_native_tls()
+    cursor_http_client_builder()
         .build()
         .context("Failed to build Cursor HTTP client")
 }
@@ -1597,6 +1616,26 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// #1250: cursor.com serves a bot-protection challenge instead of the API
+    /// response when the ClientHello comes from rustls, so this one client has
+    /// to be on the platform TLS stack while everything else stays on rustls
+    /// via `tokscale_core::http`.
+    ///
+    /// reqwest calls its native-tls backend `TlsBackend::Default` and prints
+    /// it as `Default`; `Rustls` is the other value this field can take. The
+    /// field is only printed when both backends are compiled in, which is
+    /// every target except Android — and Android is exactly where
+    /// `.use_native_tls()` is cfg'd out.
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn the_cursor_client_is_built_on_the_native_tls_backend() {
+        let rendered = format!("{:?}", cursor_http_client_builder());
+        assert!(
+            rendered.contains("tls_backend: Default"),
+            "the Cursor client must use native TLS, not rustls, got: {rendered}"
+        );
+    }
 
     #[test]
     fn test_extract_user_id_from_session_token_with_url_encoding() {

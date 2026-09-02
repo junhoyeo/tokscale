@@ -32,11 +32,15 @@ sha2 = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
 
-# Same vendored-OpenSSL gate as tokscale-cli: musl/Android have nothing to
-# dynamically link. Feature unification from the CLI binary would cover the
-# published artifact, but a standalone `tokscale-core` musl build would
-# otherwise look for system libssl and fail.
-[target.'cfg(any(target_env = "musl", target_os = "android"))'.dependencies]
+# Same per-target TLS gates as tokscale-cli; see the long rationale there.
+# Both crates need them: `use_native_tls()` and `use_rustls_tls()` only exist
+# when the corresponding reqwest feature is on for the crate being compiled,
+# and a standalone `tokscale-core` build must resolve the same way the CLI
+# binary does rather than relying on feature unification from the binary.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["native-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 reqwest = { workspace = true, features = ["native-tls-vendored"] }
 
 [dev-dependencies]

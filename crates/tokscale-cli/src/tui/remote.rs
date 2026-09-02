@@ -96,7 +96,7 @@ pub fn fetch_remote_stats(token: &str, username: &str, api_base_url: &str) -> Re
         .build()?;
 
     let mut stats: RemoteStats = rt.block_on(async {
-        let response = reqwest::Client::new()
+        let response = tokscale_core::http::client()
             .get(url)
             .header("Authorization", format!("Bearer {}", token))
             .send()

@@ -423,7 +423,7 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
 }
 
 async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> Result<RgbaImage> {
-    let client = reqwest::Client::new();
+    let client = tokscale_core::http::client();
     let fonts = ensure_fonts_loaded(&client).await?;
 
     let mut canvas =

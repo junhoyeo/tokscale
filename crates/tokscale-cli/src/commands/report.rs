@@ -959,7 +959,7 @@ fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::builder()
+        let client = tokscale_core::http::client_builder()
             .timeout(BACKEND_TIMEOUT)
             .build()?;
         let body = serde_json::json!({

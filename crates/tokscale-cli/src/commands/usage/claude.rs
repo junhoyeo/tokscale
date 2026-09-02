@@ -426,7 +426,7 @@ fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
         let resp = fetch_usage(&client, usage_url, access_token).await?;
 
         let metrics = usage_metrics(&resp);

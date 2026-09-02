@@ -5,7 +5,7 @@ const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 200;
 
 pub(crate) fn pricing_client() -> Result<Client, String> {
-    Client::builder()
+    crate::http::client_builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .build()
@@ -85,7 +85,7 @@ mod tests {
         // The bare Display, which is what this code used to print. Anchoring on
         // "longer than Display" rather than on the literal cause text keeps a
         // dependency bump from reddening this test for rewording its prose.
-        let displayed = reqwest::Client::new()
+        let displayed = crate::http::client()
             .get(&url)
             .send()
             .await

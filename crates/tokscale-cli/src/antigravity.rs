@@ -2242,7 +2242,7 @@ fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
 #[cfg(not(target_os = "windows"))]
 fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        tokscale_core::http::client_builder()
             // Defensive only — this is NOT what fixed any reported hang, and the
             // earlier claim that it was (#1127) was wrong. `reqwest` is built
             // `default-features = false` without `http2`, so neither it nor

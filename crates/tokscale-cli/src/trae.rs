@@ -434,7 +434,7 @@ pub mod auth {
         refresh_token: &str,
         current_token: &str,
     ) -> Result<TokenPair> {
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
         let url = format!("{}{}", host, EXCHANGE_TOKEN_PATH);
         let resp = client
             .post(&url)
@@ -1063,7 +1063,7 @@ pub mod sync {
         end_time: i64,
         usage_types: &[i32],
     ) -> Result<Vec<serde_json::Value>> {
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
         let url = format!("{}/trae/api/v1/pay/query_user_usage_group_by_session", host);
         let mut all = Vec::new();
         let mut page = 1;

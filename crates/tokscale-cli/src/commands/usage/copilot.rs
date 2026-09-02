@@ -260,7 +260,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
         let resp = fetch_api(&client, &token).await.map_err(|e| {
             if e.to_string().contains("NEEDS_AUTH") {
                 anyhow::anyhow!(

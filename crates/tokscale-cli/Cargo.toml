@@ -83,20 +83,41 @@ base64 = { workspace = true }
 # Cursor desktop state.vscdb accessToken import
 rusqlite = { workspace = true }
 
-# musl has no system OpenSSL to link; Android NDK builds do not ship one
-# either. linux-gnu keeps the workspace `native-tls` feature and links
-# libssl dynamically so the #1138 size win stays on that artifact.
-[target.'cfg(any(target_env = "musl", target_os = "android"))'.dependencies]
-reqwest = { workspace = true, features = ["native-tls-vendored"] }
-
+# Two unrelated Android exclusions share this table because TOML allows a
+# target only one `dependencies` table.
+#
+# reqwest: only the Cursor client needs native TLS (#1250) and it is opted
+# into per target, never on the workspace entry, because reqwest's
+# `native-tls` feature implies `default-tls` and `default-tls` alone decides
+# `TlsBackend::default()`. Under resolver = "2" a `[target.'cfg(...)']` block
+# is resolved per compilation target, so this does not leak into Android.
+# Android is excluded on purpose: openssl-src builds Android with `no-stdio`,
+# which stubs `BIO_new_file` and `BIO_s_file` and therefore the whole CA-file
+# loader, so a native-tls Android build would run against an empty trust
+# store and reject every certificate. Android keeps pure rustls and loses
+# Cursor login; `cursor.rs` gates `.use_native_tls()` on the identical cfg.
+#
 # arboard has no Android backend and fails to compile for
 # aarch64-linux-android. The clipboard module in tui/ provides a
 # no-op fallback on Android so the rest of the code stays portable.
 [target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["native-tls"] }
 # The TUI yank key only ever calls `Clipboard::set_text`. `arboard`'s default
 # `image-data` feature pulls in `image` (with `tiff` on macOS) plus the
 # CoreGraphics / Win32 GDI bitmap paths for clipboard images nothing reads.
 arboard = { version = "3", default-features = false }
+
+# Vendor OpenSSL on every Linux target, gnu as well as musl. The Linux cross
+# builds run under cargo-zigbuild (.github/workflows/build-native.yml) and
+# that environment has no usable system OpenSSL: the x86_64 job cannot
+# preprocess Debian's multiarch /usr/include/openssl/macros.h through zigcc,
+# and the aarch64 job has no aarch64 OpenSSL on the runner at all. Vendoring
+# also keeps the published linux-gnu artifact from acquiring a hard runtime
+# dependency on the build host's libssl.so.3 soname. macOS and Windows are
+# absent from this list because native-tls uses Security.framework and
+# schannel there and never touches OpenSSL.
+[target.'cfg(target_os = "linux")'.dependencies]
+reqwest = { workspace = true, features = ["native-tls-vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }

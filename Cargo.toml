@@ -55,26 +55,20 @@ anyhow = "1.0"
 libc = "0.2"
 
 # HTTP client (async)
-# Default to rustls rather than native-tls. `native-tls-vendored` statically
-# links a full OpenSSL into Linux artifacts that call `.use_native_tls()` (macOS
-# uses Security.framework and Windows schannel, so neither pays for it on those
-# targets) — the published linux-x64-gnu package was 25.8 MB against
-# darwin-arm64's 17.0 MB before #1138. `rustls-tls-native-roots`, not plain
+# rustls is the workspace default. `rustls-tls-native-roots`, not plain
 # `rustls-tls`: the latter trusts only the baked-in webpki root set, which
 # would silently break anyone behind a corporate MITM proxy or using a private
 # CA. Reading the OS trust store keeps today's behaviour.
 #
-# `native-tls` is also enabled so the Cursor API client can call
-# `.use_native_tls()` and pass Vercel bot protection that fingerprints rustls
-# (#1250). Other clients still construct a rustls client (`Client::new()` /
-# builder without `.use_native_tls()`). Cargo unifies reqwest features across
-# the graph, so this is a runtime default, not a separate crate.
-#
-# Do not put `native-tls-vendored` here: that feature is unified for every
-# target and statically links OpenSSL into linux-gnu (~25.8 MB). musl and
-# Android enable it on the member crates via target cfg instead; linux-gnu
-# links system libssl dynamically.
-reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "native-tls"], default-features = false }
+# `native-tls` is NOT listed here on purpose. reqwest's `native-tls` feature
+# implies `default-tls`, and `impl Default for TlsBackend` (reqwest
+# src/tls.rs) returns the native-tls backend whenever `default-tls` is on and
+# `http3` is off. Enabling it on this shared entry would therefore flip the
+# runtime TLS backend for every client in the workspace and for every target,
+# because Cargo unifies features across the graph. Only the Cursor client
+# needs native TLS (#1250), so the member crates opt in per target instead —
+# see the `[target.'cfg(...)'.dependencies]` blocks in crates/*/Cargo.toml.
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 # For disk caching (XDG paths)

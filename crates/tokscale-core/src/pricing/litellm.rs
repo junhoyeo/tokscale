@@ -615,7 +615,7 @@ mod tests {
     /// A client that cannot outlive a wedged listener thread: without this the
     /// tests below block forever instead of failing if `accept` never fires.
     fn bounded_client() -> reqwest::Client {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap()

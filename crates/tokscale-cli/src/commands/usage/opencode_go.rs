@@ -238,7 +238,7 @@ fn fetch_blocking_with_cap(
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::builder()
+        let client = tokscale_core::http::client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let resp = client

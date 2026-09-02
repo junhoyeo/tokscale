@@ -210,7 +210,7 @@ async fn call_rpc(port: u16) -> Result<QuotaSummary> {
     // a matching NO_PROXY. That both leaks quota metadata and lets the proxy
     // forge the unauthenticated response that port discovery trusts. The IDE
     // RPC client in `crate::antigravity` is built the same way.
-    let client = reqwest::Client::builder()
+    let client = tokscale_core::http::client_builder()
         .no_proxy()
         // Redirects are refused for the same reason the proxy is: discovery
         // probes ports that may belong to anything, and reqwest follows up to

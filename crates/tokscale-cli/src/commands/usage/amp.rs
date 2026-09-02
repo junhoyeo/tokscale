@@ -146,7 +146,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = tokscale_core::http::client();
         let resp = client
             .post("https://ampcode.com/api/internal")
             .header("Authorization", format!("Bearer {api_key}"))

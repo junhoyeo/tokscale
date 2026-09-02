@@ -579,7 +579,7 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = reqwest::Client::builder()
+        let client = tokscale_core::http::client_builder()
             .timeout(Duration::from_secs(12))
             .build()?;
 
