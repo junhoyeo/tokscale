@@ -3,13 +3,19 @@
 # `TlsBackend::default()`, so an unqualified `reqwest::Client::new()` is a
 # *native-tls* client on every target where Cursor's opt-in applies. Route
 # everything else through `tokscale_core::http`, which pins rustls explicitly.
+#
+# `Client::default()` and `ClientBuilder::default()` are a fourth and fifth
+# door into the same room -- reqwest implements `Default` for both types and
+# both impls just call `new()` -- but they cannot be listed here. `default` is
+# a trait-impl item, not an inherent one, so `reqwest::Client::default` does
+# not resolve and clippy answers with `does not refer to a reachable function`
+# and skips the entry; the qualified `<reqwest::Client as Default>::default`
+# form is worse, because clippy 0.1.98 accepts it without resolving it, so it
+# emits no warning and still never fires. Both doors are closed instead by
+# `crates/tokscale-cli/tests/tls_policy.rs`, whose raw-text scan covers all
+# five constructors and fails a plain `cargo test`.
 disallowed-methods = [
     { path = "reqwest::Client::new", reason = "use tokscale_core::http::client() so the TLS backend is explicit (#1250)" },
     { path = "reqwest::Client::builder", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
     { path = "reqwest::ClientBuilder::new", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
-    # `Default` is a fourth door into the same room: reqwest implements it for
-    # both types and both impls just call `new()`, so `Client::default()` is a
-    # native-tls client exactly like `Client::new()` is.
-    { path = "reqwest::Client::default", reason = "use tokscale_core::http::client() so the TLS backend is explicit (#1250)" },
-    { path = "reqwest::ClientBuilder::default", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
 ]

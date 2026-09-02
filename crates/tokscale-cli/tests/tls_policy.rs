@@ -76,7 +76,10 @@ const SCANNED_DIRS: [&str; 4] = [
 /// both `Client` (`async_impl/client.rs`) and `ClientBuilder`, and both
 /// impls delegate to
 /// `new()`, so they select the same native-tls backend by exactly the same
-/// mechanism. `clippy.toml` lists all five for the same reason.
+/// mechanism.
+///
+/// This scan covers all five. `clippy.toml` covers only the first three --
+/// see [`LINTABLE_CONSTRUCTORS`].
 const DEFAULT_BACKEND_CONSTRUCTORS: [&str; 5] = [
     "Client::new(",
     "Client::builder(",
@@ -84,6 +87,23 @@ const DEFAULT_BACKEND_CONSTRUCTORS: [&str; 5] = [
     "Client::default(",
     "ClientBuilder::default(",
 ];
+
+/// The subset of [`DEFAULT_BACKEND_CONSTRUCTORS`] that `clippy.toml` can
+/// actually enforce.
+///
+/// `disallowed-methods` resolves a path to a function, and only these three
+/// are inherent associated functions on reqwest's types. `default` is a
+/// *trait-impl* item, so `reqwest::Client::default` does not resolve: clippy
+/// reports `does not refer to a reachable function` and skips the entry, which
+/// means listing it buys a warning on every build and no enforcement at all.
+/// Writing it qualified as `<reqwest::Client as Default>::default` is worse --
+/// clippy 0.1.98 accepts that form without resolving it, so it warns about
+/// nothing and still never fires.
+///
+/// Hence the asymmetry this file has to encode: the two `Default` doors are
+/// closed by the scan below and by nothing else.
+const LINTABLE_CONSTRUCTORS: [&str; 3] =
+    ["Client::new(", "Client::builder(", "ClientBuilder::new("];
 
 /// True when `needle` occurs in `line` as a whole path segment rather than as
 /// the tail of a longer identifier.
@@ -315,13 +335,25 @@ fn the_cursor_call_site_repeats_the_manifest_cfg_verbatim() {
 /// mechanisms, and each covers a gap the other has: clippy resolves real paths
 /// (so it is not fooled by a rename) but CI runs it without `--all-targets`,
 /// while the scan is a plain text search that runs under `cargo test` on both
-/// CI platforms. They are only equivalent while they name the same
-/// constructors, and nothing but this test makes that true.
+/// CI platforms.
+///
+/// They agree on the three constructors clippy can resolve, and this test
+/// pins that agreement in both directions -- including the direction that is
+/// easy to get wrong. `clippy.toml` used to list all five, and the two
+/// `Default` entries were dead: clippy printed `does not refer to a reachable
+/// function` twice per build and skipped them, so the parity this test
+/// asserted was textual only. Re-adding either one restores that, which is
+/// why the second half asserts their *absence*.
 #[test]
 fn the_lint_config_and_the_source_scan_forbid_the_same_constructors() {
     let clippy = read("clippy.toml");
 
-    for needle in DEFAULT_BACKEND_CONSTRUCTORS {
+    for needle in LINTABLE_CONSTRUCTORS {
+        assert!(
+            DEFAULT_BACKEND_CONSTRUCTORS.contains(&needle),
+            "`{needle}` is listed as lintable but the source scan does not \
+             look for it; the lint config must never be the only lane"
+        );
         let method = needle
             .strip_suffix('(')
             .expect("every scanned constructor ends in an open paren");
@@ -337,12 +369,29 @@ fn the_lint_config_and_the_source_scan_forbid_the_same_constructors() {
     let disallowed = clippy.matches("path = \"reqwest::").count();
     assert_eq!(
         disallowed,
-        DEFAULT_BACKEND_CONSTRUCTORS.len(),
-        "clippy.toml disallows {disallowed} reqwest constructors but the source \
-         scan looks for {}; add the missing one to DEFAULT_BACKEND_CONSTRUCTORS \
-         so both lanes agree",
-        DEFAULT_BACKEND_CONSTRUCTORS.len()
+        LINTABLE_CONSTRUCTORS.len(),
+        "clippy.toml disallows {disallowed} reqwest constructors but only {} \
+         resolve to a function clippy can match; an entry clippy skips is \
+         enforcement the config only appears to have",
+        LINTABLE_CONSTRUCTORS.len()
     );
+
+    for needle in DEFAULT_BACKEND_CONSTRUCTORS {
+        if LINTABLE_CONSTRUCTORS.contains(&needle) {
+            continue;
+        }
+        let method = needle
+            .strip_suffix('(')
+            .expect("every scanned constructor ends in an open paren");
+        let path = format!("reqwest::{method}");
+        assert!(
+            !clippy.contains(&format!("path = \"{path}\"")),
+            "clippy.toml lists `{path}`, but `default` is a trait-impl item \
+             that `disallowed-methods` cannot resolve: clippy warns `does not \
+             refer to a reachable function` and skips it. The scan above is \
+             what closes that door -- leave it there"
+        );
+    }
 }
 
 /// The scan matches raw text, so it has to distinguish `Client::new(` from the
