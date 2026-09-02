@@ -63,6 +63,35 @@ const INSERT_CHUNK_SIZE = 1000;
 // (which would double-count the same underlying usage).
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 
+function emptyLayoutDay(date: string): SubmissionData["contributions"][number] {
+  return {
+    date,
+    clients: [],
+    totals: { tokens: 0, cost: 0, messages: 0 },
+    intensity: 0,
+    tokenBreakdown: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+    },
+  };
+}
+
+function applySnapshotLayoutDays(
+  merged: Record<string, ClientBreakdownData>,
+  date: string,
+  parserPlans: Map<string, ParserHighWaterPlan>
+): void {
+  for (const [client, plan] of parserPlans) {
+    if (!plan.layoutDays) continue;
+    const next = ownValue(plan.layoutDays, date);
+    if (next) merged[client] = next;
+    else delete merged[client];
+  }
+}
+
 function mergeModelBreakdowns(
   target: Record<string, ClientBreakdownData["models"][string]>,
   incoming: Record<string, ClientBreakdownData["models"][string]>
@@ -762,12 +791,38 @@ export async function POST(request: Request) {
       }
       const plannedIncrementClients = [...parserPlans].filter(
         ([, plan]) =>
-          plan.mode === "incremental" || plan.mode === "baseline-legacy"
+          !plan.layoutDays &&
+          (plan.mode === "incremental" || plan.mode === "baseline-legacy")
       );
 
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
       );
+
+      const daysToProcess = new Map(
+        data.contributions.map((day) => [day.date, day] as const)
+      );
+      for (const [client, plan] of parserPlans) {
+        if (!plan.layoutDays) continue;
+        for (const date of Object.keys(plan.layoutDays)) {
+          if (!daysToProcess.has(date)) {
+            daysToProcess.set(date, emptyLayoutDay(date));
+          }
+        }
+        for (const existing of existingDeviceDays) {
+          const breakdown = existing.sourceBreakdown as Record<
+            string,
+            ClientBreakdownData
+          > | null;
+          if (
+            breakdown &&
+            ownValue(breakdown, client) &&
+            !daysToProcess.has(existing.date)
+          ) {
+            daysToProcess.set(existing.date, emptyLayoutDay(existing.date));
+          }
+        }
+      }
 
       // ------------------------------------------
       // STEP 3c: Compute merge results in memory, then batch write
@@ -798,7 +853,7 @@ export async function POST(request: Request) {
         costIsComplete: boolean;
       }> = [];
 
-      for (const incomingDay of data.contributions) {
+      for (const incomingDay of daysToProcess.values()) {
         const incomingClientBreakdown = foldIncomingClientContributions(
           incomingDay.clients
         );
@@ -820,6 +875,13 @@ export async function POST(request: Request) {
         for (const [client, plan] of parserPlans) {
           if (plan.mode === "freeze") {
             delete incomingClientBreakdown[client];
+          } else if (plan.layoutDays) {
+            const layout = ownValue(plan.layoutDays, incomingDay.date);
+            if (layout) {
+              incomingClientBreakdown[client] = layout;
+            } else {
+              delete incomingClientBreakdown[client];
+            }
           } else if (
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy"
@@ -841,7 +903,11 @@ export async function POST(request: Request) {
             plan.mode === "freeze" ||
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy";
-          if (planRewroteClient && !incomingClientBreakdown[client]) {
+          if (
+            planRewroteClient &&
+            !plan.layoutDays &&
+            !incomingClientBreakdown[client]
+          ) {
             // A frozen/zero-increment plan is a no-op for that client, not a
             // request to delete its stored row from this day.
             clientsToMerge.delete(client);
@@ -913,6 +979,11 @@ export async function POST(request: Request) {
               }
             }
           }
+          applySnapshotLayoutDays(
+            mergedClientBreakdown,
+            incomingDay.date,
+            parserPlans
+          );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
 
           toUpdate.push({
@@ -937,6 +1008,11 @@ export async function POST(request: Request) {
           const insertedClientBreakdown = tagBreakdownCostCompleteness(
             incomingClientBreakdown,
             incomingDay.totals?.costIsComplete ?? true
+          );
+          applySnapshotLayoutDays(
+            insertedClientBreakdown,
+            incomingDay.date,
+            parserPlans
           );
           const dayTotals = recalculateDayTotals(insertedClientBreakdown);
           if (Object.keys(insertedClientBreakdown).length === 0) continue;

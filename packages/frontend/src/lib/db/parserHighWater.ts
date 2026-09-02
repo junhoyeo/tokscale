@@ -18,9 +18,9 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * Copilot is pinned at generation 2 because generation 1 counted differently
  * and must not advance the high-water. Droid is registered at generation 1,
  * the generation every CLI already declares: its shapes differ in *where*
- * tokens land, never in the lifetime total, so no generation needs freezing —
- * bounding every Droid submission by the lifetime high-water is what makes a
- * re-attribution contribute nothing.
+ * tokens land, never in the lifetime total. A full snapshot that still
+ * covers the credited lifetime therefore replaces stored days so the web
+ * graph matches the TUI, without the per-day merge guard inflating totals.
  *
  * Both Antigravity clients are registered at generation 1, the generation every
  * CLI already declares. Their parsers stopped dating usage at the session's
@@ -40,6 +40,13 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   "antigravity-cli": 1,
   antigravity: 1,
 };
+
+/**
+ * Parsers whose lifetime total is stable across re-attribution. A full
+ * snapshot that covers the credited aggregate may replace stored days so the
+ * web graph matches the TUI without the per-day merge guard inflating totals.
+ */
+const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
 
 const TOKEN_FIELDS = [
   "input",
@@ -110,6 +117,14 @@ export type ParserHighWaterMode =
 export interface ParserHighWaterPlan {
   mode: ParserHighWaterMode;
   increments: Record<string, ClientBreakdownData>;
+  /**
+   * Absolute per-day cells for parsers whose snapshot is the day layout
+   * source of truth. When set, the submit route replaces stored client cells
+   * instead of adding bounded increments, so a re-attribution moves tokens
+   * onto the days the current parser reports without changing the lifetime
+   * high-water.
+   */
+  layoutDays?: Record<string, ClientBreakdownData>;
   nextState?: ParserClientHighWaterState;
 }
 
@@ -322,6 +337,52 @@ function applyCreditedIncrements(
     );
   }
   return next;
+}
+
+function snapshotCoversCredited(
+  incoming: ParserAggregateHighWater,
+  credited: ParserAggregateHighWater
+): boolean {
+  return AGGREGATE_FIELDS.every(
+    (field) => incoming[field] >= credited[field]
+  );
+}
+
+function stateFromSnapshot(
+  version: number,
+  incomingDays: Record<string, ClientBreakdownData>
+): ParserClientHighWaterState {
+  const days = normalizeStateDays(incomingDays);
+  return {
+    stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
+    version,
+    baselineEstablished: true,
+    aggregate: aggregateSnapshot(days),
+    days,
+    observedDays: days,
+  };
+}
+
+function layoutFollowsSnapshot(args: {
+  client: string;
+  version: number;
+  incoming: ParserAggregateHighWater;
+  credited: ParserAggregateHighWater;
+  incomingDays: Record<string, ClientBreakdownData>;
+  mode: Extract<ParserHighWaterMode, "baseline-legacy" | "incremental">;
+}): ParserHighWaterPlan | null {
+  if (
+    !SNAPSHOT_LAYOUT_CLIENTS.has(args.client) ||
+    !snapshotCoversCredited(args.incoming, args.credited)
+  ) {
+    return null;
+  }
+  return {
+    mode: args.mode,
+    increments: createSafeRecord<ClientBreakdownData>(),
+    layoutDays: normalizeStateDays(args.incomingDays),
+    nextState: stateFromSnapshot(args.version, args.incomingDays),
+  };
 }
 
 function stateAfterCreditedIncrements(
@@ -649,7 +710,7 @@ export function planParserHighWaterSubmission(args: {
       increments: {},
       nextState: {
         stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
-        version: supportedVersion,
+        version: args.incomingVersion,
         baselineEstablished: false,
         aggregate: emptyAggregate(),
         days: createSafeRecord<ClientBreakdownData>(),
@@ -666,6 +727,17 @@ export function planParserHighWaterSubmission(args: {
     const legacyAggregate = aggregateSnapshot(args.existingLegacyDays);
     const hasLegacy =
       legacyAggregate.tokens > 0 || legacyAggregate.messages > 0;
+    if (hasLegacy) {
+      const followed = layoutFollowsSnapshot({
+        client: args.client,
+        version: args.incomingVersion,
+        incoming: incomingAggregate,
+        credited: legacyAggregate,
+        incomingDays: args.incomingDays,
+        mode: "baseline-legacy",
+      });
+      if (followed) return followed;
+    }
     // At transition, preserving all legacy rows and crediting at most positive
     // lifetime aggregate growth is non-destructive. With deleted old usage D
     // and genuinely new usage N, incoming - legacy = N - D <= N; the existing
@@ -689,7 +761,7 @@ export function planParserHighWaterSubmission(args: {
         )
       : {
           stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
-          version: supportedVersion,
+          version: args.incomingVersion,
           baselineEstablished: true,
           aggregate: incomingAggregate,
           days: normalizeStateDays(args.incomingDays),
@@ -717,6 +789,15 @@ export function planParserHighWaterSubmission(args: {
     args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION
       ? args.state.observedDays!
       : previousCreditedDays;
+  const followed = layoutFollowsSnapshot({
+    client: args.client,
+    version: supportedVersion,
+    incoming: incomingAggregate,
+    credited: previousAggregate,
+    incomingDays: args.incomingDays,
+    mode: "incremental",
+  });
+  if (followed) return followed;
   const increments = allocateIncrements(
     previousCreditedDays,
     previousObservedDays,

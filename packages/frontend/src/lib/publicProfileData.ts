@@ -616,7 +616,10 @@ export async function getPublicProfileResponse(
     const visibleContributions = periodRange
       ? scopedContributions
       : contributions;
-    const maxCost = Math.max(...visibleContributions.map((c) => c.cost), 0);
+    const maxTokens = Math.max(
+      ...visibleContributions.map((c) => c.tokens),
+      0,
+    );
     const periodTotals = scopedContributions.reduce(
       (totals, day) => {
         totals.totalTokens += day.tokens;
@@ -646,15 +649,15 @@ export async function getPublicProfileResponse(
     // Build contribution graph data
     const graphContributions = visibleContributions.map((day) => {
       const intensity =
-        maxCost === 0
+        maxTokens === 0
           ? 0
-          : day.cost === 0
+          : day.tokens === 0
             ? 0
-            : day.cost <= maxCost * 0.25
+            : day.tokens <= maxTokens * 0.25
               ? 1
-              : day.cost <= maxCost * 0.5
+              : day.tokens <= maxTokens * 0.5
                 ? 2
-                : day.cost <= maxCost * 0.75
+                : day.tokens <= maxTokens * 0.75
                   ? 3
                   : 4;
 
