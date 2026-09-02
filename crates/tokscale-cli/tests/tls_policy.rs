@@ -46,10 +46,62 @@ const MEMBER_MANIFESTS: [&str; 2] = [
 /// `clippy.toml` enforces the same rule at lint time; this test also fails a
 /// plain `cargo test`, and unlike clippy it does not depend on the lint being
 /// run with the right flags.
-const CLIENT_CONSTRUCTION_ALLOWLIST: [&str; 2] = [
+const CLIENT_CONSTRUCTION_ALLOWLIST: [&str; 3] = [
     "crates/tokscale-core/src/http.rs",
     "crates/tokscale-cli/src/cursor.rs",
+    // This file spells the forbidden constructors out as string literals in
+    // order to search for them, so it matches its own scan.
+    "crates/tokscale-cli/tests/tls_policy.rs",
 ];
+
+/// Every directory the client-construction scan walks.
+///
+/// `crates/*/tests` is in here because CI runs clippy without `--all-targets`
+/// (`.github/workflows/test_coverage.yml`), so integration tests are linted by
+/// nothing. A raw client planted in a test would otherwise be caught by neither
+/// this scan nor `clippy::disallowed_methods`.
+const SCANNED_DIRS: [&str; 4] = [
+    "crates/tokscale-cli/src",
+    "crates/tokscale-core/src",
+    "crates/tokscale-cli/tests",
+    "crates/tokscale-core/tests",
+];
+
+/// The five constructors that yield a client on reqwest's *default* backend.
+///
+/// `Client::new`, `Client::builder` and `ClientBuilder::new` are the obvious
+/// three -- and the scan only ever looked for the first two, because
+/// `"ClientBuilder::new("` does not contain `"Client::new("` as a substring.
+/// `Default` is the pair that both lanes missed: reqwest implements it for
+/// both `Client` (`async_impl/client.rs`) and `ClientBuilder`, and both
+/// impls delegate to
+/// `new()`, so they select the same native-tls backend by exactly the same
+/// mechanism. `clippy.toml` lists all five for the same reason.
+const DEFAULT_BACKEND_CONSTRUCTORS: [&str; 5] = [
+    "Client::new(",
+    "Client::builder(",
+    "ClientBuilder::new(",
+    "Client::default(",
+    "ClientBuilder::default(",
+];
+
+/// True when `needle` occurs in `line` as a whole path segment rather than as
+/// the tail of a longer identifier.
+///
+/// Without this, the bare substring `Client::new(` also matches
+/// `FooClient::new(`, and an unrelated type would trip the scan with a
+/// confusing TLS-policy failure.
+fn contains_standalone(line: &str, needle: &str) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find(needle) {
+        let preceding = rest[..at].chars().next_back();
+        if !preceding.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return true;
+        }
+        rest = &rest[at + needle.len()..];
+    }
+    false
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -58,9 +110,45 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root must exist two levels above the CLI crate")
 }
 
+/// Read a workspace file with line endings normalised to `\n`.
+///
+/// GitHub's `windows-latest` runner ships Git for Windows with
+/// `core.autocrlf=true`, and this repo carries no `.gitattributes`, so the
+/// checkout on the Windows test leg has CRLF endings. Every assertion below
+/// that spans a line break would then fail on Windows only — a red hard-gated
+/// job that says nothing about the property being guarded.
 fn read(relative: &str) -> String {
     let path = workspace_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    normalize_newlines(raw)
+}
+
+fn normalize_newlines(source: String) -> String {
+    source.replace("\r\n", "\n")
+}
+
+/// Without the normalisation in `read`, every assertion here that spans a line
+/// break passes on Linux and macOS and fails on Windows — on a job with no
+/// `continue-on-error`, for a reason that has nothing to do with TLS.
+#[test]
+fn source_is_read_with_line_endings_normalised() {
+    let windows_checkout = "#[cfg(not(target_os = \"android\"))]\r\n    let builder = \
+                            builder.use_native_tls();"
+        .to_string();
+    let expected = "#[cfg(not(target_os = \"android\"))]\n    let builder = \
+                    builder.use_native_tls();";
+
+    assert!(
+        !windows_checkout.contains(expected),
+        "this test is pointless unless a CRLF checkout really does defeat the \
+         substring match it guards"
+    );
+    assert!(
+        normalize_newlines(windows_checkout).contains(expected),
+        "reads must normalise CRLF so the Windows leg checks the same property \
+         as the Linux one"
+    );
 }
 
 fn manifest(relative: &str) -> toml::Value {
@@ -223,6 +311,66 @@ fn the_cursor_call_site_repeats_the_manifest_cfg_verbatim() {
     );
 }
 
+/// `clippy.toml` and the scan above enforce the same rule by two different
+/// mechanisms, and each covers a gap the other has: clippy resolves real paths
+/// (so it is not fooled by a rename) but CI runs it without `--all-targets`,
+/// while the scan is a plain text search that runs under `cargo test` on both
+/// CI platforms. They are only equivalent while they name the same
+/// constructors, and nothing but this test makes that true.
+#[test]
+fn the_lint_config_and_the_source_scan_forbid_the_same_constructors() {
+    let clippy = read("clippy.toml");
+
+    for needle in DEFAULT_BACKEND_CONSTRUCTORS {
+        let method = needle
+            .strip_suffix('(')
+            .expect("every scanned constructor ends in an open paren");
+        let path = format!("reqwest::{method}");
+        assert!(
+            clippy.contains(&format!("path = \"{path}\"")),
+            "clippy.toml must also disallow `{path}`; the source scan already \
+             rejects it, and a rule only one of the two enforces is a rule that \
+             silently lapses whenever the other is skipped"
+        );
+    }
+
+    let disallowed = clippy.matches("path = \"reqwest::").count();
+    assert_eq!(
+        disallowed,
+        DEFAULT_BACKEND_CONSTRUCTORS.len(),
+        "clippy.toml disallows {disallowed} reqwest constructors but the source \
+         scan looks for {}; add the missing one to DEFAULT_BACKEND_CONSTRUCTORS \
+         so both lanes agree",
+        DEFAULT_BACKEND_CONSTRUCTORS.len()
+    );
+}
+
+/// The scan matches raw text, so it has to distinguish `Client::new(` from the
+/// tail of some unrelated `FooClient::new(`. Nothing in the tree trips this
+/// today; the point is that adding such a type later must not produce a
+/// baffling TLS-policy failure.
+#[test]
+fn the_scan_matches_whole_segments_rather_than_identifier_tails() {
+    assert!(contains_standalone(
+        "let c = reqwest::Client::new();",
+        "Client::new("
+    ));
+    assert!(contains_standalone("Client::new()", "Client::new("));
+    assert!(!contains_standalone(
+        "let c = FooClient::new();",
+        "Client::new("
+    ));
+    assert!(!contains_standalone(
+        "let c = my_client::new();",
+        "Client::new("
+    ));
+    // A tail match early in the line must not hide a real one later.
+    assert!(contains_standalone(
+        "FooClient::new(); reqwest::Client::new();",
+        "Client::new("
+    ));
+}
+
 /// Once `default-tls` is in the graph, an unqualified `reqwest::Client::new()`
 /// is a native-tls client. Anything that is not Cursor must therefore say
 /// rustls out loud.
@@ -231,8 +379,12 @@ fn no_client_is_constructed_outside_the_allowlist() {
     let root = workspace_root();
     let mut offenders = Vec::new();
 
-    for crate_dir in ["crates/tokscale-cli/src", "crates/tokscale-core/src"] {
-        let mut stack = vec![root.join(crate_dir)];
+    for crate_dir in SCANNED_DIRS {
+        let dir = root.join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut stack = vec![dir];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("source directory must be readable") {
                 let path = entry.expect("directory entry must be readable").path();
@@ -253,7 +405,10 @@ fn no_client_is_constructed_outside_the_allowlist() {
                 }
                 let source = std::fs::read_to_string(&path).expect("source must be readable");
                 for (number, line) in source.lines().enumerate() {
-                    if line.contains("Client::new(") || line.contains("Client::builder(") {
+                    if DEFAULT_BACKEND_CONSTRUCTORS
+                        .iter()
+                        .any(|needle| contains_standalone(line, needle))
+                    {
                         offenders.push(format!("{relative}:{}: {}", number + 1, line.trim()));
                     }
                 }

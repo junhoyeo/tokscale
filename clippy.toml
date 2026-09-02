@@ -7,4 +7,9 @@ disallowed-methods = [
     { path = "reqwest::Client::new", reason = "use tokscale_core::http::client() so the TLS backend is explicit (#1250)" },
     { path = "reqwest::Client::builder", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
     { path = "reqwest::ClientBuilder::new", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
+    # `Default` is a fourth door into the same room: reqwest implements it for
+    # both types and both impls just call `new()`, so `Client::default()` is a
+    # native-tls client exactly like `Client::new()` is.
+    { path = "reqwest::Client::default", reason = "use tokscale_core::http::client() so the TLS backend is explicit (#1250)" },
+    { path = "reqwest::ClientBuilder::default", reason = "use tokscale_core::http::client_builder() so the TLS backend is explicit (#1250)" },
 ]
