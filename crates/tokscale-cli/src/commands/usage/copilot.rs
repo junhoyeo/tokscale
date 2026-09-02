@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Deserialize;
 
-use super::helpers::{capitalize, read_keychain};
+use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
 
 #[derive(Debug, Deserialize)]
@@ -33,8 +33,79 @@ struct FreeResponse {
     limited_user_reset_date: Option<String>,
 }
 
+/// The `keyring` service name the GitHub CLI stores its token under.
+/// `gh` composes it as `"gh:" + hostname` (cli/cli `keyringServiceName`).
+const GH_KEYRING_SERVICE: &str = "gh:github.com";
+
+/// Windows Credential Manager target names to try for the `gh` token, most
+/// likely first.
+///
+/// `CredReadW` is an exact lookup, so the target has to be reproduced exactly,
+/// and it is not the service name. Go's `go-keyring` — which `gh` uses —
+/// composes the target as `service + ":" + username` (`credName` in
+/// keyring_windows.go), and `gh` stores and reads its *active* token with an
+/// empty username (`keyring.Get(keyringServiceName(host), "")` in cli/cli
+/// internal/config/config.go, reached from `Login` via `activateUser`). So the
+/// entry every successful `gh auth login` leaves behind is `"gh:github.com:"`,
+/// with a trailing colon.
+///
+/// The bare service name follows as a last resort. `gh` never writes it, but
+/// trying it costs one failed lookup and keeps this a superset of the target
+/// this code used to try, so no machine where a token happens to sit there
+/// gets worse.
+fn gh_wincred_targets(service: &str) -> [String; 2] {
+    [format!("{service}:"), service.to_string()]
+}
+
+/// The candidate targets, quoted, for probe and error messages. Quoting
+/// matters: `gh:github.com` is a prefix of `gh:github.com:`, so an unquoted
+/// list reads as one repeated name.
+fn gh_wincred_targets_display() -> String {
+    gh_wincred_targets(GH_KEYRING_SERVICE)
+        .iter()
+        .map(|target| format!("\"{target}\""))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// Windows only: the first candidate target that holds a credential, together
+/// with the target it was found at, so callers can report what actually
+/// matched instead of what they hoped would match.
+#[cfg(target_os = "windows")]
+fn read_gh_wincred() -> Result<(String, String)> {
+    for target in gh_wincred_targets(GH_KEYRING_SERVICE) {
+        if let Ok(value) = super::helpers::read_wincred(&target) {
+            return Ok((target, value));
+        }
+    }
+    anyhow::bail!(
+        "No `gh` credential in the Windows Credential Manager (tried: {}). \
+         Run `gh auth login`, or run `cmdkey /list` and report the target name \
+         it shows for GitHub.",
+        gh_wincred_targets_display()
+    )
+}
+
+/// Reads the raw `gh` secret from the platform credential store.
+///
+/// Single entry point on purpose: `read_token_from_keychain`,
+/// `has_credentials` and `wincred_probe` each used to call
+/// `read_keychain("gh:github.com")` themselves, so a fix to one of them left
+/// the other two — including the one that gates the provider card — still
+/// looking in the wrong place.
+fn read_gh_secret() -> Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        read_gh_wincred().map(|(_target, value)| value)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        super::helpers::read_keychain(GH_KEYRING_SERVICE)
+    }
+}
+
 fn read_token_from_keychain() -> Result<String> {
-    let raw = read_keychain("gh:github.com")?;
+    let raw = read_gh_secret()?;
     // go-keyring may base64-encode the value
     if let Some(encoded) = raw.strip_prefix("go-keyring-base64:") {
         let decoded = base64_decode(encoded)?;
@@ -95,45 +166,85 @@ pub(super) fn credential_probe() -> Vec<String> {
     probes
 }
 
-/// Probe-only: reports whether a credential is stored in the Windows
-/// Credential Manager for the `gh:github.com` target. Never returns the
-/// token itself — only presence, blob length, and whether it is
-/// base64-encoded. On non-Windows this probe is not applicable.
+/// Probe-only: reports whether the Windows Credential Manager holds a `gh`
+/// credential. Never returns the token itself — only presence, blob length,
+/// and whether it is base64-encoded.
+///
+/// The probe names the exact target it hit, or every target it tried when it
+/// found nothing. That is the whole point: this is the line a #1194 reporter
+/// pastes next to `cmdkey /list`, and it is useless if it prints a name the
+/// code never looked up.
 fn wincred_probe() -> String {
     #[cfg(target_os = "windows")]
     {
-        const SERVICE: &str = "gh:github.com";
-        match super::helpers::read_keychain(SERVICE) {
-            Ok(cred) => {
+        match read_gh_wincred() {
+            Ok((target, cred)) => {
                 let (prefix, blob_len) = match cred.strip_prefix("go-keyring-base64:") {
                     Some(encoded) => ("go-keyring-base64", encoded.len()),
                     None => ("plain", cred.len()),
                 };
-                format!("wincred={SERVICE} (found, {prefix}, blob={blob_len} bytes, token omitted)")
+                format!(
+                    "wincred=\"{target}\" (found, {prefix}, blob={blob_len} bytes, token omitted)"
+                )
             }
-            Err(_) => format!("wincred={SERVICE} (missing)"),
+            Err(_) => format!("wincred=missing (tried: {})", gh_wincred_targets_display()),
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        "wincred=gh:github.com (not-applicable on non-windows)".to_string()
+        format!(
+            "wincred=not-applicable on non-windows (would try: {})",
+            gh_wincred_targets_display()
+        )
     }
 }
 
+/// Where the Copilot editor integrations keep `apps.json`, most likely first.
+///
+/// The POSIX path was reported on every platform, so on Windows the probe
+/// printed a guaranteed "missing" for a path Copilot never writes — a false
+/// negative aimed squarely at the users this probe exists to help. Windows
+/// keeps it under `%LOCALAPPDATA%`; `~/.config` stays in the list everywhere
+/// so a wrong guess about the Windows convention still finds the file.
+fn github_copilot_apps_json_candidates() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let home = crate::paths::home_dir();
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("github-copilot"));
+        }
+        if let Some(home) = home.as_ref() {
+            let local = home.join("AppData").join("Local").join("github-copilot");
+            if !dirs.contains(&local) {
+                dirs.push(local);
+            }
+        }
+    }
+    if let Some(home) = home {
+        dirs.push(home.join(".config").join("github-copilot"));
+    }
+    dirs.into_iter().map(|dir| dir.join("apps.json")).collect()
+}
+
 /// Probe-only: checks whether the VS Code Copilot extension keeps a
-/// credential file at `~/.config/github-copilot/apps.json` (Worth checking:
+/// credential file in the `github-copilot` config directory (Worth checking:
 /// it may hold an OAuth token similar to the one the CLI uses). The probe
 /// reports presence, JSON validity, and which token-like fields exist, but
 /// the value is never read into `read_credentials` — this is observability
 /// only, to be verified before any automatic use is considered.
 fn github_copilot_apps_json_probe() -> String {
-    let Some(home) = crate::paths::home_dir() else {
+    let candidates = github_copilot_apps_json_candidates();
+    let Some(first) = candidates.first().cloned() else {
         return "apps.json (home dir unavailable)".to_string();
     };
-    let path = home
-        .join(".config")
-        .join("github-copilot")
-        .join("apps.json");
+    // Report the file that exists; when none does, report the most likely
+    // location for this platform so the "missing" line still names a path
+    // worth checking.
+    let path = candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .unwrap_or(first);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -339,7 +450,7 @@ pub fn has_credentials() -> bool {
     if token_from_env().is_some() {
         return true;
     }
-    if super::helpers::read_keychain("gh:github.com").is_ok() {
+    if read_gh_secret().is_ok() {
         return true;
     }
     parse_token_from_hosts().is_ok()
@@ -503,6 +614,78 @@ mod tests {
                         None => std::env::remove_var(key),
                     }
                 }
+            }
+        }
+    }
+
+    /// Mirrors `credName` from go-keyring's keyring_windows.go, which is what
+    /// composes every Windows target name `gh` reads or writes.
+    fn go_keyring_cred_name(service: &str, username: &str) -> String {
+        format!("{service}:{username}")
+    }
+
+    #[test]
+    fn primary_wincred_target_is_the_slot_gh_writes_for_the_active_account() {
+        // This is the regression guard for #1194. The Windows lookup used to
+        // pass the bare service name as the CredReadW target, which cannot
+        // match: `gh` stores its active token through go-keyring with an empty
+        // username, so the target is the service name plus a trailing colon.
+        // CredReadW is an exact lookup, so "one colon short" means
+        // ERROR_NOT_FOUND on every machine.
+        let targets = gh_wincred_targets(GH_KEYRING_SERVICE);
+        assert_eq!(targets[0], go_keyring_cred_name(GH_KEYRING_SERVICE, ""));
+        assert_eq!(targets[0], "gh:github.com:");
+        assert_ne!(
+            targets[0], GH_KEYRING_SERVICE,
+            "the primary target must not be the bare service name"
+        );
+    }
+
+    #[test]
+    fn wincred_targets_keep_the_bare_service_name_as_a_distinct_fallback() {
+        let targets = gh_wincred_targets(GH_KEYRING_SERVICE);
+        assert_eq!(targets[1], GH_KEYRING_SERVICE);
+        assert_ne!(targets[0], targets[1], "candidates must not duplicate");
+    }
+
+    #[test]
+    fn wincred_targets_compose_from_the_service_argument() {
+        // Not hardcoded to github.com, so a future enterprise-host change
+        // keeps the composition rule.
+        let targets = gh_wincred_targets("gh:ghe.example.com");
+        assert_eq!(targets[0], "gh:ghe.example.com:");
+        assert_eq!(targets[1], "gh:ghe.example.com");
+    }
+
+    #[test]
+    fn wincred_targets_display_quotes_each_candidate() {
+        // Unquoted, "gh:github.com" is a prefix of "gh:github.com:" and the
+        // list reads as the same name twice.
+        let display = gh_wincred_targets_display();
+        assert_eq!(display, "\"gh:github.com:\", \"gh:github.com\"");
+    }
+
+    #[test]
+    #[serial]
+    fn wincred_probe_names_every_target_it_tries() {
+        let probe = wincred_probe();
+        assert!(probe.starts_with("wincred="), "got: {probe}");
+        let targets = gh_wincred_targets(GH_KEYRING_SERVICE);
+        if probe.contains("(found") {
+            // A real credential exists on this machine (possible on a Windows
+            // runner): the probe must name the target that actually matched.
+            assert!(
+                targets
+                    .iter()
+                    .any(|target| probe.contains(&format!("\"{target}\""))),
+                "found-probe must name a candidate target, got: {probe}"
+            );
+        } else {
+            for target in &targets {
+                assert!(
+                    probe.contains(&format!("\"{target}\"")),
+                    "probe must name the target it tried ({target}), got: {probe}"
+                );
             }
         }
     }
