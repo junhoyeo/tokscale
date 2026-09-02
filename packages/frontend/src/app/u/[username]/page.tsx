@@ -108,14 +108,19 @@ export default async function ProfilePage({
     permanentRedirect(`/u/${data.user.username}${period === "all" ? "" : `?period=${period}`}`);
   }
 
-  // Fetched outside the cached public payload and only for the account owner:
-  // publicProfileData is unstable_cache'd and served to everyone, so moderation
-  // state must never travel with it. A visitor sees nothing at all.
+  // Fetched outside the cached public payload: publicProfileData is
+  // unstable_cache'd and also backs /api/users/<username>, so carrying
+  // moderation state in it would publish the decision through the JSON API as
+  // a side effect of putting it on the page.
+  //
+  // Shown to everyone, but worded by audience. A failed session lookup means we
+  // could not establish ownership, so it falls through to the public wording
+  // rather than showing a stranger copy that addresses them as the owner.
   const session = await getSession().catch(() => null);
-  const moderationNotice =
-    session && data.user?.id && session.id === data.user.id
-      ? await getModerationNotice(session.id)
-      : null;
+  const isOwner = Boolean(session && data.user?.id && session.id === data.user.id);
+  const moderationNotice = data.user?.id
+    ? await getModerationNotice(data.user.id, isOwner ? "owner" : "public")
+    : null;
 
   return (
     <ProfilePageClient

@@ -132,12 +132,6 @@ const ModerationNoticeBanner = styled.div<{ $tone: ModerationNotice["tone"] }>`
   }
 `;
 
-const NOTICE_TITLE: Record<ModerationNotice["tone"], string> = {
-  enforcement: "Removed from the leaderboard",
-  pending: "Withheld from the leaderboard",
-  "our-fault": "Temporarily hidden — our issue, not yours",
-};
-
 export default function ProfilePageClient({
   initialData,
   initialDevices,
@@ -285,7 +279,7 @@ export default function ProfilePageClient({
         <ContentWrapper>
           {moderationNotice && (
             <ModerationNoticeBanner role="status" $tone={moderationNotice.tone}>
-              <strong>{NOTICE_TITLE[moderationNotice.tone]}</strong>
+              <strong>{moderationNotice.title}</strong>
               <span>{moderationNotice.message}</span>
             </ModerationNoticeBanner>
           )}
