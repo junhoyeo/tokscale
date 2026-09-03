@@ -5993,11 +5993,9 @@ fn run_submit_command(
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let explicit_warp_filter = client_filter_explicitly_requests_warp(&clients);
     let explicit_hindsight_filter = client_filter_explicitly_requests_hindsight(&clients);
+    let full_history_scan = since.is_none() && until.is_none() && year.is_none();
     let clients = clients.or_else(|| Some(default_submit_clients()));
-    let scan_scope = submit_scan_scope(
-        clients.as_deref(),
-        since.is_none() && until.is_none() && year.is_none(),
-    );
+    let scan_scope = submit_scan_scope(clients.as_deref(), full_history_scan);
 
     let include_cursor = clients
         .as_ref()
@@ -6027,8 +6025,43 @@ fn run_submit_command(
         emit_cursor_setup_warnings(&cursor_setup_warnings);
     }
 
-    println!("{}", "  Scanning local session data...".bright_black());
+    // Name the effective scope up front: an unbounded `submit` re-scans every
+    // client directory, so a slow run should at least say what it is chewing
+    // through — and the label advertises the flags that narrow it.
+    let scan_scope_label = {
+        let client_count = clients.as_ref().map(Vec::len).unwrap_or_default();
+        let range_label = match (&since, &until, &year) {
+            (None, None, None) => "full history".to_string(),
+            _ => {
+                let mut parts = Vec::new();
+                if let Some(since) = &since {
+                    parts.push(format!("since {since}"));
+                }
+                if let Some(until) = &until {
+                    parts.push(format!("until {until}"));
+                }
+                if let Some(year) = &year {
+                    parts.push(format!("year {year}"));
+                }
+                parts.join(" ")
+            }
+        };
+        format!(
+            "{} {}, {range_label}",
+            client_count,
+            if client_count == 1 {
+                "client"
+            } else {
+                "clients"
+            }
+        )
+    };
+    println!(
+        "{}",
+        format!("  Scanning local session data ({scan_scope_label})...").bright_black()
+    );
 
+    let scan_started = std::time::Instant::now();
     let rt = Runtime::new()?;
     let mut graph_result = rt
         .block_on(async {
@@ -6046,6 +6079,17 @@ fn run_submit_command(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
+    println!(
+        "{}",
+        format!("  Scanned in {:.1}s.", scan_started.elapsed().as_secs_f64()).bright_black()
+    );
+    if full_history_scan {
+        println!(
+            "{}",
+            "  Tip: narrow the scan with `--since <date>` and `--client <id>` for faster incremental submits."
+                .bright_black()
+        );
+    }
 
     // Preserve local-calendar contributions here. The API validator owns the
     // UTC+ timezone buffer; client-side UTC capping silently drops current-day

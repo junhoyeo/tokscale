@@ -2949,6 +2949,49 @@ fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
         .stdout(predicate::str::contains("Total tokens: 1,750"));
 }
 
+/// Regression: an unbounded `submit` re-scans every client directory, and the
+/// silent wait used to give no hint of what was being scanned or how to narrow
+/// it. The scope label, elapsed time, and incremental-submit tip are the
+/// observability for that wait; none of them change what gets submitted.
+#[test]
+fn test_submit_reports_scan_scope_and_elapsed() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Scanning local session data (1 client, full history)...",
+        ))
+        .stdout(predicate::str::contains("Scanned in "))
+        .stdout(predicate::str::contains("Tip: narrow the scan"));
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--since",
+            "2026-01-01",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Scanning local session data (1 client, since 2026-01-01)...",
+        ))
+        .stdout(predicate::str::contains("Tip: narrow the scan").not());
+}
+
 #[test]
 fn test_models_with_all_client_flags() {
     let tmp = create_temp_fixture_dir();
