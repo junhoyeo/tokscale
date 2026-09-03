@@ -119,7 +119,10 @@ export default async function ProfilePage({
   const session = await getSession().catch(() => null);
   const isOwner = Boolean(session && data.user?.id && session.id === data.user.id);
   const moderationNotice = data.user?.id
-    ? await getModerationNotice(data.user.id, isOwner ? "owner" : "public")
+    ? await getModerationNotice(data.user.id, isOwner ? "owner" : "public").catch((error) => {
+        if (isOwner) throw error;
+        return null;
+      })
     : null;
 
   return (
