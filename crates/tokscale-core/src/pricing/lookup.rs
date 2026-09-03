@@ -880,21 +880,7 @@ impl PricingLookup {
             self.exact_match_models_dev_for_provider(model_id, provider_id),
             provider_id,
         ) {
-            // A provider-proven first-party snapshot beats an unverified
-            // guess. Reseller rows (`deepinfra/anthropic/...`) match here by
-            // model part while the archive holds the publishing endpoint's
-            // own exact tariff further down; letting the guess win prices
-            // first-party usage at a third party's rate and reports it as
-            // unpublishable. Safe upstream rows still win untouched.
-            if !result.evidence.is_submission_safe() {
-                let proven = self
-                    .exact_match_archive(model_id, provider_id)
-                    .filter(|archived| archived.evidence.is_submission_safe());
-                if let Some(archived) = proven {
-                    return Some(archived);
-                }
-            }
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
 
         if let Some(result) = exact_litellm {
@@ -918,11 +904,11 @@ impl PricingLookup {
         // matching key falls through to the canonical resolution below.
         if provider_id.is_some() {
             if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
-                return Some(result);
+                return Some(self.prefer_proven_archive(result, model_id, provider_id));
             }
         }
         if let Some(result) = self.exact_match_openrouter_model_part(model_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
 
         // Separator-normalized exact passes against the canonical sources
@@ -940,31 +926,47 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&version_normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
             if provider_id.is_some() {
                 if let Some(result) =
                     self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
                 {
-                    return Some(result.with_normalization());
+                    return Some(self.prefer_proven_archive(
+                        result.with_normalization(),
+                        &version_normalized,
+                        provider_id,
+                    ));
                 }
             }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&version_normalized) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
         }
 
         if let Some(result) = self.exact_match_models_dev_with_provider(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
         }
 
@@ -975,40 +977,64 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                ));
             }
             if let Some(result) = self.exact_match_litellm(&normalized) {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&normalized) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                ));
             }
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&normalized, provider_id)
             {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                ));
             }
         }
 
         if let Some(result) = self.prefix_match_litellm(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
         if let Some(result) = self.prefix_match_openrouter(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
         if let Some(result) = self.prefix_match_models_dev(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id));
         }
 
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_litellm(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
             if let Some(result) = self.prefix_match_openrouter(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
             if let Some(result) = self.prefix_match_models_dev(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                ));
             }
         }
 
@@ -1462,6 +1488,31 @@ impl PricingLookup {
             }
         }
         None
+    }
+
+    /// Prefer a provider-proven archive tariff over an unverified upstream guess.
+    ///
+    /// Every unverified fallback stage in `lookup_auto` (model-part, alias and
+    /// prefix matches) routes through here. Reseller rows
+    /// (`deepinfra/anthropic/...`, `z-ai/...`) match those stages by model
+    /// part while the archive holds the publishing endpoint's own exact
+    /// tariff; letting the guess win prices first-party usage at a third
+    /// party's rate and reports it as unpublishable. Safe upstream rows pass
+    /// through untouched, as does everything when the archive cannot prove
+    /// the endpoint -- so display estimates never change, only their
+    /// publishability when a proven tariff exists.
+    fn prefer_proven_archive(
+        &self,
+        upstream: LookupResult,
+        model_id: &str,
+        provider_id: Option<&str>,
+    ) -> LookupResult {
+        if upstream.evidence.is_submission_safe() {
+            return upstream;
+        }
+        self.exact_match_archive(model_id, provider_id)
+            .filter(|archived| archived.evidence.is_submission_safe())
+            .unwrap_or(upstream)
     }
 
     /// Match `model_id` against the retirement archive of last-known tariffs.
