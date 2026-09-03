@@ -377,6 +377,19 @@ impl PricingService {
             // cache-hit / $0.14 cache-miss input / $0.28 output per MTok,
             // flat to 1M context since the 2026-05-27 permanent cut).
             ("xiaomi/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
+            // Tencent Hunyuan HY3: $0.132/$0.528 per 1M, $0.033 cache-hit;
+            // HY4-Preview: $0.834/$2.501 per 1M, $0.042 cache-hit. Neither
+            // publishes a separate cache-write tariff. No live dataset
+            // carries a first-party row -- only `deepinfra/tencent/*` and
+            // `crossmodel/tencent/*` reseller keys -- so a `tencent` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://cloud.tencent.com/document/product/1823/130055
+            // (Hy3: 1元 in / 4元 out / 0.25元 cache-hit; Hy4 preview: 6元
+            // in / 18元 out / 0.3元 cache-hit per M tokens, flat) and the
+            // Intl sheet https://intl.cloud.tencent.com/document/product/1300/78937
+            // (USD numbers archived here, matching the datasets' currency).
+            ("tencent/hy3", 0.132e-6, 0.528e-6, 0.033e-6, None),
+            ("tencent/hy4-preview", 0.834e-6, 2.501e-6, 0.042e-6, None),
         ];
 
         let mut overrides = HashMap::with_capacity(entries.len());
@@ -873,6 +886,79 @@ mod tests {
             !service.covers_usage_with_provider("mimo-v2.5", Some("xiaomi"), &all_bucket_usage()),
             "cache-write-bearing usage must stay unpriced: no published tariff"
         );
+    }
+
+    /// Tencent publishes no first-party row to any live dataset -- only
+    /// `deepinfra/tencent/*` and `crossmodel/tencent/*` reseller keys -- so a
+    /// `tencent` hint for `hy3` / `hy4-preview` resolved as an unverified
+    /// guess. The archived first-party tariffs (Intl USD sheet, verified
+    /// 2026-09-03) win for the publishing endpoint. Each case mirrors the
+    /// live reseller shape, exercising the LiteLLM path (hy3) and the
+    /// models.dev path (hy4-preview).
+    #[test]
+    fn tencent_hunyuan_rates_resolve_first_party_over_reseller_rows() {
+        fn usage_without_cache_write() -> TokenBreakdown {
+            TokenBreakdown {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 1_000_000,
+                cache_write: 0,
+                reasoning: 0,
+            }
+        }
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "deepinfra/tencent/Hy3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.132e-6),
+                output_cost_per_token: Some(0.528e-6),
+                cache_read_input_token_cost: Some(0.033e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "crossmodel/tencent/hy4-preview".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.834e-6),
+                output_cost_per_token: Some(2.501e-6),
+                cache_read_input_token_cost: Some(0.042e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new_with_custom_and_models_dev(
+            CustomPricing::default(),
+            litellm,
+            HashMap::new(),
+            models_dev,
+        );
+
+        for (model, expected_key, expected_cost) in [
+            ("hy3", "tencent/hy3", 0.693),
+            ("hy4-preview", "tencent/hy4-preview", 3.377),
+        ] {
+            let usage = usage_without_cache_write();
+            let resolved = service
+                .resolve_for_usage_with_provider(model, Some("tencent"), &usage)
+                .unwrap_or_else(|| panic!("{model} must resolve first-party"));
+            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
+            assert_eq!(resolved.matched_key, expected_key, "model: {model}");
+            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
+            assert!(
+                service.covers_usage_with_provider(model, Some("tencent"), &usage),
+                "model: {model}"
+            );
+            let actual = service.calculate_cost_with_provider(model, Some("tencent"), &usage);
+            assert!(
+                (actual - expected_cost).abs() < 1e-9,
+                "model: {model}, unexpected cost: {actual}"
+            );
+            assert!(
+                !service.covers_usage_with_provider(model, Some("tencent"), &all_bucket_usage()),
+                "model: {model}, cache-write-bearing usage must stay unpriced"
+            );
+        }
     }
 
     #[test]
