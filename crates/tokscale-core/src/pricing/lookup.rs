@@ -880,6 +880,20 @@ impl PricingLookup {
             self.exact_match_models_dev_for_provider(model_id, provider_id),
             provider_id,
         ) {
+            // A provider-proven first-party snapshot beats an unverified
+            // guess. Reseller rows (`deepinfra/anthropic/...`) match here by
+            // model part while the archive holds the publishing endpoint's
+            // own exact tariff further down; letting the guess win prices
+            // first-party usage at a third party's rate and reports it as
+            // unpublishable. Safe upstream rows still win untouched.
+            if !result.evidence.is_submission_safe() {
+                let proven = self
+                    .exact_match_archive(model_id, provider_id)
+                    .filter(|archived| archived.evidence.is_submission_safe());
+                if let Some(archived) = proven {
+                    return Some(archived);
+                }
+            }
             return Some(result);
         }
 
@@ -1466,17 +1480,21 @@ impl PricingLookup {
             return None;
         }
 
-        // Every archived key is a canonical `claude-{family}-{major}-{minor}`
+        // Every archived key is a canonical `{family}-{major}-{minor}` id
         // under a provider root, so the normalizer the upstream exact passes
-        // already use is the whole matcher. It folds the dated
-        // (`claude-haiku-4-5-20251001`), context-tagged (`claude-opus-4-8[1m]`),
-        // dotted (`claude-haiku-4.5`) and reasoning-tier
-        // (`claude-opus-4-7-thinking-xhigh`) spellings real clients emit, and it
-        // drops any leading provider segment on the way. Comparing the raw id to
-        // the key by equality instead would miss every one of those shapes —
-        // that is, every shape the archive exists to cover.
+        // already use is the whole matcher for the Claude line: it folds the
+        // dated (`claude-haiku-4-5-20251001`), context-tagged
+        // (`claude-opus-4-8[1m]`), dotted (`claude-haiku-4.5`) and
+        // reasoning-tier (`claude-opus-4-7-thinking-xhigh`) spellings real
+        // clients emit, and it drops any leading provider segment on the way.
+        // Comparing the raw id to the key by equality instead would miss
+        // every one of those shapes -- that is, every shape the archive
+        // exists to cover. Ids from other vendors have no normalizer yet and
+        // match verbatim; the provider-qualified gate below still requires
+        // the hint to name the key's publishing endpoint, so a verbatim
+        // match can never elect a neighbouring model.
         let lower = model_id.trim().to_ascii_lowercase();
-        let canonical = normalize_model_name(&lower)?;
+        let canonical = normalize_model_name(&lower).unwrap_or_else(|| lower.clone());
 
         // The id's own leading segment authorises the tariff exactly as a hint
         // does, so `anthropic/claude-opus-4-8` resolves provider-scoped with no

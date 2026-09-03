@@ -801,6 +801,43 @@ mod tests {
         );
     }
 
+    /// A reseller row that only matches by model part must not shadow the
+    /// publishing endpoint's own archived tariff.
+    ///
+    /// Live LiteLLM keys this as `deepinfra/anthropic/claude-opus-4-8` -- a
+    /// nested provider segment, not a first-party root -- so an `anthropic`
+    /// hint resolves it as an unverified ModelPart guess while the archive
+    /// holds `anthropic/claude-opus-4-8` exactly. The guess used to win by
+    /// precedence and the usage submitted at $0.00 with a cost-incomplete
+    /// day; the proven row wins now.
+    #[test]
+    fn unsafe_reseller_row_yields_to_proven_archive() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "deepinfra/anthropic/claude-opus-4-8".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(5e-6),
+                output_cost_per_token: Some(2.5e-5),
+                cache_read_input_token_cost: Some(5e-7),
+                cache_creation_input_token_cost: Some(6.25e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = all_bucket_usage();
+
+        let resolved = service
+            .resolve_for_usage_with_provider("claude-opus-4-8", Some("anthropic"), &usage)
+            .expect("proven archive row must resolve");
+        assert_eq!(resolved.source, "Tokscale Archive");
+        assert_eq!(resolved.matched_key, "anthropic/claude-opus-4-8");
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(service.covers_usage_with_provider("claude-opus-4-8", Some("anthropic"), &usage));
+        let actual =
+            service.calculate_cost_with_provider("claude-opus-4-8", Some("anthropic"), &usage);
+        assert!((actual - 36.75).abs() < 1e-9, "unexpected cost: {actual}");
+    }
+
     /// The shared normalizer folds reasoning-effort suffixes, so the archive
     /// needs no suffix stripper of its own.
     #[test]
