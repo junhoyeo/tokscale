@@ -4,12 +4,17 @@ import { db, moderationActions, users } from "@/lib/db";
 /**
  * Who is reading the notice.
  *
- * The same moderation state has to be stated two different ways. The owner is
- * being told something about their own account and given somewhere to appeal;
- * a visitor is being told why a profile they are looking at is missing from
- * the leaderboard. Second-person wording aimed at the wrong reader is not a
- * cosmetic problem — "if you believe this is a mistake" shown to a stranger
- * reads as an accusation against them.
+ * The same moderation state is stated the same way to both, except for how the
+ * account itself is referred to. The owner is being told something about their
+ * own account; a visitor is being told why a profile they are looking at is
+ * missing from the leaderboard. So every possessive moves to third person —
+ * "Your profile and totals" shown to a visitor claims the account belongs to
+ * whoever is reading it.
+ *
+ * The appeal clause is not part of that substitution and is meant to stay in
+ * both. Its "you" addresses whoever spotted a wrong call, which is true of any
+ * reader; a visitor handed a verdict with no way to report it wrong is the
+ * thing that would be worse.
  */
 export type ModerationAudience = "owner" | "public";
 
@@ -132,9 +137,9 @@ export function moderationNoticeFor(
  * Returns the notice for `userId`, or null when they are not hidden.
  *
  * Callers pass the audience rather than proving ownership: the notice is shown
- * to everyone, and the only thing ownership decides is which wording. Getting
- * that argument wrong shows the appeal copy to strangers, so it is required at
- * every call site that is not the owner's own page.
+ * to everyone, and the only thing ownership decides is which wording. Passing
+ * "owner" to a viewer who is not one tells a stranger the account is theirs,
+ * so any call site that has not established ownership must pass "public".
  */
 export async function getModerationNotice(
   userId: string,

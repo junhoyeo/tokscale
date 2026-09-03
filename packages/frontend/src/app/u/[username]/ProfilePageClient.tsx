@@ -92,9 +92,10 @@ interface ProfilePageClientProps {
   initialDevices?: ProfileDevice[];
   username: string;
   /**
-   * Only ever populated when the viewer is the account owner. The server
-   * resolves this outside the cached public payload, so a visitor receives
-   * null and renders nothing — a hide is not announced to anyone else.
+   * Populated for every viewer of a hidden account, not just its owner. The
+   * server resolves this outside the cached public payload and picks the
+   * wording by audience, so the component renders whatever it is handed
+   * without deciding who may see it — see lib/moderation/notice.ts.
    */
   moderationNotice?: ModerationNotice | null;
 }
@@ -102,9 +103,10 @@ interface ProfilePageClientProps {
 const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
 
 /**
- * Amber for the two cases the account owner may want to contest, neutral blue
+ * Amber for the two cases the account holder may want to contest, neutral blue
  * when the cause is our own data problem — that one is informational, and
- * dressing it as a warning would imply they did something wrong.
+ * dressing it as a warning would imply they did something wrong. The colour
+ * carries the same meaning to a visitor, who is reading the same decision.
  */
 const ModerationNoticeBanner = styled.div<{ $tone: ModerationNotice["tone"] }>`
   display: flex;
