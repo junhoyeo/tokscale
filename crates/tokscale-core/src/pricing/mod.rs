@@ -368,6 +368,15 @@ impl PricingService {
             // cache-hit per M tokens, flat 1M context, no tiers).
             ("zhipu/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
             ("zhipu/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            // Xiaomi MiMo-V2.5: $0.14/$0.28 per 1M, $0.0028 cached input,
+            // no published cache-write tariff (only cache-hit vs cache-miss
+            // input). No live dataset carries a first-party row -- only the
+            // `openrouter/xiaomi/*` marketplace key -- so a `xiaomi` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://mimo.mi.com/docs/en-US/pricing (MiMo-V2.5: $0.0028
+            // cache-hit / $0.14 cache-miss input / $0.28 output per MTok,
+            // flat to 1M context since the 2026-05-27 permanent cut).
+            ("xiaomi/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
         ];
 
         let mut overrides = HashMap::with_capacity(entries.len());
@@ -822,6 +831,48 @@ mod tests {
                 "model: {model}"
             );
         }
+    }
+
+    /// Xiaomi publishes no first-party row to any live dataset -- only the
+    /// `openrouter/xiaomi/*` marketplace key -- so a `xiaomi` hint for
+    /// `mimo-v2.5` resolved as an unverified guess. The archived first-party
+    /// tariff ($0.14/$0.28 per 1M, $0.0028 cached input, verified 2026-09-03)
+    /// wins for the publishing endpoint.
+    #[test]
+    fn xiaomi_mimo_rate_resolves_first_party_over_marketplace_row() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openrouter/xiaomi/mimo-v2.5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.14e-6),
+                output_cost_per_token: Some(0.28e-6),
+                cache_read_input_token_cost: Some(0.0028e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        // No published cache-write tariff, so the covered usage carries none.
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let resolved = service
+            .resolve_for_usage_with_provider("mimo-v2.5", Some("xiaomi"), &usage)
+            .expect("mimo-v2.5 must resolve first-party");
+        assert_eq!(resolved.source, "Tokscale Archive");
+        assert_eq!(resolved.matched_key, "xiaomi/mimo-v2.5");
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(service.covers_usage_with_provider("mimo-v2.5", Some("xiaomi"), &usage));
+        let actual = service.calculate_cost_with_provider("mimo-v2.5", Some("xiaomi"), &usage);
+        assert!((actual - 0.4228).abs() < 1e-9, "unexpected cost: {actual}");
+        assert!(
+            !service.covers_usage_with_provider("mimo-v2.5", Some("xiaomi"), &all_bucket_usage()),
+            "cache-write-bearing usage must stay unpriced: no published tariff"
+        );
     }
 
     #[test]
