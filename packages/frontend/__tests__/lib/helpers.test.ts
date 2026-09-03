@@ -241,4 +241,21 @@ describe("reapplyReplaceLayoutCostFloors", () => {
     expect(first.provenance?.costIsComplete).toBe(false);
     expect(second.provenance?.costIsComplete).toBe(false);
   });
+
+  it("splits a cell's cost floor across models by token share", () => {
+    const cell = makeClient(100_000, 4, 2) as ClientBreakdownData;
+    cell.models["model-0"].tokens = 75_000;
+    cell.models["model-1"].tokens = 25_000;
+    cell.tokens = 100_000;
+
+    reapplyReplaceLayoutCostFloors(
+      [{ sourceBreakdown: { droid: cell } }],
+      new Map([["droid", 40]]),
+      new Set(["droid"])
+    );
+
+    expect(cell.models["model-0"].cost).toBe(30);
+    expect(cell.models["model-1"].cost).toBe(10);
+    expect(cell.cost).toBe(40);
+  });
 });

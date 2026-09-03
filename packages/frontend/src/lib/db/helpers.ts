@@ -418,11 +418,25 @@ function addClientCostFloor(
   extra: number
 ): void {
   if (extra <= 0) return;
-  cell.cost = quantizeCost((cell.cost || 0) + extra);
-  const modelIds = Object.keys(cell.models ?? {});
-  if (modelIds.length > 0) {
-    const model = cell.models[modelIds[0]];
-    model.cost = quantizeCost((model.cost || 0) + extra);
+  const models = Object.values(cell.models ?? {});
+  if (models.length === 0) {
+    cell.cost = quantizeCost((cell.cost || 0) + extra);
+  } else {
+    const tokenTotal = models.reduce((sum, model) => sum + (model.tokens || 0), 0);
+    let assigned = 0;
+    for (let i = 0; i < models.length; i++) {
+      const share =
+        i === models.length - 1
+          ? quantizeCost(extra - assigned)
+          : tokenTotal > 0
+            ? quantizeCost((extra * (models[i].tokens || 0)) / tokenTotal)
+            : quantizeCost(extra / models.length);
+      models[i].cost = quantizeCost((models[i].cost || 0) + share);
+      assigned = quantizeCost(assigned + share);
+    }
+    cell.cost = quantizeCost(
+      models.reduce((sum, model) => sum + (model.cost || 0), 0)
+    );
   }
   cell.provenance = {
     ...(cell.provenance ?? deriveClientBreakdownProvenance(cell)),
