@@ -128,10 +128,31 @@ describe("profile moderation notice delivery", () => {
     expect(page.props.moderationNotice).toBeNull();
   });
 
-  it("preserves a moderation lookup failure for the page error boundary", async () => {
+  it("preserves a moderation lookup failure for the owner's error boundary", async () => {
     getSession.mockResolvedValue({ id: "profile-owner" });
     getModerationNotice.mockRejectedValue(new Error("database unavailable"));
 
     await expect(renderProfile()).rejects.toThrow("database unavailable");
+  });
+
+  it("keeps a visitor's profile working when the moderation lookup fails", async () => {
+    // This lookup now runs for every viewer, so letting it throw would turn one
+    // unhealthy query into every profile page being down. A visitor loses the
+    // banner and nothing else.
+    getSession.mockResolvedValue({ id: "another-user" });
+    getModerationNotice.mockRejectedValue(new Error("database unavailable"));
+
+    const page = await renderProfile();
+
+    expect(page.props.moderationNotice).toBeNull();
+  });
+
+  it("keeps an anonymous visitor's profile working when the moderation lookup fails", async () => {
+    getSession.mockResolvedValue(null);
+    getModerationNotice.mockRejectedValue(new Error("database unavailable"));
+
+    const page = await renderProfile();
+
+    expect(page.props.moderationNotice).toBeNull();
   });
 });

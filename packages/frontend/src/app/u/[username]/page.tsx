@@ -116,6 +116,12 @@ export default async function ProfilePage({
   // Shown to everyone, but worded by audience. A failed session lookup means we
   // could not establish ownership, so it falls through to the public wording
   // rather than showing a stranger copy that addresses them as the owner.
+  //
+  // Now that this runs for every viewer and not just the owner, a database
+  // hiccup here would take down every profile page rather than one. A visitor
+  // loses only the banner and still gets a working profile; the owner keeps
+  // the error, because someone who cannot see why their account is missing
+  // from the leaderboard is the one person the failure actually matters to.
   const session = await getSession().catch(() => null);
   const isOwner = Boolean(session && data.user?.id && session.id === data.user.id);
   const moderationNotice = data.user?.id
