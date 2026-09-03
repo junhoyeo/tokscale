@@ -255,7 +255,15 @@ impl PricingService {
     // Stealth EULA provides access "free of charge"
     // (https://openrouter.ai/terms/stealth, accessed 2026-09-03), and the Zen
     // catalog lists `Ox Alpha Free (Unlimited)` at input = 0, output = 0,
-    // cache_read = 0 with status "deprecated". This is a published tariff,
+    // cache_read = 0 with status "deprecated". Upstream models.dev agrees --
+    // its live api.json carries `opencode/x-preview-f-free` and
+    // `opencode-go/ox-alpha-free` at input = 0, output = 0, cache_read = 0,
+    // both deprecated (checked 2026-09-03) -- but neither row is consumable
+    // as-is: sessions spell the gateway `opencode-zen`/`opencode_zen`
+    // against the `opencode` root (an identity gap no alias can prove safe
+    // for paid rows), both rows omit the cache-write bucket (so
+    // cache-write-bearing usage would stay uncovered), and no `ox-alpha` row
+    // exists under any provider at all. This is still a published tariff,
     // not a guess -- contrast `openai/codex-auto-review`, which has no
     // published rate anywhere and is deliberately left unpriced.
     //
