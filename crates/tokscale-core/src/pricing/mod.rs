@@ -94,6 +94,7 @@ impl PricingService {
                 Self::build_sakana_overrides(),
                 models_dev_data,
                 Self::build_archive_overrides(),
+                Self::build_free_preview_overrides(),
             ),
         }
     }
@@ -241,6 +242,52 @@ impl PricingService {
                 ..Default::default()
             },
         );
+        overrides
+    }
+
+    // @keep: published $0 for dead free-preview incarnations. Both ids below
+    // are the August 2026 stealth preview of Z.AI's GLM-5.3-Flash, served free
+    // for a week and then retired: OpenRouter's page states "This model is
+    // free to use" (https://openrouter.ai/stealth/ox-alpha, accessed
+    // 2026-09-03), Z.AI confirms it "tested GLM-5.3-Flash anonymously as
+    // ox-alpha on OpenCode and OpenRouter"
+    // (https://docs.z.ai/guides/vlm/glm-5.3-flash, accessed 2026-09-03), the
+    // Stealth EULA provides access "free of charge"
+    // (https://openrouter.ai/terms/stealth, accessed 2026-09-03), and the Zen
+    // catalog lists `Ox Alpha Free (Unlimited)` at input = 0, output = 0,
+    // cache_read = 0 with status "deprecated". This is a published tariff,
+    // not a guess -- contrast `openai/codex-auto-review`, which has no
+    // published rate anywhere and is deliberately left unpriced.
+    //
+    // Every bucket is an explicit zero (tiers: none exist), so
+    // `quotes_zero_for_every_published_rate` covers any usage shape -- the
+    // same treatment as the documented-free `opencode/nemotron-3-ultra-free`
+    // row. A dead preview's $0 is final: the id can never be billed again,
+    // so these match bare with `BuiltIn` evidence regardless of which
+    // gateway (`command-code`, `hermes`, `nous`, `stealth`, `opencode-zen`)
+    // routed the historical request.
+    //
+    // Non-goals, deliberately: no generic `:free`-suffix rule (a naming
+    // convention is weaker evidence than a per-id published $0; those ids
+    // stay on the `custom-pricing.json` path) and no `ox-alpha-free` row
+    // (seen in the wild but without a citable published tariff).
+    fn build_free_preview_overrides() -> HashMap<String, ModelPricing> {
+        const ZERO: f64 = 0.0;
+        let entries: &[&str] = &["ox-alpha", "x-preview-f-free"];
+
+        let mut overrides = HashMap::with_capacity(entries.len());
+        for model_id in entries {
+            overrides.insert(
+                model_id.to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(ZERO),
+                    output_cost_per_token: Some(ZERO),
+                    cache_read_input_token_cost: Some(ZERO),
+                    cache_creation_input_token_cost: Some(ZERO),
+                    ..Default::default()
+                },
+            );
+        }
         overrides
     }
 
@@ -836,6 +883,116 @@ mod tests {
         let actual =
             service.calculate_cost_with_provider("claude-opus-4-8", Some("anthropic"), &usage);
         assert!((actual - 36.75).abs() < 1e-9, "unexpected cost: {actual}");
+    }
+
+    /// Dead free-preview incarnations submit at their published $0 from any
+    /// gateway, with no warning: the freeness is a property of the preview
+    /// id, and every usage shape (including cache-write and reasoning) is
+    /// covered by the all-zero row.
+    #[test]
+    fn free_preview_ids_resolve_at_zero_from_any_gateway() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+
+        for (provider, model, expected_key) in [
+            (Some("command-code"), "ox-alpha", "ox-alpha"),
+            (Some("stealth"), "ox-alpha", "ox-alpha"),
+            (Some("nous"), "ox-alpha", "ox-alpha"),
+            (Some("hermes"), "ox-alpha", "ox-alpha"),
+            // Router-qualified ids real clients emit resolve by terminal segment.
+            (Some("stealth"), "stealth/ox-alpha", "ox-alpha"),
+            (Some("nous"), "stealth/ox-alpha", "ox-alpha"),
+            (Some("opencode-zen"), "x-preview-f-free", "x-preview-f-free"),
+            (Some("opencode_zen"), "x-preview-f-free", "x-preview-f-free"),
+            (None, "ox-alpha", "ox-alpha"),
+            (None, "x-preview-f-free", "x-preview-f-free"),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model, provider, &all_bucket_usage())
+                .unwrap_or_else(|| panic!("{provider:?}/{model} must resolve the free preview"));
+            assert_eq!(resolved.source, "FreePreview", "id: {model}");
+            assert_eq!(resolved.matched_key, expected_key, "id: {model}");
+            assert!(resolved.evidence.is_submission_safe(), "id: {model}");
+            assert!(
+                service.covers_usage_with_provider(model, provider, &all_bucket_usage()),
+                "id: {model}"
+            );
+            let actual = service.calculate_cost_with_provider(model, provider, &all_bucket_usage());
+            assert_eq!(actual, 0.0, "id: {model}");
+        }
+
+        // Reasoning tokens bill at the output rate, which is an explicit zero.
+        let reasoning_usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 100_000,
+        };
+        assert!(service.covers_usage_with_provider("ox-alpha", Some("stealth"), &reasoning_usage));
+        assert_eq!(
+            service.calculate_cost_with_provider("ox-alpha", Some("stealth"), &reasoning_usage),
+            0.0
+        );
+    }
+
+    /// An unverified reseller guess for a free-preview id must not shadow its
+    /// published $0: live models.dev keys `opencode/x-preview-f-free`, which
+    /// an `opencode-zen` hint can only match by model part.
+    #[test]
+    fn free_preview_zero_beats_unverified_reseller_guess() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "opencode/x-preview-f-free".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(2e-6),
+                output_cost_per_token: Some(8e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new_with_custom_and_models_dev(
+            CustomPricing::default(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let resolved = service
+            .resolve_for_usage_with_provider(
+                "x-preview-f-free",
+                Some("opencode-zen"),
+                &all_bucket_usage(),
+            )
+            .expect("free preview must resolve");
+        assert_eq!(resolved.source, "FreePreview");
+        assert_eq!(resolved.matched_key, "x-preview-f-free");
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(service.covers_usage_with_provider(
+            "x-preview-f-free",
+            Some("opencode-zen"),
+            &all_bucket_usage()
+        ));
+    }
+
+    /// A live first-party exact row still beats the $0 snapshot: the table
+    /// covers dead previews, never a live tariff dispute.
+    #[test]
+    fn live_upstream_exact_wins_over_free_preview_zero() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "ox-alpha".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+
+        let resolved = service
+            .resolve_for_usage_with_provider("ox-alpha", Some("stealth"), &all_bucket_usage())
+            .expect("live upstream row must resolve");
+        assert_eq!(resolved.source, "LiteLLM");
+        assert!(resolved.evidence.is_submission_safe());
     }
 
     /// The shared normalizer folds reasoning-effort suffixes, so the archive

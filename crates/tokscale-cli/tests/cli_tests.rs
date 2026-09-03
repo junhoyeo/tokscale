@@ -5096,6 +5096,82 @@ fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
     );
 }
 
+/// Dead free-preview incarnations (`ox-alpha`, `x-preview-f-free`) carry a
+/// published $0, so they submit with the priced usage: no per-row warning,
+/// no aggregate line, no fix hint.
+#[test]
+fn test_submit_free_preview_models_upload_without_warnings() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let preview_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/free-preview");
+    fs::create_dir_all(&preview_dir).unwrap();
+    for (file, id, session, provider, input, output) in [
+        ("ox.json", "ox", "free-preview-ox", "stealth", 1000, 500),
+        (
+            "xpreview.json",
+            "xpreview",
+            "free-preview-x",
+            "opencode-zen",
+            2000,
+            100,
+        ),
+    ] {
+        let model_id = if id == "ox" {
+            "stealth/ox-alpha".to_string()
+        } else {
+            "x-preview-f-free".to_string()
+        };
+        fs::write(
+preview_dir.join(file),
+format!(
+r#"{{
+"id": "{id}",
+"sessionID": "{session}",
+"role": "assistant",
+"modelID": "{model_id}",
+"providerID": "{provider}",
+"cost": 0,
+"tokens": {{ "input": {input}, "output": {output}, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+"time": {{ "created": 1736510400000.0 }}
+}}"#,
+),
+)
+.unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "free preview usage must submit cleanly; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("unpriced"),
+        "published-$0 usage must not warn: {stdout}"
+    );
+    assert!(
+        !stdout.contains("custom-pricing.json"),
+        "no fix hint for priced usage: {stdout}"
+    );
+    assert!(
+        stdout.contains("Total tokens: 7,550"),
+        "both preview models (3,600 tokens) must be counted on top of the 3,950-token stock fixture: {stdout}"
+    );
+}
+
 /// Regression: a cold cache with no network must not look like "no usage".
 ///
 /// Every fetchable upstream is unreachable here and nothing is cached, so the

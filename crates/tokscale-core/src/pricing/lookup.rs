@@ -136,6 +136,16 @@ pub struct PricingLookup {
     /// provider-qualified path instead and can only be submission-safe when the
     /// lookup actually proves the publishing endpoint.
     archive: HashMap<String, ModelPricing>,
+    /// Published $0 tariffs for dead free-preview incarnations (`ox-alpha`,
+    /// `x-preview-f-free`).
+    ///
+    /// Deliberately not folded into `archive`: archived rows are snapshots
+    /// that may since have moved, so they match provider-qualified and are
+    /// only safe when the endpoint is proven. A dead preview's $0 is final --
+    /// the id can never be billed again -- so these match bare like
+    /// `cursor`/`sakana` and answer with `BuiltIn` evidence regardless of
+    /// which gateway routed the request.
+    free_preview: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
     litellm_key_parts: Vec<KeyModelPart>,
@@ -149,6 +159,7 @@ pub struct PricingLookup {
     models_dev_model_part: HashMap<String, String>,
     cursor_lower: HashMap<String, String>,
     sakana_lower: HashMap<String, String>,
+    free_preview_lower: HashMap<String, String>,
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
@@ -368,13 +379,14 @@ impl PricingLookup {
         Self::new_with_models_dev(litellm, openrouter, cursor, HashMap::new(), HashMap::new())
     }
 
-    // @keep: the omission of cursor/sakana is the whole point and reads like a bug otherwise.
+    // @keep: the omission of cursor/sakana/free_preview is the whole point and reads like a bug otherwise.
     /// True when at least one *fetchable* upstream dataset loaded.
     ///
-    /// The `cursor`, `sakana` and `archive` tables are compiled-in constants
-    /// that are present on every run, so they are deliberately not consulted:
-    /// counting them would report healthy pricing during a total upstream
-    /// outage, which is exactly the condition callers use this to detect.
+    /// The `cursor`, `sakana`, `free_preview` and `archive` tables are
+    /// compiled-in constants that are present on every run, so they are
+    /// deliberately not consulted: counting them would report healthy pricing
+    /// during a total upstream outage, which is exactly the condition callers
+    /// use this to detect.
     pub fn has_upstream_dataset(&self) -> bool {
         !self.litellm.is_empty() || !self.openrouter.is_empty() || !self.models_dev.is_empty()
     }
@@ -392,6 +404,7 @@ impl PricingLookup {
             cursor,
             sakana,
             models_dev,
+            HashMap::new(),
             HashMap::new(),
         )
     }
@@ -413,6 +426,10 @@ impl PricingLookup {
         sakana: HashMap<String, ModelPricing>,
         models_dev: HashMap<String, ModelPricing>,
         archive: HashMap<String, ModelPricing>,
+        // @keep: separate table rather than archive rows because the match
+        // semantics differ (bare BuiltIn match, not provider-qualified); see
+        // the field docs.
+        free_preview: HashMap<String, ModelPricing>,
     ) -> Self {
         // Longest key first, then alphabetical. The alphabetical leg only pins
         // equal-length ties so a run is reproducible; it carries no pricing
@@ -490,6 +507,11 @@ impl PricingLookup {
             sakana_lower.insert(key.to_lowercase(), key.clone());
         }
 
+        let mut free_preview_lower = HashMap::with_capacity(free_preview.len());
+        for key in free_preview.keys() {
+            free_preview_lower.insert(key.to_lowercase(), key.clone());
+        }
+
         let build_key_parts = |keys: &[String]| -> Vec<KeyModelPart> {
             keys.iter()
                 .map(|key| {
@@ -515,6 +537,7 @@ impl PricingLookup {
             sakana,
             models_dev,
             archive,
+            free_preview,
             litellm_keys,
             openrouter_keys,
             litellm_key_parts,
@@ -528,6 +551,7 @@ impl PricingLookup {
             models_dev_model_part,
             cursor_lower,
             sakana_lower,
+            free_preview_lower,
             lookup_cache: RwLock::new(HashMap::with_capacity(64)),
         }
     }
@@ -880,7 +904,7 @@ impl PricingLookup {
             self.exact_match_models_dev_for_provider(model_id, provider_id),
             provider_id,
         ) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
 
         if let Some(result) = exact_litellm {
@@ -904,11 +928,11 @@ impl PricingLookup {
         // matching key falls through to the canonical resolution below.
         if provider_id.is_some() {
             if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
-                return Some(self.prefer_proven_archive(result, model_id, provider_id));
+                return Some(self.prefer_proven_rate(result, model_id, provider_id));
             }
         }
         if let Some(result) = self.exact_match_openrouter_model_part(model_id) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
 
         // Separator-normalized exact passes against the canonical sources
@@ -926,7 +950,7 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&version_normalized, provider_id),
                 provider_id,
             ) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
@@ -936,7 +960,7 @@ impl PricingLookup {
                 if let Some(result) =
                     self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
                 {
-                    return Some(self.prefer_proven_archive(
+                    return Some(self.prefer_proven_rate(
                         result.with_normalization(),
                         &version_normalized,
                         provider_id,
@@ -947,7 +971,7 @@ impl PricingLookup {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&version_normalized) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
@@ -956,13 +980,13 @@ impl PricingLookup {
         }
 
         if let Some(result) = self.exact_match_models_dev_with_provider(model_id, provider_id) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
@@ -977,7 +1001,7 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&normalized, provider_id),
                 provider_id,
             ) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &normalized,
                     provider_id,
@@ -987,7 +1011,7 @@ impl PricingLookup {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&normalized) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &normalized,
                     provider_id,
@@ -996,7 +1020,7 @@ impl PricingLookup {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&normalized, provider_id)
             {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &normalized,
                     provider_id,
@@ -1005,32 +1029,32 @@ impl PricingLookup {
         }
 
         if let Some(result) = self.prefix_match_litellm(model_id, provider_id) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
         if let Some(result) = self.prefix_match_openrouter(model_id, provider_id) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
         if let Some(result) = self.prefix_match_models_dev(model_id, provider_id) {
-            return Some(self.prefer_proven_archive(result, model_id, provider_id));
+            return Some(self.prefer_proven_rate(result, model_id, provider_id));
         }
 
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_litellm(&version_normalized, provider_id) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
                 ));
             }
             if let Some(result) = self.prefix_match_openrouter(&version_normalized, provider_id) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
                 ));
             }
             if let Some(result) = self.prefix_match_models_dev(&version_normalized, provider_id) {
-                return Some(self.prefer_proven_archive(
+                return Some(self.prefer_proven_rate(
                     result.with_normalization(),
                     &version_normalized,
                     provider_id,
@@ -1056,6 +1080,20 @@ impl PricingLookup {
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.exact_match_sakana(&version_normalized) {
+                return Some(result.with_normalization());
+            }
+        }
+
+        // Dead free-preview ids (`ox-alpha`, `x-preview-f-free`) sit at the
+        // same precedence: a live upstream exact row still wins above, while
+        // an unverified reseller guess is displaced by `prefer_proven_rate`
+        // at its own stage. This slot only answers when upstream has nothing
+        // at all (the bare-`ox-alpha` shape).
+        if let Some(result) = self.exact_match_free_preview(model_id) {
+            return Some(result);
+        }
+        if let Some(version_normalized) = normalize_version_separator(model_id) {
+            if let Some(result) = self.exact_match_free_preview(&version_normalized) {
                 return Some(result.with_normalization());
             }
         }
@@ -1490,18 +1528,51 @@ impl PricingLookup {
         None
     }
 
-    /// Prefer a provider-proven archive tariff over an unverified upstream guess.
+    /// Match `model_id` against the free-preview table of published $0
+    /// tariffs, ignoring which gateway routed the request.
+    ///
+    /// Same shape as the Cursor/Sakana built-ins above: an exact hit, plus
+    /// the terminal segment for router-qualified ids real clients emit
+    /// (`stealth/ox-alpha`). Both answer `BuiltIn`, which is submission-safe
+    /// by construction -- the freeness is a property of the preview id, and
+    /// a dead preview's $0 is final.
+    fn exact_match_free_preview(&self, model_id: &str) -> Option<LookupResult> {
+        if let Some(key) = self.free_preview_lower.get(model_id) {
+            return lookup_result_if_usable(
+                self.free_preview.get(key).unwrap(),
+                FREE_PREVIEW_SOURCE,
+                key,
+            )
+            .map(|result| result.with_kind(ResolutionKind::BuiltIn));
+        }
+        if let Some(model_part) = model_id.split('/').next_back() {
+            if model_part != model_id {
+                if let Some(key) = self.free_preview_lower.get(model_part) {
+                    return lookup_result_if_usable(
+                        self.free_preview.get(key).unwrap(),
+                        FREE_PREVIEW_SOURCE,
+                        key,
+                    )
+                    .map(|result| result.with_kind(ResolutionKind::BuiltIn));
+                }
+            }
+        }
+        None
+    }
+
+    /// Prefer a proven first-party rate over an unverified upstream guess.
     ///
     /// Every unverified fallback stage in `lookup_auto` (model-part, alias and
     /// prefix matches) routes through here. Reseller rows
-    /// (`deepinfra/anthropic/...`, `z-ai/...`) match those stages by model
-    /// part while the archive holds the publishing endpoint's own exact
-    /// tariff; letting the guess win prices first-party usage at a third
-    /// party's rate and reports it as unpublishable. Safe upstream rows pass
-    /// through untouched, as does everything when the archive cannot prove
-    /// the endpoint -- so display estimates never change, only their
-    /// publishability when a proven tariff exists.
-    fn prefer_proven_archive(
+    /// (`deepinfra/anthropic/...`, `z-ai/...`, `opencode/x-preview-f-free`)
+    /// match those stages by model part while a compiled-in table holds the
+    /// publishing endpoint's own exact tariff (the archive) or the preview
+    /// id's published $0 (the free-preview table); letting the guess win
+    /// misprices first-party usage and reports it as unpublishable. Safe
+    /// upstream rows pass through untouched, as does everything when neither
+    /// table can prove a rate -- so display estimates never change, only
+    /// their publishability when a proven rate exists.
+    fn prefer_proven_rate(
         &self,
         upstream: LookupResult,
         model_id: &str,
@@ -1510,9 +1581,19 @@ impl PricingLookup {
         if upstream.evidence.is_submission_safe() {
             return upstream;
         }
-        self.exact_match_archive(model_id, provider_id)
+        if let Some(proven) = self
+            .exact_match_archive(model_id, provider_id)
             .filter(|archived| archived.evidence.is_submission_safe())
-            .unwrap_or(upstream)
+        {
+            return proven;
+        }
+        // A free-preview $0 is final for its id rather than endpoint-proven,
+        // so it needs no safety filter: `exact_match_free_preview` only
+        // answers `BuiltIn`, which is submission-safe by construction.
+        if let Some(free) = self.exact_match_free_preview(model_id) {
+            return free;
+        }
+        upstream
     }
 
     /// Match `model_id` against the retirement archive of last-known tariffs.
@@ -2959,6 +3040,15 @@ const ROUTING_LABELS: &[&str] = &["auto", "agent_review"];
 /// to tell "this rate is a snapshot of a model upstream no longer carries" from
 /// "LiteLLM says so today".
 pub(super) const ARCHIVE_SOURCE: &str = "Tokscale Archive";
+
+/// Source label reported for a price served from the free-preview table.
+///
+/// Deliberately distinct from the live dataset labels and from the archive:
+/// `tokscale pricing` and the submission diagnostics print this verbatim, and
+/// a reader has to be able to tell "this id was a published $0 preview" from
+/// "LiteLLM says so today" and from "this rate is a snapshot of a model
+/// upstream no longer carries".
+pub(super) const FREE_PREVIEW_SOURCE: &str = "FreePreview";
 
 pub(crate) fn is_routing_label(model_id: &str) -> bool {
     let lower = model_id.trim().to_lowercase();
