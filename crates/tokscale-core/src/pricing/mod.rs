@@ -244,11 +244,16 @@ impl PricingService {
         overrides
     }
 
-    // @keep: a snapshot of last-known published rates for Anthropic models that
-    // upstream will eventually stop carrying. LiteLLM, OpenRouter and models.dev
-    // all describe the CURRENT catalogue: once a provider retires a model those
-    // rows are dropped, and every historical session that used it silently loses
-    // its price. This archive is the only place that memory lives.
+    // @keep: a snapshot of published first-party rates for models no live
+    // dataset carries first-party. LiteLLM, OpenRouter and models.dev all
+    // describe the CURRENT catalogue from resellers as well as vendors: once
+    // a provider retires a model those rows are dropped, and some current
+    // models were never listed first-party at all (only `deepinfra/*`,
+    // `z-ai/*`, `openrouter/*` reseller keys exist). In both cases every
+    // historical session that used the model at the publishing endpoint
+    // silently loses its price without this memory, and a reseller row that
+    // merely shares the model name wins by precedence as an unverified
+    // guess. This archive is the only place that memory lives.
     //
     // Precedence is the same slot as the Cursor/Sakana overrides in
     // PricingLookup - after every upstream exact/normalized/prefix match, before
@@ -256,11 +261,11 @@ impl PricingService {
     // answers, and once upstream drops it the archive answers with that model's
     // own last rate instead of letting fuzzy elect a neighbouring row.
     //
-    // Keys are provider-qualified on purpose. Anthropic bills these rates on its
-    // own API; a request routed through Vertex or Bedrock is a different tariff.
-    // With an `anthropic/` root, an anthropic hint resolves ProviderScoped with
-    // matching provider identity (submission-safe), and a `vertex`/`vertex_ai`
-    // hint is recognised as a cross-provider alias and stays an estimate.
+    // Keys are provider-qualified on purpose. Each vendor bills these rates
+    // on its own API; a request routed through another endpoint is a
+    // different tariff. With a matching root, a same-vendor hint resolves
+    // ProviderScoped with matching provider identity (submission-safe), and
+    // any other hint stays an estimate.
     //
     // Rates verified 2026-09-02 against both live datasets: models.dev keys them
     // exactly as written here, LiteLLM keys them bare (`claude-haiku-4-5`, ...)
@@ -279,7 +284,11 @@ impl PricingService {
     // cost is preserved.
     fn build_archive_overrides() -> HashMap<String, ModelPricing> {
         /// `(model id, input, output, cache read, cache creation)`, per token.
-        type ArchivedRateRow = (&'static str, f64, f64, f64, f64);
+        /// Cache creation is `None` where the vendor publishes no such bucket
+        /// (Zhipu, Xiaomi and Tencent document cached-input reads but no
+        /// cache-write tariff): usage populating that bucket then stays
+        /// unpriced rather than billed at an invented rate.
+        type ArchivedRateRow = (&'static str, f64, f64, f64, Option<f64>);
 
         // Every first-party Claude row the narrowest dataset still carries, so
         // whichever one is retired next already has its last published rate
@@ -290,22 +299,75 @@ impl PricingService {
         // nothing retires the model that is shipping.
         let entries: &[ArchivedRateRow] = &[
             // Claude Haiku 4.5: $1.00/$5.00 per 1M, $0.10 cache read, $1.25 cache write.
-            ("anthropic/claude-haiku-4-5", 1e-6, 5e-6, 1e-7, 1.25e-6),
+            (
+                "anthropic/claude-haiku-4-5",
+                1e-6,
+                5e-6,
+                1e-7,
+                Some(1.25e-6),
+            ),
             // Claude Sonnet 4.5 / 4.6: $3.00/$15.00 per 1M, $0.30 cache read,
             // $3.75 cache write. 4.5 is the oldest Sonnet any of the three
             // still carries.
-            ("anthropic/claude-sonnet-4-5", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
-            ("anthropic/claude-sonnet-4-6", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
+            (
+                "anthropic/claude-sonnet-4-5",
+                3e-6,
+                1.5e-5,
+                3e-7,
+                Some(3.75e-6),
+            ),
+            (
+                "anthropic/claude-sonnet-4-6",
+                3e-6,
+                1.5e-5,
+                3e-7,
+                Some(3.75e-6),
+            ),
             // Claude Opus 4.5 / 4.6 / 4.7 / 4.8: $5.00/$25.00 per 1M, $0.50
             // cache read, $6.25 cache write. 4.5 is the oldest Opus carried by
             // all three, so it is the next one due to fall off -- LiteLLM and
             // OpenRouter still list opus-4 and opus-4-1 (and LiteLLM
             // claude-3-opus), but models.dev has already dropped them, so
             // their rates cannot be cross-checked and they are not archived.
-            ("anthropic/claude-opus-4-5", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-6", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-7", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-8", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
+            (
+                "anthropic/claude-opus-4-5",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-6",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-7",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-8",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            // Zhipu GLM-5.2 / GLM-5.3: $1.40/$4.40 per 1M, $0.26 cached
+            // input, no published cache-write tariff (cached-input storage
+            // is "Limited-time Free"). No live dataset carries a first-party
+            // row -- only the `z-ai/*` reseller keys -- so a `zhipu` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://docs.z.ai/guides/overview/pricing ("Latest Models":
+            // GLM-5.3 and GLM-5.2 at $1.4 in / $0.26 cached / $4.4 out) and
+            // https://bigmodel.cn/pricing (8元 in / 28元 out / 2元
+            // cache-hit per M tokens, flat 1M context, no tiers).
+            ("zhipu/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zhipu/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
         ];
 
         let mut overrides = HashMap::with_capacity(entries.len());
@@ -316,7 +378,7 @@ impl PricingService {
                     input_cost_per_token: Some(*input),
                     output_cost_per_token: Some(*output),
                     cache_read_input_token_cost: Some(*cache_read),
-                    cache_creation_input_token_cost: Some(*cache_creation),
+                    cache_creation_input_token_cost: *cache_creation,
                     ..Default::default()
                 },
             );
@@ -694,6 +756,72 @@ mod tests {
     #[test]
     fn retired_claude_opus_4_8_keeps_its_last_known_price() {
         assert_retired_anthropic_price("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25);
+    }
+
+    /// Zhipu publishes no first-party row to any live dataset -- only the
+    /// `z-ai/*` reseller keys -- so a `zhipu` hint resolved as an unverified
+    /// guess. The archived first-party tariff ($1.40/$4.40 per 1M, $0.26
+    /// cached input, verified 2026-09-03) wins for the publishing endpoint.
+    #[test]
+    fn zhipu_glm_rates_resolve_first_party_over_reseller_row() {
+        fn reseller_row() -> ModelPricing {
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-6),
+                output_cost_per_token: Some(4.4e-6),
+                cache_read_input_token_cost: Some(0.26e-6),
+                ..Default::default()
+            }
+        }
+
+        for model in ["glm-5.2", "glm-5.3"] {
+            let mut openrouter = HashMap::new();
+            openrouter.insert(format!("z-ai/{model}"), reseller_row());
+            let service = PricingService::new(HashMap::new(), openrouter);
+            // No published cache-write tariff, so the covered usage carries
+            // none; cache-write-bearing usage stays unpriced (pinned below).
+            let usage = TokenBreakdown {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 1_000_000,
+                cache_write: 0,
+                reasoning: 0,
+            };
+
+            let resolved = service
+                .resolve_for_usage_with_provider(model, Some("zhipu"), &usage)
+                .unwrap_or_else(|| panic!("{model} must resolve first-party"));
+            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
+            assert_eq!(
+                resolved.matched_key,
+                format!("zhipu/{model}"),
+                "model: {model}"
+            );
+            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
+            assert!(
+                service.covers_usage_with_provider(model, Some("zhipu"), &usage),
+                "model: {model}"
+            );
+            let actual = service.calculate_cost_with_provider(model, Some("zhipu"), &usage);
+            assert!(
+                (actual - 6.06).abs() < 1e-9,
+                "model: {model}, unexpected cost: {actual}"
+            );
+        }
+    }
+
+    /// Zhipu documents cached-input reads but no cache-write tariff, so
+    /// cache-write-bearing usage must stay unpriced rather than billed at an
+    /// invented rate.
+    #[test]
+    fn zhipu_cache_write_usage_stays_unpriced() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+
+        for model in ["glm-5.2", "glm-5.3"] {
+            assert!(
+                !service.covers_usage_with_provider(model, Some("zhipu"), &all_bucket_usage()),
+                "model: {model}"
+            );
+        }
     }
 
     #[test]
