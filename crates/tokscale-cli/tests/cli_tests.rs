@@ -5096,6 +5096,101 @@ fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
     );
 }
 
+/// Stealth preview shorthands (`ox-alpha`, `x-preview-f-free`) resolve to
+/// their canonical upstream $0 rows, so they submit with the priced usage:
+/// no per-row warning, no aggregate line, no fix hint.
+#[test]
+fn test_submit_stealth_preview_shorthands_upload_without_warnings() {
+    let tmp = create_temp_fixture_dir();
+    // Mirror the live models.dev rows (both deprecated $0, no cache-write
+    // bucket). The shorthand ids below only resolve through them.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let priced_payload = format!(
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}}}}}}"#,
+        now
+    );
+    let models_dev_payload = format!(
+        r#"{{"timestamp":{},"data":{{"opencode-go/ox-alpha-free":{{"input_cost_per_token":0.0,"output_cost_per_token":0.0,"cache_read_input_token_cost":0.0}},"opencode/x-preview-f-free":{{"input_cost_per_token":0.0,"output_cost_per_token":0.0,"cache_read_input_token_cost":0.0}}}}}}"#,
+        now
+    );
+    write_canonical_pricing_cache_files(
+        tmp.path(),
+        &priced_payload,
+        &priced_payload,
+        &models_dev_payload,
+    );
+    write_fake_credentials(tmp.path());
+    let preview_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/stealth-preview");
+    fs::create_dir_all(&preview_dir).unwrap();
+    for (file, id, session, provider, model_id) in [
+        (
+            "ox.json",
+            "ox",
+            "stealth-preview-ox",
+            "stealth",
+            "stealth/ox-alpha",
+        ),
+        (
+            "xpreview.json",
+            "xpreview",
+            "stealth-preview-x",
+            "opencode-zen",
+            "x-preview-f-free",
+        ),
+    ] {
+        fs::write(
+            preview_dir.join(file),
+            format!(
+                r#"{{
+            "id": "{id}",
+            "sessionID": "{session}",
+            "role": "assistant",
+            "modelID": "{model_id}",
+            "providerID": "{provider}",
+            "cost": 0,
+            "tokens": {{ "input": 1000, "output": 500, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "shorthand preview usage must submit cleanly; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("unpriced"),
+        "upstream-$0 usage must not warn: {stdout}"
+    );
+    assert!(
+        !stdout.contains("custom-pricing.json"),
+        "no fix hint for priced usage: {stdout}"
+    );
+    assert!(
+        stdout.contains("Total tokens: 6,950"),
+        "both preview models (3,000 tokens) must be counted on top of the 3,950-token stock fixture: {stdout}"
+    );
+}
+
 /// Regression: a cold cache with no network must not look like "no usage".
 ///
 /// Every fetchable upstream is unreachable here and nothing is cached, so the
