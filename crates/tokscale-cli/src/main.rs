@@ -5861,7 +5861,17 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
 fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissionUsage]) {
     use colored::Colorize;
 
-    for row in unpriced {
+    if unpriced.is_empty() {
+        return;
+    }
+
+    // A long proxy-model history fans out to one row per provider/model pair
+    // (dozens in practice), burying the submittable summary. Cap the per-row
+    // detail exactly like `report_excluded_tokenless_rows` and report the
+    // aggregate instead; every row stays visible via `--dry-run` + JSON logs.
+    const MAX_DETAIL_ROWS: usize = 20;
+
+    for row in unpriced.iter().take(MAX_DETAIL_ROWS) {
         println!(
             "{}",
             format!(
@@ -5876,22 +5886,40 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
         );
     }
 
+    if unpriced.len() > MAX_DETAIL_ROWS {
+        println!(
+            "{}",
+            format!("    ... and {} more", unpriced.len() - MAX_DETAIL_ROWS).bright_black()
+        );
+    }
+
+    let total_messages: usize = unpriced.iter().map(|row| row.message_count).sum();
+    let total_tokens: i64 = unpriced.iter().map(|row| row.total_tokens).sum();
+    println!(
+        "{}",
+        format!(
+            "  Unpriced total: {} message(s) ({} tokens) at $0.00 across {} provider/model(s).",
+            total_messages,
+            format_tokens_with_commas(total_tokens),
+            unpriced.len(),
+        )
+        .bright_black()
+    );
+
     // Homebrew-style follow-up: the warnings above name the gap, but nothing
     // told the user the fix is one file away. #1021/#1035 reporters (and the
     // custom-pricing docs added after them) all had to read core sources to
     // discover that an exact-match entry in custom-pricing.json — including
     // explicit 0 rates for free models and routing labels — is the supported fix.
-    if !unpriced.is_empty() {
-        let pricing_path = crate::paths::get_config_dir().join("custom-pricing.json");
-        println!(
-            "{}",
-            format!(
-                "  Hint: unpriced usage is included in token totals with zero cost. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate. Re-check\n          with `tokscale submit --dry-run` and `tokscale pricing <model-id>`, then resubmit\n          to replace the temporary cost floor with a complete total.",
-                pricing_path.display(),
-            )
-            .bright_black()
-        );
-    }
+    let pricing_path = crate::paths::get_config_dir().join("custom-pricing.json");
+    println!(
+        "{}",
+        format!(
+            "  Hint: unpriced usage is included in token totals with zero cost. Add exact-match entries to\n          {}\n          keyed by the model id alone (the `model` half of the `provider/model` above),\n          where an explicit 0 declares a free model or a known routing-label rate. Re-check\n          with `tokscale submit --dry-run` and `tokscale pricing <model-id>`, then resubmit\n          to replace the temporary cost floor with a complete total.",
+            pricing_path.display(),
+        )
+        .bright_black()
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

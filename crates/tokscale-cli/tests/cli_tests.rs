@@ -5096,6 +5096,65 @@ fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
     );
 }
 
+/// Regression: a long proxy-model history fans out to one warning row per
+/// provider/model pair and used to bury the submittable summary. Detail rows
+/// are capped (mirroring the tokenless-row reporter) with an aggregate total.
+#[test]
+fn test_submit_caps_unpriced_warning_rows_and_reports_the_total() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-cap");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..21 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-cap",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 1 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Unpriced total: 21 message(s) (21 tokens) at $0.00 across 21 provider/model(s)."
+        ),
+        "the aggregate must account for every row including capped ones: {stdout}"
+    );
+}
+
 /// Regression: a cold cache with no network must not look like "no usage".
 ///
 /// Every fetchable upstream is unreachable here and nothing is cached, so the
