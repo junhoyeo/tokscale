@@ -2950,9 +2950,9 @@ fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
 }
 
 /// Regression: an unbounded `submit` re-scans every client directory, and the
-/// silent wait used to give no hint of what was being scanned or how to narrow
-/// it. The scope label, elapsed time, and incremental-submit tip are the
-/// observability for that wait; none of them change what gets submitted.
+/// silent wait used to give no hint of what was being scanned or how long it
+/// took. The scope label and the elapsed time are the observability for that
+/// wait; neither changes what gets submitted.
 #[test]
 fn test_submit_reports_scan_scope_and_elapsed() {
     let tmp = create_temp_fixture_dir();
@@ -2971,9 +2971,9 @@ fn test_submit_reports_scan_scope_and_elapsed() {
             "Scanning local session data (1 client, full history)...",
         ))
         .stdout(predicate::str::is_match(r"Scanned in \d+\.\d+s\.").unwrap())
-        .stdout(predicate::str::contains(
-            "Tip: narrow the scan with `--since <date>` and `--client <id>`",
-        ));
+        // The scan is already narrowed to one client, so the tip has nothing
+        // left to suggest.
+        .stdout(predicate::str::contains("Tip:").not());
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_API_TOKEN", "test-token")
@@ -2991,7 +2991,7 @@ fn test_submit_reports_scan_scope_and_elapsed() {
         .stdout(predicate::str::contains(
             "Scanning local session data (1 client, since 2026-01-01)...",
         ))
-        .stdout(predicate::str::contains("Tip: narrow the scan").not());
+        .stdout(predicate::str::contains("Tip:").not());
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_API_TOKEN", "test-token")
@@ -3008,6 +3008,51 @@ fn test_submit_reports_scan_scope_and_elapsed() {
             "Scanning local session data ({} clients, full history)...",
             tokscale_core::ClientId::COUNT
         )));
+}
+
+/// The tip may name `--client` and nothing else.
+///
+/// `--since` does not shorten the scan: the date filters are `retain`
+/// predicates run over already-parsed messages, so the same files are read
+/// either way. It also clears `fullHistory` on the scan scope, and
+/// `planParserHighWaterSubmission` (packages/frontend/src/lib/db/parserHighWater.ts)
+/// freezes a partial snapshot for every client in `SUPPORTED_VERSIONED_PARSERS`
+/// — copilot, droid, antigravity-cli and antigravity. Advertising it as a
+/// speedup costs the user data.
+#[test]
+fn test_submit_tip_recommends_only_the_client_filter() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["--no-spinner", "submit", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Tip: narrow the scan with `--client <id>` for a faster submit.",
+        ))
+        .stdout(predicate::str::is_match(r"Tip:.*--since").unwrap().not());
+}
+
+/// Autosubmit's stdout is the scheduler's log file (`StandardOutPath` in the
+/// launchd plist, the systemd/cron redirect elsewhere), so the tip would be
+/// appended to it on every scheduled run with nobody at a prompt to act on it.
+///
+/// This covers the observable behavior end to end. It does not isolate the mode
+/// gate on its own — `submit_filters` always hands `run_submit_command` a
+/// client list, so the already-narrowed gate would suppress the tip here too.
+/// `client_scope_tip_is_interactive_only` in main.rs is the test that flips
+/// only the mode.
+#[test]
+fn test_autosubmit_run_omits_the_scan_scope_tip() {
+    let tmp = create_temp_fixture_dir();
+    write_settings_json(tmp.path(), r#"{"autosubmit":{"enabled":true}}"#);
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["--no-spinner", "autosubmit", "run", "--force"])
+        .assert()
+        .stdout(predicate::str::contains("Scanning local session data ("))
+        .stdout(predicate::str::contains("Tip:").not());
 }
 
 #[test]
