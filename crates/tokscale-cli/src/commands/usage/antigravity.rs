@@ -568,9 +568,15 @@ mod tests {
     /// Regression for #1264. Both entry points build their own current-thread
     /// runtime, and `block_on` panics with "Cannot start a runtime from within
     /// a runtime" when the calling thread already has a runtime context
-    /// entered -- which the TUI usage refresh does. Neither return value is
-    /// asserted on: whether a language server answers is a property of the
-    /// machine, and the point is that the call returns at all.
+    /// entered -- which the TUI usage refresh does.
+    ///
+    /// Calling them is not the check. Both swallow a worker panic
+    /// (`unwrap_or(false)`, `unwrap_or_else`), so a worker that still panicked
+    /// inside the caller's runtime returns exactly like a working one, and
+    /// neither return value can be asserted on because whether a language
+    /// server answers is a property of the machine. So the isolation itself is
+    /// pinned: work left on the caller's thread sees the entered runtime
+    /// context, and only work moved off that thread does not.
     #[test]
     fn entry_points_tolerate_an_entered_tokio_runtime_context() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -579,6 +585,11 @@ mod tests {
             .unwrap();
 
         rt.block_on(async {
+            assert!(
+                off_caller_runtime(|| tokio::runtime::Handle::try_current().is_err())
+                    .expect("the worker must not panic"),
+                "the work must run off the caller's runtime"
+            );
             let _ = has_credentials();
             let _ = fetch_all();
         });
