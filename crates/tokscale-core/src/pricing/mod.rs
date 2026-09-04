@@ -801,9 +801,9 @@ mod tests {
         }
 
         for model in ["glm-5.2", "glm-5.3"] {
-            let mut openrouter = HashMap::new();
-            openrouter.insert(format!("z-ai/{model}"), reseller_row());
-            let service = PricingService::new(HashMap::new(), openrouter);
+            let mut litellm = HashMap::new();
+            litellm.insert(format!("openrouter/z-ai/{model}"), reseller_row());
+            let service = PricingService::new(litellm, HashMap::new());
             // No published cache-write tariff, so the covered usage carries
             // none; cache-write-bearing usage stays unpriced (pinned below).
             let usage = TokenBreakdown {
@@ -814,19 +814,19 @@ mod tests {
                 reasoning: 0,
             };
 
-            for (provider, test_model) in [
-                (Some("zhipu"), model.to_string()),
-                (None, format!("zhipu/{model}")),
+            for (provider, test_model, expected_key) in [
+                (Some("zhipu"), model.to_string(), format!("zhipu/{model}")),
+                (None, format!("zhipu/{model}"), format!("zhipu/{model}")),
+                (Some("zai"), model.to_string(), format!("zai/{model}")),
+                (None, format!("zai/{model}"), format!("zai/{model}")),
             ] {
                 let resolved = service
                     .resolve_for_usage_with_provider(&test_model, provider, &usage)
                     .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
                 assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
-                assert!(
-                    resolved.matched_key == format!("zhipu/{model}")
-                        || resolved.matched_key == format!("zai/{model}"),
-                    "unexpected matched_key: {}",
-                    resolved.matched_key
+                assert_eq!(
+                    resolved.matched_key, expected_key,
+                    "model: {test_model}, unexpected matched_key"
                 );
                 assert!(
                     resolved.evidence.is_submission_safe(),
@@ -887,22 +887,17 @@ mod tests {
             reasoning: 0,
         };
 
-        for (provider, model_id) in [
-            (Some("xiaomi"), "mimo-v2.5"),
-            (Some("mimo"), "mimo-v2.5"),
-            (None, "xiaomi/mimo-v2.5"),
-            (None, "mimo/mimo-v2.5"),
+        for (provider, model_id, expected_key) in [
+            (Some("xiaomi"), "mimo-v2.5", "xiaomi/mimo-v2.5"),
+            (Some("mimo"), "mimo-v2.5", "mimo/mimo-v2.5"),
+            (None, "xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5"),
+            (None, "mimo/mimo-v2.5", "mimo/mimo-v2.5"),
         ] {
             let resolved = service
                 .resolve_for_usage_with_provider(model_id, provider, &usage)
                 .expect("mimo-v2.5 must resolve first-party");
             assert_eq!(resolved.source, "Tokscale Archive");
-            assert!(
-                resolved.matched_key == "xiaomi/mimo-v2.5"
-                    || resolved.matched_key == "mimo/mimo-v2.5",
-                "unexpected matched key: {}",
-                resolved.matched_key
-            );
+            assert_eq!(resolved.matched_key, expected_key, "unexpected matched key");
             assert!(resolved.evidence.is_submission_safe());
             assert!(service.covers_usage_with_provider(model_id, provider, &usage));
             let actual = service.calculate_cost_with_provider(model_id, provider, &usage);
@@ -961,20 +956,28 @@ mod tests {
         );
 
         for (model, expected_cost) in [("hy3", 0.693), ("hy4-preview", 3.377)] {
-            for (test_model, provider) in [
-                (model.to_string(), Some("tencent")),
-                (format!("tencent/{model}"), None),
+            for (test_model, provider, expected_key) in [
+                (
+                    model.to_string(),
+                    Some("tencent"),
+                    format!("tencent/{model}"),
+                ),
+                (
+                    model.to_string(),
+                    Some("hunyuan"),
+                    format!("hunyuan/{model}"),
+                ),
+                (format!("tencent/{model}"), None, format!("tencent/{model}")),
+                (format!("hunyuan/{model}"), None, format!("hunyuan/{model}")),
             ] {
                 let usage = usage_without_cache_write();
                 let resolved = service
                     .resolve_for_usage_with_provider(&test_model, provider, &usage)
                     .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
                 assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
-                assert!(
-                    resolved.matched_key == format!("tencent/{model}")
-                        || resolved.matched_key == format!("hunyuan/{model}"),
-                    "model: {test_model}, unexpected matched_key: {}",
-                    resolved.matched_key
+                assert_eq!(
+                    resolved.matched_key, expected_key,
+                    "model: {test_model}, unexpected matched_key"
                 );
                 assert!(
                     resolved.evidence.is_submission_safe(),
