@@ -2770,4 +2770,107 @@ mod tests {
         assert!(service.calculate_cost_with_provider("atlas-chat", None, &usage) > 0.0);
         assert!(!service.covers_usage_with_provider("atlas-chat", None, &usage));
     }
+
+    /// Regression: an archived row is one model's own last published tariff,
+    /// not a family price, so the generic suffix stripper must not reach it.
+    ///
+    /// `mimo-v2.5-pro` (the id the MiMo Code fixture records), `glm-5.3-flash`
+    /// and `hy3-instruct` are SKUs no vendor page prices. Peeling the trailing
+    /// segment and answering from the base model's archived row billed them at
+    /// a neighbouring model's rate and -- under that vendor's own hint --
+    /// stamped the result submission-safe, which would publish a made-up
+    /// price. With no dataset row of their own they stay unpriced, exactly as
+    /// they were before the archive carried these vendors.
+    #[test]
+    fn unknown_sku_suffix_never_reaches_the_archive() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        for (model, provider) in [
+            ("mimo-v2.5-pro", Some("xiaomi")),
+            ("mimo-v2.5-pro", Some("mimo")),
+            ("glm-5.2-air", Some("zhipu")),
+            ("glm-5.2-flash", Some("zhipu")),
+            ("glm-5.2-x", Some("zhipu")),
+            ("glm-5.2-thinking", Some("zhipu")),
+            ("glm-5.3-air", Some("zhipu")),
+            ("glm-5.3-flash", Some("zhipu")),
+            ("hy3-instruct", Some("tencent")),
+            ("hy3-instruct", Some("hunyuan")),
+        ] {
+            assert!(
+                service
+                    .resolve_for_usage_with_provider(model, provider, &usage)
+                    .is_none(),
+                "model: {model}, an unknown SKU has no archived rate of its own"
+            );
+            assert!(
+                !service.covers_usage_with_provider(model, provider, &usage),
+                "model: {model}, a suffix-eroded price must never become submission-safe"
+            );
+        }
+
+        // The base SKUs the archive does carry keep resolving: the guard
+        // refuses eroded candidates, not the archive.
+        for (model, provider) in [
+            ("mimo-v2.5", Some("xiaomi")),
+            ("glm-5.2", Some("zhipu")),
+            ("hy3", Some("tencent")),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model, provider, &usage)
+                .unwrap_or_else(|| panic!("{model} must keep its archived price"));
+            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
+            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
+        }
+    }
+
+    /// Regression: the guard declines the ARCHIVE for an eroded candidate, not
+    /// the whole lookup. Filtering the composed result instead threw the live
+    /// row away with it: inside `lookup_auto` the archive substitutes itself
+    /// for an unverified upstream hit, so the marketplace row that prices
+    /// `mimo-v2.5-pro` was already gone by the time the filter saw the source,
+    /// and merely ADDING an archive row dropped every MiMo Code session to $0.
+    #[test]
+    fn suffix_eroded_sku_keeps_its_live_dataset_price() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openrouter/xiaomi/mimo-v2.5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.14e-6),
+                output_cost_per_token: Some(0.28e-6),
+                cache_read_input_token_cost: Some(0.0028e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        // `mimo-v2.5-pro` under a `mimo` hint is verbatim what the MiMo Code
+        // parser records, and the marketplace row is the only live key for it.
+        let resolved = service
+            .resolve_for_usage_with_provider("mimo-v2.5-pro", Some("mimo"), &usage)
+            .expect("the marketplace row must keep pricing the unknown -pro SKU");
+        assert_eq!(resolved.source, "LiteLLM");
+        assert_eq!(resolved.matched_key, "openrouter/xiaomi/mimo-v2.5");
+        assert!(service.calculate_cost_with_provider("mimo-v2.5-pro", Some("mimo"), &usage) > 0.0);
+
+        // The id the archive does carry still takes the first-party tariff.
+        let base = service
+            .resolve_for_usage_with_provider("mimo-v2.5", Some("mimo"), &usage)
+            .expect("mimo-v2.5 must resolve first-party");
+        assert_eq!(base.source, "Tokscale Archive");
+    }
 }
