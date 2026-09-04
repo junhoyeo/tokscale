@@ -130,12 +130,16 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
 ///
 /// Both entry points above drive their own current-thread runtime, and
 /// `block_on` panics with "Cannot start a runtime from within a runtime" when
-/// the calling thread already has a Tokio runtime context entered (#1264) --
-/// the TUI usage refresh does exactly that. A fresh OS thread never carries a
-/// runtime context, so the panic is structurally impossible for every caller,
-/// and the scope joins before returning, which keeps both entry points as
-/// synchronous as they were. `crate::antigravity::https_rpc_request` isolates
-/// its own `block_on` the same way.
+/// the calling thread already has a Tokio runtime context entered (#1264). No
+/// caller does that today -- `tokscale usage` reaches them from a plain sync
+/// `main`, and the TUI usage refresh runs the fetcher on a bare
+/// `std::thread::spawn` -- so this is hardening rather than a live crash path:
+/// a fresh OS thread never carries a runtime context, which keeps the panic
+/// impossible for whatever entry point is added next. The scope joins before
+/// returning, so both entry points stay as synchronous as they were.
+/// `crate::antigravity::https_rpc_request` isolates its own `block_on` the
+/// same way, and that one is reachable today: `discover_port` walks into it
+/// synchronously from inside the runtime `has_credentials` just entered.
 fn off_caller_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> std::thread::Result<T> {
     std::thread::scope(|scope| scope.spawn(work).join())
 }
@@ -568,15 +572,18 @@ mod tests {
     /// Regression for #1264. Both entry points build their own current-thread
     /// runtime, and `block_on` panics with "Cannot start a runtime from within
     /// a runtime" when the calling thread already has a runtime context
-    /// entered -- which the TUI usage refresh does.
+    /// entered. No caller does that today, so what is pinned here is hardening.
     ///
-    /// Calling them is not the check. Both swallow a worker panic
+    /// Calling them is not sufficient on its own. Both swallow a worker panic
     /// (`unwrap_or(false)`, `unwrap_or_else`), so a worker that still panicked
     /// inside the caller's runtime returns exactly like a working one, and
     /// neither return value can be asserted on because whether a language
-    /// server answers is a property of the machine. So the isolation itself is
-    /// pinned: work left on the caller's thread sees the entered runtime
-    /// context, and only work moved off that thread does not.
+    /// server answers is a property of the machine. Hence the assert, which
+    /// pins the isolation itself: work left on the caller's thread sees the
+    /// entered runtime context, and only work moved off that thread does not.
+    /// The two calls still carry the other half -- an entry point that stops
+    /// using the helper panics on them while the assert stays green -- so keep
+    /// both halves.
     #[test]
     fn entry_points_tolerate_an_entered_tokio_runtime_context() {
         let rt = tokio::runtime::Builder::new_current_thread()
