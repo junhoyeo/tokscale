@@ -605,7 +605,12 @@ export async function getPublicProfileResponse(
       }
     }
 
-    // Calculate max tokens for intensity
+    // Calculate max tokens for intensity. Tokens, not cost, because every
+    // embed already shades from tokens -- layoutContributions in
+    // lib/embed/embedShared.ts, getUserEmbedStats and renderIsometric3DSvg all
+    // recompute intensity from totalTokens -- so a cost-scaled profile graph
+    // shaded the same account differently from its own embeds, and a day whose
+    // client reports no pricing read as blank.
     const contributions = Array.from(aggregatedDaily.values());
     const scopedContributions = contributions.filter(
       ({ date }) => date >= chartRange.start && date <= chartRange.end,

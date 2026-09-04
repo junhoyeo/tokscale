@@ -45,6 +45,12 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
  * Parsers whose lifetime total is stable across re-attribution. A full
  * snapshot that covers the credited aggregate may replace stored days so the
  * web graph matches the TUI without the per-day merge guard inflating totals.
+ *
+ * Replacing is destructive by design: a day the snapshot no longer dates loses
+ * its cell. So local history the user deleted is erased too, as long as the
+ * remaining growth still covers the credited aggregate. Below that cover the
+ * snapshot cannot replace anything and the bounded-growth plan applies, which
+ * keeps every stored row.
  */
 const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
 
@@ -671,6 +677,12 @@ function validState(
  * with uncredited capacity receives the bounded remainder. Only increments
  * actually written advance the credited ledger, so growth cannot be lost.
  * Date/model reshuffles and deleted local history never erase stored rows.
+ *
+ * SNAPSHOT_LAYOUT_CLIENTS are the deliberate exception to both absolutes
+ * above: once a full snapshot's aggregate covers the credited one, the stored
+ * layout is replaced outright so the web graph matches the TUI, which also
+ * drops the cells of days the snapshot no longer dates. A snapshot that does
+ * not cover it falls back to the bounded-growth plan and keeps every row.
  */
 export function planParserHighWaterSubmission(args: {
   client: string;
@@ -722,6 +734,9 @@ export function planParserHighWaterSubmission(args: {
     const hasLegacy =
       legacyAggregate.tokens > 0 || legacyAggregate.messages > 0;
     if (hasLegacy) {
+      // Tried before the preserving transition below, so a snapshot-layout
+      // client adopts the snapshot's own dating instead of preserving legacy
+      // rows. Everything after this point is the fallback for the rest.
       const followed = replaceLayoutPlan({
         client: args.client,
         version: args.incomingVersion,
