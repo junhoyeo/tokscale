@@ -368,6 +368,8 @@ impl PricingService {
             // cache-hit per M tokens, flat 1M context, no tiers).
             ("zhipu/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
             ("zhipu/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zai/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zai/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
             // Xiaomi MiMo-V2.5: $0.14/$0.28 per 1M, $0.0028 cached input,
             // no published cache-write tariff (only cache-hit vs cache-miss
             // input). No live dataset carries a first-party row -- only the
@@ -377,6 +379,7 @@ impl PricingService {
             // cache-hit / $0.14 cache-miss input / $0.28 output per MTok,
             // flat to 1M context since the 2026-05-27 permanent cut).
             ("xiaomi/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
+            ("mimo/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
             // Tencent Hunyuan HY3: $0.132/$0.528 per 1M, $0.033 cache-hit;
             // HY4-Preview: $0.834/$2.501 per 1M, $0.042 cache-hit. Neither
             // publishes a separate cache-write tariff. No live dataset
@@ -390,6 +393,8 @@ impl PricingService {
             // (USD numbers archived here, matching the datasets' currency).
             ("tencent/hy3", 0.132e-6, 0.528e-6, 0.033e-6, None),
             ("tencent/hy4-preview", 0.834e-6, 2.501e-6, 0.042e-6, None),
+            ("hunyuan/hy3", 0.132e-6, 0.528e-6, 0.033e-6, None),
+            ("hunyuan/hy4-preview", 0.834e-6, 2.501e-6, 0.042e-6, None),
         ];
 
         let mut overrides = HashMap::with_capacity(entries.len());
@@ -809,25 +814,34 @@ mod tests {
                 reasoning: 0,
             };
 
-            let resolved = service
-                .resolve_for_usage_with_provider(model, Some("zhipu"), &usage)
-                .unwrap_or_else(|| panic!("{model} must resolve first-party"));
-            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
-            assert_eq!(
-                resolved.matched_key,
-                format!("zhipu/{model}"),
-                "model: {model}"
-            );
-            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
-            assert!(
-                service.covers_usage_with_provider(model, Some("zhipu"), &usage),
-                "model: {model}"
-            );
-            let actual = service.calculate_cost_with_provider(model, Some("zhipu"), &usage);
-            assert!(
-                (actual - 6.06).abs() < 1e-9,
-                "model: {model}, unexpected cost: {actual}"
-            );
+            for (provider, test_model) in [
+                (Some("zhipu"), model.to_string()),
+                (None, format!("zhipu/{model}")),
+            ] {
+                let resolved = service
+                    .resolve_for_usage_with_provider(&test_model, provider, &usage)
+                    .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
+                assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
+                assert!(
+                    resolved.matched_key == format!("zhipu/{model}")
+                        || resolved.matched_key == format!("zai/{model}"),
+                    "unexpected matched_key: {}",
+                    resolved.matched_key
+                );
+                assert!(
+                    resolved.evidence.is_submission_safe(),
+                    "model: {test_model}"
+                );
+                assert!(
+                    service.covers_usage_with_provider(&test_model, provider, &usage),
+                    "model: {test_model}"
+                );
+                let actual = service.calculate_cost_with_provider(&test_model, provider, &usage);
+                assert!(
+                    (actual - 6.06).abs() < 1e-9,
+                    "model: {test_model}, unexpected cost: {actual}"
+                );
+            }
         }
     }
 
@@ -873,19 +887,31 @@ mod tests {
             reasoning: 0,
         };
 
-        let resolved = service
-            .resolve_for_usage_with_provider("mimo-v2.5", Some("xiaomi"), &usage)
-            .expect("mimo-v2.5 must resolve first-party");
-        assert_eq!(resolved.source, "Tokscale Archive");
-        assert_eq!(resolved.matched_key, "xiaomi/mimo-v2.5");
-        assert!(resolved.evidence.is_submission_safe());
-        assert!(service.covers_usage_with_provider("mimo-v2.5", Some("xiaomi"), &usage));
-        let actual = service.calculate_cost_with_provider("mimo-v2.5", Some("xiaomi"), &usage);
-        assert!((actual - 0.4228).abs() < 1e-9, "unexpected cost: {actual}");
-        assert!(
-            !service.covers_usage_with_provider("mimo-v2.5", Some("xiaomi"), &all_bucket_usage()),
-            "cache-write-bearing usage must stay unpriced: no published tariff"
-        );
+        for (provider, model_id) in [
+            (Some("xiaomi"), "mimo-v2.5"),
+            (Some("mimo"), "mimo-v2.5"),
+            (None, "xiaomi/mimo-v2.5"),
+            (None, "mimo/mimo-v2.5"),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model_id, provider, &usage)
+                .expect("mimo-v2.5 must resolve first-party");
+            assert_eq!(resolved.source, "Tokscale Archive");
+            assert!(
+                resolved.matched_key == "xiaomi/mimo-v2.5"
+                    || resolved.matched_key == "mimo/mimo-v2.5",
+                "unexpected matched key: {}",
+                resolved.matched_key
+            );
+            assert!(resolved.evidence.is_submission_safe());
+            assert!(service.covers_usage_with_provider(model_id, provider, &usage));
+            let actual = service.calculate_cost_with_provider(model_id, provider, &usage);
+            assert!((actual - 0.4228).abs() < 1e-9, "unexpected cost: {actual}");
+            assert!(
+                !service.covers_usage_with_provider(model_id, provider, &all_bucket_usage()),
+                "cache-write-bearing usage must stay unpriced: no published tariff"
+            );
+        }
     }
 
     /// Tencent publishes no first-party row to any live dataset -- only
@@ -934,30 +960,40 @@ mod tests {
             models_dev,
         );
 
-        for (model, expected_key, expected_cost) in [
-            ("hy3", "tencent/hy3", 0.693),
-            ("hy4-preview", "tencent/hy4-preview", 3.377),
-        ] {
-            let usage = usage_without_cache_write();
-            let resolved = service
-                .resolve_for_usage_with_provider(model, Some("tencent"), &usage)
-                .unwrap_or_else(|| panic!("{model} must resolve first-party"));
-            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
-            assert_eq!(resolved.matched_key, expected_key, "model: {model}");
-            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
-            assert!(
-                service.covers_usage_with_provider(model, Some("tencent"), &usage),
-                "model: {model}"
-            );
-            let actual = service.calculate_cost_with_provider(model, Some("tencent"), &usage);
-            assert!(
-                (actual - expected_cost).abs() < 1e-9,
-                "model: {model}, unexpected cost: {actual}"
-            );
-            assert!(
-                !service.covers_usage_with_provider(model, Some("tencent"), &all_bucket_usage()),
-                "model: {model}, cache-write-bearing usage must stay unpriced"
-            );
+        for (model, expected_cost) in [("hy3", 0.693), ("hy4-preview", 3.377)] {
+            for (test_model, provider) in [
+                (model.to_string(), Some("tencent")),
+                (format!("tencent/{model}"), None),
+            ] {
+                let usage = usage_without_cache_write();
+                let resolved = service
+                    .resolve_for_usage_with_provider(&test_model, provider, &usage)
+                    .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
+                assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
+                assert!(
+                    resolved.matched_key == format!("tencent/{model}")
+                        || resolved.matched_key == format!("hunyuan/{model}"),
+                    "model: {test_model}, unexpected matched_key: {}",
+                    resolved.matched_key
+                );
+                assert!(
+                    resolved.evidence.is_submission_safe(),
+                    "model: {test_model}"
+                );
+                assert!(
+                    service.covers_usage_with_provider(&test_model, provider, &usage),
+                    "model: {test_model}"
+                );
+                let actual = service.calculate_cost_with_provider(&test_model, provider, &usage);
+                assert!(
+                    (actual - expected_cost).abs() < 1e-9,
+                    "model: {test_model}, unexpected cost: {actual}"
+                );
+                assert!(
+                    !service.covers_usage_with_provider(&test_model, provider, &all_bucket_usage()),
+                    "model: {test_model}, cache-write-bearing usage must stay unpriced"
+                );
+            }
         }
     }
 

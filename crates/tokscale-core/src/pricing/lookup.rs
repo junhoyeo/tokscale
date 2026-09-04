@@ -856,15 +856,27 @@ impl PricingLookup {
                     self.exact_match_models_dev_for_provider(stripped, provider_id),
                     provider_id,
                 ) {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                    ));
                 }
                 if let Some(result) = self.exact_or_normalized_litellm(stripped, provider_id) {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                    ));
                 }
                 if let Some(result) =
                     self.exact_match_models_dev_with_provider(stripped, provider_id)
                 {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                    ));
                 }
             }
         }
@@ -1545,7 +1557,12 @@ impl PricingLookup {
         // the hint to name the key's publishing endpoint, so a verbatim
         // match can never elect a neighbouring model.
         let lower = model_id.trim().to_ascii_lowercase();
-        let canonical = normalize_model_name(&lower).unwrap_or_else(|| lower.clone());
+        let stripped = lower
+            .split_once('/')
+            .map_or(lower.as_str(), |(_, model)| model);
+        let canonical = normalize_model_name(&lower)
+            .or_else(|| normalize_model_name(stripped))
+            .unwrap_or_else(|| stripped.to_string());
 
         // The id's own leading segment authorises the tariff exactly as a hint
         // does, so `anthropic/claude-opus-4-8` resolves provider-scoped with no
