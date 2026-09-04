@@ -5155,6 +5155,156 @@ fn test_submit_caps_unpriced_warning_rows_and_reports_the_total() {
     );
 }
 
+/// Regression: the hint tells the user to add custom pricing keyed by the ids
+/// printed above it, so an id the cap swallows is an unfixable gap. Nothing
+/// else surfaces the rows — `unpriced_submission_usage` is `#[serde(skip)]`
+/// and `--dry-run` runs the same reporter — so the capped tail must still be
+/// listed by id.
+#[test]
+fn test_submit_names_the_unpriced_models_past_the_detail_cap() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-tail");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..22 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-tail",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 2 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+    // Equal tokens and message counts, so the provider/model tiebreak decides:
+    // `...-20` and `...-21` are the two rows that fall past the cap.
+    assert!(
+        stdout.contains("unknown-provider-20/genuinely-unpriced-model-20"),
+        "a capped row must still be nameable for custom-pricing: {stdout}"
+    );
+    assert!(
+        stdout.contains("unknown-provider-21/genuinely-unpriced-model-21"),
+        "a capped row must still be nameable for custom-pricing: {stdout}"
+    );
+}
+
+/// Regression: the cap used to keep the alphabetically first rows, which hid
+/// the heaviest usage behind a provider id starting with `z`. The ids the hint
+/// asks the user to price must be the ones pricing recovers the most tokens
+/// for.
+#[test]
+fn test_submit_orders_unpriced_warning_rows_by_token_impact() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-rank");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..20 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-rank",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+    // Sorts last by provider id, so the old alphabetical order pushed the
+    // single row worth pricing past the 20-row cap.
+    fs::write(
+        unpriced_dir.join("unpriced-heavy.json"),
+        r#"{
+            "id": "unpriced-heavy",
+            "sessionID": "unpriced-rank",
+            "role": "assistant",
+            "modelID": "zz-heavy-unpriced-model",
+            "providerID": "zz-provider",
+            "cost": 0,
+            "tokens": { "input": 999, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let heaviest =
+        "submitting 1 unpriced zz_provider/zz-heavy-unpriced-model message(s) (999 tokens)";
+    let lightest = "submitting 1 unpriced unknown-provider-00/genuinely-unpriced-model-00";
+    let heaviest_at = stdout
+        .find(heaviest)
+        .unwrap_or_else(|| panic!("the heaviest row must get a detail line: {stdout}"));
+    let lightest_at = stdout
+        .find(lightest)
+        .unwrap_or_else(|| panic!("the lighter rows must still be listed: {stdout}"));
+    assert!(
+        heaviest_at < lightest_at,
+        "detail rows must be ordered by token impact, heaviest first: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Unpriced total: 21 message(s) (1,019 tokens) at $0.00 across 21 provider/model(s)."
+        ),
+        "the aggregate must still cover every row: {stdout}"
+    );
+}
+
 /// Regression: a cold cache with no network must not look like "no usage".
 ///
 /// Every fetchable upstream is unreachable here and nothing is cached, so the

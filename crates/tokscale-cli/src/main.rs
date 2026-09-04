@@ -5868,10 +5868,27 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
     // A long proxy-model history fans out to one row per provider/model pair
     // (dozens in practice), burying the submittable summary. Cap the per-row
     // detail exactly like `report_excluded_tokenless_rows` and report the
-    // aggregate instead; every row stays visible via `--dry-run` + JSON logs.
+    // aggregate instead. This print is the only place the rows surface at all:
+    // `GraphResult::unpriced_submission_usage` is `#[serde(skip)]` and never
+    // reaches a payload, and `--dry-run` runs this same reporter — so the
+    // capped rows are still named by id below rather than dropped.
     const MAX_DETAIL_ROWS: usize = 20;
 
-    for row in unpriced.iter().take(MAX_DETAIL_ROWS) {
+    // Core keys these rows by `(provider, model)`, which hands the cap the
+    // alphabetically first rows rather than the ones worth pricing. The hint
+    // below asks the user to price the ids printed here, so rank by what
+    // pricing them recovers: tokens first (every row is $0.00 by definition,
+    // so cost cannot rank them), then message count, with the provider/model
+    // key as the tiebreak to keep the output deterministic.
+    let mut ranked: Vec<&tokscale_core::UnpricedSubmissionUsage> = unpriced.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.total_tokens
+            .cmp(&a.total_tokens)
+            .then_with(|| b.message_count.cmp(&a.message_count))
+            .then_with(|| (&a.provider_id, &a.model_id).cmp(&(&b.provider_id, &b.model_id)))
+    });
+
+    for row in ranked.iter().take(MAX_DETAIL_ROWS) {
         println!(
             "{}",
             format!(
@@ -5886,10 +5903,23 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
         );
     }
 
-    if unpriced.len() > MAX_DETAIL_ROWS {
+    // Name the capped rows even though their prose is dropped: the hint tells
+    // the user to add pricing keyed by the ids printed above, so an id that
+    // never prints is an unfixable gap.
+    if ranked.len() > MAX_DETAIL_ROWS {
+        let rest = ranked[MAX_DETAIL_ROWS..]
+            .iter()
+            .map(|row| format!("{}/{}", row.provider_id, row.model_id))
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
             "{}",
-            format!("    ... and {} more", unpriced.len() - MAX_DETAIL_ROWS).bright_black()
+            format!(
+                "    ... and {} more at $0.00: {}",
+                ranked.len() - MAX_DETAIL_ROWS,
+                rest
+            )
+            .bright_black()
         );
     }
 
