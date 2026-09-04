@@ -4104,9 +4104,18 @@ mod tests {
             .block_on(async { https_rpc_request(&connection, "GetUsage", &serde_json::json!({})) })
             .unwrap_err();
 
-        assert!(
-            !error.to_string().contains("runtime"),
-            "nested-runtime panic must be gone, got: {error:#}"
+        // Asserting only the absence of "runtime" would also be satisfied by
+        // the panic-catch path above, whose message ("worker thread panicked")
+        // does not contain the word either -- a swallowed panic would keep this
+        // test green. Pinning the connection error the request actually
+        // produces means only the fixed path can pass.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "error sending request for url (https://127.0.0.1:{port}\
+                 /exa.language_server_pb.LanguageServerService/GetUsage)"
+            ),
+            "the request must reach the closed port and fail there, got: {error:#}"
         );
     }
 

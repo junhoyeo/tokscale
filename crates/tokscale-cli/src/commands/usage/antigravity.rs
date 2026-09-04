@@ -92,32 +92,52 @@ struct QuotaBucket {
 /// card on screen. The probe is a loopback request against a port read out of
 /// the CLI log, so it costs a few milliseconds.
 pub fn has_credentials() -> bool {
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return false;
-    };
-    rt.block_on(async { discover_port().await.is_some() })
+    off_caller_runtime(|| {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return false;
+        };
+        rt.block_on(async { discover_port().await.is_some() })
+    })
+    .unwrap_or(false)
 }
 
 pub fn fetch_all() -> Result<Vec<UsageOutput>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    off_caller_runtime(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
 
-    rt.block_on(async {
-        let port = discover_port()
-            .await
-            .context("Antigravity language server is not running")?;
-        let summary = call_rpc(port).await?;
+        rt.block_on(async {
+            let port = discover_port()
+                .await
+                .context("Antigravity language server is not running")?;
+            let summary = call_rpc(port).await?;
 
-        if summary.groups.is_empty() {
-            anyhow::bail!("Antigravity is running but not signed in");
-        }
+            if summary.groups.is_empty() {
+                anyhow::bail!("Antigravity is running but not signed in");
+            }
 
-        Ok(summary.groups.into_iter().map(output_for_group).collect())
+            Ok(summary.groups.into_iter().map(output_for_group).collect())
+        })
     })
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("Antigravity usage worker thread panicked")))
+}
+
+/// Run `work` on a dedicated OS thread, off whatever runtime the caller is on.
+///
+/// Both entry points above drive their own current-thread runtime, and
+/// `block_on` panics with "Cannot start a runtime from within a runtime" when
+/// the calling thread already has a Tokio runtime context entered (#1264) --
+/// the TUI usage refresh does exactly that. A fresh OS thread never carries a
+/// runtime context, so the panic is structurally impossible for every caller,
+/// and the scope joins before returning, which keeps both entry points as
+/// synchronous as they were. `crate::antigravity::https_rpc_request` isolates
+/// its own `block_on` the same way.
+fn off_caller_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> std::thread::Result<T> {
+    std::thread::scope(|scope| scope.spawn(work).join())
 }
 
 fn output_for_group(group: QuotaGroup) -> UsageOutput {
@@ -543,6 +563,25 @@ mod tests {
             third_party.account.as_ref().unwrap().id,
             "claude-and-gpt-models"
         );
+    }
+
+    /// Regression for #1264. Both entry points build their own current-thread
+    /// runtime, and `block_on` panics with "Cannot start a runtime from within
+    /// a runtime" when the calling thread already has a runtime context
+    /// entered -- which the TUI usage refresh does. Neither return value is
+    /// asserted on: whether a language server answers is a property of the
+    /// machine, and the point is that the call returns at all.
+    #[test]
+    fn entry_points_tolerate_an_entered_tokio_runtime_context() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let _ = has_credentials();
+            let _ = fetch_all();
+        });
     }
 
     #[test]
