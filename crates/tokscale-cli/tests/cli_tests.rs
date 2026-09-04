@@ -3042,17 +3042,36 @@ fn test_submit_tip_recommends_only_the_client_filter() {
 /// client list, so the already-narrowed gate would suppress the tip here too.
 /// `client_scope_tip_is_interactive_only` in main.rs is the test that flips
 /// only the mode.
+///
+/// The home is deliberately empty of session data, and that is load-bearing.
+/// `autosubmit run` is the one submit path in this file that is not a dry run
+/// (`run_submit_command(.., dry_run = false, ..)` at the `AutosubmitRunDecision`
+/// call site), so any usage at all carries it past the `total_tokens == 0`
+/// short-circuit and into a real `POST {api}/api/submit` with
+/// `Authorization: Bearer test-token`. With `create_temp_fixture_dir` here the
+/// run reached "Submitting to server..." and only the loopback proxies in
+/// `cmd_with_home` stopped the request leaving the machine — a guard that lives
+/// in the harness, not in this test. An empty home ends the run at "No usage
+/// data found to submit." instead, which is what the last assertion pins, and
+/// the scope line and the tip gate are observable either way.
+///
+/// `prime_pricing_cache` is still needed: the pricing load runs before the
+/// usage check and ignores `TOKSCALE_PRICING_CACHE_ONLY`.
 #[test]
 fn test_autosubmit_run_omits_the_scan_scope_tip() {
-    let tmp = create_temp_fixture_dir();
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
     write_settings_json(tmp.path(), r#"{"autosubmit":{"enabled":true}}"#);
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_API_TOKEN", "test-token")
         .args(["--no-spinner", "autosubmit", "run", "--force"])
         .assert()
+        .success()
         .stdout(predicate::str::contains("Scanning local session data ("))
-        .stdout(predicate::str::contains("Tip:").not());
+        .stdout(predicate::str::is_match(r"Scanned in \d+\.\d+s\.").unwrap())
+        .stdout(predicate::str::contains("Tip:").not())
+        .stdout(predicate::str::contains("No usage data found to submit."));
 }
 
 #[test]
