@@ -107,6 +107,7 @@ function applyReplaceLayouts(
   }
 }
 
+/** Returns the dates added here, i.e. the ones the submission never covered. */
 function expandDaysForReplaceLayouts(
   daysToProcess: Map<string, SubmissionData["contributions"][number]>,
   parserPlans: Map<string, ParserHighWaterPlan>,
@@ -114,12 +115,14 @@ function expandDaysForReplaceLayouts(
     date: string;
     sourceBreakdown: unknown;
   }>
-): void {
+): Set<string> {
+  const layoutOnlyDates = new Set<string>();
   for (const [client, plan] of parserPlans) {
     if (!isReplacePlan(plan) || !plan.layoutDays) continue;
     for (const date of Object.keys(plan.layoutDays)) {
       if (!daysToProcess.has(date)) {
         daysToProcess.set(date, emptyLayoutDay(date));
+        layoutOnlyDates.add(date);
       }
     }
     for (const existing of existingDeviceDays) {
@@ -133,9 +136,11 @@ function expandDaysForReplaceLayouts(
         !daysToProcess.has(existing.date)
       ) {
         daysToProcess.set(existing.date, emptyLayoutDay(existing.date));
+        layoutOnlyDates.add(existing.date);
       }
     }
   }
+  return layoutOnlyDates;
 }
 
 function mergeModelBreakdowns(
@@ -859,7 +864,7 @@ export async function POST(request: Request) {
       const daysToProcess = new Map(
         data.contributions.map((day) => [day.date, day] as const)
       );
-      expandDaysForReplaceLayouts(
+      const layoutOnlyDates = expandDaysForReplaceLayouts(
         daysToProcess,
         parserPlans,
         existingDeviceDays
@@ -935,6 +940,11 @@ export async function POST(request: Request) {
         }
 
         const clientsToMerge = new Set(submittedClients);
+        // A day the submission never covered is in the write set only so a
+        // replace layout can empty its own cell there. The other clients were
+        // not resubmitted for that day at all, so their stored cells did not
+        // disappear -- merging them would preserve them with a false warning.
+        if (layoutOnlyDates.has(incomingDay.date)) clientsToMerge.clear();
         for (const [client, plan] of parserPlans) {
           if (plan.mode === "replace") {
             clientsToMerge.delete(client);
@@ -1225,8 +1235,15 @@ export async function POST(request: Request) {
           totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(14,4))), 0)::text`,
           inputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.inputTokens}), 0), 9223372036854775807)::bigint`,
           outputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.outputTokens}), 0), 9223372036854775807)::bigint`,
-          dateStart: sql<string>`MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
-          dateEnd: sql<string>`MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
+          // The filter keeps an emptied day from stretching the reported range,
+          // but it returns NULL when NO row in scope has tokens -- and
+          // date_start/date_end are NOT NULL, so STEP 3e would abort the whole
+          // submit. A user whose entire stored history is legacy tokenless
+          // Cursor rows is exactly that shape and is explicitly valid. Fall
+          // back to the unfiltered bounds the earlier producers of these
+          // columns used (migrations 0015/0016).
+          dateStart: sql<string>`COALESCE(MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MIN(${dailyBreakdown.date}))`,
+          dateEnd: sql<string>`COALESCE(MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MAX(${dailyBreakdown.date}))`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,
