@@ -57,7 +57,7 @@
 |------|----------|---------------|
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+、`opencode-stable.db` など全チャンネル対応) または `~/.local/share/opencode/storage/message/` |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` および `~/.claude/transcripts/` |
-| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ レガシー: `.clawdbot`, `.moltbot`, `.moldbot`) |
+| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + レガシー: `.clawdbot`, `.moltbot`, `.moldbot`) |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` および `~/.prime/agent/session-artifacts/`（RLM 子セッション） |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex 経由で追跡 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
@@ -1733,9 +1733,13 @@ Augment Code / Auggie CLI はチャットセッションごとに 1 つの JSON 
 
 ### OpenClaw
 
-場所: `~/.openclaw/agents/*/sessions/sessions.json`（レガシーパスもスキャン: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`）
+場所: `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`（現行の OpenClaw）および `~/.openclaw/agents/<agentId>/sessions/*.jsonl*`（レガシーのトランスクリプト、公開済みアーカイブ、`*.jsonl.pre-doctor-*.bak` などの doctor バックアップ。レガシーパスもスキャン: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`）
 
-JSONLセッションファイルを指すインデックスファイル:
+現行の OpenClaw（2026.x）はライブトランスクリプトをエージェントごとの SQLite データベースに保存します。Tokscale は各エージェントデータベースを読み取り専用で開き（Gateway 実行中の WAL モードでも安全）、`transcript_events` テーブルを読み、`usage` ブロックを持つ assistant イベントを集計し（モデル出力ではない OpenClaw 自身の記録用行、例: `delivery-mirror` は除外）、イベント自身に model/provider が無い場合は `session_windows` の値にフォールバックします。OpenClaw が Codex app-server ハーネスで実行したターンは、トランスクリプトには最後の model response の usage を持つ最終 assistant メッセージしかミラーされません。そのため Tokscale は OpenClaw が `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（既定のエージェント別 `CODEX_HOME`）に残す Codex rollout も読み、その中のすべての response をミラー先の OpenClaw セッションの下で `openclaw` に帰属させ、該当 thread のミラー行は除外します。OpenClaw がユーザーの Codex ホームを共有する設定（`appServer.homeScope: "user"` または supervision branch）で `~/.codex/sessions` に作られる rollout には `originator: "openclaw"` が記録され、Codex クライアントではなく同じ方法で `openclaw` に帰属します。Codex クライアントがすでに集計している thread（supervision でユーザー自身の Codex ホームから resume したもの）は `codex` のまま、そのミラー行は除外されるため二重集計にはなりません。rollout がどこにも見つからないミラー行はそのまま残ります。`/fork` が新しいセッション id で複製したトランスクリプトと、`openclaw doctor --fix` が SQLite に取り込んだレガシー JSONL は 1 回だけ集計されます。
+
+レガシーインストールはセッションごとに 1 つの JSONL ファイル（`sessions.json` でインデックス）を書き出し、`openclaw doctor --fix` はそれらを SQLite に取り込みつつ元ファイルを残します。両ストアで assistant イベントは自身のイベント id・timestamp・トークン数で識別されるため、JSONL としても残っている移行済みトランスクリプトは 1 回だけ集計されます。
+
+JSONLセッションファイルを指すレガシーのインデックスファイル:
 ```json
 {
   "agent:main:main": {

@@ -1074,7 +1074,12 @@ fn parser_version(client: ClientId) -> u32 {
         // carried in both. Without this bump an existing cache keeps replaying
         // pre-split rows, and those sessions stay double-priced while looking
         // fixed.
-        ClientId::Codex => 7,
+        // v7->v8: rollouts whose `session_meta.originator` is OpenClaw now
+        // leave the parser tagged `client = "openclaw"` and keyed by the Codex
+        // thread id, so the openclaw lane can own them. A v7 entry for such a
+        // file holds them tagged `codex` and would keep counting them there,
+        // beside OpenClaw's own rows.
+        ClientId::Codex => 8,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -1177,6 +1182,13 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
+        // v1->v2: OpenClaw messages now carry the stable dedup key
+        // `openclaw:<session>:<event id>` that lets a transcript migrated into
+        // the per-agent SQLite store collapse against its retained legacy
+        // JSONL copy. v1 entries have no key, so a warm JSONL entry would count
+        // beside the SQLite rows for the same events. `reasoningTokens` is
+        // also split out of `output` now.
+        ClientId::OpenClaw => 2,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past
         // those records instead of truncating and misaligning message indices.
@@ -3296,9 +3308,10 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
-        // bucket. The bump is what stops an existing cache from replaying
-        // pre-split rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 7);
+        // bucket, and v7->v8 retags rollouts OpenClaw originated as openclaw.
+        // Each bump is what stops an existing cache from replaying the old
+        // rows, so it has to be asserted rather than assumed.
+        assert_eq!(parser_version(ClientId::Codex), 8);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -3332,6 +3345,11 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v3_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    #[test]
+    fn test_openclaw_parser_version_invalidates_keyless_v1_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 2);
     }
 
     #[test]

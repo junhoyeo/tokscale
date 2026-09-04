@@ -35,6 +35,10 @@ pub struct CodexEntry {
 pub struct CodexPayload {
     pub id: Option<String>,
     pub forked_from_id: Option<String>,
+    /// `session_meta` only: the client that created the thread. Codex
+    /// app-server stamps it from the `initialize` request's `clientInfo.name`,
+    /// so a thread OpenClaw drove carries `"openclaw"` here.
+    pub originator: Option<String>,
     #[serde(rename = "type")]
     pub payload_type: Option<String>,
     pub model: Option<String>,
@@ -259,6 +263,49 @@ pub(crate) struct CodexParseState {
     /// it across incremental re-parses.
     #[serde(default)]
     pub forked_child_is_user_fork: bool,
+    /// Set when `session_meta.originator` names OpenClaw: this rollout records
+    /// turns OpenClaw drove through Codex app-server, so its usage belongs to
+    /// the `openclaw` client. Messages are emitted with `client = "openclaw"`
+    /// and the Codex thread id as their session id; the codex lane hands them
+    /// to the openclaw lane, which replaces OpenClaw's own last-response-only
+    /// mirror of those turns with them. `#[serde(default)]` keeps the decision
+    /// across incremental re-parses of appended chunks.
+    #[serde(default)]
+    pub session_owned_by_openclaw: bool,
+}
+
+/// Client id the `codex` parser tags rollouts OpenClaw drove with.
+pub(crate) const OPENCLAW_CLIENT_ID: &str = "openclaw";
+
+/// Codex thread id from a rollout filename, `rollout-<timestamp>-<uuid>.jsonl`.
+///
+/// Used where a rollout's ownership comes from its location rather than its
+/// `session_meta.originator`, so the parser did not already put the thread id
+/// on its messages. Returns `None` for any other spelling rather than guessing.
+pub(crate) fn thread_id_from_rollout_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let stem = stem.strip_prefix("rollout-")?;
+    // `2026-08-30T10-00-00-` is 20 chars; everything after is the thread id.
+    let candidate = stem.get(20..)?;
+    let is_uuid = candidate.len() == 36
+        && candidate
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            });
+    is_uuid.then(|| candidate.to_string())
+}
+
+/// True when a `session_meta.originator` identifies OpenClaw as the client
+/// that drove the thread. OpenClaw sends `clientInfo.name: "openclaw"` on the
+/// app-server handshake; the comparison ignores case so a capitalized
+/// product name (`"OpenClaw"`) matches too.
+fn codex_originator_is_openclaw(originator: Option<&str>) -> bool {
+    originator
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("openclaw"))
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +390,11 @@ fn parse_codex_reader<R: BufRead>(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
             if let Some(payload) = entry.payload {
+                if entry.entry_type == "session_meta"
+                    && codex_originator_is_openclaw(payload.originator.as_deref())
+                {
+                    state.session_owned_by_openclaw = true;
+                }
                 let payload_model = extract_model(&payload);
                 let is_token_count = entry.entry_type == "event_msg"
                     && payload.payload_type.as_deref() == Some("token_count");
@@ -631,11 +683,23 @@ fn parse_codex_reader<R: BufRead>(
                         .or_else(|| model.as_deref().and_then(inferred_provider_from_model))
                         .unwrap_or("openai");
 
+                    // A rollout OpenClaw drove is OpenClaw's usage: tag it so
+                    // and key it by the Codex thread id, which is what
+                    // OpenClaw's transcript mirror names when it refers back
+                    // to this thread.
+                    let (client, message_session_id) = if state.session_owned_by_openclaw {
+                        (
+                            OPENCLAW_CLIENT_ID,
+                            state.session_id_from_meta.as_deref().unwrap_or(session_id),
+                        )
+                    } else {
+                        ("codex", session_id)
+                    };
                     let mut message = UnifiedMessage::new_with_agent(
-                        "codex",
+                        client,
                         model.clone().unwrap_or_else(|| "unknown".to_string()),
                         provider,
-                        session_id.to_string(),
+                        message_session_id.to_string(),
                         timestamp,
                         tokens,
                         0.0,
@@ -1723,6 +1787,116 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+    }
+
+    #[test]
+    fn test_session_meta_openclaw_originator_retags_the_rollout_as_openclaw() {
+        // OpenClaw drives Codex app-server with `clientInfo.name: "openclaw"`,
+        // which Codex records as the rollout's originator. The turns are
+        // OpenClaw's usage, so they leave the parser tagged `openclaw` and
+        // keyed by the Codex thread id instead of the file stem.
+        let line1 = r#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"thread-1","originator":"openclaw","cli_version":"0.120.0","source":"cli","model_provider":"openai","cwd":"/Users/alice/.openclaw/workspace"}}"#;
+        let line2 = r#"{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2-codex"}}"#;
+        let line3 = r#"{"timestamp":"2026-08-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#;
+        let content = format!("{}\n{}\n{}\n", line1, line2, line3);
+        let file = create_test_file(&content);
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.session_owned_by_openclaw);
+        assert_eq!(parsed.consumed_offset, content.len() as u64);
+        assert_eq!(parsed.messages.len(), 1);
+        let message = &parsed.messages[0];
+        assert_eq!(message.client, "openclaw");
+        assert_eq!(message.session_id, "thread-1");
+        assert_eq!(message.model_id, "gpt-5.2-codex");
+        assert_eq!(message.provider_id, "openai");
+        assert_eq!(message.tokens.input, 80);
+        assert_eq!(message.tokens.cache_read, 20);
+        assert_eq!(message.tokens.output, 30);
+
+        // Case only differs by product spelling; still OpenClaw.
+        let capitalized =
+            content.replace(r#""originator":"openclaw""#, r#""originator":"OpenClaw""#);
+        let file = create_test_file(&capitalized);
+        let messages = parse_codex_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "openclaw");
+    }
+
+    #[test]
+    fn test_openclaw_ownership_survives_incremental_resume() {
+        let head = concat!(
+            r#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"thread-1","originator":"openclaw","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2-codex"}}"#,
+            "\n"
+        );
+        let file = create_test_file(head);
+        let first = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(first.messages.is_empty());
+        assert!(first.state.session_owned_by_openclaw);
+        assert_eq!(first.consumed_offset, head.len() as u64);
+
+        // A later turn appends token counts; the resumed parse never re-reads
+        // the session_meta line, so ownership has to come from the state.
+        let tail = concat!(
+            r#"{"timestamp":"2026-08-30T10:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            "\n"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file.path())
+            .unwrap()
+            .write_all(tail.as_bytes())
+            .unwrap();
+
+        let resumed = parse_codex_file_incremental(file.path(), first.consumed_offset, first.state);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.messages[0].client, "openclaw");
+        assert_eq!(resumed.messages[0].session_id, "thread-1");
+        assert_eq!(resumed.consumed_offset, (head.len() + tail.len()) as u64);
+    }
+
+    #[test]
+    fn test_other_originators_stay_codex() {
+        for originator in ["codex_cli_rs", "codex-tui", "Codex Desktop", "codex_exec"] {
+            let line1 = format!(
+                r#"{{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{{"id":"thread-1","originator":"{originator}","source":"cli","model_provider":"openai"}}}}"#
+            );
+            let line2 = r#"{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+            let line3 = r#"{"timestamp":"2026-08-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+            let file = create_test_file(&format!("{}\n{}\n{}", line1, line2, line3));
+            let messages = parse_codex_file(file.path());
+            assert_eq!(
+                messages.len(),
+                1,
+                "originator {originator:?} must keep parsing"
+            );
+            assert_eq!(messages[0].client, "codex");
+            assert_ne!(messages[0].session_id, "thread-1");
+        }
+    }
+
+    #[test]
+    fn test_thread_id_from_rollout_path() {
+        assert_eq!(
+            thread_id_from_rollout_path(Path::new(
+                "/x/codex-home/sessions/2026/08/30/rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl"
+            ))
+            .as_deref(),
+            Some("0192f3a4-5b6c-7d8e-9f01-23456789abcd")
+        );
+        assert_eq!(
+            thread_id_from_rollout_path(Path::new("/x/session.jsonl")),
+            None
+        );
+        assert_eq!(
+            thread_id_from_rollout_path(Path::new(
+                "/x/rollout-2026-08-30T10-00-00-not-a-uuid.jsonl"
+            )),
+            None
+        );
     }
 
     #[test]

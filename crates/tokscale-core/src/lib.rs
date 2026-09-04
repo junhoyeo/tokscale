@@ -2080,6 +2080,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
     all_messages.extend(claude_messages.into_iter().map(|(_, message)| message));
     flush_lane(&mut all_messages, &flush_context, sink);
 
+    // Rollouts OpenClaw drove through Codex app-server leave the codex parser
+    // tagged `openclaw` (their `session_meta.originator`); they are OpenClaw's
+    // usage and go to the openclaw lane below, which owns them.
+    let mut openclaw_owned_rollouts: Vec<UnifiedMessage> = Vec::new();
+    // Threads the codex lane counted under `codex`. OpenClaw can resume a
+    // thread the user created in their own Codex home (supervision) and
+    // mirror the turns it drives into its transcript; the rollout then keeps
+    // its original originator and stays codex usage, so the openclaw lane
+    // drops its mirror rows for these threads rather than counting them again.
+    let mut codex_counted_threads: HashSet<String> = HashSet::new();
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
         .par_iter()
@@ -2092,12 +2102,20 @@ fn parse_all_messages_streaming<S: MessageSink>(
         .collect();
     let mut codex_seen: HashSet<String> = HashSet::new();
     for (path, outcome) in codex_outcomes {
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut codex_seen, message)),
-        );
+        let mut counted_under_codex = false;
+        for message in outcome.messages {
+            if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
+                openclaw_owned_rollouts.push(message);
+            } else if should_keep_deduped_message(&mut codex_seen, &message) {
+                counted_under_codex = true;
+                all_messages.push(message);
+            }
+        }
+        if counted_under_codex {
+            if let Some(thread) = sessions::codex::thread_id_from_rollout_path(&path) {
+                codex_counted_threads.insert(thread);
+            }
+        }
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         } else if outcome.invalidate_cache {
@@ -2375,14 +2393,145 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    parse_cached_lane(
-        &scan_result,
-        &mut source_cache,
-        pricing,
-        &mut all_messages,
-        ClientId::OpenClaw,
-        sessions::openclaw::parse_openclaw_transcript,
-    );
+    // OpenClaw. Three sources, in this order:
+    //
+    // 1. Codex rollouts of the turns OpenClaw drove through Codex app-server:
+    //    the ones in each agent's `codex-home` (found by the OpenClaw scan) and
+    //    the ones the codex lane handed over from a shared user Codex home.
+    //    They record every model response of a turn.
+    // 2. The per-agent SQLite transcript stores, the live source.
+    // 3. Legacy JSONL transcripts and published archives.
+    //
+    // A transcript that `openclaw doctor --fix` imported into SQLite keeps its
+    // JSONL original on disk, so 2 and 3 dedup on the stable
+    // `openclaw:<session>:<event id>` key, first copy wins. The SQLite
+    // fingerprint watches the `-wal` sidecar, so rows committed only to the
+    // WAL still invalidate a cached entry.
+    //
+    // For a Codex turn the transcript only mirrors the final assistant message
+    // with the *last* response's usage, so whenever the thread's rollout was
+    // read (1), the mirror rows for that thread (keyed
+    // `openclaw:codex-mirror:<thread>:…`) are dropped and the rollout's
+    // messages are emitted under the OpenClaw session they were mirrored into.
+    // Without a rollout the mirror rows stay: a lower bound beats nothing.
+    {
+        let openclaw_identity = message_cache::CacheIdentity::for_client(ClientId::OpenClaw);
+        let mut openclaw_transcripts: Vec<&PathBuf> = Vec::new();
+        let mut openclaw_codex_rollouts: Vec<&PathBuf> = Vec::new();
+        for path in scan_result.get(ClientId::OpenClaw) {
+            match sessions::openclaw::classify_openclaw_jsonl(path) {
+                sessions::openclaw::OpenClawJsonlKind::Transcript => {
+                    openclaw_transcripts.push(path)
+                }
+                sessions::openclaw::OpenClawJsonlKind::CodexRollout => {
+                    openclaw_codex_rollouts.push(path)
+                }
+                sessions::openclaw::OpenClawJsonlKind::CodexHomeOther => {}
+            }
+        }
+
+        let rollout_outcomes: Vec<(PathBuf, CachedParseOutcome)> = openclaw_codex_rollouts
+            .par_iter()
+            .map(|path| {
+                (
+                    (*path).clone(),
+                    load_or_parse_codex_source(path, &source_cache, pricing, &headless_roots),
+                )
+            })
+            .collect();
+        let mut rollout_messages = std::mem::take(&mut openclaw_owned_rollouts);
+        for (path, outcome) in rollout_outcomes {
+            let thread_from_name = sessions::codex::thread_id_from_rollout_path(&path);
+            for mut message in outcome.messages {
+                if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
+                    // The location says whose usage this is even when an older
+                    // OpenClaw did not announce itself as the originator.
+                    message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                    if let Some(thread) = &thread_from_name {
+                        message.session_id = thread.clone();
+                    }
+                }
+                rollout_messages.push(message);
+            }
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            } else if outcome.invalidate_cache {
+                source_cache.remove(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                );
+            }
+        }
+        // Threads with a complete record somewhere: the rollouts owned here
+        // and the ones the codex lane already counted.
+        let mut recorded_threads: HashSet<String> = rollout_messages
+            .iter()
+            .map(|message| message.session_id.clone())
+            .collect();
+        recorded_threads.extend(codex_counted_threads);
+
+        let openclaw_db_outcomes: Vec<CachedParseOutcome> = scan_result
+            .openclaw_dbs
+            .par_iter()
+            .map(|db_path| {
+                load_or_parse_sqlite_source(
+                    openclaw_identity,
+                    db_path,
+                    &source_cache,
+                    pricing,
+                    sessions::openclaw::parse_openclaw_sqlite,
+                )
+            })
+            .collect();
+        let openclaw_jsonl_outcomes: Vec<CachedParseOutcome> = openclaw_transcripts
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(
+                    openclaw_identity,
+                    path,
+                    &source_cache,
+                    pricing,
+                    sessions::openclaw::parse_openclaw_transcript,
+                )
+            })
+            .collect();
+        let mut openclaw_seen: HashSet<String> = HashSet::new();
+        // Codex thread id -> the OpenClaw session that mirrored it.
+        let mut mirrored_thread_sessions: HashMap<String, String> = HashMap::new();
+        for outcome in openclaw_db_outcomes
+            .into_iter()
+            .chain(openclaw_jsonl_outcomes)
+        {
+            for message in outcome.messages {
+                if let Some(thread) = message
+                    .dedup_key
+                    .as_deref()
+                    .and_then(sessions::openclaw::codex_mirror_thread_from_dedup_key)
+                {
+                    mirrored_thread_sessions
+                        .entry(thread.to_string())
+                        .or_insert_with(|| message.session_id.clone());
+                    if recorded_threads.contains(thread) {
+                        continue;
+                    }
+                }
+                if should_keep_deduped_message(&mut openclaw_seen, &message) {
+                    all_messages.push(message);
+                }
+            }
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+        for mut message in rollout_messages {
+            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
+                message.session_id = session_id;
+            }
+            if should_keep_deduped_message(&mut openclaw_seen, &message) {
+                all_messages.push(message);
+            }
+        }
+    }
 
     parse_cached_lane(
         &scan_result,
@@ -4994,26 +5143,44 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Claude, claude_count);
     messages.extend(claude_msgs);
 
-    let codex_msgs_raw: Vec<UnifiedMessage> = scan_result
+    let codex_files: Vec<(PathBuf, Vec<UnifiedMessage>)> = scan_result
         .get(ClientId::Codex)
         .par_iter()
-        .flat_map(|path| {
+        .map(|path| {
             let is_headless = is_headless_path(path, &headless_roots);
-            sessions::codex::parse_codex_file(path)
+            let messages = sessions::codex::parse_codex_file(path)
                 .into_iter()
                 .map(|mut msg| {
                     apply_headless_agent(&mut msg, is_headless);
                     msg
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (path.clone(), messages)
         })
         .collect();
+    // Rollouts OpenClaw drove (tagged `openclaw` by the parser) belong to the
+    // openclaw block below, and threads counted here under codex silence
+    // their OpenClaw mirror rows there; same hand-off as the cached lane.
+    let mut openclaw_owned_rollouts: Vec<UnifiedMessage> = Vec::new();
+    let mut codex_counted_threads: HashSet<String> = HashSet::new();
     let mut codex_seen: HashSet<String> = HashSet::new();
-    let codex_msgs: Vec<ParsedMessage> = codex_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut codex_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
+    let mut codex_msgs: Vec<ParsedMessage> = Vec::new();
+    for (path, file_messages) in codex_files {
+        let mut counted_under_codex = false;
+        for message in file_messages {
+            if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
+                openclaw_owned_rollouts.push(message);
+            } else if should_keep_deduped_message(&mut codex_seen, &message) {
+                counted_under_codex = true;
+                codex_msgs.push(unified_to_parsed(&message));
+            }
+        }
+        if counted_under_codex {
+            if let Some(thread) = sessions::codex::thread_id_from_rollout_path(&path) {
+                codex_counted_threads.insert(thread);
+            }
+        }
+    }
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
@@ -5150,16 +5317,98 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Droid, droid_count);
     messages.extend(droid_msgs);
 
-    let openclaw_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::OpenClaw)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::openclaw::parse_openclaw_transcript(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    // OpenClaw: the same three sources and replacement rule as the cached lane
+    // (Codex rollouts OpenClaw drove replace the transcript's mirror rows for
+    // their thread; SQLite before legacy JSONL, deduped on the event key).
+    //
+    // The codex scan can surface OpenClaw-owned rollouts on its own, so when
+    // openclaw was not requested they are dropped here rather than counted:
+    // the message filter below would remove them anyway, and the per-client
+    // count must agree with what is returned.
+    let include_openclaw = include_all || clients.iter().any(|c| c == "openclaw");
+    if !include_openclaw {
+        openclaw_owned_rollouts.clear();
+    }
+    let openclaw_msgs: Vec<ParsedMessage> = {
+        let mut openclaw_transcripts: Vec<&PathBuf> = Vec::new();
+        let mut openclaw_codex_rollouts: Vec<&PathBuf> = Vec::new();
+        for path in scan_result.get(ClientId::OpenClaw) {
+            match sessions::openclaw::classify_openclaw_jsonl(path) {
+                sessions::openclaw::OpenClawJsonlKind::Transcript => {
+                    openclaw_transcripts.push(path)
+                }
+                sessions::openclaw::OpenClawJsonlKind::CodexRollout => {
+                    openclaw_codex_rollouts.push(path)
+                }
+                sessions::openclaw::OpenClawJsonlKind::CodexHomeOther => {}
+            }
+        }
+        let mut rollout_messages: Vec<UnifiedMessage> = openclaw_owned_rollouts;
+        rollout_messages.extend(
+            openclaw_codex_rollouts
+                .par_iter()
+                .flat_map(|path| {
+                    let thread_from_name = sessions::codex::thread_id_from_rollout_path(path);
+                    sessions::codex::parse_codex_file(path)
+                        .into_iter()
+                        .map(|mut message| {
+                            if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
+                                message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                                if let Some(thread) = &thread_from_name {
+                                    message.session_id = thread.clone();
+                                }
+                            }
+                            message
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut recorded_threads: HashSet<String> = rollout_messages
+            .iter()
+            .map(|message| message.session_id.clone())
+            .collect();
+        recorded_threads.extend(codex_counted_threads);
+
+        let sqlite_messages: Vec<UnifiedMessage> = scan_result
+            .openclaw_dbs
+            .par_iter()
+            .flat_map(|db_path| sessions::openclaw::parse_openclaw_sqlite(db_path))
+            .collect();
+        let jsonl_messages: Vec<UnifiedMessage> = openclaw_transcripts
+            .par_iter()
+            .flat_map(|path| sessions::openclaw::parse_openclaw_transcript(path))
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut mirrored_thread_sessions: HashMap<String, String> = HashMap::new();
+        let mut kept: Vec<UnifiedMessage> = Vec::new();
+        for message in sqlite_messages.into_iter().chain(jsonl_messages) {
+            if let Some(thread) = message
+                .dedup_key
+                .as_deref()
+                .and_then(sessions::openclaw::codex_mirror_thread_from_dedup_key)
+            {
+                mirrored_thread_sessions
+                    .entry(thread.to_string())
+                    .or_insert_with(|| message.session_id.clone());
+                if recorded_threads.contains(thread) {
+                    continue;
+                }
+            }
+            if should_keep_deduped_message(&mut seen, &message) {
+                kept.push(message);
+            }
+        }
+        for mut message in rollout_messages {
+            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
+                message.session_id = session_id;
+            }
+            if should_keep_deduped_message(&mut seen, &message) {
+                kept.push(message);
+            }
+        }
+        kept.iter().map(unified_to_parsed).collect()
+    };
     let openclaw_count = openclaw_msgs.len() as i32;
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
@@ -10396,6 +10645,839 @@ mod tests {
             );
             assert_eq!(refreshed_messages.len(), 2);
         }
+    }
+
+    /// Seed `<home>/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite` with
+    /// one session whose transcript is `events`, returning the store path.
+    fn seed_openclaw_agent_db(
+        home: &std::path::Path,
+        agent: &str,
+        session_id: &str,
+        harness: Option<&str>,
+        events: &[String],
+    ) -> std::path::PathBuf {
+        use sessions::openclaw::test_fixtures::{
+            create_agent_db, insert_event, insert_session_window,
+        };
+        let db_path = home
+            .join(".openclaw/agents")
+            .join(agent)
+            .join("agent/openclaw-agent.sqlite");
+        let conn = create_agent_db(&db_path);
+        insert_session_window(
+            &conn,
+            session_id,
+            Some("anthropic"),
+            Some("claude-opus-4-6"),
+            harness,
+        );
+        for (seq, event) in events.iter().enumerate() {
+            insert_event(
+                &conn,
+                session_id,
+                seq as i64,
+                event,
+                1_756_548_000_000 + seq as i64 * 1000,
+            );
+        }
+        drop(conn);
+        db_path
+    }
+
+    fn openclaw_assistant_event(id: &str, input: i64, output: i64, timestamp_ms: i64) -> String {
+        format!(
+            r#"{{"type":"message","id":"{id}","parentId":"u1","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"provider":"anthropic","model":"claude-opus-4-6","usage":{{"input":{input},"output":{output},"cacheRead":0,"cacheWrite":0,"totalTokens":{total},"cost":{{"total":0}}}},"stopReason":"stop","timestamp":{timestamp_ms}}}}}"#,
+            total = input + output
+        )
+    }
+
+    fn openclaw_dedup_keys(messages: &[UnifiedMessage]) -> Vec<String> {
+        let mut keys: Vec<String> = messages
+            .iter()
+            .map(|message| {
+                message
+                    .dedup_key
+                    .clone()
+                    .expect("openclaw messages carry keys")
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_counts_openclaw_sqlite_only_usage_across_agents() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        // No JSONL transcript anywhere: only the per-agent SQLite stores.
+        let header = sessions::openclaw::test_fixtures::header_event("sess-main");
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-main",
+            Some("openclaw"),
+            &[
+                header,
+                sessions::openclaw::test_fixtures::user_event("u1", "hi"),
+                openclaw_assistant_event("a1", 100, 50, 1_756_548_001_000),
+            ],
+        );
+        seed_openclaw_agent_db(
+            home,
+            "work",
+            "sess-work",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-work"),
+                openclaw_assistant_event("b1", 10, 5, 1_756_548_002_000),
+            ],
+        );
+
+        let messages = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| message.client == "openclaw"));
+        assert_eq!(
+            openclaw_dedup_keys(&messages),
+            vec![
+                "openclaw:a1:1756548001000:100:50",
+                "openclaw:b1:1756548002000:10:5"
+            ]
+        );
+        let input_total: i64 = messages.iter().map(|message| message.tokens.input).sum();
+        assert_eq!(input_total, 110);
+
+        // A warm cache replays the same rows.
+        let warm = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_dedup_keys(&warm), openclaw_dedup_keys(&messages));
+
+        // The uncached lane agrees.
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+        assert_eq!(parsed.messages.len(), 2);
+        assert!(parsed.messages.iter().all(|m| m.client == "openclaw"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_openclaw_sqlite_and_legacy_jsonl_do_not_double_count() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        // `openclaw doctor --fix` imported this session into SQLite and left
+        // the JSONL original in `sessions/`: the same events in both stores.
+        let migrated: Vec<String> = vec![
+            sessions::openclaw::test_fixtures::header_event("sess-a"),
+            r#"{"type":"model_change","id":"m1","provider":"anthropic","modelId":"claude-opus-4-6"}"#
+                .to_string(),
+            sessions::openclaw::test_fixtures::user_event("u1", "hi"),
+            openclaw_assistant_event("a1", 100, 50, 1_756_548_001_000),
+            openclaw_assistant_event("a2", 20, 10, 1_756_548_002_000),
+        ];
+        let sessions_dir = home.join(".openclaw/agents/main/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("sess-a.jsonl"), migrated.join("\n")).unwrap();
+        // A legacy session that was never migrated, and a reset archive
+        // OpenClaw published from SQLite after the migration.
+        std::fs::write(
+            sessions_dir.join("sess-old.jsonl"),
+            [
+                sessions::openclaw::test_fixtures::header_event("sess-old"),
+                openclaw_assistant_event("z1", 7, 3, 1_756_540_000_000),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions_dir.join("sess-reset.jsonl.reset.2026-08-30T10-00-00.000Z"),
+            [
+                sessions::openclaw::test_fixtures::header_event("sess-reset"),
+                openclaw_assistant_event("r1", 5, 5, 1_756_541_000_000),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        seed_openclaw_agent_db(home, "main", "sess-a", None, &migrated);
+        // A session that only ever existed in SQLite.
+        seed_openclaw_agent_db(
+            home,
+            "work",
+            "sess-new",
+            None,
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-new"),
+                openclaw_assistant_event("n1", 1, 1, 1_756_548_003_000),
+            ],
+        );
+
+        let expected_keys = vec![
+            "openclaw:a1:1756548001000:100:50",
+            "openclaw:a2:1756548002000:20:10",
+            "openclaw:n1:1756548003000:1:1",
+            "openclaw:r1:1756541000000:5:5",
+            "openclaw:z1:1756540000000:7:3",
+        ];
+
+        let cold = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_dedup_keys(&cold), expected_keys);
+        let input_total: i64 = cold.iter().map(|message| message.tokens.input).sum();
+        assert_eq!(input_total, 100 + 20 + 1 + 7 + 5);
+
+        // Cached entries keep their keys, so a warm scan collapses the same way.
+        let warm = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_dedup_keys(&warm), expected_keys);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 5);
+        assert_eq!(parsed.messages.len(), 5);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_sqlite_source_cache_invalidates_on_wal_only_commit() {
+        use sessions::openclaw::test_fixtures::{
+            create_agent_db, header_event, insert_event, insert_session_window,
+        };
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let db_path = home.join(".openclaw/agents/main/agent/openclaw-agent.sqlite");
+        let conn = create_agent_db(&db_path);
+        // Keep every commit in the WAL, the way a running gateway between
+        // checkpoints does, so the main file never changes.
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        insert_session_window(
+            &conn,
+            "sess-a",
+            Some("anthropic"),
+            Some("claude-opus-4-6"),
+            None,
+        );
+        insert_event(
+            &conn,
+            "sess-a",
+            0,
+            &header_event("sess-a"),
+            1_756_548_000_000,
+        );
+        insert_event(
+            &conn,
+            "sess-a",
+            1,
+            &openclaw_assistant_event("a1", 100, 50, 1_756_548_001_000),
+            1_756_548_001_000,
+        );
+
+        let first = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_dedup_keys(&first),
+            vec!["openclaw:a1:1756548001000:100:50"]
+        );
+        let main_len_before = std::fs::metadata(&db_path).unwrap().len();
+
+        insert_event(
+            &conn,
+            "sess-a",
+            2,
+            &openclaw_assistant_event("a2", 20, 10, 1_756_548_002_000),
+            1_756_548_002_000,
+        );
+        let wal_path = db_path.with_file_name("openclaw-agent.sqlite-wal");
+        assert!(wal_path.exists(), "the commit must have gone to the WAL");
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().len(),
+            main_len_before,
+            "the main database file must be untouched, so only the WAL can reveal the row"
+        );
+
+        let refreshed = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_dedup_keys(&refreshed),
+            vec![
+                "openclaw:a1:1756548001000:100:50",
+                "openclaw:a2:1756548002000:20:10"
+            ]
+        );
+        drop(conn);
+    }
+
+    /// The assistant row OpenClaw mirrors from a Codex app-server turn: only
+    /// the last model response's usage, keyed by the Codex thread.
+    fn openclaw_codex_mirror_event(
+        id: &str,
+        thread: &str,
+        turn: &str,
+        timestamp_ms: i64,
+    ) -> String {
+        format!(
+            r#"{{"type":"message","id":"{id}","parentId":"u1","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}],"api":"openai-chatgpt-responses","provider":"openai","model":"gpt-5.2-codex","usage":{{"input":400,"output":300,"cacheRead":800,"cacheWrite":0,"totalTokens":1500,"cost":{{"total":0}}}},"idempotencyKey":"codex-app-server:{thread}:{turn}:assistant","__openclaw":{{"mirrorOrigin":"codex-app-server","mirrorIdentity":"{turn}:assistant"}},"stopReason":"stop","timestamp":{timestamp_ms}}}}}"#
+        )
+    }
+
+    /// A Codex rollout of one OpenClaw-driven turn with two model responses
+    /// (a tool call, then the final answer): 1000/700/50 and 1200/800/300
+    /// input/cached/output.
+    fn openclaw_codex_rollout(thread: &str, originator: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{{"id":"{thread}","originator":"{originator}","source":"cli","model_provider":"openai","cwd":"/home/alice/.openclaw/workspace"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{{"model":"gpt-5.2-codex"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-08-30T10:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":50}},"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":50}}}}}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-08-30T10:00:05Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":2200,"cached_input_tokens":1500,"output_tokens":350}},"last_token_usage":{{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":300}}}}}}}}"#,
+                "\n"
+            ),
+            thread = thread,
+            originator = originator,
+        )
+    }
+
+    const OPENCLAW_CODEX_THREAD: &str = "0192f3a4-5b6c-7d8e-9f01-23456789abcd";
+
+    fn openclaw_usage_by_client_session(
+        messages: &[UnifiedMessage],
+    ) -> Vec<(String, String, i64, i64, i64)> {
+        let mut rows: Vec<(String, String, i64, i64, i64)> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message.client.clone(),
+                    message.session_id.clone(),
+                    message.tokens.input,
+                    message.tokens.cache_read,
+                    message.tokens.output,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_codex_home_rollout_replaces_the_transcript_mirror_rows() {
+        // Default OpenClaw: Codex app-server runs with CODEX_HOME inside the
+        // agent dir, so the rollout sits under `agent/codex-home/sessions`.
+        // The transcript mirrors only the final response (400/800/300); the
+        // rollout has both responses. The rollout wins, under the OpenClaw
+        // session, and the mirror row goes; OpenClaw's own runtime turns in
+        // the same session are untouched.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let rollout_dir = home.join(".openclaw/agents/main/agent/codex-home/sessions/2026/08/30");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        std::fs::write(
+            rollout_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout(OPENCLAW_CODEX_THREAD, "openclaw"),
+        )
+        .unwrap();
+        // Other files Codex keeps in its home are not usage in any format.
+        std::fs::write(
+            home.join(".openclaw/agents/main/agent/codex-home/history.jsonl"),
+            "{\"session_id\":\"x\",\"ts\":1,\"text\":\"ls\"}\n",
+        )
+        .unwrap();
+
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                sessions::openclaw::test_fixtures::user_event("u1", "hi"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+                // A turn this session ran on OpenClaw's own runtime afterwards.
+                openclaw_assistant_event("a2", 30, 10, 1_756_548_009_000),
+            ],
+        );
+
+        let expected = vec![
+            ("openclaw".to_string(), "sess-codex".to_string(), 30, 0, 10),
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                300,
+                700,
+                50,
+            ),
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                400,
+                800,
+                300,
+            ),
+        ];
+
+        let cold = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string(), "codex".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&cold), expected);
+        assert!(cold.iter().all(|message| message.client == "openclaw"));
+
+        let warm = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string(), "codex".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["openclaw".to_string(), "codex".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 3);
+        assert_eq!(parsed.counts.get(ClientId::Codex), 0);
+        let mut uncached: Vec<(String, i64, i64)> = parsed
+            .messages
+            .iter()
+            .map(|m| (m.session_id.clone(), m.input, m.output))
+            .collect();
+        uncached.sort();
+        assert_eq!(
+            uncached,
+            vec![
+                ("sess-codex".to_string(), 30, 10),
+                ("sess-codex".to_string(), 300, 50),
+                ("sess-codex".to_string(), 400, 300),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_codex_mirror_rows_stay_when_no_rollout_was_read() {
+        // No rollout anywhere for this thread (ephemeral, pruned, or on a
+        // paired node): the mirror's last-response usage is the only record
+        // and must remain.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+            ],
+        );
+
+        let messages = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string(), "codex".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_usage_by_client_session(&messages),
+            vec![(
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                400,
+                800,
+                300
+            )]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_originated_rollouts_in_the_user_codex_home_are_openclaw_usage() {
+        // `appServer.homeScope: "user"` (or a supervision branch) makes
+        // OpenClaw create its Codex threads in the user's own `~/.codex`,
+        // where the codex scanner reads them. Their originator names
+        // OpenClaw, so the codex lane hands them to the openclaw lane, which
+        // replaces the transcript's mirror row with them. The user's own
+        // Codex threads keep counting under codex.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let codex_dir = home.join(".codex/sessions/2026/08/30");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout(OPENCLAW_CODEX_THREAD, "openclaw"),
+        )
+        .unwrap();
+        std::fs::write(
+            codex_dir
+                .join("rollout-2026-08-30T11-00-00-11111111-2222-3333-4444-555555555555.jsonl"),
+            openclaw_codex_rollout("11111111-2222-3333-4444-555555555555", "codex-tui"),
+        )
+        .unwrap();
+
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+            ],
+        );
+
+        let both = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_usage_by_client_session(&both),
+            vec![
+                (
+                    "codex".to_string(),
+                    "rollout-2026-08-30T11-00-00-11111111-2222-3333-4444-555555555555".to_string(),
+                    300,
+                    700,
+                    50
+                ),
+                (
+                    "codex".to_string(),
+                    "rollout-2026-08-30T11-00-00-11111111-2222-3333-4444-555555555555".to_string(),
+                    400,
+                    800,
+                    300
+                ),
+                (
+                    "openclaw".to_string(),
+                    "sess-codex".to_string(),
+                    300,
+                    700,
+                    50
+                ),
+                (
+                    "openclaw".to_string(),
+                    "sess-codex".to_string(),
+                    400,
+                    800,
+                    300
+                ),
+            ]
+        );
+
+        // A warm scan replays the same partition from the cache.
+        let warm = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_usage_by_client_session(&warm),
+            openclaw_usage_by_client_session(&both)
+        );
+
+        // Asking for codex alone never shows OpenClaw's turns under codex.
+        let codex_only =
+            parse_all_messages_with_pricing(home.to_str().unwrap(), &["codex".to_string()], None);
+        assert_eq!(codex_only.len(), 2);
+        assert!(codex_only.iter().all(|message| message.client == "codex"));
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["codex".to_string(), "openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Codex), 2);
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+        assert!(parsed
+            .messages
+            .iter()
+            .filter(|m| m.client == "openclaw")
+            .all(|m| m.session_id == "sess-codex"));
+
+        // Codex alone: the OpenClaw-owned rollout is neither returned nor
+        // counted, under either client.
+        let codex_only_parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["codex".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(codex_only_parsed.counts.get(ClientId::Codex), 2);
+        assert_eq!(codex_only_parsed.counts.get(ClientId::OpenClaw), 0);
+        assert_eq!(codex_only_parsed.messages.len(), 2);
+        assert!(codex_only_parsed
+            .messages
+            .iter()
+            .all(|m| m.client == "codex"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_mirror_rows_yield_to_a_thread_the_codex_lane_counted() {
+        // Supervision lets OpenClaw resume a thread the user created in their
+        // own Codex home. The rollout keeps its original originator, so the
+        // codex lane counts it; OpenClaw's mirror of the turns it drove must
+        // then go, or the turns count under both clients.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let codex_dir = home.join(".codex/sessions/2026/08/30");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout(OPENCLAW_CODEX_THREAD, "Codex Desktop"),
+        )
+        .unwrap();
+
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+                openclaw_assistant_event("a2", 30, 10, 1_756_548_009_000),
+            ],
+        );
+
+        let expected = vec![
+            (
+                "codex".to_string(),
+                format!("rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}"),
+                300,
+                700,
+                50,
+            ),
+            (
+                "codex".to_string(),
+                format!("rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}"),
+                400,
+                800,
+                300,
+            ),
+            ("openclaw".to_string(), "sess-codex".to_string(), 30, 0, 10),
+        ];
+        let cold = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&cold), expected);
+        let warm = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+            None,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+
+        // Without the codex lane the mirror is the only record and stays.
+        let openclaw_only = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_usage_by_client_session(&openclaw_only),
+            vec![
+                ("openclaw".to_string(), "sess-codex".to_string(), 30, 0, 10),
+                (
+                    "openclaw".to_string(),
+                    "sess-codex".to_string(),
+                    400,
+                    800,
+                    300
+                ),
+            ]
+        );
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["codex".to_string(), "openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Codex), 2);
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_fork_copies_count_once_across_stores_and_sessions() {
+        // `/fork` copies the visible transcript into a new session with the
+        // same event ids, timestamps and usage, and the legacy JSONL of the
+        // original may still be on disk beside the SQLite rows. One spend,
+        // three copies, one count.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let original = openclaw_assistant_event("a1", 100, 50, 1_756_548_001_000);
+        let sessions_dir = home.join(".openclaw/agents/main/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("sess-a.jsonl"),
+            [
+                sessions::openclaw::test_fixtures::header_event("sess-a"),
+                original.clone(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        {
+            use sessions::openclaw::test_fixtures::{
+                create_agent_db, header_event, insert_event, insert_session_window,
+            };
+            let db_path = home.join(".openclaw/agents/main/agent/openclaw-agent.sqlite");
+            let conn = create_agent_db(&db_path);
+            for session in ["sess-a", "sess-fork"] {
+                insert_session_window(
+                    &conn,
+                    session,
+                    Some("anthropic"),
+                    Some("claude-opus-4-6"),
+                    None,
+                );
+                insert_event(&conn, session, 0, &header_event(session), 1);
+                insert_event(&conn, session, 1, &original, 1_756_548_001_000);
+            }
+            // The fork's own new turn.
+            insert_event(
+                &conn,
+                "sess-fork",
+                2,
+                &openclaw_assistant_event("f1", 7, 3, 1_756_548_500_000),
+                1_756_548_500_000,
+            );
+        }
+
+        let messages = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_dedup_keys(&messages),
+            vec![
+                "openclaw:a1:1756548001000:100:50",
+                "openclaw:f1:1756548500000:7:3"
+            ]
+        );
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
     }
 
     #[test]

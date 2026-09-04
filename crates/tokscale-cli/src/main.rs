@@ -4386,6 +4386,18 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         exists: path.exists(),
                     });
                 }
+                if client == ClientId::OpenClaw {
+                    // Current OpenClaw keeps live transcripts in per-agent
+                    // SQLite stores beside the legacy JSONL session dirs.
+                    for db_path in tokscale_core::scanner::discover_openclaw_agent_dbs(Path::new(
+                        &sessions_path,
+                    )) {
+                        additional_paths.push(AdditionalPath {
+                            path: db_path.to_string_lossy().to_string(),
+                            exists: true,
+                        });
+                    }
+                }
                 if client == ClientId::DevinDesktop {
                     for root in tokscale_core::scanner::devin_desktop_additional_roots(
                         &home_dir_str,
