@@ -5893,8 +5893,12 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
         );
     }
 
-    let total_messages: usize = unpriced.iter().map(|row| row.message_count).sum();
-    let total_tokens: i64 = unpriced.iter().map(|row| row.total_tokens).sum();
+    let total_messages: usize = unpriced
+        .iter()
+        .fold(0usize, |acc, row| acc.saturating_add(row.message_count));
+    let total_tokens: i64 = unpriced
+        .iter()
+        .fold(0i64, |acc, row| acc.saturating_add(row.total_tokens));
     println!(
         "{}",
         format!(
