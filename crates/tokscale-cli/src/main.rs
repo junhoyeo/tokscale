@@ -4389,13 +4389,40 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                 if client == ClientId::OpenClaw {
                     // Current OpenClaw keeps live transcripts in per-agent
                     // SQLite stores beside the legacy JSONL session dirs.
-                    for db_path in tokscale_core::scanner::discover_openclaw_agent_dbs(Path::new(
-                        &sessions_path,
-                    )) {
-                        additional_paths.push(AdditionalPath {
-                            path: db_path.to_string_lossy().to_string(),
-                            exists: true,
-                        });
+                    // List them from every agents root the scanner ingests:
+                    // the default root, the legacy rebrand roots, and the
+                    // configured extra roots.
+                    let mut openclaw_roots: Vec<std::path::PathBuf> =
+                        vec![std::path::PathBuf::from(&sessions_path)];
+                    openclaw_roots.extend(
+                        [".clawdbot/agents", ".moltbot/agents", ".moldbot/agents"]
+                            .iter()
+                            .map(|relative| home_dir.join(relative)),
+                    );
+                    openclaw_roots.extend(
+                        settings_extra_dirs
+                            .iter()
+                            .filter(|(c, _)| *c == ClientId::OpenClaw)
+                            .map(|(_, path)| path.clone()),
+                    );
+                    openclaw_roots.extend(
+                        extra_dirs
+                            .iter()
+                            .filter(|(c, _)| *c == ClientId::OpenClaw)
+                            .map(|(_, path)| std::path::PathBuf::from(path)),
+                    );
+                    let mut seen_openclaw_dbs = std::collections::HashSet::new();
+                    for root in openclaw_roots {
+                        for db_path in tokscale_core::scanner::discover_openclaw_agent_dbs(&root) {
+                            let key =
+                                std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+                            if seen_openclaw_dbs.insert(key) {
+                                additional_paths.push(AdditionalPath {
+                                    path: db_path.to_string_lossy().to_string(),
+                                    exists: true,
+                                });
+                            }
+                        }
                     }
                 }
                 if client == ClientId::DevinDesktop {

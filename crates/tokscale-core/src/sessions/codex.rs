@@ -390,11 +390,6 @@ fn parse_codex_reader<R: BufRead>(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
             if let Some(payload) = entry.payload {
-                if entry.entry_type == "session_meta"
-                    && codex_originator_is_openclaw(payload.originator.as_deref())
-                {
-                    state.session_owned_by_openclaw = true;
-                }
                 let payload_model = extract_model(&payload);
                 let is_token_count = entry.entry_type == "event_msg"
                     && payload.payload_type.as_deref() == Some("token_count");
@@ -481,6 +476,14 @@ fn parse_codex_reader<R: BufRead>(
                 }
 
                 if entry.entry_type == "session_meta" {
+                    // Only the file's own metadata decides ownership. A forked
+                    // child replays its parent's `session_meta` too, and that
+                    // copy is skipped by the replay gate above, so a child the
+                    // user forked in Codex from an OpenClaw-driven thread stays
+                    // Codex usage.
+                    if codex_originator_is_openclaw(payload.originator.as_deref()) {
+                        state.session_owned_by_openclaw = true;
+                    }
                     if codex_source_is_exec(payload.source.as_ref()) {
                         state.session_is_headless = true;
                     }
@@ -1876,6 +1879,46 @@ mod tests {
             assert_eq!(messages[0].client, "codex");
             assert_ne!(messages[0].session_id, "thread-1");
         }
+    }
+
+    #[test]
+    fn test_replayed_parent_originator_does_not_claim_a_forked_child() {
+        // A child the user forked in Codex from an OpenClaw-driven thread
+        // replays the parent's session_meta (originator openclaw) before its
+        // own turns. Ownership comes from the child's own metadata only.
+        let child_by_user = concat!(
+            r#"{"timestamp":"2026-08-30T10:01:00Z","type":"session_meta","payload":{"id":"child","forked_from_id":"parent","originator":"Codex Desktop","source":"vscode","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"parent","originator":"openclaw","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:01:02Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":30,"output_tokens":45},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15}}}}"#,
+            "\n"
+        );
+        let file = create_test_file(child_by_user);
+        let messages = parse_codex_file(file.path());
+        assert!(!messages.is_empty());
+        assert!(messages.iter().all(|m| m.client == "codex"), "{messages:?}");
+
+        // The mirror image: OpenClaw forked the thread itself.
+        let child_by_openclaw = child_by_user.replace(
+            r#""id":"child","forked_from_id":"parent","originator":"Codex Desktop""#,
+            r#""id":"child","forked_from_id":"parent","originator":"openclaw""#,
+        );
+        let file = create_test_file(&child_by_openclaw);
+        let messages = parse_codex_file(file.path());
+        assert!(!messages.is_empty());
+        assert!(
+            messages.iter().all(|m| m.client == "openclaw"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| m.session_id == "child"),
+            "{messages:?}"
+        );
     }
 
     #[test]

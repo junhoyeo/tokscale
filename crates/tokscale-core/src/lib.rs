@@ -2090,6 +2090,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // its original originator and stays codex usage, so the openclaw lane
     // drops its mirror rows for these threads rather than counting them again.
     let mut codex_counted_threads: HashSet<String> = HashSet::new();
+    // The scanner also walks the Codex roots for an OpenClaw-only request, as
+    // lookup inputs for the hand-off above. Codex usage itself is only output
+    // when codex was asked for; the flush filter would drop it anyway, but a
+    // thread must not be marked as counted under codex when it is not.
+    let include_codex = include_all || clients.iter().any(|c| c == "codex");
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
         .par_iter()
@@ -2106,7 +2111,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in outcome.messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 openclaw_owned_rollouts.push(message);
-            } else if should_keep_deduped_message(&mut codex_seen, &message) {
+            } else if include_codex && should_keep_deduped_message(&mut codex_seen, &message) {
                 counted_under_codex = true;
                 all_messages.push(message);
             }
@@ -5163,6 +5168,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     // their OpenClaw mirror rows there; same hand-off as the cached lane.
     let mut openclaw_owned_rollouts: Vec<UnifiedMessage> = Vec::new();
     let mut codex_counted_threads: HashSet<String> = HashSet::new();
+    let include_codex = include_all || clients.iter().any(|c| c == "codex");
     let mut codex_seen: HashSet<String> = HashSet::new();
     let mut codex_msgs: Vec<ParsedMessage> = Vec::new();
     for (path, file_messages) in codex_files {
@@ -5170,7 +5176,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         for message in file_messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 openclaw_owned_rollouts.push(message);
-            } else if should_keep_deduped_message(&mut codex_seen, &message) {
+            } else if include_codex && should_keep_deduped_message(&mut codex_seen, &message) {
                 counted_under_codex = true;
                 codex_msgs.push(unified_to_parsed(&message));
             }
@@ -11261,6 +11267,50 @@ mod tests {
         assert_eq!(codex_only.len(), 2);
         assert!(codex_only.iter().all(|message| message.client == "codex"));
 
+        // Asking for openclaw alone still finds the rollout in the user's
+        // Codex home (the scanner walks it as a lookup) and never shows the
+        // user's own Codex thread.
+        let openclaw_only = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(
+            openclaw_usage_by_client_session(&openclaw_only),
+            vec![
+                (
+                    "openclaw".to_string(),
+                    "sess-codex".to_string(),
+                    300,
+                    700,
+                    50
+                ),
+                (
+                    "openclaw".to_string(),
+                    "sess-codex".to_string(),
+                    400,
+                    800,
+                    300
+                ),
+            ]
+        );
+        let openclaw_only_parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["openclaw".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(openclaw_only_parsed.counts.get(ClientId::Codex), 0);
+        assert_eq!(openclaw_only_parsed.counts.get(ClientId::OpenClaw), 2);
+        assert!(openclaw_only_parsed
+            .messages
+            .iter()
+            .all(|m| m.client == "openclaw"));
+
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(home.to_str().unwrap().to_string()),
             use_env_roots: false,
@@ -11369,7 +11419,8 @@ mod tests {
         );
         assert_eq!(openclaw_usage_by_client_session(&warm), expected);
 
-        // Without the codex lane the mirror is the only record and stays.
+        // With codex not requested, nothing is counted under codex, so the
+        // mirror is the only record of those turns and stays.
         let openclaw_only = parse_all_messages_with_pricing(
             home.to_str().unwrap(),
             &["openclaw".to_string()],

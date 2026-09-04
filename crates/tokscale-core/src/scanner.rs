@@ -465,11 +465,14 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 // copies, so a backup that outlived its original still counts
                 // and one that did not counts once. The Codex plugin's binding
                 // sidecars (`<id>.jsonl.codex-app-server.json[.migrated]`) are
-                // JSON metadata, not transcripts, and are the one family
-                // excluded.
+                // JSON metadata, not transcripts: a suffix that ends in `.json`
+                // or `.json.migrated` is excluded, and nothing else is.
                 "*.jsonl*" => match file_name.split_once(".jsonl") {
                     Some((stem, suffix)) if !stem.is_empty() => {
-                        suffix.is_empty() || (suffix.starts_with('.') && !suffix.contains(".json"))
+                        suffix.is_empty()
+                            || (suffix.starts_with('.')
+                                && !suffix.ends_with(".json")
+                                && !suffix.ends_with(".json.migrated"))
                     }
                     _ => false,
                 },
@@ -1836,9 +1839,18 @@ fn scan_all_clients_with_env_strategy_inner(
     // Desktop ACP filenames need Devin CLI database titles to recover their
     // session/model/workspace metadata. Treat configured CLI roots as lookup
     // inputs for a Desktop-only scan without enabling CLI usage output.
-    let mut enabled_with_devin_lookup = enabled.clone();
+    let mut enabled_with_lookups = enabled.clone();
     if enabled.contains(&ClientId::DevinDesktop) {
-        enabled_with_devin_lookup.insert(ClientId::DevinCli);
+        enabled_with_lookups.insert(ClientId::DevinCli);
+    }
+    // OpenClaw can run Codex app-server against the user's own Codex home
+    // (`appServer.homeScope: "user"`), and the rollouts it leaves there are
+    // OpenClaw's usage (their `session_meta.originator` names OpenClaw). Treat
+    // the Codex roots as lookup inputs for an OpenClaw-only scan: the parse
+    // lanes hand those rollouts to the openclaw lane and the client filter
+    // drops the rest, so Codex usage is never output unrequested.
+    if enabled.contains(&ClientId::OpenClaw) {
+        enabled_with_lookups.insert(ClientId::Codex);
     }
 
     let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
@@ -1899,7 +1911,7 @@ fn scan_all_clients_with_env_strategy_inner(
         push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &grok_sessions);
     }
 
-    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_devin_lookup) {
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_lookups) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
         if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
@@ -2001,7 +2013,7 @@ fn scan_all_clients_with_env_strategy_inner(
     // intentionally ignored when an explicit --home override disables env roots.
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled_with_devin_lookup) {
+        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled_with_lookups) {
             warn_if_escapes_home(Path::new(home_dir), client_id, &PathBuf::from(&path));
             if client_id == ClientId::DevinCli {
                 devin_cli_roots.push(PathBuf::from(path));
@@ -2128,7 +2140,7 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if enabled.contains(&ClientId::Codex) {
+    if enabled_with_lookups.contains(&ClientId::Codex) {
         // Codex: ~/.codex/sessions/**/*.jsonl
         let codex_home = if use_env_roots {
             std::env::var("CODEX_HOME").unwrap_or_else(|_| join_native(home_dir, ".codex"))
@@ -3957,6 +3969,9 @@ mod tests {
         for name in [
             "session-backup.jsonl.pre-doctor-openai-codex-repair-2026-07-01T15-35-38-171Z.bak",
             "session-broken.jsonl.broken-empty-input-20260428T0728Z",
+            // A backup whose repair name happens to mention json is still a
+            // transcript; only a suffix that *ends* in .json is metadata.
+            "session-json.jsonl.pre-doctor-json-shape-repair-2026-07-01T15-35-38-171Z.bak",
             "session-abc.jsonl.codex-app-server.json.migrated",
             "session-abc.jsonl.codex-app-server.json",
         ] {
@@ -5754,7 +5769,7 @@ mod tests {
         assert!(result
             .get(ClientId::OpenClaw)
             .iter()
-            .any(|path| path.to_string_lossy().contains("codex-home/sessions")));
+            .any(|path| path.components().any(|c| c.as_os_str() == "codex-home")));
     }
 
     #[test]
@@ -5843,10 +5858,49 @@ mod tests {
             "{names:?}"
         );
         assert!(
+            names
+                .iter()
+                .any(|n| n.contains(".pre-doctor-json-shape-repair-")),
+            "a backup suffix mentioning json is still a transcript: {names:?}"
+        );
+        assert!(
             !names.iter().any(|n| n.contains(".codex-app-server.json")),
             "binding sidecars are JSON metadata, not transcripts: {names:?}"
         );
-        assert_eq!(result.get(ClientId::OpenClaw).len(), 5);
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 6);
+    }
+
+    #[test]
+    fn test_scan_all_clients_openclaw_request_scans_codex_roots_as_lookup() {
+        // OpenClaw can run Codex app-server against the user's own Codex home,
+        // and the rollouts it leaves there are OpenClaw's usage. An
+        // openclaw-only request therefore scans the Codex roots too; the
+        // parse lanes keep only the OpenClaw-originated ones.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        let codex_sessions = home.join(".codex/sessions/2026/08/30");
+        fs::create_dir_all(&codex_sessions).unwrap();
+        File::create(
+            codex_sessions
+                .join("rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl"),
+        )
+        .unwrap();
+
+        let openclaw_only = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
+        assert_eq!(openclaw_only.get(ClientId::Codex).len(), 1);
+
+        // Unrelated clients do not pull the Codex roots in.
+        let claude_only = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
+        assert!(claude_only.get(ClientId::Codex).is_empty());
     }
 
     #[test]
