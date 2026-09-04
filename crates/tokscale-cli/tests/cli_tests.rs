@@ -2970,8 +2970,10 @@ fn test_submit_reports_scan_scope_and_elapsed() {
         .stdout(predicate::str::contains(
             "Scanning local session data (1 client, full history)...",
         ))
-        .stdout(predicate::str::contains("Scanned in "))
-        .stdout(predicate::str::contains("Tip: narrow the scan"));
+        .stdout(predicate::str::is_match(r"Scanned in \d+\.\d+s\.").unwrap())
+        .stdout(predicate::str::contains(
+            "Tip: narrow the scan with `--since <date>` and `--client <id>`",
+        ));
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_API_TOKEN", "test-token")
@@ -2990,6 +2992,22 @@ fn test_submit_reports_scan_scope_and_elapsed() {
             "Scanning local session data (1 client, since 2026-01-01)...",
         ))
         .stdout(predicate::str::contains("Tip: narrow the scan").not());
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "synthetic",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Scanning local session data ({} clients, full history)...",
+            tokscale_core::ClientId::COUNT
+        )));
 }
 
 #[test]

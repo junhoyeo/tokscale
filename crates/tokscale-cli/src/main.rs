@@ -6029,7 +6029,17 @@ fn run_submit_command(
     // client directory, so a slow run should at least say what it is chewing
     // through — and the label advertises the flags that narrow it.
     let scan_scope_label = {
-        let client_count = clients.as_ref().map(Vec::len).unwrap_or_default();
+        let scans_all_clients = clients
+            .as_deref()
+            .is_none_or(|c| c.iter().any(|s| s == "synthetic"));
+        let client_count = if scans_all_clients {
+            tokscale_core::ClientId::COUNT
+        } else {
+            clients
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(tokscale_core::ClientId::COUNT)
+        };
         let range_label = match (&since, &until, &year) {
             (None, None, None) => "full history".to_string(),
             _ => {
