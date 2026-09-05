@@ -1,0 +1,73 @@
+name: DSH Cache Migration
+
+# A cache written by the last published release, read once by this build,
+# must report what a cold scan of this build reports. The DSH parser's cache
+# identity has moved twice since the client shipped (#1221: 3 -> 4,
+# #1235: 4 -> 5); the unit tests cover the key, this covers the reparse.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &dsh_cache_migration_paths
+      - "crates/tokscale-core/src/sessions/dsh.rs"
+      - "crates/tokscale-core/src/message_cache.rs"
+      - "crates/tokscale-core/tests/fixtures/dsh-seq-key/**"
+      - "scripts/check-dsh-cache-migration.sh"
+      - ".github/workflows/dsh_cache_migration.yml"
+  pull_request:
+    branches: [main]
+    paths: *dsh_cache_migration_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-cache-migration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dsh-cache-migration:
+    name: Previous release's cache, this build's scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: dsh-gate-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            dsh-gate-${{ runner.os }}-cargo-
+
+      - name: Build this tree's CLI
+        run: cargo build --release --locked -p tokscale-cli
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Install the last published release
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous"
+          cd "$RUNNER_TEMP/previous"
+          npm init -y > /dev/null
+          npm install --no-save --no-audit --no-fund tokscale@latest
+          node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale --version
+
+      - name: Gate the migration
+        run: |
+          bash scripts/check-dsh-cache-migration.sh \
+            "$RUNNER_TEMP/previous/node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale" \
+            target/release/tokscale

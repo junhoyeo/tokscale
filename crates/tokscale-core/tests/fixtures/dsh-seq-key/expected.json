@@ -1,0 +1,17 @@
+{
+  "correct": {
+    "totalInput": 1177,
+    "totalOutput": 132,
+    "totalCacheRead": 11770,
+    "totalCacheWrite": 23,
+    "totalMessages": 7
+  },
+  "seq_keyed": {
+    "totalInput": 870,
+    "totalOutput": 101,
+    "totalCacheRead": 8700,
+    "totalCacheWrite": 16,
+    "totalMessages": 6
+  },
+  "dropped_call_total": 3415
+}
