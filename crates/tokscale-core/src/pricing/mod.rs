@@ -244,11 +244,16 @@ impl PricingService {
         overrides
     }
 
-    // @keep: a snapshot of last-known published rates for Anthropic models that
-    // upstream will eventually stop carrying. LiteLLM, OpenRouter and models.dev
-    // all describe the CURRENT catalogue: once a provider retires a model those
-    // rows are dropped, and every historical session that used it silently loses
-    // its price. This archive is the only place that memory lives.
+    // @keep: a snapshot of published first-party rates for models no live
+    // dataset carries first-party. LiteLLM, OpenRouter and models.dev all
+    // describe the CURRENT catalogue from resellers as well as vendors: once
+    // a provider retires a model those rows are dropped, and some current
+    // models were never listed first-party at all (only `deepinfra/*`,
+    // `z-ai/*`, `openrouter/*` reseller keys exist). In both cases every
+    // historical session that used the model at the publishing endpoint
+    // silently loses its price without this memory, and a reseller row that
+    // merely shares the model name wins by precedence as an unverified
+    // guess. This archive is the only place that memory lives.
     //
     // Precedence is the same slot as the Cursor/Sakana overrides in
     // PricingLookup - after every upstream exact/normalized/prefix match, before
@@ -256,11 +261,11 @@ impl PricingService {
     // answers, and once upstream drops it the archive answers with that model's
     // own last rate instead of letting fuzzy elect a neighbouring row.
     //
-    // Keys are provider-qualified on purpose. Anthropic bills these rates on its
-    // own API; a request routed through Vertex or Bedrock is a different tariff.
-    // With an `anthropic/` root, an anthropic hint resolves ProviderScoped with
-    // matching provider identity (submission-safe), and a `vertex`/`vertex_ai`
-    // hint is recognised as a cross-provider alias and stays an estimate.
+    // Keys are provider-qualified on purpose. Each vendor bills these rates
+    // on its own API; a request routed through another endpoint is a
+    // different tariff. With a matching root, a same-vendor hint resolves
+    // ProviderScoped with matching provider identity (submission-safe), and
+    // any other hint stays an estimate.
     //
     // Rates verified 2026-09-02 against both live datasets: models.dev keys them
     // exactly as written here, LiteLLM keys them bare (`claude-haiku-4-5`, ...)
@@ -279,7 +284,11 @@ impl PricingService {
     // cost is preserved.
     fn build_archive_overrides() -> HashMap<String, ModelPricing> {
         /// `(model id, input, output, cache read, cache creation)`, per token.
-        type ArchivedRateRow = (&'static str, f64, f64, f64, f64);
+        /// Cache creation is `None` where the vendor publishes no such bucket
+        /// (Zhipu, Xiaomi and Tencent document cached-input reads but no
+        /// cache-write tariff): usage populating that bucket then stays
+        /// unpriced rather than billed at an invented rate.
+        type ArchivedRateRow = (&'static str, f64, f64, f64, Option<f64>);
 
         // Every first-party Claude row the narrowest dataset still carries, so
         // whichever one is retired next already has its last published rate
@@ -290,22 +299,102 @@ impl PricingService {
         // nothing retires the model that is shipping.
         let entries: &[ArchivedRateRow] = &[
             // Claude Haiku 4.5: $1.00/$5.00 per 1M, $0.10 cache read, $1.25 cache write.
-            ("anthropic/claude-haiku-4-5", 1e-6, 5e-6, 1e-7, 1.25e-6),
+            (
+                "anthropic/claude-haiku-4-5",
+                1e-6,
+                5e-6,
+                1e-7,
+                Some(1.25e-6),
+            ),
             // Claude Sonnet 4.5 / 4.6: $3.00/$15.00 per 1M, $0.30 cache read,
             // $3.75 cache write. 4.5 is the oldest Sonnet any of the three
             // still carries.
-            ("anthropic/claude-sonnet-4-5", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
-            ("anthropic/claude-sonnet-4-6", 3e-6, 1.5e-5, 3e-7, 3.75e-6),
+            (
+                "anthropic/claude-sonnet-4-5",
+                3e-6,
+                1.5e-5,
+                3e-7,
+                Some(3.75e-6),
+            ),
+            (
+                "anthropic/claude-sonnet-4-6",
+                3e-6,
+                1.5e-5,
+                3e-7,
+                Some(3.75e-6),
+            ),
             // Claude Opus 4.5 / 4.6 / 4.7 / 4.8: $5.00/$25.00 per 1M, $0.50
             // cache read, $6.25 cache write. 4.5 is the oldest Opus carried by
             // all three, so it is the next one due to fall off -- LiteLLM and
             // OpenRouter still list opus-4 and opus-4-1 (and LiteLLM
             // claude-3-opus), but models.dev has already dropped them, so
             // their rates cannot be cross-checked and they are not archived.
-            ("anthropic/claude-opus-4-5", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-6", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-7", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
-            ("anthropic/claude-opus-4-8", 5e-6, 2.5e-5, 5e-7, 6.25e-6),
+            (
+                "anthropic/claude-opus-4-5",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-6",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-7",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            (
+                "anthropic/claude-opus-4-8",
+                5e-6,
+                2.5e-5,
+                5e-7,
+                Some(6.25e-6),
+            ),
+            // Zhipu GLM-5.2 / GLM-5.3: $1.40/$4.40 per 1M, $0.26 cached
+            // input, no published cache-write tariff (cached-input storage
+            // is "Limited-time Free"). No live dataset carries a first-party
+            // row -- only the `z-ai/*` reseller keys -- so a `zhipu` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://docs.z.ai/guides/overview/pricing ("Latest Models":
+            // GLM-5.3 and GLM-5.2 at $1.4 in / $0.26 cached / $4.4 out) and
+            // https://bigmodel.cn/pricing (8元 in / 28元 out / 2元
+            // cache-hit per M tokens, flat 1M context, no tiers).
+            ("zhipu/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zhipu/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zai/glm-5.2", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            ("zai/glm-5.3", 1.4e-6, 4.4e-6, 0.26e-6, None),
+            // Xiaomi MiMo-V2.5: $0.14/$0.28 per 1M, $0.0028 cached input,
+            // no published cache-write tariff (only cache-hit vs cache-miss
+            // input). No live dataset carries a first-party row -- only the
+            // `openrouter/xiaomi/*` marketplace key -- so a `xiaomi` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://mimo.mi.com/docs/en-US/pricing (MiMo-V2.5: $0.0028
+            // cache-hit / $0.14 cache-miss input / $0.28 output per MTok,
+            // flat to 1M context since the 2026-05-27 permanent cut).
+            ("xiaomi/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
+            ("mimo/mimo-v2.5", 0.14e-6, 0.28e-6, 0.0028e-6, None),
+            // Tencent Hunyuan HY3: $0.132/$0.528 per 1M, $0.033 cache-hit;
+            // HY4-Preview: $0.834/$2.501 per 1M, $0.042 cache-hit. Neither
+            // publishes a separate cache-write tariff. No live dataset
+            // carries a first-party row -- only `deepinfra/tencent/*` and
+            // `crossmodel/tencent/*` reseller keys -- so a `tencent` hint
+            // resolved as an unverified guess. Verified 2026-09-03 against
+            // https://cloud.tencent.com/document/product/1823/130055
+            // (Hy3: 1元 in / 4元 out / 0.25元 cache-hit; Hy4 preview: 6元
+            // in / 18元 out / 0.3元 cache-hit per M tokens, flat) and the
+            // Intl sheet https://intl.cloud.tencent.com/document/product/1300/78937
+            // (USD numbers archived here, matching the datasets' currency).
+            ("tencent/hy3", 0.132e-6, 0.528e-6, 0.033e-6, None),
+            ("tencent/hy4-preview", 0.834e-6, 2.501e-6, 0.042e-6, None),
+            ("hunyuan/hy3", 0.132e-6, 0.528e-6, 0.033e-6, None),
+            ("hunyuan/hy4-preview", 0.834e-6, 2.501e-6, 0.042e-6, None),
         ];
 
         let mut overrides = HashMap::with_capacity(entries.len());
@@ -316,7 +405,7 @@ impl PricingService {
                     input_cost_per_token: Some(*input),
                     output_cost_per_token: Some(*output),
                     cache_read_input_token_cost: Some(*cache_read),
-                    cache_creation_input_token_cost: Some(*cache_creation),
+                    cache_creation_input_token_cost: *cache_creation,
                     ..Default::default()
                 },
             );
@@ -696,6 +785,221 @@ mod tests {
         assert_retired_anthropic_price("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25);
     }
 
+    /// Zhipu publishes no first-party row to any live dataset -- only the
+    /// `z-ai/*` reseller keys -- so a `zhipu` hint resolved as an unverified
+    /// guess. The archived first-party tariff ($1.40/$4.40 per 1M, $0.26
+    /// cached input, verified 2026-09-03) wins for the publishing endpoint.
+    #[test]
+    fn zhipu_glm_rates_resolve_first_party_over_reseller_row() {
+        fn reseller_row() -> ModelPricing {
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-6),
+                output_cost_per_token: Some(4.4e-6),
+                cache_read_input_token_cost: Some(0.26e-6),
+                ..Default::default()
+            }
+        }
+
+        for model in ["glm-5.2", "glm-5.3"] {
+            let mut litellm = HashMap::new();
+            litellm.insert(format!("openrouter/z-ai/{model}"), reseller_row());
+            let service = PricingService::new(litellm, HashMap::new());
+            // No published cache-write tariff, so the covered usage carries
+            // none; cache-write-bearing usage stays unpriced (pinned below).
+            let usage = TokenBreakdown {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 1_000_000,
+                cache_write: 0,
+                reasoning: 0,
+            };
+
+            for (provider, test_model, expected_key) in [
+                (Some("zhipu"), model.to_string(), format!("zhipu/{model}")),
+                (None, format!("zhipu/{model}"), format!("zhipu/{model}")),
+                (Some("zai"), model.to_string(), format!("zai/{model}")),
+                (None, format!("zai/{model}"), format!("zai/{model}")),
+            ] {
+                let resolved = service
+                    .resolve_for_usage_with_provider(&test_model, provider, &usage)
+                    .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
+                assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
+                assert_eq!(
+                    resolved.matched_key, expected_key,
+                    "model: {test_model}, unexpected matched_key"
+                );
+                assert!(
+                    resolved.evidence.is_submission_safe(),
+                    "model: {test_model}"
+                );
+                assert!(
+                    service.covers_usage_with_provider(&test_model, provider, &usage),
+                    "model: {test_model}"
+                );
+                let actual = service.calculate_cost_with_provider(&test_model, provider, &usage);
+                assert!(
+                    (actual - 6.06).abs() < 1e-9,
+                    "model: {test_model}, unexpected cost: {actual}"
+                );
+            }
+        }
+    }
+
+    /// Zhipu documents cached-input reads but no cache-write tariff, so
+    /// cache-write-bearing usage must stay unpriced rather than billed at an
+    /// invented rate.
+    #[test]
+    fn zhipu_cache_write_usage_stays_unpriced() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+
+        for model in ["glm-5.2", "glm-5.3"] {
+            assert!(
+                !service.covers_usage_with_provider(model, Some("zhipu"), &all_bucket_usage()),
+                "model: {model}"
+            );
+        }
+    }
+
+    /// Xiaomi publishes no first-party row to any live dataset -- only the
+    /// `openrouter/xiaomi/*` marketplace key -- so a `xiaomi` hint for
+    /// `mimo-v2.5` resolved as an unverified guess. The archived first-party
+    /// tariff ($0.14/$0.28 per 1M, $0.0028 cached input, verified 2026-09-03)
+    /// wins for the publishing endpoint.
+    #[test]
+    fn xiaomi_mimo_rate_resolves_first_party_over_marketplace_row() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openrouter/xiaomi/mimo-v2.5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.14e-6),
+                output_cost_per_token: Some(0.28e-6),
+                cache_read_input_token_cost: Some(0.0028e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        // No published cache-write tariff, so the covered usage carries none.
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        for (provider, model_id, expected_key) in [
+            (Some("xiaomi"), "mimo-v2.5", "xiaomi/mimo-v2.5"),
+            (Some("mimo"), "mimo-v2.5", "mimo/mimo-v2.5"),
+            (None, "xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5"),
+            (None, "mimo/mimo-v2.5", "mimo/mimo-v2.5"),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model_id, provider, &usage)
+                .expect("mimo-v2.5 must resolve first-party");
+            assert_eq!(resolved.source, "Tokscale Archive");
+            assert_eq!(resolved.matched_key, expected_key, "unexpected matched key");
+            assert!(resolved.evidence.is_submission_safe());
+            assert!(service.covers_usage_with_provider(model_id, provider, &usage));
+            let actual = service.calculate_cost_with_provider(model_id, provider, &usage);
+            assert!((actual - 0.4228).abs() < 1e-9, "unexpected cost: {actual}");
+            assert!(
+                !service.covers_usage_with_provider(model_id, provider, &all_bucket_usage()),
+                "cache-write-bearing usage must stay unpriced: no published tariff"
+            );
+        }
+    }
+
+    /// Tencent publishes no first-party row to any live dataset -- only
+    /// `deepinfra/tencent/*` and `crossmodel/tencent/*` reseller keys -- so a
+    /// `tencent` hint for `hy3` / `hy4-preview` resolved as an unverified
+    /// guess. The archived first-party tariffs (Intl USD sheet, verified
+    /// 2026-09-03) win for the publishing endpoint. Each case mirrors the
+    /// live reseller shape, exercising the LiteLLM path (hy3) and the
+    /// models.dev path (hy4-preview).
+    #[test]
+    fn tencent_hunyuan_rates_resolve_first_party_over_reseller_rows() {
+        fn usage_without_cache_write() -> TokenBreakdown {
+            TokenBreakdown {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 1_000_000,
+                cache_write: 0,
+                reasoning: 0,
+            }
+        }
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "deepinfra/tencent/Hy3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.132e-6),
+                output_cost_per_token: Some(0.528e-6),
+                cache_read_input_token_cost: Some(0.033e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "crossmodel/tencent/hy4-preview".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.834e-6),
+                output_cost_per_token: Some(2.501e-6),
+                cache_read_input_token_cost: Some(0.042e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new_with_custom_and_models_dev(
+            CustomPricing::default(),
+            litellm,
+            HashMap::new(),
+            models_dev,
+        );
+
+        for (model, expected_cost) in [("hy3", 0.693), ("hy4-preview", 3.377)] {
+            for (test_model, provider, expected_key) in [
+                (
+                    model.to_string(),
+                    Some("tencent"),
+                    format!("tencent/{model}"),
+                ),
+                (
+                    model.to_string(),
+                    Some("hunyuan"),
+                    format!("hunyuan/{model}"),
+                ),
+                (format!("tencent/{model}"), None, format!("tencent/{model}")),
+                (format!("hunyuan/{model}"), None, format!("hunyuan/{model}")),
+            ] {
+                let usage = usage_without_cache_write();
+                let resolved = service
+                    .resolve_for_usage_with_provider(&test_model, provider, &usage)
+                    .unwrap_or_else(|| panic!("{test_model} must resolve first-party"));
+                assert_eq!(resolved.source, "Tokscale Archive", "model: {test_model}");
+                assert_eq!(
+                    resolved.matched_key, expected_key,
+                    "model: {test_model}, unexpected matched_key"
+                );
+                assert!(
+                    resolved.evidence.is_submission_safe(),
+                    "model: {test_model}"
+                );
+                assert!(
+                    service.covers_usage_with_provider(&test_model, provider, &usage),
+                    "model: {test_model}"
+                );
+                let actual = service.calculate_cost_with_provider(&test_model, provider, &usage);
+                assert!(
+                    (actual - expected_cost).abs() < 1e-9,
+                    "model: {test_model}, unexpected cost: {actual}"
+                );
+                assert!(
+                    !service.covers_usage_with_provider(&test_model, provider, &all_bucket_usage()),
+                    "model: {test_model}, cache-write-bearing usage must stay unpriced"
+                );
+            }
+        }
+    }
+
     #[test]
     fn retired_claude_sonnet_4_6_keeps_its_last_known_price() {
         assert_retired_anthropic_price("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75);
@@ -799,6 +1103,43 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+
+    /// A reseller row that only matches by model part must not shadow the
+    /// publishing endpoint's own archived tariff.
+    ///
+    /// Live LiteLLM keys this as `deepinfra/anthropic/claude-opus-4-8` -- a
+    /// nested provider segment, not a first-party root -- so an `anthropic`
+    /// hint resolves it as an unverified ModelPart guess while the archive
+    /// holds `anthropic/claude-opus-4-8` exactly. The guess used to win by
+    /// precedence and the usage submitted at $0.00 with a cost-incomplete
+    /// day; the proven row wins now.
+    #[test]
+    fn unsafe_reseller_row_yields_to_proven_archive() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "deepinfra/anthropic/claude-opus-4-8".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(5e-6),
+                output_cost_per_token: Some(2.5e-5),
+                cache_read_input_token_cost: Some(5e-7),
+                cache_creation_input_token_cost: Some(6.25e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = all_bucket_usage();
+
+        let resolved = service
+            .resolve_for_usage_with_provider("claude-opus-4-8", Some("anthropic"), &usage)
+            .expect("proven archive row must resolve");
+        assert_eq!(resolved.source, "Tokscale Archive");
+        assert_eq!(resolved.matched_key, "anthropic/claude-opus-4-8");
+        assert!(resolved.evidence.is_submission_safe());
+        assert!(service.covers_usage_with_provider("claude-opus-4-8", Some("anthropic"), &usage));
+        let actual =
+            service.calculate_cost_with_provider("claude-opus-4-8", Some("anthropic"), &usage);
+        assert!((actual - 36.75).abs() < 1e-9, "unexpected cost: {actual}");
     }
 
     /// The shared normalizer folds reasoning-effort suffixes, so the archive
@@ -2428,5 +2769,108 @@ mod tests {
         assert!(!resolution.evidence.is_submission_safe());
         assert!(service.calculate_cost_with_provider("atlas-chat", None, &usage) > 0.0);
         assert!(!service.covers_usage_with_provider("atlas-chat", None, &usage));
+    }
+
+    /// Regression: an archived row is one model's own last published tariff,
+    /// not a family price, so the generic suffix stripper must not reach it.
+    ///
+    /// `mimo-v2.5-pro` (the id the MiMo Code fixture records), `glm-5.3-flash`
+    /// and `hy3-instruct` are SKUs no vendor page prices. Peeling the trailing
+    /// segment and answering from the base model's archived row billed them at
+    /// a neighbouring model's rate and -- under that vendor's own hint --
+    /// stamped the result submission-safe, which would publish a made-up
+    /// price. With no dataset row of their own they stay unpriced, exactly as
+    /// they were before the archive carried these vendors.
+    #[test]
+    fn unknown_sku_suffix_never_reaches_the_archive() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        for (model, provider) in [
+            ("mimo-v2.5-pro", Some("xiaomi")),
+            ("mimo-v2.5-pro", Some("mimo")),
+            ("glm-5.2-air", Some("zhipu")),
+            ("glm-5.2-flash", Some("zhipu")),
+            ("glm-5.2-x", Some("zhipu")),
+            ("glm-5.2-thinking", Some("zhipu")),
+            ("glm-5.3-air", Some("zhipu")),
+            ("glm-5.3-flash", Some("zhipu")),
+            ("hy3-instruct", Some("tencent")),
+            ("hy3-instruct", Some("hunyuan")),
+        ] {
+            assert!(
+                service
+                    .resolve_for_usage_with_provider(model, provider, &usage)
+                    .is_none(),
+                "model: {model}, an unknown SKU has no archived rate of its own"
+            );
+            assert!(
+                !service.covers_usage_with_provider(model, provider, &usage),
+                "model: {model}, a suffix-eroded price must never become submission-safe"
+            );
+        }
+
+        // The base SKUs the archive does carry keep resolving: the guard
+        // refuses eroded candidates, not the archive.
+        for (model, provider) in [
+            ("mimo-v2.5", Some("xiaomi")),
+            ("glm-5.2", Some("zhipu")),
+            ("hy3", Some("tencent")),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model, provider, &usage)
+                .unwrap_or_else(|| panic!("{model} must keep its archived price"));
+            assert_eq!(resolved.source, "Tokscale Archive", "model: {model}");
+            assert!(resolved.evidence.is_submission_safe(), "model: {model}");
+        }
+    }
+
+    /// Regression: the guard declines the ARCHIVE for an eroded candidate, not
+    /// the whole lookup. Filtering the composed result instead threw the live
+    /// row away with it: inside `lookup_auto` the archive substitutes itself
+    /// for an unverified upstream hit, so the marketplace row that prices
+    /// `mimo-v2.5-pro` was already gone by the time the filter saw the source,
+    /// and merely ADDING an archive row dropped every MiMo Code session to $0.
+    #[test]
+    fn suffix_eroded_sku_keeps_its_live_dataset_price() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openrouter/xiaomi/mimo-v2.5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.14e-6),
+                output_cost_per_token: Some(0.28e-6),
+                cache_read_input_token_cost: Some(0.0028e-6),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        // `mimo-v2.5-pro` under a `mimo` hint is verbatim what the MiMo Code
+        // parser records, and the marketplace row is the only live key for it.
+        let resolved = service
+            .resolve_for_usage_with_provider("mimo-v2.5-pro", Some("mimo"), &usage)
+            .expect("the marketplace row must keep pricing the unknown -pro SKU");
+        assert_eq!(resolved.source, "LiteLLM");
+        assert_eq!(resolved.matched_key, "openrouter/xiaomi/mimo-v2.5");
+        assert!(service.calculate_cost_with_provider("mimo-v2.5-pro", Some("mimo"), &usage) > 0.0);
+
+        // The id the archive does carry still takes the first-party tariff.
+        let base = service
+            .resolve_for_usage_with_provider("mimo-v2.5", Some("mimo"), &usage)
+            .expect("mimo-v2.5 must resolve first-party");
+        assert_eq!(base.source, "Tokscale Archive");
     }
 }

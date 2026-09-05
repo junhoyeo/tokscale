@@ -18,9 +18,9 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * Copilot is pinned at generation 2 because generation 1 counted differently
  * and must not advance the high-water. Droid is registered at generation 1,
  * the generation every CLI already declares: its shapes differ in *where*
- * tokens land, never in the lifetime total, so no generation needs freezing —
- * bounding every Droid submission by the lifetime high-water is what makes a
- * re-attribution contribute nothing.
+ * tokens land, never in the lifetime total. A full snapshot that still
+ * covers the credited lifetime therefore replaces stored days so the web
+ * graph matches the TUI, without the per-day merge guard inflating totals.
  *
  * Both Antigravity clients are registered at generation 1, the generation every
  * CLI already declares. Their parsers stopped dating usage at the session's
@@ -40,6 +40,19 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   "antigravity-cli": 1,
   antigravity: 1,
 };
+
+/**
+ * Parsers whose lifetime total is stable across re-attribution. A full
+ * snapshot that covers the credited aggregate may replace stored days so the
+ * web graph matches the TUI without the per-day merge guard inflating totals.
+ *
+ * Replacing is destructive by design: a day the snapshot no longer dates loses
+ * its cell. So local history the user deleted is erased too, as long as the
+ * remaining growth still covers the credited aggregate. Below that cover the
+ * snapshot cannot replace anything and the bounded-growth plan applies, which
+ * keeps every stored row.
+ */
+const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
 
 const TOKEN_FIELDS = [
   "input",
@@ -105,11 +118,14 @@ export type ParserHighWaterMode =
   | "freeze"
   | "baseline-legacy"
   | "baseline-new"
-  | "incremental";
+  | "incremental"
+  | "replace";
 
 export interface ParserHighWaterPlan {
   mode: ParserHighWaterMode;
   increments: Record<string, ClientBreakdownData>;
+  /** Absolute cells when `mode` is `replace`; omitted otherwise. */
+  layoutDays?: Record<string, ClientBreakdownData>;
   nextState?: ParserClientHighWaterState;
 }
 
@@ -322,6 +338,51 @@ function applyCreditedIncrements(
     );
   }
   return next;
+}
+
+function snapshotCoversCredited(
+  incoming: ParserAggregateHighWater,
+  credited: ParserAggregateHighWater
+): boolean {
+  return AGGREGATE_FIELDS.every(
+    (field) => incoming[field] >= credited[field]
+  );
+}
+
+function stateFromSnapshot(
+  version: number,
+  incomingDays: Record<string, ClientBreakdownData>
+): ParserClientHighWaterState {
+  const days = normalizeStateDays(incomingDays);
+  return {
+    stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
+    version,
+    baselineEstablished: true,
+    aggregate: aggregateSnapshot(days),
+    days,
+    observedDays: days,
+  };
+}
+
+function replaceLayoutPlan(args: {
+  client: string;
+  version: number;
+  incoming: ParserAggregateHighWater;
+  credited: ParserAggregateHighWater;
+  incomingDays: Record<string, ClientBreakdownData>;
+}): ParserHighWaterPlan | null {
+  if (
+    !SNAPSHOT_LAYOUT_CLIENTS.has(args.client) ||
+    !snapshotCoversCredited(args.incoming, args.credited)
+  ) {
+    return null;
+  }
+  return {
+    mode: "replace",
+    increments: createSafeRecord<ClientBreakdownData>(),
+    layoutDays: normalizeStateDays(args.incomingDays),
+    nextState: stateFromSnapshot(args.version, args.incomingDays),
+  };
 }
 
 function stateAfterCreditedIncrements(
@@ -616,6 +677,12 @@ function validState(
  * with uncredited capacity receives the bounded remainder. Only increments
  * actually written advance the credited ledger, so growth cannot be lost.
  * Date/model reshuffles and deleted local history never erase stored rows.
+ *
+ * SNAPSHOT_LAYOUT_CLIENTS are the deliberate exception to both absolutes
+ * above: once a full snapshot's aggregate covers the credited one, the stored
+ * layout is replaced outright so the web graph matches the TUI, which also
+ * drops the cells of days the snapshot no longer dates. A snapshot that does
+ * not cover it falls back to the bounded-growth plan and keeps every row.
  */
 export function planParserHighWaterSubmission(args: {
   client: string;
@@ -649,7 +716,7 @@ export function planParserHighWaterSubmission(args: {
       increments: {},
       nextState: {
         stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
-        version: supportedVersion,
+        version: args.incomingVersion,
         baselineEstablished: false,
         aggregate: emptyAggregate(),
         days: createSafeRecord<ClientBreakdownData>(),
@@ -666,6 +733,19 @@ export function planParserHighWaterSubmission(args: {
     const legacyAggregate = aggregateSnapshot(args.existingLegacyDays);
     const hasLegacy =
       legacyAggregate.tokens > 0 || legacyAggregate.messages > 0;
+    if (hasLegacy) {
+      // Tried before the preserving transition below, so a snapshot-layout
+      // client adopts the snapshot's own dating instead of preserving legacy
+      // rows. Everything after this point is the fallback for the rest.
+      const followed = replaceLayoutPlan({
+        client: args.client,
+        version: args.incomingVersion,
+        incoming: incomingAggregate,
+        credited: legacyAggregate,
+        incomingDays: args.incomingDays,
+      });
+      if (followed) return followed;
+    }
     // At transition, preserving all legacy rows and crediting at most positive
     // lifetime aggregate growth is non-destructive. With deleted old usage D
     // and genuinely new usage N, incoming - legacy = N - D <= N; the existing
@@ -689,7 +769,7 @@ export function planParserHighWaterSubmission(args: {
         )
       : {
           stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
-          version: supportedVersion,
+          version: args.incomingVersion,
           baselineEstablished: true,
           aggregate: incomingAggregate,
           days: normalizeStateDays(args.incomingDays),
@@ -717,6 +797,14 @@ export function planParserHighWaterSubmission(args: {
     args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION
       ? args.state.observedDays!
       : previousCreditedDays;
+  const followed = replaceLayoutPlan({
+    client: args.client,
+    version: args.incomingVersion,
+    incoming: incomingAggregate,
+    credited: previousAggregate,
+    incomingDays: args.incomingDays,
+  });
+  if (followed) return followed;
   const increments = allocateIncrements(
     previousCreditedDays,
     previousObservedDays,

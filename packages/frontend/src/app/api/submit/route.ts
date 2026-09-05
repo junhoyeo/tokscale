@@ -17,6 +17,9 @@ import {
   mergeTimestampMs,
   breakdownCostIsComplete,
   tagBreakdownCostCompleteness,
+  applyCostCompleteness,
+  replaceLayoutCostFloors,
+  reapplyReplaceLayoutCostFloors,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
 import {
@@ -62,6 +65,83 @@ const INSERT_CHUNK_SIZE = 1000;
 // the two as the SAME client instead of summing them as disjoint clients
 // (which would double-count the same underlying usage).
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
+
+function emptyLayoutDay(date: string): SubmissionData["contributions"][number] {
+  return {
+    date,
+    clients: [],
+    totals: { tokens: 0, cost: 0, messages: 0 },
+    intensity: 0,
+    tokenBreakdown: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+    },
+  };
+}
+
+function isReplacePlan(plan: ParserHighWaterPlan): boolean {
+  return plan.mode === "replace";
+}
+
+function applyReplaceLayouts(
+  merged: Record<string, ClientBreakdownData>,
+  date: string,
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  incomingCostIsComplete: boolean
+): void {
+  for (const [client, plan] of parserPlans) {
+    if (!isReplacePlan(plan) || !plan.layoutDays) continue;
+    const next = ownValue(plan.layoutDays, date);
+    if (next) {
+      merged[client] = applyCostCompleteness(
+        next,
+        ownValue(merged, client),
+        incomingCostIsComplete
+      );
+    } else {
+      delete merged[client];
+    }
+  }
+}
+
+/** Returns the dates added here, i.e. the ones the submission never covered. */
+function expandDaysForReplaceLayouts(
+  daysToProcess: Map<string, SubmissionData["contributions"][number]>,
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  existingDeviceDays: Array<{
+    date: string;
+    sourceBreakdown: unknown;
+  }>
+): Set<string> {
+  const layoutOnlyDates = new Set<string>();
+  for (const [client, plan] of parserPlans) {
+    if (!isReplacePlan(plan) || !plan.layoutDays) continue;
+    for (const date of Object.keys(plan.layoutDays)) {
+      if (!daysToProcess.has(date)) {
+        daysToProcess.set(date, emptyLayoutDay(date));
+        layoutOnlyDates.add(date);
+      }
+    }
+    for (const existing of existingDeviceDays) {
+      const breakdown = existing.sourceBreakdown as Record<
+        string,
+        ClientBreakdownData
+      > | null;
+      if (
+        breakdown &&
+        ownValue(breakdown, client) &&
+        !daysToProcess.has(existing.date)
+      ) {
+        daysToProcess.set(existing.date, emptyLayoutDay(existing.date));
+        layoutOnlyDates.add(existing.date);
+      }
+    }
+  }
+  return layoutOnlyDates;
+}
 
 function mergeModelBreakdowns(
   target: Record<string, ClientBreakdownData["models"][string]>,
@@ -754,6 +834,10 @@ export async function POST(request: Request) {
           warnings.push(
             `Established the ${label} parser generation ${supportedVersion} baseline; existing same-device history was preserved and only bounded lifetime growth was added.`
           );
+        } else if (plan.mode === "replace") {
+          warnings.push(
+            `Rewrote ${label} daily layout from the full parser snapshot without changing the lifetime high-water.`
+          );
         } else if (plan.mode === "freeze") {
           warnings.push(
             `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
@@ -764,9 +848,26 @@ export async function POST(request: Request) {
         ([, plan]) =>
           plan.mode === "incremental" || plan.mode === "baseline-legacy"
       );
+      const replaceClients = [...parserPlans]
+        .filter(([, plan]) => isReplacePlan(plan))
+        .map(([client]) => client);
+      const replaceCostFloors = replaceLayoutCostFloors(
+        existingDeviceDays,
+        replaceClients
+      );
+      const incompleteReplaceClients = new Set<string>();
 
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
+      );
+
+      const daysToProcess = new Map(
+        data.contributions.map((day) => [day.date, day] as const)
+      );
+      const layoutOnlyDates = expandDaysForReplaceLayouts(
+        daysToProcess,
+        parserPlans,
+        existingDeviceDays
       );
 
       // ------------------------------------------
@@ -798,7 +899,12 @@ export async function POST(request: Request) {
         costIsComplete: boolean;
       }> = [];
 
-      for (const incomingDay of data.contributions) {
+      const toDelete: string[] = [];
+
+      for (const incomingDay of daysToProcess.values()) {
+        if (incomingDay.totals?.costIsComplete === false) {
+          for (const client of replaceClients) incompleteReplaceClients.add(client);
+        }
         const incomingClientBreakdown = foldIncomingClientContributions(
           incomingDay.clients
         );
@@ -818,14 +924,12 @@ export async function POST(request: Request) {
         }
 
         for (const [client, plan] of parserPlans) {
-          if (plan.mode === "freeze") {
+          if (plan.mode === "freeze" || plan.mode === "replace") {
             delete incomingClientBreakdown[client];
           } else if (
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy"
           ) {
-            // The full snapshot itself is never merged. Only the bounded growth
-            // calculated against the persisted generation high-water is eligible.
             const increment = ownValue(plan.increments, incomingDay.date);
             if (increment) {
               incomingClientBreakdown[client] = increment;
@@ -836,14 +940,21 @@ export async function POST(request: Request) {
         }
 
         const clientsToMerge = new Set(submittedClients);
+        // A day the submission never covered is in the write set only so a
+        // replace layout can empty its own cell there. The other clients were
+        // not resubmitted for that day at all, so their stored cells did not
+        // disappear -- merging them would preserve them with a false warning.
+        if (layoutOnlyDates.has(incomingDay.date)) clientsToMerge.clear();
         for (const [client, plan] of parserPlans) {
+          if (plan.mode === "replace") {
+            clientsToMerge.delete(client);
+            continue;
+          }
           const planRewroteClient =
             plan.mode === "freeze" ||
             plan.mode === "incremental" ||
             plan.mode === "baseline-legacy";
           if (planRewroteClient && !incomingClientBreakdown[client]) {
-            // A frozen/zero-increment plan is a no-op for that client, not a
-            // request to delete its stored row from this day.
             clientsToMerge.delete(client);
           }
         }
@@ -913,6 +1024,16 @@ export async function POST(request: Request) {
               }
             }
           }
+          applyReplaceLayouts(
+            mergedClientBreakdown,
+            incomingDay.date,
+            parserPlans,
+            incomingDay.totals?.costIsComplete ?? true
+          );
+          if (Object.keys(mergedClientBreakdown).length === 0) {
+            toDelete.push(existingDay.id);
+            continue;
+          }
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
 
           toUpdate.push({
@@ -938,6 +1059,12 @@ export async function POST(request: Request) {
             incomingClientBreakdown,
             incomingDay.totals?.costIsComplete ?? true
           );
+          applyReplaceLayouts(
+            insertedClientBreakdown,
+            incomingDay.date,
+            parserPlans,
+            incomingDay.totals?.costIsComplete ?? true
+          );
           const dayTotals = recalculateDayTotals(insertedClientBreakdown);
           if (Object.keys(insertedClientBreakdown).length === 0) continue;
 
@@ -955,6 +1082,20 @@ export async function POST(request: Request) {
             costIsComplete: breakdownCostIsComplete(insertedClientBreakdown),
           });
         }
+      }
+
+      reapplyReplaceLayoutCostFloors(
+        [...toInsert, ...toUpdate],
+        replaceCostFloors,
+        incompleteReplaceClients
+      );
+      for (const row of [...toInsert, ...toUpdate]) {
+        const dayTotals = recalculateDayTotals(row.sourceBreakdown);
+        row.tokens = dayTotals.tokens;
+        row.cost = dayTotals.cost.toFixed(4);
+        row.inputTokens = dayTotals.inputTokens;
+        row.outputTokens = dayTotals.outputTokens;
+        row.costIsComplete = breakdownCostIsComplete(row.sourceBreakdown);
       }
 
       const advancedParserStates = [...parserPlans].flatMap(([client, plan]) =>
@@ -1055,6 +1196,17 @@ export async function POST(request: Request) {
         `);
       }
 
+      if (toDelete.length > 0) {
+        const deleteIds = sql.join(
+          toDelete.map((id) => sql`${id}::uuid`),
+          sql`, `
+        );
+        await tx.execute(sql`
+          DELETE FROM daily_breakdown
+          WHERE id IN (${deleteIds})
+        `);
+      }
+
       // Phase 4a observation write — same transaction as the daily rows above,
       // so an explicitly reported cell cannot commit without its guarded
       // daily_breakdown counterpart. Last-write-wins (no GREATEST) for that cell only: omitted
@@ -1083,8 +1235,15 @@ export async function POST(request: Request) {
           totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(14,4))), 0)::text`,
           inputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.inputTokens}), 0), 9223372036854775807)::bigint`,
           outputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.outputTokens}), 0), 9223372036854775807)::bigint`,
-          dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
-          dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
+          // The filter keeps an emptied day from stretching the reported range,
+          // but it returns NULL when NO row in scope has tokens -- and
+          // date_start/date_end are NOT NULL, so STEP 3e would abort the whole
+          // submit. A user whose entire stored history is legacy tokenless
+          // Cursor rows is exactly that shape and is explicitly valid. Fall
+          // back to the unfiltered bounds the earlier producers of these
+          // columns used (migrations 0015/0016).
+          dateStart: sql<string>`COALESCE(MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MIN(${dailyBreakdown.date}))`,
+          dateEnd: sql<string>`COALESCE(MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MAX(${dailyBreakdown.date}))`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,

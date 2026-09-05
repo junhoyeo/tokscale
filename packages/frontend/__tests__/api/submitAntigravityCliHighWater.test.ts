@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SUPPORTED_VERSIONED_PARSERS } from "../../src/lib/db/parserHighWater";
@@ -155,7 +158,14 @@ function collectStrings(
   }
 }
 
-type StoredBreakdown = Record<string, { tokens: number }>;
+type StoredBreakdown = Record<
+  string,
+  {
+    tokens: number;
+    cost?: number;
+    provenance?: { costIsComplete?: boolean };
+  }
+>;
 
 type PersistedDay = {
   id: string;
@@ -197,19 +207,36 @@ function storedTokens(store: Store): number {
   );
 }
 
+function storedCost(store: Store): number {
+  return store.days.reduce(
+    (total, day) =>
+      total +
+      Object.values(day.sourceBreakdown).reduce(
+        (sum, client) => sum + (client.cost ?? 0),
+        0,
+      ),
+    0,
+  );
+}
+
 function aggregatesRow(store: Store) {
   const totalTokens = storedTokens(store);
-  const dates = store.days.map((day) => day.date).sort();
+  const dates = store.days
+    .filter((day) =>
+      Object.values(day.sourceBreakdown).some((client) => client.tokens > 0),
+    )
+    .map((day) => day.date)
+    .sort();
   return {
     totalTokens,
-    totalCost: (totalTokens / 1000).toFixed(4),
+    totalCost: storedCost(store).toFixed(4),
     inputTokens: totalTokens,
     outputTokens: 0,
     dateStart: dates[0] ?? null,
     dateEnd: dates[dates.length - 1] ?? null,
-    activeDays: store.days.length,
-    totalActiveTimeMs: 0,
+    activeDays: dates.length,
     rowCount: store.days.length,
+    totalActiveTimeMs: 0,
   };
 }
 
@@ -261,13 +288,15 @@ function isDailyBreakdownInsert(text: string): boolean {
 
 function installTx(store: Store) {
   const executedSqlArgs: unknown[] = [];
+  const selectedColumns: Array<Record<string, unknown>> = [];
 
   function applyDailyBreakdownWrite(sqlArg: unknown): void {
     const strings: string[] = [];
     collectStrings(sqlArg, strings);
     const text = strings.join("\n");
     if (text.includes("DELETE FROM daily_breakdown")) {
-      throw new Error("submit route deleted a daily_breakdown row");
+      store.days = store.days.filter((day) => !strings.includes(day.id));
+      return;
     }
     const insert = isDailyBreakdownInsert(text);
     // The batch row update; NOT the legacy-adoption `UPDATE ... AS db`, which
@@ -335,9 +364,10 @@ function installTx(store: Store) {
       };
       return builder;
     }),
-    select: vi.fn((columns: Record<string, unknown>) =>
-      makeAwaitableBuilder(selectResult(columns, store)),
-    ),
+    select: vi.fn((columns: Record<string, unknown>) => {
+      selectedColumns.push(columns);
+      return makeAwaitableBuilder(selectResult(columns, store));
+    }),
     insert: vi.fn(() => {
       const builder = {
         values: vi.fn(() => builder),
@@ -367,7 +397,7 @@ function installTx(store: Store) {
     async (callback: (transaction: typeof tx) => Promise<unknown>) =>
       callback(tx),
   );
-  return { executedSqlArgs };
+  return { executedSqlArgs, selectedColumns };
 }
 
 function submissionBody(
@@ -653,5 +683,237 @@ describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
       store.days.find((day) => day.date === "2026-08-10")?.sourceBreakdown
         .antigravity.tokens,
     ).toBe(55_000);
+  });
+});
+
+describe("POST /api/submit droid snapshot layout", () => {
+  it("replaces stored Droid days when a full snapshot re-dates the same lifetime", async () => {
+    const { store, firstJson, secondJson } = await submitOldThenNew("droid");
+
+    expect(firstJson.metrics.totalTokens).toBe(240_000);
+    expect(secondJson.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-07",
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    expect(store.days.find((day) => day.date === "2026-08-07")?.sourceBreakdown.droid.tokens).toBe(
+      40_000,
+    );
+    expect(store.days.find((day) => day.date === "2026-08-08")?.sourceBreakdown.droid.tokens).toBe(
+      120_000,
+    );
+    expect(store.days.find((day) => day.date === "2026-08-09")?.sourceBreakdown.droid.tokens).toBe(
+      80_000,
+    );
+    expect(
+      secondJson.warnings.some((warning: string) =>
+        warning.includes("Established the Droid parser generation"),
+      ),
+    ).toBe(false);
+    expect(
+      secondJson.warnings.some((warning: string) =>
+        warning.includes("Rewrote Droid daily layout"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the stored Droid cost floor when a full unpriced snapshot replaces the layout", async () => {
+    const store = newStore();
+
+    installTx(store);
+    const priced = submissionBody("droid", SESSION_START_DATING);
+    mockSubmit(priced);
+    expect((await post(priced)).status).toBe(200);
+
+    installTx(store);
+    const unpriced = submissionBody("droid", PER_GENERATION_DATING);
+    for (const day of unpriced.contributions) {
+      day.clients[0].cost = 0;
+      (day as { totals?: { costIsComplete: boolean } }).totals = {
+        costIsComplete: false,
+      };
+    }
+    mockSubmit(unpriced);
+    const response = await post(unpriced);
+    expect(response.status).toBe(200);
+
+    const startDay = store.days.find((day) => day.date === "2026-08-07");
+    expect(startDay?.sourceBreakdown.droid.tokens).toBe(40_000);
+    expect(Number(startDay?.sourceBreakdown.droid.cost)).toBe(240);
+    expect(startDay?.sourceBreakdown.droid.provenance?.costIsComplete).toBe(
+      false,
+    );
+  });
+
+  it("carries the stored Droid cost onto new days when an unpriced snapshot moves every token", async () => {
+    const store = newStore();
+
+    installTx(store);
+    const priced = submissionBody("droid", SESSION_START_DATING);
+    mockSubmit(priced);
+    expect((await post(priced)).status).toBe(200);
+
+    installTx(store);
+    const moved = submissionBody("droid", [
+      { date: "2026-08-08", tokens: 120_000, messages: 6 },
+      { date: "2026-08-09", tokens: 120_000, messages: 6 },
+    ]);
+    for (const day of moved.contributions) {
+      day.clients[0].cost = 0;
+      (day as { totals?: { costIsComplete: boolean } }).totals = {
+        costIsComplete: false,
+      };
+    }
+    mockSubmit(moved);
+    const response = await post(moved);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    expect(storedCost(store)).toBe(240);
+    expect(json.metrics.dateRange.start).toBe("2026-08-08");
+    expect(json.metrics.dateRange.end).toBe("2026-08-09");
+  });
+
+  it("still credits genuinely new Droid usage after the layout rewrite", async () => {
+    const { store } = await submitOldThenNew("droid");
+
+    installTx(store);
+    const grown = submissionBody("droid", [
+      ...PER_GENERATION_DATING,
+      { date: "2026-08-10", tokens: 55_000, messages: 3 },
+    ]);
+    mockSubmit(grown);
+    const response = await post(grown);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(295_000);
+    expect(
+      store.days.find((day) => day.date === "2026-08-10")?.sourceBreakdown.droid
+        .tokens,
+    ).toBe(55_000);
+  });
+});
+
+/**
+ * A Droid day that also carries a client with no versioned parser. The
+ * snapshot layout only ever moves the Droid cell, so the sibling's fate on a
+ * day the snapshot no longer mentions is what the preserve warning describes.
+ */
+function droidAndClaudeBody(
+  days: Array<{ date: string; droid?: number; claude?: number }>,
+) {
+  const dates = days.map((day) => day.date).sort();
+  const entry = (client: string, tokens: number) => ({
+    client,
+    modelId: client === "droid" ? "gemini-3-pro" : "claude-sonnet-4",
+    tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+    cost: tokens / 1000,
+    messages: 2,
+  });
+  return {
+    device: { id: "dev_1", name: "Device one" },
+    meta: {
+      generatedAt: "2026-08-10T00:00:00Z",
+      version: "4.13.0",
+      dateRange: { start: dates[0], end: dates[dates.length - 1] },
+    },
+    scanScope: { parserVersions: { droid: 1 }, fullHistory: true },
+    summary: { clients: ["droid", "claude"] },
+    years: [],
+    contributions: days.map((day) => ({
+      date: day.date,
+      clients: [
+        ...(day.droid ? [entry("droid", day.droid)] : []),
+        ...(day.claude ? [entry("claude", day.claude)] : []),
+      ],
+    })),
+  };
+}
+
+describe("POST /api/submit droid snapshot layout sibling clients", () => {
+  it("does not report a sibling client as disappeared from a day the snapshot only emptied of Droid", async () => {
+    const store = newStore();
+
+    installTx(store);
+    const first = droidAndClaudeBody([
+      { date: "2026-08-07", droid: 240_000, claude: 10_000 },
+    ]);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    installTx(store);
+    const rewritten = droidAndClaudeBody([
+      { date: "2026-08-08", droid: 120_000 },
+      { date: "2026-08-09", droid: 120_000, claude: 10_000 },
+    ]);
+    mockSubmit(rewritten);
+    const response = await post(rewritten);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    // 08-07 is only in the write set because the Droid layout emptied it. The
+    // day never disappeared for Claude -- the submission simply does not cover
+    // it -- so the preserve warning must not fire.
+    const startDay = store.days.find((day) => day.date === "2026-08-07");
+    expect(startDay?.sourceBreakdown.claude?.tokens).toBe(10_000);
+    expect(startDay?.sourceBreakdown.droid).toBeUndefined();
+    expect(
+      json.warnings.filter((warning: string) =>
+        warning.includes("Preserved claude"),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("submission date range aggregate", () => {
+  // This transaction double never enforces NOT NULL, so a green route test
+  // proves nothing about a NULL date range. Pin the SQL expression instead:
+  // `sql` is not mocked, so the fragment the route builds is a real drizzle
+  // object and collectStrings reassembles it verbatim.
+  function renderSql(fragment: unknown): string {
+    const parts: string[] = [];
+    collectStrings(fragment, parts);
+    return parts.join("");
+  }
+
+  it("falls back to the unfiltered bounds, so a history with no token-bearing day is not NULL", async () => {
+    const store = newStore();
+    const { selectedColumns } = installTx(store);
+    const body = submissionBody("droid", SESSION_START_DATING);
+    mockSubmit(body);
+    expect((await post(body)).status).toBe(200);
+
+    const aggregate = selectedColumns.find(
+      (columns) => "totalTokens" in columns && "dateStart" in columns,
+    );
+    expect(aggregate).toBeDefined();
+    // MIN/MAX over the tokens filter alone is NULL for a user whose whole
+    // stored history is legacy tokenless Cursor rows -- a shape validation
+    // explicitly permits -- and both columns are NOT NULL.
+    expect(renderSql(aggregate!.dateStart)).toBe(
+      "COALESCE(MIN(CASE WHEN dailyBreakdown.tokens > 0 THEN dailyBreakdown.date END), MIN(dailyBreakdown.date))",
+    );
+    expect(renderSql(aggregate!.dateEnd)).toBe(
+      "COALESCE(MAX(CASE WHEN dailyBreakdown.tokens > 0 THEN dailyBreakdown.date END), MAX(dailyBreakdown.date))",
+    );
+  });
+
+  it("pins the NOT NULL columns the fallback exists for", () => {
+    const migration = readFileSync(
+      resolve(
+        __dirname,
+        "../../src/lib/db/migrations/0000_add_user_id_unique_constraint.sql",
+      ),
+      "utf8",
+    );
+    expect(migration).toContain('"date_start" date NOT NULL');
+    expect(migration).toContain('"date_end" date NOT NULL');
   });
 });

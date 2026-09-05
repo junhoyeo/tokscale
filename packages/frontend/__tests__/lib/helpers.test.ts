@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { mergeClientBreakdownsWithRegressionGuard } from "../../src/lib/db/helpers";
+import {
+  applyCostCompleteness,
+  mergeClientBreakdownsWithRegressionGuard,
+  reapplyReplaceLayoutCostFloors,
+  type ClientBreakdownData,
+} from "../../src/lib/db/helpers";
 
 // Minimal client breakdown fixture
 function makeClient(tokens: number, messages: number, modelCount: number) {
@@ -202,5 +207,55 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.warnings[0]).toContain("disappeared");
       expect(result.foldPreservedClients).toEqual(new Set(["kilo"]));
     });
+  });
+});
+
+describe("applyCostCompleteness", () => {
+  it("keeps the stored cost floor and incompleteness tag when incoming pricing is missing", () => {
+    const existing = makeClient(240_000, 12, 1);
+    existing.cost = 240;
+    existing.models["model-0"].cost = 240;
+    const incoming = makeClient(40_000, 2, 1);
+
+    const next = applyCostCompleteness(incoming, existing, false);
+
+    expect(next.tokens).toBe(40_000);
+    expect(next.cost).toBe(240);
+    expect(next.provenance?.costIsComplete).toBe(false);
+  });
+});
+
+describe("reapplyReplaceLayoutCostFloors", () => {
+  it("spreads a pre-rewrite cost floor onto days that had no stored cell", () => {
+    const first = makeClient(120_000, 6, 1) as ClientBreakdownData;
+    const second = makeClient(120_000, 6, 1) as ClientBreakdownData;
+    const rows = [{ sourceBreakdown: { droid: first } }, { sourceBreakdown: { droid: second } }];
+
+    reapplyReplaceLayoutCostFloors(
+      rows,
+      new Map([["droid", 240]]),
+      new Set(["droid"])
+    );
+
+    expect(first.cost + second.cost).toBe(240);
+    expect(first.provenance?.costIsComplete).toBe(false);
+    expect(second.provenance?.costIsComplete).toBe(false);
+  });
+
+  it("splits a cell's cost floor across models by token share", () => {
+    const cell = makeClient(100_000, 4, 2) as ClientBreakdownData;
+    cell.models["model-0"].tokens = 75_000;
+    cell.models["model-1"].tokens = 25_000;
+    cell.tokens = 100_000;
+
+    reapplyReplaceLayoutCostFloors(
+      [{ sourceBreakdown: { droid: cell } }],
+      new Map([["droid", 40]]),
+      new Set(["droid"])
+    );
+
+    expect(cell.models["model-0"].cost).toBe(30);
+    expect(cell.models["model-1"].cost).toBe(10);
+    expect(cell.cost).toBe(40);
   });
 });

@@ -695,15 +695,20 @@ impl PricingLookup {
             }
         }
 
-        // Helper to perform lookup with the given source constraint
-        let do_lookup = |id: &str| match force_source {
+        // Helper to perform lookup with the given source constraint.
+        // `allow_archive` is false for the ids the suffix stripper invents:
+        // an archived row is one model's own last published tariff, not a
+        // family price, so an eroded candidate must resolve from the live
+        // datasets alone. The forced-source paths never reach the archive.
+        let lookup = |id: &str, allow_archive: bool| match force_source {
             Some("litellm") => self.lookup_litellm_only(id, provider_id),
             Some("openrouter") => self.lookup_openrouter_only(id, provider_id),
             Some("models.dev") | Some("modelsdev") | Some("models_dev") => {
                 self.lookup_models_dev_only(id, provider_id)
             }
-            _ => self.lookup_auto(id, provider_id),
+            _ => self.lookup_auto(id, provider_id, allow_archive),
         };
+        let do_lookup = |id: &str| lookup(id, true);
         let requested_family = claude_family(lower_ref);
         let requested_version = requested_claude_version(lower_ref);
         let unparsed_modern_version = requested_family.is_some()
@@ -750,12 +755,16 @@ impl PricingLookup {
             return None;
         }
 
-        let guarded_lookup = |candidate: &str| {
-            do_lookup(candidate)
+        let guarded = |candidate: &str, allow_archive: bool| {
+            lookup(candidate, allow_archive)
                 .map(annotate_direct)
                 .map(LookupResult::with_stripping)
                 .filter(|result| !unsafe_claude_resolution(result))
         };
+        let guarded_lookup = |candidate: &str| guarded(candidate, true);
+        // Suffix erosion asks for an id nobody published, so it resolves
+        // live-only: see `try_strip_unknown_suffix`.
+        let eroded_lookup = |candidate: &str| guarded(candidate, false);
 
         // 1.5. Generic provider-routing prefix fallback: ids coming from a
         // router/proxy (e.g. `cx/gpt-5.5` via an `omniroute` provider) carry a
@@ -786,26 +795,35 @@ impl PricingLookup {
             // on `-`, so it can peel `-xhigh` off `cx/gpt-5.5-xhigh` but is
             // left with `cx/gpt-5.5`, which is not a dataset key either. Both
             // halves resolve alone while the combination billed $0 (#846).
-            if let Some(result) = try_strip_unknown_suffix(terminal, guarded_lookup) {
+            if let Some(result) = try_strip_unknown_suffix(terminal, eroded_lookup) {
                 return Some(result);
             }
         }
 
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
-        if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup) {
+        if let Some(result) = try_strip_unknown_suffix(lower_ref, eroded_lookup) {
             return Some(result);
         }
 
         // 3. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
         //    For each prefix candidate, also try suffix stripping
-        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup) {
+        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup, eroded_lookup) {
             return Some(result);
         }
 
         None
     }
 
-    fn lookup_auto(&self, model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
+    /// `allow_archive` is false when the caller invented the id it is asking
+    /// about -- the suffix stripper's eroded candidates. The archive holds one
+    /// model's own last published tariff, so it may answer an id somebody
+    /// really published, never a neighbouring SKU.
+    fn lookup_auto(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        allow_archive: bool,
+    ) -> Option<LookupResult> {
         if let Some(result) = self.lookup_provider_scoped_path(model_id, provider_id) {
             return Some(scope_resolution_to_provider(result, model_id));
         }
@@ -856,15 +874,30 @@ impl PricingLookup {
                     self.exact_match_models_dev_for_provider(stripped, provider_id),
                     provider_id,
                 ) {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                        allow_archive,
+                    ));
                 }
                 if let Some(result) = self.exact_or_normalized_litellm(stripped, provider_id) {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                        allow_archive,
+                    ));
                 }
                 if let Some(result) =
                     self.exact_match_models_dev_with_provider(stripped, provider_id)
                 {
-                    return Some(result.with_stripping());
+                    return Some(self.prefer_proven_archive(
+                        result.with_stripping(),
+                        model_id,
+                        provider_id,
+                        allow_archive,
+                    ));
                 }
             }
         }
@@ -880,7 +913,7 @@ impl PricingLookup {
             self.exact_match_models_dev_for_provider(model_id, provider_id),
             provider_id,
         ) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
 
         if let Some(result) = exact_litellm {
@@ -904,11 +937,16 @@ impl PricingLookup {
         // matching key falls through to the canonical resolution below.
         if provider_id.is_some() {
             if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
-                return Some(result);
+                return Some(self.prefer_proven_archive(
+                    result,
+                    model_id,
+                    provider_id,
+                    allow_archive,
+                ));
             }
         }
         if let Some(result) = self.exact_match_openrouter_model_part(model_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
 
         // Separator-normalized exact passes against the canonical sources
@@ -926,31 +964,51 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&version_normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
             if provider_id.is_some() {
                 if let Some(result) =
                     self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
                 {
-                    return Some(result.with_normalization());
+                    return Some(self.prefer_proven_archive(
+                        result.with_normalization(),
+                        &version_normalized,
+                        provider_id,
+                        allow_archive,
+                    ));
                 }
             }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&version_normalized) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
         }
 
         if let Some(result) = self.exact_match_models_dev_with_provider(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
         }
 
@@ -961,40 +1019,70 @@ impl PricingLookup {
                 self.exact_match_models_dev_for_provider(&normalized, provider_id),
                 provider_id,
             ) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
             if let Some(result) = self.exact_match_litellm(&normalized) {
                 return Some(result.with_normalization());
             }
             if let Some(result) = self.exact_match_openrouter(&normalized) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&normalized, provider_id)
             {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
         }
 
         if let Some(result) = self.prefix_match_litellm(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
         if let Some(result) = self.prefix_match_openrouter(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
         if let Some(result) = self.prefix_match_models_dev(model_id, provider_id) {
-            return Some(result);
+            return Some(self.prefer_proven_archive(result, model_id, provider_id, allow_archive));
         }
 
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = self.prefix_match_litellm(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
             if let Some(result) = self.prefix_match_openrouter(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
             if let Some(result) = self.prefix_match_models_dev(&version_normalized, provider_id) {
-                return Some(result.with_normalization());
+                return Some(self.prefer_proven_archive(
+                    result.with_normalization(),
+                    &version_normalized,
+                    provider_id,
+                    allow_archive,
+                ));
             }
         }
 
@@ -1025,8 +1113,10 @@ impl PricingLookup {
         // runs ahead of the fuzzy stage below: an exact snapshot of this
         // model's own last published rate is better evidence than the
         // nearest-neighbour row fuzzy would elect.
-        if let Some(result) = self.exact_match_archive(model_id, provider_id) {
-            return Some(result);
+        if allow_archive {
+            if let Some(result) = self.exact_match_archive(model_id, provider_id) {
+                return Some(result);
+            }
         }
 
         if !is_fuzzy_eligible(model_id) {
@@ -1450,6 +1540,36 @@ impl PricingLookup {
         None
     }
 
+    /// Prefer a provider-proven archive tariff over an unverified upstream guess.
+    ///
+    /// Every unverified fallback stage in `lookup_auto` (model-part, alias and
+    /// prefix matches) routes through here. Reseller rows
+    /// (`deepinfra/anthropic/...`, `z-ai/...`) match those stages by model
+    /// part while the archive holds the publishing endpoint's own exact
+    /// tariff; letting the guess win prices first-party usage at a third
+    /// party's rate and reports it as unpublishable. Safe upstream rows pass
+    /// through untouched, as does everything when the archive cannot prove
+    /// the endpoint -- so display estimates never change, only their
+    /// publishability when a proven tariff exists.
+    ///
+    /// `allow_archive` is false for the eroded candidates the suffix stripper
+    /// invents: substituting there would swap a live row for a DIFFERENT
+    /// model's archived tariff (`mimo-v2.5-pro` billed as `mimo/mimo-v2.5`).
+    fn prefer_proven_archive(
+        &self,
+        upstream: LookupResult,
+        model_id: &str,
+        provider_id: Option<&str>,
+        allow_archive: bool,
+    ) -> LookupResult {
+        if !allow_archive || upstream.evidence.is_submission_safe() {
+            return upstream;
+        }
+        self.exact_match_archive(model_id, provider_id)
+            .filter(|archived| archived.evidence.is_submission_safe())
+            .unwrap_or(upstream)
+    }
+
     /// Match `model_id` against the retirement archive of last-known tariffs.
     ///
     /// Unlike the Cursor and Sakana built-ins above, this does NOT stamp
@@ -1466,17 +1586,26 @@ impl PricingLookup {
             return None;
         }
 
-        // Every archived key is a canonical `claude-{family}-{major}-{minor}`
+        // Every archived key is a canonical `{family}-{major}-{minor}` id
         // under a provider root, so the normalizer the upstream exact passes
-        // already use is the whole matcher. It folds the dated
-        // (`claude-haiku-4-5-20251001`), context-tagged (`claude-opus-4-8[1m]`),
-        // dotted (`claude-haiku-4.5`) and reasoning-tier
-        // (`claude-opus-4-7-thinking-xhigh`) spellings real clients emit, and it
-        // drops any leading provider segment on the way. Comparing the raw id to
-        // the key by equality instead would miss every one of those shapes —
-        // that is, every shape the archive exists to cover.
+        // already use is the whole matcher for the Claude line: it folds the
+        // dated (`claude-haiku-4-5-20251001`), context-tagged
+        // (`claude-opus-4-8[1m]`), dotted (`claude-haiku-4.5`) and
+        // reasoning-tier (`claude-opus-4-7-thinking-xhigh`) spellings real
+        // clients emit, and it drops any leading provider segment on the way.
+        // Comparing the raw id to the key by equality instead would miss
+        // every one of those shapes -- that is, every shape the archive
+        // exists to cover. Ids from other vendors have no normalizer yet and
+        // match verbatim; the provider-qualified gate below still requires
+        // the hint to name the key's publishing endpoint, so a verbatim
+        // match can never elect a neighbouring model.
         let lower = model_id.trim().to_ascii_lowercase();
-        let canonical = normalize_model_name(&lower)?;
+        let stripped = lower
+            .split_once('/')
+            .map_or(lower.as_str(), |(_, model)| model);
+        let canonical = normalize_model_name(&lower)
+            .or_else(|| normalize_model_name(stripped))
+            .unwrap_or_else(|| stripped.to_string());
 
         // The id's own leading segment authorises the tariff exactly as a hint
         // does, so `anthropic/claude-opus-4-8` resolves provider-scoped with no
@@ -2708,6 +2837,18 @@ fn is_fuzzy_eligible(model_id: &str) -> bool {
 /// Attempts to find a model by progressively stripping trailing segments.
 /// Handles arbitrary suffixes (e.g., "claude-sonnet-4-5-thinking" → "claude-sonnet-4-5").
 /// This replaces the hardcoded TIER_SUFFIXES and FALLBACK_SUFFIXES approach.
+///
+/// Every candidate here is an id nobody published: `mimo-v2.5-pro` is a
+/// different SKU from `mimo-v2.5`. Callers therefore pass a lookup with the
+/// retirement archive held out (`eroded_lookup`) — an archived row is one
+/// model's own last published tariff, not a family price, so answering an
+/// eroded candidate from it would bill an unknown SKU at a neighbouring
+/// model's rate and, under that vendor's hint, stamp it submission-safe. The
+/// live datasets still answer here exactly as they did before the archive
+/// existed. The archived spellings that ARE the same model (dated, dotted,
+/// `[1m]`, reasoning-tier) are folded by the normalizer inside
+/// `exact_match_archive`, so they resolve on the direct pass and never depend
+/// on this fallback.
 fn try_strip_unknown_suffix<F>(model_id: &str, do_lookup: F) -> Option<LookupResult>
 where
     F: Fn(&str) -> Option<LookupResult>,
@@ -2796,9 +2937,18 @@ fn has_unrecognized_claude_four_minor(model_id: &str) -> bool {
 /// Attempts to find a model by progressively stripping leading segments.
 /// Handles arbitrary routing prefixes (e.g., "myplugin-claude-3.5-sonnet" → "claude-3.5-sonnet").
 /// This replaces the hardcoded STRIPPED_PREFIXES approach.
-fn try_strip_unknown_prefix<F>(model_id: &str, do_lookup: F) -> Option<LookupResult>
+///
+/// A prefix candidate is still an id somebody published, only tagged by the
+/// client that emitted it, so `do_lookup` keeps the archive. The composed
+/// suffix pass takes `do_eroded_lookup` for the reason above.
+fn try_strip_unknown_prefix<F, G>(
+    model_id: &str,
+    do_lookup: F,
+    do_eroded_lookup: G,
+) -> Option<LookupResult>
 where
     F: Fn(&str) -> Option<LookupResult>,
+    G: Fn(&str) -> Option<LookupResult>,
 {
     let parts: Vec<&str> = model_id.split('-').collect();
 
@@ -2818,7 +2968,7 @@ where
             }
 
             // Try candidate with suffix stripping
-            if let Some(result) = try_strip_unknown_suffix(&candidate, &do_lookup) {
+            if let Some(result) = try_strip_unknown_suffix(&candidate, &do_eroded_lookup) {
                 return Some(result);
             }
         }

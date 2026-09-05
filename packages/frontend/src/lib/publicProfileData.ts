@@ -10,6 +10,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { calculateIntensity } from "@/lib/utils";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -604,7 +605,12 @@ export async function getPublicProfileResponse(
       }
     }
 
-    // Calculate max cost for intensity
+    // Calculate max tokens for intensity. Tokens, not cost, because every
+    // embed already shades from tokens -- layoutContributions in
+    // lib/embed/embedShared.ts, getUserEmbedStats and renderIsometric3DSvg all
+    // recompute intensity from totalTokens -- so a cost-scaled profile graph
+    // shaded the same account differently from its own embeds, and a day whose
+    // client reports no pricing read as blank.
     const contributions = Array.from(aggregatedDaily.values());
     const scopedContributions = contributions.filter(
       ({ date }) => date >= chartRange.start && date <= chartRange.end,
@@ -616,7 +622,10 @@ export async function getPublicProfileResponse(
     const visibleContributions = periodRange
       ? scopedContributions
       : contributions;
-    const maxCost = Math.max(...visibleContributions.map((c) => c.cost), 0);
+    const maxTokens = Math.max(
+      ...visibleContributions.map((c) => c.tokens),
+      0,
+    );
     const periodTotals = scopedContributions.reduce(
       (totals, day) => {
         totals.totalTokens += day.tokens;
@@ -645,18 +654,7 @@ export async function getPublicProfileResponse(
 
     // Build contribution graph data
     const graphContributions = visibleContributions.map((day) => {
-      const intensity =
-        maxCost === 0
-          ? 0
-          : day.cost === 0
-            ? 0
-            : day.cost <= maxCost * 0.25
-              ? 1
-              : day.cost <= maxCost * 0.5
-                ? 2
-                : day.cost <= maxCost * 0.75
-                  ? 3
-                  : 4;
+      const intensity = calculateIntensity(day.tokens, maxTokens);
 
       let dayCacheRead = 0;
       let dayCacheWrite = 0;
