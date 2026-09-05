@@ -279,11 +279,12 @@ pub(crate) struct CodexParseState {
     /// turn across incremental re-parses.
     #[serde(default)]
     pub current_turn_id: Option<String>,
-    /// True while `current_turn_id` came from a `task_started` that the
-    /// turn's `turn_context` has not yet confirmed. A `turn_context` without
-    /// an id then keeps the announced one; a `turn_context` without an id
-    /// and without an announcement ahead of it starts a turn that has none.
-    /// `#[serde(default)]` keeps it across incremental re-parses.
+    /// True while `current_turn_id` came from a `task_started` that neither
+    /// a `turn_context` nor any usage has followed yet. A `turn_context`
+    /// without an id then keeps the announced one; once the turn has a
+    /// `turn_context` or has produced usage, a `turn_context` without an id
+    /// starts a turn that has none. `#[serde(default)]` keeps it across
+    /// incremental re-parses.
     #[serde(default)]
     pub turn_id_announced_by_task_started: bool,
     /// The turns this rollout has recorded usage for so far; see
@@ -780,6 +781,10 @@ fn parse_codex_reader<R: BufRead>(
                     );
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
+                    // The announced turn has produced usage, so it is under
+                    // way: a `turn_context` without an id that comes later
+                    // starts another turn, not this one.
+                    state.turn_id_announced_by_task_started = false;
                     // Apply a deferred human-turn marker from a preceding
                     // user_message to this assistant reply — the first
                     // token-bearing message after the human input.
@@ -2109,6 +2114,36 @@ mod tests {
         assert_eq!(
             parsed.state.turn_coverage,
             expected_turns(&["turn-a", "turn-d"])
+        );
+
+        // Once the announced turn has produced usage, a later `turn_context`
+        // without an id is another turn, not a late confirmation of that
+        // one: its usage is recorded without a turn id.
+        let announced_then_unstamped = format!(
+            "{turn_a}{}",
+            concat!(
+                r#"{"timestamp":"2026-08-30T10:03:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-d","started_at":1756548181}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:03:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":70,"output_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:04:01Z","type":"turn_context","payload":{"model":"gpt-5.2-codex"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":700,"cached_input_tokens":90,"output_tokens":150},"last_token_usage":{"input_tokens":200,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+                "\n",
+            )
+        );
+        let file = create_test_file(&announced_then_unstamped);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed.state.turn_coverage,
+            CodexTurnCoverage {
+                turn_ids: ["turn-a", "turn-d"]
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect(),
+                without_turn_id: true,
+            }
         );
 
         // A rollout with no usage covers nothing.
