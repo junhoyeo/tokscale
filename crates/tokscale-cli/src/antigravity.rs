@@ -4109,13 +4109,21 @@ mod tests {
         // does not contain the word either -- a swallowed panic would keep this
         // test green. Pinning the connection error the request actually
         // produces means only the fixed path can pass.
+        // Matched on reqwest's own predicates rather than its `Display` text:
+        // that wording is an undocumented internal format a version bump can
+        // reword, while a swallowed panic does not downcast to a
+        // `reqwest::Error` at all, so this still separates the two paths.
+        let transport = error
+            .downcast_ref::<reqwest::Error>()
+            .unwrap_or_else(|| panic!("the failure must be the request's own, got: {error:#}"));
+        assert!(
+            transport.is_connect(),
+            "the request must fail connecting to the closed port, got: {error:#}"
+        );
         assert_eq!(
-            error.to_string(),
-            format!(
-                "error sending request for url (https://127.0.0.1:{port}\
-                 /exa.language_server_pb.LanguageServerService/GetUsage)"
-            ),
-            "the request must reach the closed port and fail there, got: {error:#}"
+            transport.url().and_then(|url| url.port()),
+            Some(port),
+            "the failure must name the closed port, got: {error:#}"
         );
     }
 
