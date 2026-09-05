@@ -20,7 +20,8 @@
 #
 # The fixture is the one from tokscale#1187: two unrelated sessions whose
 # compaction summaries agree on seq, time and every usage bucket and differ
-# only in compactionId (two billed calls), plus a parent and a fork whose
+# only in their per-call ids, compactionId and sourceCommandId (two billed
+# calls), plus a parent and a fork whose
 # header lost seedLength (one billed call). A seq-keyed parser drops one of
 # the first pair, 3,415 tokens; a compactionId-keyed one keeps both.
 set -euo pipefail

@@ -7,7 +7,8 @@ two legs, one root:
 - **Leg A** — `session-alpha` and `session-bravo`: two unrelated sessions, no
   `parentSession`, no `seedLength`, whose `compaction/summary` events agree on
   `seq`, `time`, provider, model and every usage bucket, and differ only in
-  `compactionId`. Two separately billed summarize calls.
+  the two per-call ids, `compactionId` and `sourceCommandId`. Two separately
+  billed summarize calls.
 - **Leg B** — `session-charlie` and `session-delta`: a parent and a fork whose
   header lost `seedLength`, the child's prefix repeating the parent's summary
   verbatim. One billed call. This is the case the `seq:` fallback exists for
