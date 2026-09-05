@@ -848,6 +848,15 @@ impl RecordedCodexTurns {
     /// Note that `thread`'s rollout emitted usage, `coverage` saying for
     /// which turns. Call only when it did emit some: an empty coverage is
     /// read as "usage without turn ids", not as "no usage".
+    ///
+    /// A rollout that mixes turns with ids and turns without (resumed under
+    /// an older Codex) is matched thread-wide too, deliberately. Its id-less
+    /// turns are in the file, so their mirror rows should yield, and only a
+    /// thread-wide match can make them; matching per turn instead would
+    /// keep every id-less turn's mirror row beside the rollout's own record
+    /// of it, and that double count would be permanent. What thread-wide
+    /// gives up is the guard for a turn the rollout lacks, and a turn that
+    /// ran after the read is picked up by the next scan.
     fn record(&mut self, thread: &str, coverage: &sessions::codex::CodexTurnCoverage) {
         if coverage.without_turn_id || coverage.turn_ids.is_empty() {
             self.whole_threads.insert(thread.to_string());

@@ -5935,8 +5935,6 @@ mod tests {
         // overlap the OpenClaw agents tree. The rollout there is OpenClaw's by
         // location, and the scan lists it for openclaw alone; listing it for
         // codex as well would have each lane emit it under its own client.
-        let previous_codex = std::env::var("CODEX_HOME").ok();
-
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_openclaw_dir(home);
@@ -5946,7 +5944,8 @@ mod tests {
         );
         fs::create_dir_all(rollout.parent().unwrap()).unwrap();
         File::create(&rollout).unwrap();
-        unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
+        let mut env = EnvGuard::capture(&["CODEX_HOME"]);
+        env.set("CODEX_HOME", &codex_home);
 
         let both = scan_without_extra_dirs(
             home.to_str().unwrap(),
@@ -5963,8 +5962,6 @@ mod tests {
         // and the directory the user pointed Codex at is Codex's.
         let codex_only = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(codex_only.get(ClientId::Codex), &vec![rollout.clone()]);
-
-        restore_env("CODEX_HOME", previous_codex);
     }
 
     #[test]

@@ -665,25 +665,19 @@ pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
 /// The transcript query this store's schema supports.
 ///
 /// Prefers the join against the current `session_windows` table, then the
-/// older `sessions` table, and reads the transcript alone when neither has
-/// the model columns. Each candidate is only *prepared* here: a missing
-/// table or column is the normal shape of an older store, not a fault worth
-/// a warning on every scan, so the probe is silent and the query that runs
-/// is the one that logs.
+/// older `sessions` table, and reads the transcript alone when neither
+/// joins. Each candidate is *prepared* here, in full, and only prepared: a
+/// missing table or column is the normal shape of an older store, not a
+/// fault worth a warning on every scan, so the probe is silent and the
+/// query that runs is the one that logs. Preparing the query itself rather
+/// than a probe of the columns it needs means a schema the query cannot
+/// run against falls through to the next one instead of failing the read.
 fn transcript_events_query(conn: &rusqlite::Connection) -> &'static str {
-    for (table, query) in [
-        (
-            "session_windows",
-            TRANSCRIPT_EVENTS_QUERY_WITH_SESSION_WINDOWS,
-        ),
-        ("sessions", TRANSCRIPT_EVENTS_QUERY_WITH_SESSIONS),
+    for query in [
+        TRANSCRIPT_EVENTS_QUERY_WITH_SESSION_WINDOWS,
+        TRANSCRIPT_EVENTS_QUERY_WITH_SESSIONS,
     ] {
-        if conn
-            .prepare(&format!(
-                "SELECT model_provider, model FROM {table} LIMIT 0"
-            ))
-            .is_ok()
-        {
+        if conn.prepare(query).is_ok() {
             return query;
         }
     }

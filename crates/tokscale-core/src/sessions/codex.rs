@@ -279,6 +279,13 @@ pub(crate) struct CodexParseState {
     /// turn across incremental re-parses.
     #[serde(default)]
     pub current_turn_id: Option<String>,
+    /// True while `current_turn_id` came from a `task_started` that the
+    /// turn's `turn_context` has not yet confirmed. A `turn_context` without
+    /// an id then keeps the announced one; a `turn_context` without an id
+    /// and without an announcement ahead of it starts a turn that has none.
+    /// `#[serde(default)]` keeps it across incremental re-parses.
+    #[serde(default)]
+    pub turn_id_announced_by_task_started: bool,
     /// The turns this rollout has recorded usage for so far; see
     /// [`CodexTurnCoverage`]. `#[serde(default)]` keeps it across incremental
     /// re-parses, since a mirror row for an earlier turn still has to yield.
@@ -442,18 +449,25 @@ fn parse_codex_reader<R: BufRead>(
                 };
                 let event_model = payload_model.clone().or(info_model.clone());
 
-                // The turn the following token_count rows belong to.
-                // `task_started` announces it and `turn_context` repeats it;
-                // read both so a rollout that has only one of them still
-                // attributes its usage. Older rollouts carry no `turn_id`
-                // on either and keep `None`.
-                let announces_turn = entry.entry_type == "turn_context"
-                    || (entry.entry_type == "event_msg"
-                        && payload.payload_type.as_deref() == Some("task_started"));
-                if announces_turn {
-                    if let Some(turn_id) = payload.turn_id.as_deref() {
-                        state.current_turn_id = Some(turn_id.to_string());
+                // The turn the following token_count rows belong to. Both
+                // `task_started` and `turn_context` start a turn, so each
+                // replaces the current id — with `None` when it carries no
+                // `turn_id`, as older Codex wrote them, so that turn's usage
+                // is not attributed to the previous turn. The one exception:
+                // a `turn_context` without an id keeps the id its own
+                // `task_started` announced just before it.
+                if entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("task_started")
+                {
+                    state.current_turn_id = payload.turn_id.clone();
+                    state.turn_id_announced_by_task_started = state.current_turn_id.is_some();
+                } else if entry.entry_type == "turn_context" {
+                    if payload.turn_id.is_some() {
+                        state.current_turn_id = payload.turn_id.clone();
+                    } else if !state.turn_id_announced_by_task_started {
+                        state.current_turn_id = None;
                     }
+                    state.turn_id_announced_by_task_started = false;
                 }
 
                 if state.forked_child_waiting_for_turn_context {
@@ -2051,6 +2065,50 @@ mod tests {
                 turn_ids: Default::default(),
                 without_turn_id: true,
             }
+        );
+
+        // A turn that arrives without an id after turns that had one (a
+        // resume under an older Codex) must not be attributed to the last
+        // identified turn: it is usage without a turn id.
+        let unstamped_later = format!(
+            "{turn_a}{}",
+            concat!(
+                r#"{"timestamp":"2026-08-30T10:03:01Z","type":"turn_context","payload":{"model":"gpt-5.2-codex"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:03:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":70,"output_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20}}}}"#,
+                "\n",
+            )
+        );
+        let file = create_test_file(&unstamped_later);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(
+            parsed.state.turn_coverage,
+            CodexTurnCoverage {
+                turn_ids: ["turn-a".to_string()].into_iter().collect(),
+                without_turn_id: true,
+            }
+        );
+
+        // A `turn_context` without an id right after its own `task_started`
+        // keeps the announced id.
+        let announced_only = format!(
+            "{turn_a}{}",
+            concat!(
+                r#"{"timestamp":"2026-08-30T10:03:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-d","started_at":1756548181}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:03:01Z","type":"turn_context","payload":{"model":"gpt-5.2-codex"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T10:03:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":70,"output_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20}}}}"#,
+                "\n",
+            )
+        );
+        let file = create_test_file(&announced_only);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(
+            parsed.state.turn_coverage,
+            expected_turns(&["turn-a", "turn-d"])
         );
 
         // A rollout with no usage covers nothing.
