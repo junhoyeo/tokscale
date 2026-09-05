@@ -1078,7 +1078,11 @@ fn parser_version(client: ClientId) -> u32 {
         // leave the parser tagged `client = "openclaw"` and keyed by the Codex
         // thread id, so the openclaw lane can own them. A v7 entry for such a
         // file holds them tagged `codex` and would keep counting them there,
-        // beside OpenClaw's own rows.
+        // beside OpenClaw's own rows. The cached parse state also records
+        // which turns the rollout emitted usage for (`turn_coverage`), which
+        // the openclaw lane matches OpenClaw's per-turn mirror rows against;
+        // an entry without it would let a mirror row count beside the
+        // rollout's own record of the same turn.
         ClientId::Codex => 8,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
@@ -1182,12 +1186,15 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
-        // v1->v2: OpenClaw messages now carry the stable dedup key
-        // `openclaw:<session>:<event id>` that lets a transcript migrated into
-        // the per-agent SQLite store collapse against its retained legacy
-        // JSONL copy. v1 entries have no key, so a warm JSONL entry would count
-        // beside the SQLite rows for the same events. `reasoningTokens` is
-        // also split out of `output` now.
+        // v1->v2: OpenClaw messages now carry a stable dedup key built from
+        // the event (`openclaw:<event id>:<timestamp>:<input>:<output>`, or
+        // `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
+        // Codex app-server turn) that lets a transcript migrated into the
+        // per-agent SQLite store collapse against its retained legacy JSONL
+        // copy, and lets the lane match a mirror row to the rollout's record
+        // of its turn. v1 entries have no key, so a warm JSONL entry would
+        // count beside the SQLite rows for the same events. `reasoningTokens`
+        // is also split out of `output` now.
         ClientId::OpenClaw => 2,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past

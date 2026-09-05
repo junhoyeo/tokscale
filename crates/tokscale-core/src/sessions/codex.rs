@@ -272,6 +272,48 @@ pub(crate) struct CodexParseState {
     /// across incremental re-parses of appended chunks.
     #[serde(default)]
     pub session_owned_by_openclaw: bool,
+    /// `turn_id` of the turn being read, from its `task_started` /
+    /// `turn_context`. Attributes each token_count to the turn that produced
+    /// it, which is the granularity OpenClaw's transcript mirror uses when it
+    /// refers back to a Codex thread. `#[serde(default)]` keeps the current
+    /// turn across incremental re-parses.
+    #[serde(default)]
+    pub current_turn_id: Option<String>,
+    /// The turns this rollout has recorded usage for so far; see
+    /// [`CodexTurnCoverage`]. `#[serde(default)]` keeps it across incremental
+    /// re-parses, since a mirror row for an earlier turn still has to yield.
+    #[serde(default)]
+    pub turn_coverage: CodexTurnCoverage,
+}
+
+/// Which of a thread's turns a rollout recorded usage for.
+///
+/// OpenClaw mirrors each Codex app-server turn into its own transcript as one
+/// row with the last response's usage, keyed by `(thread id, turn id)`, and
+/// the lanes replace such a row with the rollout's complete record of that
+/// turn. The replacement has to be per turn, not per thread: a rollout that
+/// is truncated, or that had turns appended after it was read, covers only
+/// some of the turns its thread's mirror rows describe, and a mirror row for
+/// a turn the rollout does not hold is the only record of that turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CodexTurnCoverage {
+    /// Turn ids a usage message was emitted under.
+    pub turn_ids: std::collections::HashSet<String>,
+    /// Usage was emitted with no turn id in effect. Rollouts written before
+    /// Codex stamped `turn_id` on `turn_context` look like this; such a
+    /// rollout can only be matched to its mirror rows thread-wide.
+    pub without_turn_id: bool,
+}
+
+impl CodexTurnCoverage {
+    fn record(&mut self, turn_id: Option<&str>) {
+        match turn_id {
+            Some(turn_id) => {
+                self.turn_ids.insert(turn_id.to_string());
+            }
+            None => self.without_turn_id = true,
+        }
+    }
 }
 
 /// Client id the `codex` parser tags rollouts OpenClaw drove with.
@@ -399,6 +441,20 @@ fn parse_codex_reader<R: BufRead>(
                     None
                 };
                 let event_model = payload_model.clone().or(info_model.clone());
+
+                // The turn the following token_count rows belong to.
+                // `task_started` announces it and `turn_context` repeats it;
+                // read both so a rollout that has only one of them still
+                // attributes its usage. Older rollouts carry no `turn_id`
+                // on either and keep `None`.
+                let announces_turn = entry.entry_type == "turn_context"
+                    || (entry.entry_type == "event_msg"
+                        && payload.payload_type.as_deref() == Some("task_started"));
+                if announces_turn {
+                    if let Some(turn_id) = payload.turn_id.as_deref() {
+                        state.current_turn_id = Some(turn_id.to_string());
+                    }
+                }
 
                 if state.forked_child_waiting_for_turn_context {
                     if entry.entry_type == "turn_context"
@@ -709,6 +765,7 @@ fn parse_codex_reader<R: BufRead>(
                         agent,
                     );
                     message.duration_ms = duration_ms;
+                    state.turn_coverage.record(state.current_turn_id.as_deref());
                     // Apply a deferred human-turn marker from a preceding
                     // user_message to this assistant reply — the first
                     // token-bearing message after the human input.
@@ -1919,6 +1976,92 @@ mod tests {
             messages.iter().all(|m| m.session_id == "child"),
             "{messages:?}"
         );
+    }
+
+    #[test]
+    fn test_turn_coverage_records_the_turns_usage_was_emitted_under() {
+        // OpenClaw's transcript mirrors a Codex turn by (thread, turn id), so
+        // a rollout has to say which turns it holds usage for. Either of
+        // `task_started` and `turn_context` announces a turn; the coverage
+        // survives an incremental resume; a rollout written before Codex
+        // stamped turn ids can only be matched thread-wide and says so.
+        let turn_a = concat!(
+            r#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"thread-1","originator":"openclaw","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a","started_at":1756548001}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-5.2-codex"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            "\n",
+        );
+        let later_turns = concat!(
+            // Announced by `turn_context` alone.
+            r#"{"timestamp":"2026-08-30T10:01:01Z","type":"turn_context","payload":{"turn_id":"turn-b","model":"gpt-5.2-codex"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:01:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":250,"cached_input_tokens":40,"output_tokens":75},"last_token_usage":{"input_tokens":150,"cached_input_tokens":20,"output_tokens":45}}}}"#,
+            "\n",
+            // Announced by `task_started` alone.
+            r#"{"timestamp":"2026-08-30T10:02:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-c","started_at":1756548121}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-30T10:02:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400,"cached_input_tokens":60,"output_tokens":100},"last_token_usage":{"input_tokens":150,"cached_input_tokens":20,"output_tokens":25}}}}"#,
+            "\n",
+        );
+        let expected_turns = |turns: &[&str]| CodexTurnCoverage {
+            turn_ids: turns.iter().map(|turn| turn.to_string()).collect(),
+            without_turn_id: false,
+        };
+
+        let file = create_test_file(&format!("{turn_a}{later_turns}"));
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed.state.turn_coverage,
+            expected_turns(&["turn-a", "turn-b", "turn-c"])
+        );
+
+        // Read in two chunks, the way the cache resumes an appended rollout.
+        let file = create_test_file(turn_a);
+        let first = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(first.state.turn_coverage, expected_turns(&["turn-a"]));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file.path())
+            .unwrap()
+            .write_all(later_turns.as_bytes())
+            .unwrap();
+        let resumed = parse_codex_file_incremental(file.path(), first.consumed_offset, first.state);
+        assert_eq!(resumed.messages.len(), 2);
+        assert_eq!(
+            resumed.state.turn_coverage,
+            expected_turns(&["turn-a", "turn-b", "turn-c"])
+        );
+
+        // No turn ids anywhere: usage was emitted, but under no turn.
+        let unstamped = turn_a
+            .replace(r#""turn_id":"turn-a","#, "")
+            .replace(r#"{"turn_id":"turn-a","model""#, r#"{"model""#);
+        assert!(!unstamped.contains("turn_id"), "{unstamped}");
+        let file = create_test_file(&unstamped);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(
+            parsed.state.turn_coverage,
+            CodexTurnCoverage {
+                turn_ids: Default::default(),
+                without_turn_id: true,
+            }
+        );
+
+        // A rollout with no usage covers nothing.
+        let file = create_test_file(
+            r#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"thread-1","originator":"openclaw"}}
+{"timestamp":"2026-08-30T10:00:01Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-5.2-codex"}}
+"#,
+        );
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.messages.is_empty());
+        assert_eq!(parsed.state.turn_coverage, CodexTurnCoverage::default());
     }
 
     #[test]

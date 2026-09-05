@@ -2772,6 +2772,31 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    // A Codex rollout inside an OpenClaw agent's `codex-home` is OpenClaw's
+    // usage by location, and the openclaw lane reads it as such. The Codex
+    // roots can overlap that directory — `CODEX_HOME` pointed at it, or an
+    // extra Codex scan root inside the agents tree — and the per-client dedup
+    // above would then list the same file for both clients, each lane
+    // emitting it under its own client. Ownership is decided once, here: a
+    // rollout the OpenClaw scan claims never reaches the codex lane.
+    if enabled.contains(&ClientId::OpenClaw) && !result.get(ClientId::Codex).is_empty() {
+        let openclaw_rollouts: HashSet<PathBuf> = result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .filter(|path| {
+                crate::sessions::openclaw::classify_openclaw_jsonl(path)
+                    == crate::sessions::openclaw::OpenClawJsonlKind::CodexRollout
+            })
+            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        if !openclaw_rollouts.is_empty() {
+            result.get_mut(ClientId::Codex).retain(|path| {
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                !openclaw_rollouts.contains(&key)
+            });
+        }
+    }
+
     if enabled.contains(&ClientId::Copilot) {
         let desktop_db = PathBuf::from(join_native(home_dir, ".copilot/data.db"));
         if desktop_db.is_file() {
@@ -5901,6 +5926,45 @@ mod tests {
             false,
         );
         assert!(claude_only.get(ClientId::Codex).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_openclaw_codex_home_rollout_is_listed_under_openclaw_only() {
+        // `CODEX_HOME` aimed at an agent's codex-home makes the Codex roots
+        // overlap the OpenClaw agents tree. The rollout there is OpenClaw's by
+        // location, and the scan lists it for openclaw alone; listing it for
+        // codex as well would have each lane emit it under its own client.
+        let previous_codex = std::env::var("CODEX_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        let codex_home = home.join(".openclaw/agents/main/agent/codex-home");
+        let rollout = codex_home.join(
+            "sessions/2026/08/30/rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl",
+        );
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        File::create(&rollout).unwrap();
+        unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
+
+        let both = scan_without_extra_dirs(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+        );
+        assert!(
+            both.get(ClientId::Codex).is_empty(),
+            "{:?}",
+            both.get(ClientId::Codex)
+        );
+        assert!(both.get(ClientId::OpenClaw).contains(&rollout));
+
+        // Without openclaw in the request the agents tree is never walked,
+        // and the directory the user pointed Codex at is Codex's.
+        let codex_only = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
+        assert_eq!(codex_only.get(ClientId::Codex), &vec![rollout.clone()]);
+
+        restore_env("CODEX_HOME", previous_codex);
     }
 
     #[test]

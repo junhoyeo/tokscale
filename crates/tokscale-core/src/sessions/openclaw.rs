@@ -20,15 +20,17 @@
 //! <output>`), so the SQLite row and the JSONL line for one event agree on it
 //! and so do the copies a `/fork` writes under a new session id; the caller
 //! keeps the first copy it sees (SQLite first) and drops the rest. An event
-//! without its own timestamp falls back to `openclaw:<session id>:<event id>`,
-//! since the two stores would fill the timestamp in differently.
+//! without its own timestamp is keyed by its id and usage alone
+//! (`openclaw:<event id>:<input>:<output>`), never by the timestamp a store
+//! fills in for it, since the two stores fill it in differently.
 //!
 //! Turns OpenClaw runs through the Codex app-server harness are a special
 //! case: the transcript only mirrors the final assistant message of each turn,
 //! carrying the usage of the *last* model response, while Codex's own rollout
 //! (under the agent's `codex-home`, or a shared user Codex home) records every
 //! response. Those mirror rows are keyed `openclaw:codex-mirror:<thread
-//! id>:…` so the caller can replace them with the rollout when it has one.
+//! id>:<turn id>:…` so the caller can replace each one with the rollout's
+//! record of that turn when it has one.
 
 use super::utils::{
     file_modified_timestamp_ms, for_each_json_line, open_readonly_sqlite, parse_json_line,
@@ -60,10 +62,19 @@ pub const OPENCLAW_CODEX_HOME_DIRNAME: &str = "codex-home";
 const CODEX_MIRROR_IDEMPOTENCY_PREFIX: &str = "codex-app-server:";
 
 /// Dedup-key namespace of an assistant row that mirrors a Codex app-server
-/// turn: `openclaw:codex-mirror:<thread id>:` followed by the same event
-/// identity as any other row. The thread id up front lets the lane match the
-/// row against that thread's rollout without a second field on the message.
+/// turn: `openclaw:codex-mirror:<thread id>:<turn id>:` followed by the same
+/// event identity as any other row. The thread and turn up front let the lane
+/// match the row against the rollout's record of that turn without a second
+/// field on the message. The turn segment is empty when the mirror named none.
 pub(crate) const CODEX_MIRROR_DEDUP_PREFIX: &str = "openclaw:codex-mirror:";
+
+/// The Codex app-server turn a transcript row mirrors: thread id, and the
+/// turn id when the row names one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexMirrorTurn<'a> {
+    pub thread: &'a str,
+    pub turn: Option<&'a str>,
+}
 
 /// Dedup key of one assistant event.
 ///
@@ -73,33 +84,38 @@ pub(crate) const CODEX_MIRROR_DEDUP_PREFIX: &str = "openclaw:codex-mirror:";
 /// session id when a session is forked (`/fork` copies the visible path with
 /// its ids, timestamps and usage intact). An 8-character event id alone could
 /// collide across sessions; the millisecond timestamp and token counts make
-/// that vanishingly unlikely. Without a timestamp of its own the event is
-/// keyed by session instead, because the two stores substitute different
-/// fallback timestamps.
+/// that vanishingly unlikely. An event without a timestamp of its own is
+/// keyed by its id and usage alone: the timestamp a store fills in for it
+/// differs between the stores and between a session and its fork copy, so it
+/// cannot take part, and scoping the key to the session instead would count
+/// each fork copy again.
 fn openclaw_dedup_key(
-    session_id: &str,
     event_id: &str,
-    mirror_thread: Option<&str>,
+    mirror: Option<CodexMirrorTurn<'_>>,
     timestamp: Option<i64>,
     tokens: &crate::TokenBreakdown,
 ) -> String {
     let identity = match timestamp {
         Some(timestamp) => format!("{event_id}:{timestamp}:{}:{}", tokens.input, tokens.output),
-        None => format!("{session_id}:{event_id}"),
+        None => format!("{event_id}:{}:{}", tokens.input, tokens.output),
     };
-    match mirror_thread {
-        Some(thread) => format!("{CODEX_MIRROR_DEDUP_PREFIX}{thread}:{identity}"),
+    match mirror {
+        Some(CodexMirrorTurn { thread, turn }) => {
+            let turn = turn.unwrap_or_default();
+            format!("{CODEX_MIRROR_DEDUP_PREFIX}{thread}:{turn}:{identity}")
+        }
         None => format!("openclaw:{identity}"),
     }
 }
 
-/// Thread id of the Codex app-server turn a dedup key mirrors, if any.
-pub(crate) fn codex_mirror_thread_from_dedup_key(dedup_key: &str) -> Option<&str> {
-    dedup_key
+/// The Codex app-server turn a dedup key mirrors, if any.
+pub(crate) fn codex_mirror_turn_from_dedup_key(dedup_key: &str) -> Option<CodexMirrorTurn<'_>> {
+    let mut segments = dedup_key
         .strip_prefix(CODEX_MIRROR_DEDUP_PREFIX)?
-        .split(':')
-        .next()
-        .filter(|thread| !thread.is_empty())
+        .split(':');
+    let thread = segments.next().filter(|thread| !thread.is_empty())?;
+    let turn = segments.next().filter(|turn| !turn.is_empty());
+    Some(CodexMirrorTurn { thread, turn })
 }
 
 /// What one JSONL file found under an OpenClaw agents root is.
@@ -203,14 +219,20 @@ impl OpenClawMessage {
                 .is_some_and(|model| OPENCLAW_TRANSCRIPT_ONLY_MODELS.contains(&model))
     }
 
-    /// Codex thread id when this message mirrors a Codex app-server turn.
-    fn codex_mirror_thread(&self) -> Option<&str> {
-        self.idempotency_key
+    /// The Codex app-server turn this message mirrors, if any. The key is
+    /// `codex-app-server:<thread id>:<turn id>:assistant`; a key that stops
+    /// after the thread still identifies the thread.
+    fn codex_mirror_turn(&self) -> Option<CodexMirrorTurn<'_>> {
+        let mut segments = self
+            .idempotency_key
             .as_deref()?
             .strip_prefix(CODEX_MIRROR_IDEMPOTENCY_PREFIX)?
-            .split(':')
+            .split(':');
+        let thread = segments.next().filter(|thread| !thread.is_empty())?;
+        let turn = segments
             .next()
-            .filter(|thread| !thread.is_empty())
+            .filter(|turn| !turn.is_empty() && *turn != "assistant");
+        Some(CodexMirrorTurn { thread, turn })
     }
 }
 
@@ -290,7 +312,9 @@ fn ingest_openclaw_entry(
                 return None;
             }
 
-            let mirror_thread = msg.codex_mirror_thread().map(str::to_string);
+            let mirror: Option<(String, Option<String>)> = msg
+                .codex_mirror_turn()
+                .map(|turn| (turn.thread.to_string(), turn.turn.map(str::to_string)));
             let usage = msg.usage?;
 
             let model = msg
@@ -312,9 +336,11 @@ fn ingest_openclaw_entry(
             let tokens = usage.to_breakdown_with_reasoning();
             let dedup_key = entry.id.and_then(non_empty).map(|id| {
                 openclaw_dedup_key(
-                    ctx.session_id,
                     &id,
-                    mirror_thread.as_deref(),
+                    mirror.as_ref().map(|(thread, turn)| CodexMirrorTurn {
+                        thread,
+                        turn: turn.as_deref(),
+                    }),
                     msg.timestamp,
                     &tokens,
                 )
@@ -469,23 +495,32 @@ const TRANSCRIPT_EVENTS_QUERY_BARE: &str = r#"
         ORDER BY e.session_id, e.seq
 "#;
 
-fn has_transcript_events_table(db_path: &Path, conn: &rusqlite::Connection) -> bool {
+/// Whether the store has a `transcript_events` table. `Err` when the probe
+/// itself failed — a store another process holds exclusively, an unreadable
+/// file — which says nothing about the schema.
+fn has_transcript_events_table(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
     match conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcript_events'",
         [],
         |row| row.get::<_, i64>(0),
     ) {
-        Ok(_) => true,
-        Err(rusqlite::Error::QueryReturnedNoRows) => false,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to probe OpenClaw transcript_events table"
-            );
-            false
-        }
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err),
     }
+}
+
+/// What one read of a per-agent store produced.
+#[derive(Debug, Default)]
+pub(crate) struct OpenClawSqliteScan {
+    pub messages: Vec<UnifiedMessage>,
+    /// False when the store was not read to the end: it could not be opened,
+    /// or iteration stopped partway. `messages` is then a prefix of the
+    /// store, worth reporting for this scan (a lower bound beats nothing)
+    /// but not worth caching, or every later scan would replay the shortfall
+    /// until the file happens to change. A store with no transcript table is
+    /// complete: there was nothing to read.
+    pub complete: bool,
 }
 
 /// Parse every assistant usage event in one per-agent OpenClaw database.
@@ -494,11 +529,17 @@ fn has_transcript_events_table(db_path: &Path, conn: &rusqlite::Connection) -> b
 /// app-server as its agent runtime) are read like any other: OpenClaw mirrors
 /// the final assistant message of each Codex turn into its own transcript with
 /// the usage of that turn's last model response. Those rows come out keyed by
-/// the Codex thread (see [`CODEX_MIRROR_DEDUP_PREFIX`]); the caller swaps them
-/// for the thread's rollout when it has read one, and keeps them otherwise, so
-/// the usage is never silently dropped. The legacy JSONL parser never filtered
-/// on the harness either.
+/// the Codex thread and turn (see [`CODEX_MIRROR_DEDUP_PREFIX`]); the caller
+/// swaps each for the rollout's record of that turn when it has read one, and
+/// keeps it otherwise, so the usage is never silently dropped. The legacy JSONL
+/// parser never filtered on the harness either.
 pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    scan_openclaw_sqlite(db_path).messages
+}
+
+/// [`parse_openclaw_sqlite`], also saying whether the store was read to the
+/// end. The cached lane needs the distinction; see [`OpenClawSqliteScan`].
+pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
     let conn = match open_readonly_sqlite(db_path) {
         Ok(conn) => conn,
         Err(err) => {
@@ -507,7 +548,10 @@ pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 error = %err,
                 "Failed to open OpenClaw agent database"
             );
-            return Vec::new();
+            return OpenClawSqliteScan {
+                messages: Vec::new(),
+                complete: false,
+            };
         }
     };
     if let Err(err) = conn.busy_timeout(OPENCLAW_SQLITE_BUSY_TIMEOUT) {
@@ -519,13 +563,31 @@ pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     }
 
     // A partial install or a pre-transcript schema has nothing to read; that
-    // is expected, not a fault worth logging on every scan.
-    if !has_transcript_events_table(db_path, &conn) {
-        debug!(
-            db_path = %db_path.display(),
-            "OpenClaw agent database has no transcript_events table; skipping"
-        );
-        return Vec::new();
+    // is expected, not a fault worth logging on every scan. A probe that
+    // could not run at all is a store that was not read.
+    match has_transcript_events_table(&conn) {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(
+                db_path = %db_path.display(),
+                "OpenClaw agent database has no transcript_events table; skipping"
+            );
+            return OpenClawSqliteScan {
+                messages: Vec::new(),
+                complete: true,
+            };
+        }
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to probe OpenClaw transcript_events table"
+            );
+            return OpenClawSqliteScan {
+                messages: Vec::new(),
+                complete: false,
+            };
+        }
     }
 
     let db_mtime_ms = file_modified_timestamp_ms(db_path);
@@ -535,17 +597,13 @@ pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let mut state = OpenClawSessionState::default();
     let mut malformed_rows: usize = 0;
 
-    let queries = [
-        (TRANSCRIPT_EVENTS_QUERY_WITH_SESSION_WINDOWS, None),
-        (TRANSCRIPT_EVENTS_QUERY_WITH_SESSIONS, None),
-        (
-            TRANSCRIPT_EVENTS_QUERY_BARE,
-            Some("OpenClaw transcript event"),
-        ),
-    ];
-
-    for (query, what) in queries {
-        let scan = sqlite_for_each_row_on(&conn, db_path, query, what, &mut |row| {
+    let query = transcript_events_query(&conn);
+    let scan = sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        query,
+        Some("OpenClaw transcript event"),
+        &mut |row| {
             let session_id: String = row.get(0)?;
             let event_json: String = row.get(1)?;
             // Read as f64 so an INTEGER or a REAL column both decode; a row
@@ -580,16 +638,8 @@ pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 messages.push(message);
             }
             Ok(())
-        });
-
-        match scan {
-            // Only a prepare failure means "this database does not have that
-            // schema"; anything else ran the query the schema supports.
-            SqliteScan::NotPrepared => continue,
-            SqliteScan::NotOpened => break,
-            SqliteScan::Ran | SqliteScan::Incomplete | SqliteScan::NotExecuted => break,
-        }
-    }
+        },
+    );
 
     if malformed_rows > 0 {
         debug!(
@@ -599,7 +649,45 @@ pub fn parse_openclaw_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         );
     }
 
-    messages
+    // The driver has already logged what went wrong under the label above;
+    // what is left to decide is whether `messages` is the store or a prefix
+    // of it. Only a scan that iterated to the end is the store.
+    let complete = match scan {
+        SqliteScan::Ran => true,
+        SqliteScan::Incomplete
+        | SqliteScan::NotExecuted
+        | SqliteScan::NotPrepared
+        | SqliteScan::NotOpened => false,
+    };
+    OpenClawSqliteScan { messages, complete }
+}
+
+/// The transcript query this store's schema supports.
+///
+/// Prefers the join against the current `session_windows` table, then the
+/// older `sessions` table, and reads the transcript alone when neither has
+/// the model columns. Each candidate is only *prepared* here: a missing
+/// table or column is the normal shape of an older store, not a fault worth
+/// a warning on every scan, so the probe is silent and the query that runs
+/// is the one that logs.
+fn transcript_events_query(conn: &rusqlite::Connection) -> &'static str {
+    for (table, query) in [
+        (
+            "session_windows",
+            TRANSCRIPT_EVENTS_QUERY_WITH_SESSION_WINDOWS,
+        ),
+        ("sessions", TRANSCRIPT_EVENTS_QUERY_WITH_SESSIONS),
+    ] {
+        if conn
+            .prepare(&format!(
+                "SELECT model_provider, model FROM {table} LIMIT 0"
+            ))
+            .is_ok()
+        {
+            return query;
+        }
+    }
+    TRANSCRIPT_EVENTS_QUERY_BARE
 }
 
 /// Synthetic per-agent database fixtures shared by the parser, scanner and
@@ -1495,11 +1583,95 @@ mod tests {
              INSERT INTO transcript_events VALUES ('sess-a', 1, '{}', 1);",
         )
         .unwrap();
-        assert!(parse_openclaw_sqlite(&db_path).is_empty());
+        let locked = scan_openclaw_sqlite(&db_path);
+        assert!(locked.messages.is_empty());
+        // Nothing was read, and the caller must not remember it as nothing
+        // to read.
+        assert!(!locked.complete);
 
         conn.execute_batch("ROLLBACK;").unwrap();
         drop(conn);
-        assert_eq!(parse_openclaw_sqlite(&db_path).len(), 1);
+        let released = scan_openclaw_sqlite(&db_path);
+        assert_eq!(released.messages.len(), 1);
+        assert!(released.complete);
+    }
+
+    #[test]
+    fn test_scan_openclaw_sqlite_reports_a_store_it_could_not_read_to_the_end() {
+        // A read that stops partway (here the file is cut off under a table
+        // that spans many pages) hands back the rows it got, marked as not
+        // the whole store: worth reporting for this scan, not worth caching
+        // as if it were complete.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("openclaw-agent.sqlite");
+        let conn = create_agent_db(&db_path);
+        let sessions = 400;
+        for index in 0..sessions {
+            let session = format!("sess-{index:04}");
+            insert_session_window(
+                &conn,
+                &session,
+                Some("anthropic"),
+                Some("claude-opus-4-6"),
+                None,
+            );
+            insert_event(
+                &conn,
+                &session,
+                0,
+                &assistant_event(
+                    &format!("a{index:04}"),
+                    "anthropic",
+                    "claude-opus-4-6",
+                    r#"{"input":10,"output":5,"cacheRead":0,"cacheWrite":0}"#,
+                    1_756_548_000_000 + index,
+                ),
+                1_756_548_000_000 + index,
+            );
+        }
+        // Fold the WAL into the main file so cutting the file off is what
+        // is read.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        let intact = scan_openclaw_sqlite(&db_path);
+        assert_eq!(intact.messages.len(), sessions as usize);
+        assert!(intact.complete);
+
+        let size = std::fs::metadata(&db_path).unwrap().len();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db_path)
+            .unwrap();
+        file.set_len(size / 3).unwrap();
+        drop(file);
+
+        // Whether SQLite fails before the first row or after some depends on
+        // where the b-tree's pages ended up; either way the scan says what
+        // it returned is not the store.
+        let cut = scan_openclaw_sqlite(&db_path);
+        assert!(!cut.complete);
+        assert!(
+            cut.messages.len() < sessions as usize,
+            "read {} rows from a store cut to a third",
+            cut.messages.len()
+        );
+    }
+
+    #[test]
+    fn test_scan_openclaw_sqlite_without_a_transcript_table_is_complete() {
+        // Nothing to read is a complete read: there is nothing a later scan
+        // would find that this one missed.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("openclaw-agent.sqlite");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let scan = scan_openclaw_sqlite(&db_path);
+        assert!(scan.messages.is_empty());
+        assert!(scan.complete);
     }
 
     #[test]
@@ -1556,11 +1728,12 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_mirror_rows_are_keyed_by_thread_in_both_stores() {
+    fn test_codex_mirror_rows_are_keyed_by_thread_and_turn_in_both_stores() {
         // The assistant row OpenClaw mirrors from a Codex app-server turn
         // carries `idempotencyKey: codex-app-server:<thread>:<turn>:assistant`.
-        // Its dedup key leads with the thread so the lane can replace it with
-        // that thread's rollout, and the two stores agree on the key.
+        // Its dedup key leads with the thread and turn so the lane can replace
+        // it with the rollout's record of exactly that turn, and the two
+        // stores agree on the key.
         let dir = TempDir::new().unwrap();
         let mirror = r#"{"type":"message","id":"m1","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"api":"openai-chatgpt-responses","provider":"openai","model":"gpt-5.2-codex","usage":{"input":400,"output":300,"cacheRead":800,"cacheWrite":0,"totalTokens":1500,"cost":{"total":0}},"idempotencyKey":"codex-app-server:0192f3a4-5b6c-7d8e-9f01-23456789abcd:turn-7:assistant","__openclaw":{"mirrorOrigin":"codex-app-server","mirrorIdentity":"turn-7:assistant"},"stopReason":"stop","timestamp":1756548001000}}"#;
         let plain = r#"{"type":"message","id":"m2","message":{"role":"assistant","content":[],"provider":"anthropic","model":"claude-opus-4-6","usage":{"input":10,"output":5},"timestamp":1756548002000}}"#;
@@ -1599,19 +1772,47 @@ mod tests {
         assert_eq!(from_jsonl.len(), 2);
         assert_eq!(
             from_jsonl[0].dedup_key.as_deref(),
-            Some("openclaw:codex-mirror:0192f3a4-5b6c-7d8e-9f01-23456789abcd:m1:1756548001000:400:300")
+            Some("openclaw:codex-mirror:0192f3a4-5b6c-7d8e-9f01-23456789abcd:turn-7:m1:1756548001000:400:300")
         );
         assert_eq!(
-            codex_mirror_thread_from_dedup_key(from_jsonl[0].dedup_key.as_deref().unwrap()),
-            Some("0192f3a4-5b6c-7d8e-9f01-23456789abcd")
+            codex_mirror_turn_from_dedup_key(from_jsonl[0].dedup_key.as_deref().unwrap()),
+            Some(CodexMirrorTurn {
+                thread: "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+                turn: Some("turn-7"),
+            })
         );
         assert_eq!(
             from_jsonl[1].dedup_key.as_deref(),
             Some("openclaw:m2:1756548002000:10:5")
         );
         assert_eq!(
-            codex_mirror_thread_from_dedup_key("openclaw:m2:1756548002000:10:5"),
+            codex_mirror_turn_from_dedup_key("openclaw:m2:1756548002000:10:5"),
             None
+        );
+
+        // A mirror that names the thread but no turn keeps an empty turn
+        // segment, and reads back as thread-only.
+        let thread_only = mirror.replace(
+            "codex-app-server:0192f3a4-5b6c-7d8e-9f01-23456789abcd:turn-7:assistant",
+            "codex-app-server:0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+        );
+        let thread_only_path = dir.path().join("sess-b.jsonl");
+        std::fs::write(
+            &thread_only_path,
+            [header_event("sess-b"), thread_only].join("\n"),
+        )
+        .unwrap();
+        let from_thread_only = parse_openclaw_transcript(&thread_only_path);
+        assert_eq!(
+            from_thread_only[0].dedup_key.as_deref(),
+            Some("openclaw:codex-mirror:0192f3a4-5b6c-7d8e-9f01-23456789abcd::m1:1756548001000:400:300")
+        );
+        assert_eq!(
+            codex_mirror_turn_from_dedup_key(from_thread_only[0].dedup_key.as_deref().unwrap()),
+            Some(CodexMirrorTurn {
+                thread: "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+                turn: None,
+            })
         );
     }
 
@@ -1660,8 +1861,11 @@ mod tests {
             ),
             1_756_548_950_000,
         );
-        // Timestamp-less events cannot be matched across stores, so they stay
-        // scoped to their session.
+        // A timestamp-less event is keyed by its id and usage alone: the
+        // fork copy carries the same id and usage, and the timestamp a store
+        // fills in (the row's `created_at` here) differs per copy, so it must
+        // not take part — and neither may the session, or the copy would
+        // count again.
         let timeless = r#"{"type":"message","id":"t1","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-4-6","content":[],"usage":{"input":1,"output":1}}}"#;
         insert_event(&conn, "sess-a", 1, timeless, 1_756_548_002_000);
         insert_event(&conn, "sess-fork", 2, timeless, 1_756_548_960_000);
@@ -1676,12 +1880,15 @@ mod tests {
             keys,
             vec![
                 ("sess-a", "openclaw:a1:1756548001000:100:50"),
-                ("sess-a", "openclaw:sess-a:t1"),
+                ("sess-a", "openclaw:t1:1:1"),
                 ("sess-fork", "openclaw:a1:1756548001000:100:50"),
                 ("sess-fork", "openclaw:a1:1756548950000:100:50"),
-                ("sess-fork", "openclaw:sess-fork:t1"),
+                ("sess-fork", "openclaw:t1:1:1"),
             ]
         );
+        // The store's own timestamp still reaches the message.
+        assert_eq!(messages[1].timestamp, 1_756_548_002_000);
+        assert_eq!(messages[4].timestamp, 1_756_548_960_000);
     }
 
     #[test]

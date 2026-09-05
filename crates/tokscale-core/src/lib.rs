@@ -825,6 +825,52 @@ impl MessageSink for Vec<UnifiedMessage> {
 /// the parse. Each is stateless per message, so applying them at flush time is
 /// equivalent to applying them to the finished vector -- and it lets messages
 /// be released a lane at a time.
+/// The Codex turns the rollouts read in one scan recorded usage for.
+///
+/// OpenClaw mirrors every turn it runs through Codex app-server into its own
+/// transcript as one row keyed by `(thread id, turn id)` with only the last
+/// response's usage. The openclaw lane drops such a row when a rollout read
+/// in this scan holds that turn — the rollout is the complete record — and
+/// keeps it otherwise, because then it is the only record. Coverage is per
+/// turn: a rollout that is truncated, or that a concurrent append extended
+/// after it was read, does not stand in for the turns it lacks.
+#[derive(Debug, Default)]
+struct RecordedCodexTurns {
+    /// Thread id -> the turn ids its rollout recorded usage under.
+    turns: HashMap<String, HashSet<String>>,
+    /// Threads whose rollout carries no turn ids (written before Codex
+    /// stamped `turn_id` on `turn_context`); they can only be matched
+    /// thread-wide, which is all such a rollout allows.
+    whole_threads: HashSet<String>,
+}
+
+impl RecordedCodexTurns {
+    /// Note that `thread`'s rollout emitted usage, `coverage` saying for
+    /// which turns. Call only when it did emit some: an empty coverage is
+    /// read as "usage without turn ids", not as "no usage".
+    fn record(&mut self, thread: &str, coverage: &sessions::codex::CodexTurnCoverage) {
+        if coverage.without_turn_id || coverage.turn_ids.is_empty() {
+            self.whole_threads.insert(thread.to_string());
+        } else {
+            self.turns
+                .entry(thread.to_string())
+                .or_default()
+                .extend(coverage.turn_ids.iter().cloned());
+        }
+    }
+
+    /// True when a rollout read in this scan recorded the turn a mirror row
+    /// describes. A row that names no turn is covered only thread-wide.
+    fn covers(&self, thread: &str, turn: Option<&str>) -> bool {
+        self.whole_threads.contains(thread)
+            || turn.is_some_and(|turn| {
+                self.turns
+                    .get(thread)
+                    .is_some_and(|turns| turns.contains(turn))
+            })
+    }
+}
+
 struct FlushContext<'a> {
     include_all: bool,
     requested: HashSet<&'a str>,
@@ -959,17 +1005,25 @@ fn parse_all_messages_streaming<S: MessageSink>(
         messages
     }
 
+    /// A Codex rollout's messages, and the turns they came from (see
+    /// [`sessions::codex::CodexTurnCoverage`]). The coverage rides beside the
+    /// outcome rather than on its messages because it is a property of the
+    /// file: the openclaw lane matches OpenClaw's per-turn mirror rows against
+    /// it whether the messages were parsed just now or served from the cache.
+    type CodexSourceOutcome = (CachedParseOutcome, sessions::codex::CodexTurnCoverage);
+
     fn parse_full_log_source(
         path: &Path,
         pricing: Option<&pricing::PricingService>,
         is_headless: bool,
-    ) -> CachedParseOutcome {
+    ) -> CodexSourceOutcome {
         let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(path);
         let parsed = sessions::codex::parse_codex_file_incremental(
             path,
             0,
             sessions::codex::CodexParseState::default(),
         );
+        let turn_coverage = parsed.state.turn_coverage.clone();
         let messages = finalize_codex_messages(
             parsed.messages.clone(),
             pricing,
@@ -977,22 +1031,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
             &parsed.fallback_timestamp_indices,
             fallback_timestamp,
         );
-        if !parsed.parse_succeeded {
-            return CachedParseOutcome {
-                messages,
-                retained_message_keys: HashSet::new(),
-                cache_entry: None,
-                invalidate_cache: false,
-            };
-        }
-
-        if parsed.unresolved_model_events {
-            return CachedParseOutcome {
-                messages,
-                retained_message_keys: HashSet::new(),
-                cache_entry: None,
-                invalidate_cache: false,
-            };
+        if !parsed.parse_succeeded || parsed.unresolved_model_events {
+            return (
+                CachedParseOutcome {
+                    messages,
+                    retained_message_keys: HashSet::new(),
+                    cache_entry: None,
+                    invalidate_cache: false,
+                },
+                turn_coverage,
+            );
         }
 
         let cache_entry = build_codex_cache_entry(
@@ -1003,12 +1051,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
             parsed.fallback_timestamp_indices,
         );
 
-        CachedParseOutcome {
-            messages,
-            retained_message_keys: HashSet::new(),
-            cache_entry,
-            invalidate_cache: false,
-        }
+        (
+            CachedParseOutcome {
+                messages,
+                retained_message_keys: HashSet::new(),
+                cache_entry,
+                invalidate_cache: false,
+            },
+            turn_coverage,
+        )
     }
 
     fn finalize_codex_messages(
@@ -1757,7 +1808,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
         headless_roots: &[PathBuf],
-    ) -> CachedParseOutcome {
+    ) -> CodexSourceOutcome {
         let identity = message_cache::CacheIdentity::for_client(ClientId::Codex);
         let is_headless = is_headless_path(path, headless_roots);
         let cached = source_cache.take(identity, path);
@@ -1785,25 +1836,34 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
         if let Some(cached) = cached {
             let reparse_from_start = |invalidate_cache: bool| {
-                let mut outcome = parse_full_log_source(path, pricing, is_headless);
+                let (mut outcome, turn_coverage) =
+                    parse_full_log_source(path, pricing, is_headless);
                 outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
-                outcome
+                (outcome, turn_coverage)
             };
 
             if cached.fingerprint == fingerprint {
                 if message_cache::codex_cache_entry_matches_fingerprint(&cached, &fingerprint) {
-                    return CachedParseOutcome {
-                        messages: finalize_codex_messages(
-                            cached.messages,
-                            pricing,
-                            is_headless,
-                            &cached.fallback_timestamp_indices,
-                            fallback_timestamp,
-                        ),
-                        retained_message_keys: HashSet::new(),
-                        cache_entry: None,
-                        invalidate_cache: false,
-                    };
+                    let turn_coverage = cached
+                        .codex_incremental
+                        .as_ref()
+                        .map(|incremental| incremental.state.turn_coverage.clone())
+                        .unwrap_or_default();
+                    return (
+                        CachedParseOutcome {
+                            messages: finalize_codex_messages(
+                                cached.messages,
+                                pricing,
+                                is_headless,
+                                &cached.fallback_timestamp_indices,
+                                fallback_timestamp,
+                            ),
+                            retained_message_keys: HashSet::new(),
+                            cache_entry: None,
+                            invalidate_cache: false,
+                        },
+                        turn_coverage,
+                    );
                 }
 
                 return reparse_from_start(true);
@@ -1830,6 +1890,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                 .map(|index| existing_len + index),
                         );
                         raw_messages.extend(parsed.messages);
+                        let turn_coverage = parsed.state.turn_coverage.clone();
                         let cache_entry = build_codex_cache_entry(
                             path,
                             raw_messages.clone(),
@@ -1846,12 +1907,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                 fallback_timestamp,
                             );
 
-                            return CachedParseOutcome {
-                                messages,
-                                retained_message_keys: HashSet::new(),
-                                cache_entry: Some(cache_entry),
-                                invalidate_cache: false,
-                            };
+                            return (
+                                CachedParseOutcome {
+                                    messages,
+                                    retained_message_keys: HashSet::new(),
+                                    cache_entry: Some(cache_entry),
+                                    invalidate_cache: false,
+                                },
+                                turn_coverage,
+                            );
                         }
                     }
                 }
@@ -2084,18 +2148,21 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // tagged `openclaw` (their `session_meta.originator`); they are OpenClaw's
     // usage and go to the openclaw lane below, which owns them.
     let mut openclaw_owned_rollouts: Vec<UnifiedMessage> = Vec::new();
-    // Threads the codex lane counted under `codex`. OpenClaw can resume a
-    // thread the user created in their own Codex home (supervision) and
-    // mirror the turns it drives into its transcript; the rollout then keeps
-    // its original originator and stays codex usage, so the openclaw lane
-    // drops its mirror rows for these threads rather than counting them again.
-    let mut codex_counted_threads: HashSet<String> = HashSet::new();
-    // The scanner also walks the Codex roots for an OpenClaw-only request, as
-    // lookup inputs for the hand-off above. Codex usage itself is only output
-    // when codex was asked for; the flush filter would drop it anyway, but a
-    // thread must not be marked as counted under codex when it is not.
-    let include_codex = include_all || clients.iter().any(|c| c == "codex");
-    let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
+    // The Codex turns a rollout read in this scan recorded, whichever client
+    // they count under: the OpenClaw-owned rollouts above, and threads counted
+    // under `codex`. OpenClaw can resume a thread the user created in their
+    // own Codex home (supervision) and mirror the turns it drives into its
+    // transcript; the rollout then keeps its original originator and stays
+    // codex usage, so the openclaw lane drops its mirror rows for those turns
+    // rather than counting them again. A thread counts under codex only when
+    // its messages survive the client filter: the scanner also walks the Codex
+    // roots for an OpenClaw-only request (as lookup inputs for the hand-off),
+    // and nothing is counted under codex there, so the mirror stays the record
+    // of those turns. The messages themselves go to the lane buffer regardless
+    // and the flush filter decides — a `synthetic` request keeps the ones a
+    // synthetic gateway served, whether or not codex was asked for by name.
+    let mut recorded_codex_turns = RecordedCodexTurns::default();
+    let codex_outcomes: Vec<(PathBuf, CodexSourceOutcome)> = scan_result
         .get(ClientId::Codex)
         .par_iter()
         .map(|path| {
@@ -2106,19 +2173,31 @@ fn parse_all_messages_streaming<S: MessageSink>(
         })
         .collect();
     let mut codex_seen: HashSet<String> = HashSet::new();
-    for (path, outcome) in codex_outcomes {
+    for (path, (outcome, turn_coverage)) in codex_outcomes {
+        let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in outcome.messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
+                if owned_thread.is_none() {
+                    owned_thread = Some(message.session_id.clone());
+                }
                 openclaw_owned_rollouts.push(message);
-            } else if include_codex && should_keep_deduped_message(&mut codex_seen, &message) {
-                counted_under_codex = true;
+            } else if should_keep_deduped_message(&mut codex_seen, &message) {
+                counted_under_codex |= flush_context.include_all
+                    || retain_for_requested_clients(
+                        &message.client,
+                        &message.model_id,
+                        &message.provider_id,
+                        &flush_context.requested,
+                    );
                 all_messages.push(message);
             }
         }
-        if counted_under_codex {
+        if let Some(thread) = owned_thread {
+            recorded_codex_turns.record(&thread, &turn_coverage);
+        } else if counted_under_codex {
             if let Some(thread) = sessions::codex::thread_id_from_rollout_path(&path) {
-                codex_counted_threads.insert(thread);
+                recorded_codex_turns.record(&thread, &turn_coverage);
             }
         }
         if let Some(entry) = outcome.cache_entry {
@@ -2408,17 +2487,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // 3. Legacy JSONL transcripts and published archives.
     //
     // A transcript that `openclaw doctor --fix` imported into SQLite keeps its
-    // JSONL original on disk, so 2 and 3 dedup on the stable
-    // `openclaw:<session>:<event id>` key, first copy wins. The SQLite
-    // fingerprint watches the `-wal` sidecar, so rows committed only to the
-    // WAL still invalidate a cached entry.
+    // JSONL original on disk, so 2 and 3 dedup on the stable event-content
+    // key (`openclaw:<event id>:<timestamp>:<input>:<output>`), first copy
+    // wins. The SQLite fingerprint watches the `-wal` sidecar, so rows
+    // committed only to the WAL still invalidate a cached entry.
     //
     // For a Codex turn the transcript only mirrors the final assistant message
-    // with the *last* response's usage, so whenever the thread's rollout was
-    // read (1), the mirror rows for that thread (keyed
-    // `openclaw:codex-mirror:<thread>:…`) are dropped and the rollout's
+    // with the *last* response's usage, so whenever a rollout read in (1)
+    // recorded that turn, the mirror row (keyed
+    // `openclaw:codex-mirror:<thread>:<turn>:…`) is dropped and the rollout's
     // messages are emitted under the OpenClaw session they were mirrored into.
-    // Without a rollout the mirror rows stay: a lower bound beats nothing.
+    // The match is per turn (`RecordedCodexTurns`): a rollout stands in only
+    // for the turns it holds. Without one the mirror row stays: a lower bound
+    // beats nothing.
     {
         let openclaw_identity = message_cache::CacheIdentity::for_client(ClientId::OpenClaw);
         let mut openclaw_transcripts: Vec<&PathBuf> = Vec::new();
@@ -2435,7 +2516,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
 
-        let rollout_outcomes: Vec<(PathBuf, CachedParseOutcome)> = openclaw_codex_rollouts
+        let rollout_outcomes: Vec<(PathBuf, CodexSourceOutcome)> = openclaw_codex_rollouts
             .par_iter()
             .map(|path| {
                 (
@@ -2445,8 +2526,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
             })
             .collect();
         let mut rollout_messages = std::mem::take(&mut openclaw_owned_rollouts);
-        for (path, outcome) in rollout_outcomes {
+        for (path, (outcome, turn_coverage)) in rollout_outcomes {
             let thread_from_name = sessions::codex::thread_id_from_rollout_path(&path);
+            let mut recorded_thread: Option<String> = None;
             for mut message in outcome.messages {
                 if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
                     // The location says whose usage this is even when an older
@@ -2456,7 +2538,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         message.session_id = thread.clone();
                     }
                 }
+                if recorded_thread.is_none() {
+                    recorded_thread = Some(message.session_id.clone());
+                }
                 rollout_messages.push(message);
+            }
+            if let Some(thread) = recorded_thread {
+                recorded_codex_turns.record(&thread, &turn_coverage);
             }
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
@@ -2467,56 +2555,64 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 );
             }
         }
-        // Threads with a complete record somewhere: the rollouts owned here
-        // and the ones the codex lane already counted.
-        let mut recorded_threads: HashSet<String> = rollout_messages
-            .iter()
-            .map(|message| message.session_id.clone())
-            .collect();
-        recorded_threads.extend(codex_counted_threads);
 
-        let openclaw_db_outcomes: Vec<CachedParseOutcome> = scan_result
+        let openclaw_db_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
             .openclaw_dbs
             .par_iter()
             .map(|db_path| {
-                load_or_parse_sqlite_source(
-                    openclaw_identity,
-                    db_path,
-                    &source_cache,
-                    pricing,
-                    sessions::openclaw::parse_openclaw_sqlite,
+                (
+                    db_path.clone(),
+                    // A store whose read stopped partway hands back the prefix
+                    // it got — reported for this scan, but not cacheable:
+                    // cached, it would stand in for the store on every warm
+                    // scan until the file happened to change.
+                    load_or_parse_source_with_fingerprint_and_policy(
+                        openclaw_identity,
+                        db_path,
+                        &source_cache,
+                        pricing,
+                        HistoryRetention::LiveFileOnly,
+                        message_cache::SourceFingerprint::check_sqlite_path,
+                        |path, _| {
+                            let scan = sessions::openclaw::scan_openclaw_sqlite(path);
+                            (scan.messages, scan.complete)
+                        },
+                    ),
                 )
             })
             .collect();
-        let openclaw_jsonl_outcomes: Vec<CachedParseOutcome> = openclaw_transcripts
+        let openclaw_jsonl_outcomes: Vec<(PathBuf, CachedParseOutcome)> = openclaw_transcripts
             .par_iter()
             .map(|path| {
-                load_or_parse_source(
-                    openclaw_identity,
-                    path,
-                    &source_cache,
-                    pricing,
-                    sessions::openclaw::parse_openclaw_transcript,
+                (
+                    (*path).clone(),
+                    load_or_parse_source(
+                        openclaw_identity,
+                        path,
+                        &source_cache,
+                        pricing,
+                        sessions::openclaw::parse_openclaw_transcript,
+                    ),
                 )
             })
             .collect();
         let mut openclaw_seen: HashSet<String> = HashSet::new();
         // Codex thread id -> the OpenClaw session that mirrored it.
         let mut mirrored_thread_sessions: HashMap<String, String> = HashMap::new();
-        for outcome in openclaw_db_outcomes
+        for (path, outcome) in openclaw_db_outcomes
             .into_iter()
             .chain(openclaw_jsonl_outcomes)
         {
             for message in outcome.messages {
-                if let Some(thread) = message
+                if let Some(mirror) = message
                     .dedup_key
                     .as_deref()
-                    .and_then(sessions::openclaw::codex_mirror_thread_from_dedup_key)
+                    .and_then(sessions::openclaw::codex_mirror_turn_from_dedup_key)
                 {
                     mirrored_thread_sessions
-                        .entry(thread.to_string())
+                        .entry(mirror.thread.to_string())
                         .or_insert_with(|| message.session_id.clone());
-                    if recorded_threads.contains(thread) {
+                    if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                         continue;
                     }
                 }
@@ -2526,6 +2622,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
+            } else if outcome.invalidate_cache {
+                source_cache.remove(openclaw_identity, &path);
             }
         }
         for mut message in rollout_messages {
@@ -5038,6 +5136,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         clients
     });
     let include_all = clients.is_empty();
+    let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
     let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
@@ -5148,42 +5247,69 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Claude, claude_count);
     messages.extend(claude_msgs);
 
-    let codex_files: Vec<(PathBuf, Vec<UnifiedMessage>)> = scan_result
+    let codex_files: Vec<(
+        PathBuf,
+        Vec<UnifiedMessage>,
+        sessions::codex::CodexTurnCoverage,
+    )> = scan_result
         .get(ClientId::Codex)
         .par_iter()
         .map(|path| {
             let is_headless = is_headless_path(path, &headless_roots);
-            let messages = sessions::codex::parse_codex_file(path)
+            let parsed = sessions::codex::parse_codex_file_incremental(
+                path,
+                0,
+                sessions::codex::CodexParseState::default(),
+            );
+            let messages = parsed
+                .messages
                 .into_iter()
                 .map(|mut msg| {
                     apply_headless_agent(&mut msg, is_headless);
                     msg
                 })
                 .collect::<Vec<_>>();
-            (path.clone(), messages)
+            (path.clone(), messages, parsed.state.turn_coverage)
         })
         .collect();
     // Rollouts OpenClaw drove (tagged `openclaw` by the parser) belong to the
-    // openclaw block below, and threads counted here under codex silence
-    // their OpenClaw mirror rows there; same hand-off as the cached lane.
+    // openclaw block below, and the turns of threads counted here under codex
+    // silence their OpenClaw mirror rows there; same hand-off as the cached
+    // lane. The client filter is applied here rather than at the end so the
+    // per-client count agrees with what is returned: a thread counts under
+    // codex only when its messages pass it, and a `synthetic` request keeps
+    // the ones a synthetic gateway served whether or not codex was named.
     let mut openclaw_owned_rollouts: Vec<UnifiedMessage> = Vec::new();
-    let mut codex_counted_threads: HashSet<String> = HashSet::new();
-    let include_codex = include_all || clients.iter().any(|c| c == "codex");
+    let mut recorded_codex_turns = RecordedCodexTurns::default();
     let mut codex_seen: HashSet<String> = HashSet::new();
     let mut codex_msgs: Vec<ParsedMessage> = Vec::new();
-    for (path, file_messages) in codex_files {
+    for (path, file_messages, turn_coverage) in codex_files {
+        let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in file_messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
+                if owned_thread.is_none() {
+                    owned_thread = Some(message.session_id.clone());
+                }
                 openclaw_owned_rollouts.push(message);
-            } else if include_codex && should_keep_deduped_message(&mut codex_seen, &message) {
+            } else if should_keep_deduped_message(&mut codex_seen, &message)
+                && (include_all
+                    || retain_for_requested_clients(
+                        &message.client,
+                        &message.model_id,
+                        &message.provider_id,
+                        &requested,
+                    ))
+            {
                 counted_under_codex = true;
                 codex_msgs.push(unified_to_parsed(&message));
             }
         }
-        if counted_under_codex {
+        if let Some(thread) = owned_thread {
+            recorded_codex_turns.record(&thread, &turn_coverage);
+        } else if counted_under_codex {
             if let Some(thread) = sessions::codex::thread_id_from_rollout_path(&path) {
-                codex_counted_threads.insert(thread);
+                recorded_codex_turns.record(&thread, &turn_coverage);
             }
         }
     }
@@ -5350,12 +5476,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
         let mut rollout_messages: Vec<UnifiedMessage> = openclaw_owned_rollouts;
-        rollout_messages.extend(
+        let location_rollouts: Vec<(Vec<UnifiedMessage>, sessions::codex::CodexTurnCoverage)> =
             openclaw_codex_rollouts
                 .par_iter()
-                .flat_map(|path| {
+                .map(|path| {
                     let thread_from_name = sessions::codex::thread_id_from_rollout_path(path);
-                    sessions::codex::parse_codex_file(path)
+                    let parsed = sessions::codex::parse_codex_file_incremental(
+                        path,
+                        0,
+                        sessions::codex::CodexParseState::default(),
+                    );
+                    let messages = parsed
+                        .messages
                         .into_iter()
                         .map(|mut message| {
                             if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
@@ -5366,15 +5498,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                             }
                             message
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (messages, parsed.state.turn_coverage)
                 })
-                .collect::<Vec<_>>(),
-        );
-        let mut recorded_threads: HashSet<String> = rollout_messages
-            .iter()
-            .map(|message| message.session_id.clone())
-            .collect();
-        recorded_threads.extend(codex_counted_threads);
+                .collect();
+        for (messages, turn_coverage) in location_rollouts {
+            if let Some(first) = messages.first() {
+                recorded_codex_turns.record(&first.session_id, &turn_coverage);
+            }
+            rollout_messages.extend(messages);
+        }
 
         let sqlite_messages: Vec<UnifiedMessage> = scan_result
             .openclaw_dbs
@@ -5389,15 +5522,15 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let mut mirrored_thread_sessions: HashMap<String, String> = HashMap::new();
         let mut kept: Vec<UnifiedMessage> = Vec::new();
         for message in sqlite_messages.into_iter().chain(jsonl_messages) {
-            if let Some(thread) = message
+            if let Some(mirror) = message
                 .dedup_key
                 .as_deref()
-                .and_then(sessions::openclaw::codex_mirror_thread_from_dedup_key)
+                .and_then(sessions::openclaw::codex_mirror_turn_from_dedup_key)
             {
                 mirrored_thread_sessions
-                    .entry(thread.to_string())
+                    .entry(mirror.thread.to_string())
                     .or_insert_with(|| message.session_id.clone());
-                if recorded_threads.contains(thread) {
+                if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                     continue;
                 }
             }
@@ -6101,7 +6234,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     // Filter BEFORE normalization (see parse_all_messages_with_pricing).
     if !include_all {
-        let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         messages.retain(|msg| {
             retain_for_requested_clients(&msg.client, &msg.model_id, &msg.provider_id, &requested)
         });
@@ -10958,17 +11090,104 @@ mod tests {
     }
 
     /// The assistant row OpenClaw mirrors from a Codex app-server turn: only
-    /// the last model response's usage, keyed by the Codex thread.
+    /// the last model response's usage (400/800/300 input/cached/output),
+    /// keyed by the Codex thread and turn.
     fn openclaw_codex_mirror_event(
         id: &str,
         thread: &str,
         turn: &str,
         timestamp_ms: i64,
     ) -> String {
+        openclaw_codex_mirror_event_with_usage(id, thread, turn, timestamp_ms, (400, 800, 300))
+    }
+
+    /// [`openclaw_codex_mirror_event`] with the mirrored usage spelled out as
+    /// `(input, cacheRead, output)`.
+    fn openclaw_codex_mirror_event_with_usage(
+        id: &str,
+        thread: &str,
+        turn: &str,
+        timestamp_ms: i64,
+        (input, cache_read, output): (i64, i64, i64),
+    ) -> String {
         format!(
-            r#"{{"type":"message","id":"{id}","parentId":"u1","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}],"api":"openai-chatgpt-responses","provider":"openai","model":"gpt-5.2-codex","usage":{{"input":400,"output":300,"cacheRead":800,"cacheWrite":0,"totalTokens":1500,"cost":{{"total":0}}}},"idempotencyKey":"codex-app-server:{thread}:{turn}:assistant","__openclaw":{{"mirrorOrigin":"codex-app-server","mirrorIdentity":"{turn}:assistant"}},"stopReason":"stop","timestamp":{timestamp_ms}}}}}"#
+            r#"{{"type":"message","id":"{id}","parentId":"u1","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}],"api":"openai-chatgpt-responses","provider":"openai","model":"gpt-5.2-codex","usage":{{"input":{input},"output":{output},"cacheRead":{cache_read},"cacheWrite":0,"totalTokens":{total},"cost":{{"total":0}}}},"idempotencyKey":"codex-app-server:{thread}:{turn}:assistant","__openclaw":{{"mirrorOrigin":"codex-app-server","mirrorIdentity":"{turn}:assistant"}},"stopReason":"stop","timestamp":{timestamp_ms}}}}}"#,
+            total = input + cache_read + output
         )
     }
+
+    /// One model response of a Codex turn as `last_token_usage` reports it:
+    /// `(input_tokens, cached_input_tokens, output_tokens)`, input inclusive
+    /// of cached.
+    type CodexResponse = (i64, i64, i64);
+
+    /// A Codex rollout of the given turns, each announced by `task_started`
+    /// and `turn_context` carrying its `turn_id` the way current Codex writes
+    /// them, then one token_count per response with cumulative totals.
+    fn openclaw_codex_rollout_with_turns(
+        thread: &str,
+        originator: &str,
+        turns: &[(&str, &[CodexResponse])],
+    ) -> String {
+        openclaw_codex_rollout_lines(thread, originator, turns, 1).join("\n") + "\n"
+    }
+
+    /// The lines [`openclaw_codex_rollout_with_turns`] appends for `turns`
+    /// alone, timestamped from minute `minute`, so a test can extend a
+    /// rollout the way Codex does when a later turn runs.
+    fn openclaw_codex_rollout_turn_lines(
+        turns: &[(&str, &[CodexResponse])],
+        minute: usize,
+        totals: &mut CodexResponse,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (turn_index, (turn_id, responses)) in turns.iter().enumerate() {
+            let minute = minute + turn_index;
+            lines.push(format!(
+                r#"{{"timestamp":"2026-08-30T10:{minute:02}:00Z","type":"event_msg","payload":{{"type":"task_started","turn_id":"{turn_id}","started_at":{}}}}}"#,
+                1_756_548_000 + minute as i64 * 60
+            ));
+            lines.push(format!(
+                r#"{{"timestamp":"2026-08-30T10:{minute:02}:00Z","type":"turn_context","payload":{{"turn_id":"{turn_id}","model":"gpt-5.2-codex"}}}}"#
+            ));
+            for (second, (input, cached, output)) in responses.iter().enumerate() {
+                totals.0 += input;
+                totals.1 += cached;
+                totals.2 += output;
+                lines.push(format!(
+                    r#"{{"timestamp":"2026-08-30T10:{minute:02}:{:02}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{},"cached_input_tokens":{},"output_tokens":{}}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":{cached},"output_tokens":{output}}}}}}}}}"#,
+                    second + 1,
+                    totals.0,
+                    totals.1,
+                    totals.2
+                ));
+            }
+        }
+        lines
+    }
+
+    fn openclaw_codex_rollout_lines(
+        thread: &str,
+        originator: &str,
+        turns: &[(&str, &[CodexResponse])],
+        minute: usize,
+    ) -> Vec<String> {
+        let mut lines = vec![format!(
+            r#"{{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{{"id":"{thread}","originator":"{originator}","source":"cli","model_provider":"openai","cwd":"/home/alice/.openclaw/workspace"}}}}"#
+        )];
+        let mut totals = (0, 0, 0);
+        lines.extend(openclaw_codex_rollout_turn_lines(
+            turns,
+            minute,
+            &mut totals,
+        ));
+        lines
+    }
+
+    /// The two responses of [`openclaw_codex_rollout`] as a turn: 1000/700/50
+    /// and 1200/800/300 input/cached/output, which the codex parser reports
+    /// as 300/700/50 and 400/800/300 input/cache_read/output.
+    const OPENCLAW_CODEX_TURN_1: &[CodexResponse] = &[(1000, 700, 50), (1200, 800, 300)];
 
     /// A Codex rollout of one OpenClaw-driven turn with two model responses
     /// (a tool call, then the final answer): 1000/700/50 and 1200/800/300
@@ -11529,6 +11748,447 @@ mod tests {
         })
         .unwrap();
         assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_rollout_stands_in_only_for_the_turns_it_holds() {
+        // The rollout holds turn 1 (two responses) and nothing of turn 2: it
+        // was cut short, or turn 2 ran after it was read. Its record replaces
+        // the transcript's mirror row for turn 1; the mirror row for turn 2 is
+        // the only record of that turn and stays. Once turn 2 is appended to
+        // the rollout, its mirror row yields too. Both lanes, and the cached
+        // lane through a warm scan and an incremental resume.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let rollout_dir = home.join(".openclaw/agents/main/agent/codex-home/sessions/2026/08/30");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout_path = rollout_dir.join(format!(
+            "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+        ));
+        std::fs::write(
+            &rollout_path,
+            openclaw_codex_rollout_with_turns(
+                OPENCLAW_CODEX_THREAD,
+                "openclaw",
+                &[("turn-1", OPENCLAW_CODEX_TURN_1)],
+            ),
+        )
+        .unwrap();
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+                openclaw_codex_mirror_event_with_usage(
+                    "m2",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-2",
+                    1_756_548_065_000,
+                    (60, 20, 12),
+                ),
+            ],
+        );
+        let clients = ["openclaw".to_string(), "codex".to_string()];
+        let row = |input, cache_read, output| {
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                input,
+                cache_read,
+                output,
+            )
+        };
+
+        let expected = vec![row(60, 20, 12), row(300, 700, 50), row(400, 800, 300)];
+        let cold = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&cold), expected);
+        let warm = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 3);
+        assert_eq!(parsed.counts.get(ClientId::Codex), 0);
+
+        // Turn 2 reaches the rollout: one response of 500/100/40.
+        let mut totals = (2200, 1500, 350);
+        let appended =
+            openclaw_codex_rollout_turn_lines(&[("turn-2", &[(500, 100, 40)])], 1, &mut totals)
+                .join("\n")
+                + "\n";
+        {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout_path)
+                .unwrap()
+                .write_all(appended.as_bytes())
+                .unwrap();
+        }
+        let expected = vec![row(300, 700, 50), row(400, 100, 40), row(400, 800, 300)];
+        let resumed = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&resumed), expected);
+        let warm = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 3);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_rollout_without_turn_ids_stands_in_for_its_whole_thread() {
+        // A rollout written before Codex stamped `turn_id` on its turns
+        // cannot be matched per turn. It stands in for the whole thread,
+        // which is what the lanes did before coverage was per turn and all
+        // such a rollout allows.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let rollout_dir = home.join(".openclaw/agents/main/agent/codex-home/sessions/2026/08/30");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        std::fs::write(
+            rollout_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout(OPENCLAW_CODEX_THREAD, "openclaw"),
+        )
+        .unwrap();
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+                openclaw_codex_mirror_event_with_usage(
+                    "m2",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-2",
+                    1_756_548_065_000,
+                    (60, 20, 12),
+                ),
+            ],
+        );
+        let clients = ["openclaw".to_string()];
+        let expected = vec![
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                300,
+                700,
+                50,
+            ),
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                400,
+                800,
+                300,
+            ),
+        ];
+        let cold = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&cold), expected);
+        let warm = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_codex_home_rollout_counts_once_when_codex_home_points_at_it() {
+        // `CODEX_HOME` aimed at an agent's codex-home makes the Codex roots
+        // overlap the OpenClaw agents tree. The rollout's originator does not
+        // name OpenClaw (an older OpenClaw), so by metadata alone the codex
+        // lane would count it under codex while the openclaw lane counts it
+        // by location, each behind its own dedup set. The scanner decides
+        // ownership once: the openclaw lane alone reads it.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let codex_home = home.join(".openclaw/agents/main/agent/codex-home");
+        let rollout_dir = codex_home.join("sessions/2026/08/30");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        std::fs::write(
+            rollout_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout_with_turns(
+                OPENCLAW_CODEX_THREAD,
+                "codex-tui",
+                &[("turn-1", OPENCLAW_CODEX_TURN_1)],
+            ),
+        )
+        .unwrap();
+        seed_openclaw_agent_db(
+            home,
+            "main",
+            "sess-codex",
+            Some("codex"),
+            &[
+                sessions::openclaw::test_fixtures::header_event("sess-codex"),
+                openclaw_codex_mirror_event(
+                    "m1",
+                    OPENCLAW_CODEX_THREAD,
+                    "turn-1",
+                    1_756_548_005_000,
+                ),
+            ],
+        );
+        let mut env = crate::paths::test_env::EnvGuard::capture(&[
+            "CODEX_HOME",
+            "TOKSCALE_EXTRA_DIRS",
+            "TOKSCALE_HEADLESS_DIR",
+        ]);
+        env.set("CODEX_HOME", &codex_home);
+        env.remove("TOKSCALE_EXTRA_DIRS");
+        env.remove("TOKSCALE_HEADLESS_DIR");
+
+        let both = ["codex".to_string(), "openclaw".to_string()];
+        let expected = vec![
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                300,
+                700,
+                50,
+            ),
+            (
+                "openclaw".to_string(),
+                "sess-codex".to_string(),
+                400,
+                800,
+                300,
+            ),
+        ];
+        for _ in 0..2 {
+            let messages = parse_all_messages_with_pricing_with_cache_policy(
+                home.to_str().unwrap(),
+                &both,
+                None,
+                true,
+                &scanner::ScannerSettings::default(),
+                SourceCachePolicy::Persistent,
+            );
+            assert_eq!(openclaw_usage_by_client_session(&messages), expected);
+        }
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: true,
+            clients: Some(both.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Codex), 0);
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+
+        // Without openclaw in the request the agents tree is never walked,
+        // and the rollout is what its metadata says: Codex usage in the
+        // directory the user pointed Codex at.
+        let codex_only = parse_all_messages_with_pricing_with_cache_policy(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+            true,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+        );
+        assert_eq!(codex_only.len(), 2);
+        assert!(codex_only.iter().all(|message| message.client == "codex"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_synthetic_request_keeps_codex_usage_a_synthetic_gateway_served() {
+        // `--client synthetic` keeps whatever any client routed through a
+        // synthetic gateway; the flush filter is where that is decided, and
+        // Codex usage has to reach it whether or not codex was named too.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let codex_dir = home.join(".codex/sessions/2026/08/30");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join(format!(
+                "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+            )),
+            openclaw_codex_rollout_with_turns(
+                OPENCLAW_CODEX_THREAD,
+                "codex-tui",
+                &[("turn-1", OPENCLAW_CODEX_TURN_1)],
+            )
+            .replace(
+                r#""model_provider":"openai""#,
+                r#""model_provider":"synthetic""#,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            codex_dir
+                .join("rollout-2026-08-30T11-00-00-11111111-2222-3333-4444-555555555555.jsonl"),
+            openclaw_codex_rollout_with_turns(
+                "11111111-2222-3333-4444-555555555555",
+                "codex-tui",
+                &[("turn-1", &[(10, 0, 5)])],
+            ),
+        )
+        .unwrap();
+
+        let synthetic = ["synthetic".to_string()];
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &synthetic, None);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.iter().all(|message| message.client == "codex"));
+        assert!(messages.iter().all(|message| message.tokens.input >= 300));
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(synthetic.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Codex), 2);
+        assert_eq!(parsed.messages.len(), 2);
+        assert!(parsed
+            .messages
+            .iter()
+            .all(|message| message.client == "codex"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_store_read_partway_is_reported_but_not_cached() {
+        // A store whose read stops partway (the file is cut off under a table
+        // spanning many pages) contributes the rows it yielded to this scan,
+        // but no cache entry: cached, that prefix would be served as the
+        // store on every warm scan until the file happened to change.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        let db_path = home.join(".openclaw/agents/main/agent/openclaw-agent.sqlite");
+        let identity = message_cache::CacheIdentity::for_client(ClientId::OpenClaw);
+
+        let seed = |sessions: i64| {
+            use sessions::openclaw::test_fixtures::{
+                create_agent_db, header_event, insert_event, insert_session_window,
+            };
+            let _ = std::fs::remove_file(&db_path);
+            let conn = create_agent_db(&db_path);
+            for index in 0..sessions {
+                let session = format!("sess-{index:04}");
+                insert_session_window(
+                    &conn,
+                    &session,
+                    Some("anthropic"),
+                    Some("claude-opus-4-6"),
+                    None,
+                );
+                insert_event(&conn, &session, 0, &header_event(&session), 1);
+                insert_event(
+                    &conn,
+                    &session,
+                    1,
+                    &openclaw_assistant_event(
+                        &format!("a{index:04}"),
+                        10,
+                        5,
+                        1_756_548_000_000 + index,
+                    ),
+                    1_756_548_000_000 + index,
+                );
+            }
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            drop(conn);
+        };
+
+        seed(400);
+        let size = std::fs::metadata(&db_path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db_path)
+            .unwrap()
+            .set_len(size / 3)
+            .unwrap();
+        let partial = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert!(partial.len() < 400, "{}", partial.len());
+        let cache = message_cache::SourceMessageCache::load();
+        assert!(
+            cache.take(identity, &db_path).is_none(),
+            "a store read partway must not be cached"
+        );
+        drop(cache);
+
+        // An intact store is.
+        seed(4);
+        let complete = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(complete.len(), 4);
+        let cache = message_cache::SourceMessageCache::load();
+        assert!(cache.take(identity, &db_path).is_some());
     }
 
     #[test]
