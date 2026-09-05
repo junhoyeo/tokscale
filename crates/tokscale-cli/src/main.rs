@@ -5905,22 +5905,24 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
 
     // Name the capped rows even though their prose is dropped: the hint tells
     // the user to add pricing keyed by the ids printed above, so an id that
-    // never prints is an unfixable gap.
+    // never prints is an unfixable gap. Wrapped a few per line rather than
+    // truncated -- dropping an id makes it unfixable, whereas one long line is
+    // only unreadable, and a 45-row history put every id on that one line.
     if ranked.len() > MAX_DETAIL_ROWS {
-        let rest = ranked[MAX_DETAIL_ROWS..]
-            .iter()
-            .map(|row| format!("{}/{}", row.provider_id, row.model_id))
-            .collect::<Vec<_>>()
-            .join(", ");
+        const TAIL_IDS_PER_LINE: usize = 4;
+        let capped = &ranked[MAX_DETAIL_ROWS..];
         println!(
             "{}",
-            format!(
-                "    ... and {} more at $0.00: {}",
-                ranked.len() - MAX_DETAIL_ROWS,
-                rest
-            )
-            .bright_black()
+            format!("    ... and {} more at $0.00:", capped.len()).bright_black()
         );
+        for chunk in capped.chunks(TAIL_IDS_PER_LINE) {
+            let ids = chunk
+                .iter()
+                .map(|row| format!("{}/{}", row.provider_id, row.model_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("{}", format!("      {}", ids).bright_black());
+        }
     }
 
     let total_messages: usize = unpriced

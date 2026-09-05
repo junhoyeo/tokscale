@@ -5220,6 +5220,77 @@ fn test_submit_names_the_unpriced_models_past_the_detail_cap() {
     );
 }
 
+/// Regression: the capped ids were first printed as one unbroken line, so a
+/// long unpriced history rebuilt the wall of text the cap exists to prevent.
+/// Every capped id still has to appear -- the hint asks the user to price
+/// them -- but wrapped, not on a single line.
+#[test]
+fn test_submit_wraps_the_capped_unpriced_model_names() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-wrap");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..40 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-wrap",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 20 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+
+    // Every capped id stays reachable: the hint tells the user to price them.
+    for i in 20..40 {
+        let id = format!("unknown-provider-{i:02}/genuinely-unpriced-model-{i:02}");
+        assert!(
+            stdout.contains(&id),
+            "capped row {id} must still be nameable for custom-pricing: {stdout}"
+        );
+    }
+
+    // ... but spread over several lines. Unwrapped, these 20 ids landed on one
+    // ~1000-character line.
+    let longest = stdout.lines().map(str::len).max().unwrap_or(0);
+    assert!(
+        longest < 300,
+        "no output line may bury the screen; longest was {longest} chars: {stdout}"
+    );
+}
+
 /// Regression: the cap used to keep the alphabetically first rows, which hid
 /// the heaviest usage behind a provider id starting with `z`. The ids the hint
 /// asks the user to price must be the ones pricing recovers the most tokens
