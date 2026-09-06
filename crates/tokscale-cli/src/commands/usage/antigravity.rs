@@ -1084,7 +1084,8 @@ mod tests {
     /// failure `call_rpc` reports at once, so the round has nothing left in
     /// flight and returns without a summary.
     ///
-    /// The port is one this test bound and released, so nothing listens on it.
+    /// The round targets port 0, which nothing can ever serve, so the connect
+    /// is refused at once on every platform and no neighbour can change that.
     /// Under [`ROUND_STALL_GUARD`] the deadline is reachable only by treating
     /// the refusal as a request still in flight, which is what the elapsed
     /// check rules out; it bounds a hang, not how fast the refusal arrives.
