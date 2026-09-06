@@ -1066,11 +1066,19 @@ pub fn parser_generation() -> u64 {
 
 fn parser_version(client: ClientId) -> u32 {
     match client {
-        // v1->v2: compressed OpenClaw archives were scanned as plain JSONL and
-        // cached as empty. Their bytes do not change when decoding is fixed.
-        // v2->v3 is reserved for transcript deduplication; merge that change
-        // before this one so each independently shipped behavior has a distinct
-        // identity. v3->v4: compaction checkpoint snapshots are no longer scan
+        // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
+        // JSONL and cached as empty. Their bytes do not change when decoding is
+        // fixed, so only the parser version can retire those entries.
+        // v2->v3 (#1278): OpenClaw messages now carry a stable dedup key built
+        // from the event (`openclaw:<event id>:<timestamp>:<input>:<output>`,
+        // or `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
+        // Codex app-server turn) that lets a transcript migrated into the
+        // per-agent SQLite store collapse against its retained legacy JSONL
+        // copy, and lets the lane match a mirror row to the rollout's record of
+        // its turn. Entries below v3 have no key, so a warm JSONL entry would
+        // count beside the SQLite rows for the same events. `reasoningTokens`
+        // is also split out of `output` now.
+        // v3->v4 (#1293): compaction checkpoint snapshots are no longer scan
         // sources. Source-cache entries cannot be reached once discovery omits
         // them, but parser_generation must change so the source-agnostic TUI
         // aggregate cache cannot replay totals that included those snapshots.
@@ -1083,7 +1091,16 @@ fn parser_version(client: ClientId) -> u32 {
         // carried in both. Without this bump an existing cache keeps replaying
         // pre-split rows, and those sessions stay double-priced while looking
         // fixed.
-        ClientId::Codex => 7,
+        // v7->v8: rollouts whose `session_meta.originator` is OpenClaw now
+        // leave the parser tagged `client = "openclaw"` and keyed by the Codex
+        // thread id, so the openclaw lane can own them. A v7 entry for such a
+        // file holds them tagged `codex` and would keep counting them there,
+        // beside OpenClaw's own rows. The cached parse state also records
+        // which turns the rollout emitted usage for (`turn_coverage`), which
+        // the openclaw lane matches OpenClaw's per-turn mirror rows against;
+        // an entry without it would let a mirror row count beside the
+        // rollout's own record of the same turn.
+        ClientId::Codex => 8,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -3305,9 +3322,10 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
-        // bucket. The bump is what stops an existing cache from replaying
-        // pre-split rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 7);
+        // bucket, and v7->v8 retags rollouts OpenClaw originated as openclaw.
+        // Each bump is what stops an existing cache from replaying the old
+        // rows, so it has to be asserted rather than assumed.
+        assert_eq!(parser_version(ClientId::Codex), 8);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -3341,6 +3359,19 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v3_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    /// Three retirements in a row, each needing its own number. #1285 took v2
+    /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
+    /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
+    /// split, so reusing 2 would have left every reader who already scanned
+    /// under #1285 unmigrated. #1293 needs v4 for the same reason one step
+    /// on: dropping checkpoint snapshots from discovery cannot reach the
+    /// source cache, so only the version can retire TUI aggregates that
+    /// still include them.
+    #[test]
+    fn test_openclaw_parser_version_invalidates_v3_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 4);
     }
 
     #[test]
@@ -3596,11 +3627,6 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
-    }
-
-    #[test]
-    fn openclaw_checkpoint_exclusion_invalidates_v3_derived_caches() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 4);
     }
 
     #[test]
