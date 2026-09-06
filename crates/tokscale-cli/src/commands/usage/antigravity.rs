@@ -1075,6 +1075,53 @@ mod tests {
         );
     }
 
+    /// A port with nothing behind it ends the round on its refusal.
+    ///
+    /// This is the premise that makes [`DISCOVERY_ROUND_TIMEOUT`] affordable
+    /// on a machine without Antigravity: `cli.log` keeps naming the ports of
+    /// servers that have since exited, and only a port that accepts and then
+    /// goes quiet may hold a round to its deadline. A refused connection is a
+    /// failure `call_rpc` reports at once, so the round has nothing left in
+    /// flight and returns without a summary.
+    ///
+    /// The round targets port 0, which nothing can ever serve, so the connect
+    /// is refused at once on every platform and no neighbour can change that.
+    /// Under [`ROUND_STALL_GUARD`] the deadline is reachable only by treating
+    /// the refusal as a request still in flight, which is what the elapsed
+    /// check rules out; it bounds a hang, not how fast the refusal arrives.
+    #[test]
+    fn a_port_that_refuses_ends_the_round_on_the_refusal() {
+        // Port 0 is the one port nothing can ever serve: bind(0) asks the
+        // kernel to pick a port, so no socket is bound to 0 itself, and a
+        // connect to it fails at once on every platform. Any real port is a
+        // race -- an ephemeral port released before the round is free for a
+        // neighbouring test to bind, and a responder there would hand the
+        // round a summary. Holding the port bound-but-not-listening is not a
+        // portable refusal either: Linux resets the SYN, macOS drops it and
+        // the connect waits out its retransmits.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let summary = runtime.block_on(race_for_quota_with(
+            vec![0],
+            ROUND_STALL_GUARD,
+            &quota_client,
+        ));
+        let elapsed = started.elapsed();
+
+        assert!(
+            summary.is_none(),
+            "nothing can serve port 0, so the round cannot yield a summary"
+        );
+        assert!(
+            elapsed < ROUND_STALL_GUARD,
+            "a refused connection must end the round on the refusal, not at its deadline \
+             (elapsed={elapsed:?})"
+        );
+    }
+
     /// The log is appended across every run and never rotated, so the read has
     /// to be bounded -- and the bound has to keep the *end*, because that is
     /// where the port of the currently running server was written.
