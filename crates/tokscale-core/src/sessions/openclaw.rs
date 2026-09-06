@@ -58,6 +58,18 @@ pub const OPENCLAW_INCOGNITO_AGENT_DB_FILENAME: &str = "incognito-openclaw-agent
 /// `<agents root>/<agentId>/agent/codex-home/sessions/**/rollout-*.jsonl`.
 pub const OPENCLAW_CODEX_HOME_DIRNAME: &str = "codex-home";
 
+/// Directory `openclaw doctor` moves legacy JSONL into once the SQLite store
+/// exists, beside the agent's `sessions/`: `<agentId>/session-sqlite-import-
+/// archive/<archive key>.<original basename>.imported-<ts>`. A transcript it
+/// imported gets its session key as the archive key and its events are in
+/// SQLite; history it found unreferenced is not imported at all and gets
+/// `OPENCLAW_UNREFERENCED_ARCHIVE_PREFIX` instead, so those files are the
+/// only record of their sessions.
+pub const OPENCLAW_IMPORT_ARCHIVE_DIRNAME: &str = "session-sqlite-import-archive";
+
+/// Archive key, with its separator, of the unreferenced history above.
+const OPENCLAW_UNREFERENCED_ARCHIVE_PREFIX: &str = "archive-tier.";
+
 /// Scope prefix OpenClaw's Codex extension puts on the `idempotencyKey` of
 /// every message it mirrors from an app-server thread:
 /// `codex-app-server:<thread id>:<turn id>:assistant`.
@@ -438,8 +450,29 @@ pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> 
         Some(id) => id,
         None => return Vec::new(),
     };
+    let session_id = import_archive_session_id(transcript_path, &session_id);
 
-    parse_openclaw_session(transcript_path, &session_id)
+    parse_openclaw_session(transcript_path, session_id)
+}
+
+/// The session id behind a filename in the doctor's import archive.
+///
+/// Unreferenced history is archived as `archive-tier.<original basename>`,
+/// so its session id is what follows the archive key; anywhere else, and for
+/// any other archive key, the stem is the session id. Imported transcripts
+/// keep their session-key prefix on purpose: their events are in SQLite and
+/// the copy collapses on the event dedup key, so its spelling never shows.
+fn import_archive_session_id<'a>(transcript_path: &Path, stem: &'a str) -> &'a str {
+    let in_import_archive = transcript_path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == OPENCLAW_IMPORT_ARCHIVE_DIRNAME);
+    if !in_import_archive {
+        return stem;
+    }
+    stem.strip_prefix(OPENCLAW_UNREFERENCED_ARCHIVE_PREFIX)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(stem)
 }
 
 fn resolve_session_path(index_dir: &Path, entry: &SessionEntry) -> PathBuf {
@@ -1028,6 +1061,60 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id, "my-session-123");
         assert_eq!(messages[0].provider_id, "openai-codex");
+    }
+
+    #[test]
+    fn test_parse_openclaw_transcript_derives_session_id_from_import_archive_filename() {
+        // `openclaw doctor` parks legacy JSONL it did not import under
+        // `session-sqlite-import-archive/archive-tier.<session id>.jsonl
+        // .imported-<ts>`. Those files are the only record of their sessions
+        // and must report OpenClaw's session id, not the archived spelling.
+        // An imported transcript is archived under its session key instead
+        // and keeps that spelling: its events are in SQLite and the copy
+        // dedups away. Outside that directory nothing is stripped.
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
+        let archive = dir
+            .path()
+            .join("agents/main")
+            .join(OPENCLAW_IMPORT_ARCHIVE_DIRNAME);
+        std::fs::create_dir_all(&archive).unwrap();
+        let session_id_for = |path: &Path| {
+            std::fs::write(path, content).unwrap();
+            let messages = parse_openclaw_transcript(path);
+            assert_eq!(messages.len(), 1, "{}", path.display());
+            messages[0].session_id.clone()
+        };
+
+        assert_eq!(
+            session_id_for(&archive.join(
+                "archive-tier.3139ce31-e15e-4f1b-a4b0-350a525f4331.jsonl.imported-1788148544385"
+            )),
+            "3139ce31-e15e-4f1b-a4b0-350a525f4331"
+        );
+        assert_eq!(
+            session_id_for(&archive.join(
+                "archive-tier.9256de27-418e-433a-b7b2-6476122a9873-topic-1788148540679.jsonl.imported-1788148544385.1"
+            )),
+            "9256de27-418e-433a-b7b2-6476122a9873-topic-1788148540679"
+        );
+        assert_eq!(
+            session_id_for(&archive.join(
+                "agent_mini_main_heartbeat.7b0e5fab-cce5-4c23-986b-8fd8e49e7c2c.jsonl.imported-1788148544385"
+            )),
+            "agent_mini_main_heartbeat.7b0e5fab-cce5-4c23-986b-8fd8e49e7c2c"
+        );
+        // The key alone is not a session.
+        assert_eq!(
+            session_id_for(&archive.join("archive-tier..jsonl.imported-1788148544385")),
+            "archive-tier."
+        );
+        let sessions = dir.path().join("agents/main/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        assert_eq!(
+            session_id_for(&sessions.join("archive-tier.abc.jsonl")),
+            "archive-tier.abc"
+        );
     }
 
     #[test]
