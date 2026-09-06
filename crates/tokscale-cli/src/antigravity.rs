@@ -2046,6 +2046,10 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
             Ok(value)
         }
         Err(http_err) => {
+            if is_rpc_cap_error(&http_err) {
+                remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
+                return Err(http_err);
+            }
             let value = https_rpc_request(connection, method, body).with_context(|| {
                 format!(
                     "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
@@ -2252,10 +2256,10 @@ fn https_rpc_request(
                 let _ = stderr_drain.join();
                 let bytes =
                     outcome.context("Failed to read curl.exe response for Windows RPC fallback")?;
-                anyhow::bail!(
-                    "Antigravity RPC body of {} bytes exceeds {cap} cap",
-                    bytes.len()
-                );
+                return Err(anyhow::Error::new(RpcBodyCapError {
+                    length: bytes.len(),
+                    cap,
+                }));
             }
         };
 
@@ -2413,18 +2417,20 @@ pub(crate) async fn read_reqwest_response_with_cap(
 ) -> Result<String> {
     if let Some(length) = response.content_length() {
         if length > max_body_bytes as u64 {
-            anyhow::bail!("Antigravity RPC body of {length} bytes exceeds {max_body_bytes} cap");
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: length as usize,
+                cap: max_body_bytes,
+            }));
         }
     }
 
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if body.len().saturating_add(chunk.len()) > max_body_bytes {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {} cap",
-                body.len().saturating_add(chunk.len()),
-                max_body_bytes
-            );
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: body.len().saturating_add(chunk.len()),
+                cap: max_body_bytes,
+            }));
         }
         body.extend_from_slice(&chunk);
     }
@@ -2493,7 +2499,7 @@ fn rpc_request_plain_http(
         read_chunked_body(&mut reader)?
     } else if let Some(length) = content_length {
         if length > cap {
-            anyhow::bail!("Antigravity RPC body of {length} bytes exceeds {cap} cap");
+            return Err(anyhow::Error::new(RpcBodyCapError { length, cap }));
         }
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
@@ -2505,10 +2511,10 @@ fn rpc_request_plain_http(
             .take(cap as u64 + 1)
             .read_to_string(&mut text)?;
         if text.len() > cap {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {cap} cap",
-                text.len()
-            );
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: text.len(),
+                cap,
+            }));
         }
         text
     };
@@ -2573,11 +2579,10 @@ fn read_chunked_body_with_cap(
         }
 
         if chunk_size > max_body_bytes || body.len().saturating_add(chunk_size) > max_body_bytes {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {} cap",
-                body.len().saturating_add(chunk_size),
-                max_body_bytes
-            );
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: body.len().saturating_add(chunk_size),
+                cap: max_body_bytes,
+            }));
         }
 
         let mut chunk = vec![0_u8; chunk_size];
@@ -2761,9 +2766,27 @@ impl TrajectoryEnrichmentBudget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RpcBodyCapError {
+    pub length: usize,
+    pub cap: usize,
+}
+
+impl std::fmt::Display for RpcBodyCapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Antigravity RPC body of {} bytes exceeds {} cap",
+            self.length, self.cap
+        )
+    }
+}
+
+impl std::error::Error for RpcBodyCapError {}
+
 fn is_rpc_cap_error(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}");
-    msg.contains("Antigravity RPC body") && msg.contains("exceeds") && msg.contains("cap")
+    err.chain()
+        .any(|cause| cause.downcast_ref::<RpcBodyCapError>().is_some())
 }
 
 /// Best-effort timestamps for sessions whose metadata does not carry its own.
@@ -4613,10 +4636,21 @@ mod tests {
 
     #[test]
     fn cap_error_detected_across_error_context_chain() {
-        let root = anyhow::anyhow!("Antigravity RPC body of 5000 bytes exceeds 1024 cap");
+        let root = anyhow::Error::new(RpcBodyCapError {
+            length: 5000,
+            cap: 1024,
+        });
         let wrapped = root.context("HTTPS RPC failed for Antigravity RPC GetCascadeTrajectory");
-        assert!(!wrapped.to_string().contains("exceeds"));
         assert!(is_rpc_cap_error(&wrapped));
+        assert_eq!(
+            wrapped
+                .chain()
+                .find_map(|c| c.downcast_ref::<RpcBodyCapError>().copied()),
+            Some(RpcBodyCapError {
+                length: 5000,
+                cap: 1024,
+            })
+        );
 
         // Non-cap server errors containing "exceeds" or "cap" must not be misclassified.
         let server_status_err = anyhow::anyhow!(
