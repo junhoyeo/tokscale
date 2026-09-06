@@ -9,7 +9,7 @@
 //!   Token data comes from usage.record lines.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line};
-use super::UnifiedMessage;
+use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -139,6 +139,167 @@ fn extract_session_id_from_kimi_code_path(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string()
+}
+
+/// The workspace slug and the kimi-code root for a kimi-code wire path.
+/// Path format: <root>/sessions/<SLUG>/<SESSION>/agents/<AGENT>/wire.jsonl
+fn kimi_code_slug_and_root(path: &Path) -> Option<(&str, &Path)> {
+    let agent_dir = path.parent()?; // AGENT
+    let agents_dir = agent_dir.parent()?; // agents
+    let session_dir = agents_dir.parent()?; // SESSION
+    let slug_dir = session_dir.parent()?; // SLUG
+    let sessions_dir = slug_dir.parent()?; // sessions
+    let root = sessions_dir.parent()?; // kimi-code root
+    Some((slug_dir.file_name()?.to_str()?, root))
+}
+
+/// A project root recovered from a kimi-code index, plus the label to display.
+#[derive(Clone)]
+struct KimiCodeWorkspace {
+    key: String,
+    label: Option<String>,
+}
+
+impl KimiCodeWorkspace {
+    /// `name` is the display name kimi-code records in workspaces.json; without
+    /// it the label is the project root's basename.
+    fn from_root(root: &str, name: Option<&str>) -> Option<Self> {
+        let key = normalize_workspace_key(root)?;
+        let label = name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| workspace_label_from_key(&key));
+        Some(Self { key, label })
+    }
+}
+
+/// The slug -> workspace map from `<root>/workspaces.json`
+/// (`{"version":1,"workspaces":{"<SLUG>":{"root":"/abs/path","name":"..."}}}`).
+fn read_workspaces_index(root: &Path) -> HashMap<String, KimiCodeWorkspace> {
+    let mut by_slug = HashMap::new();
+    let Ok(contents) = std::fs::read_to_string(root.join("workspaces.json")) else {
+        return by_slug;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return by_slug;
+    };
+    let Some(workspaces) = value.get("workspaces").and_then(|v| v.as_object()) else {
+        return by_slug;
+    };
+    for (slug, entry) in workspaces {
+        let workspace = entry.get("root").and_then(|v| v.as_str()).and_then(|root| {
+            KimiCodeWorkspace::from_root(root, entry.get("name").and_then(|v| v.as_str()))
+        });
+        if let Some(workspace) = workspace {
+            by_slug.insert(slug.clone(), workspace);
+        }
+    }
+    by_slug
+}
+
+/// The session -> workspace fallback map from `<root>/session_index.jsonl`
+/// (one JSON object per line with `sessionId`, `sessionDir`, `workDir`), for
+/// sessions whose slug is absent from workspaces.json. Keyed by both the
+/// session id and the session directory's basename, which the wire path's
+/// SESSION component can match as either.
+fn read_session_index(root: &Path) -> HashMap<String, KimiCodeWorkspace> {
+    let mut by_session = HashMap::new();
+    let Ok(contents) = std::fs::read_to_string(root.join("session_index.jsonl")) else {
+        return by_session;
+    };
+    for line in contents.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let workspace = value
+            .get("workDir")
+            .and_then(|v| v.as_str())
+            .and_then(|work_dir| KimiCodeWorkspace::from_root(work_dir, None));
+        let Some(workspace) = workspace else {
+            continue;
+        };
+        if let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) {
+            by_session.insert(session_id.to_string(), workspace.clone());
+        }
+        if let Some(dir_name) = value
+            .get("sessionDir")
+            .and_then(|v| v.as_str())
+            .and_then(|dir| Path::new(dir).file_name())
+            .and_then(|name| name.to_str())
+        {
+            by_session.insert(dir_name.to_string(), workspace);
+        }
+    }
+    by_session
+}
+
+/// Attach workspace identity to kimi-code messages after the cache read.
+///
+/// Runs after the source-message cache, not inside [`parse_kimi_code_file`],
+/// because `workspaces.json` is shared by every session under one kimi-code
+/// root: folding it into each wire file's cache fingerprint would let one new
+/// workspace invalidate every session's entry. Resolving here keeps a
+/// workspaces-only edit free — nothing is invalidated, each root's indexes are
+/// read once per scan rather than once per wire file, and a cache-served
+/// message still gets the current workspace.
+///
+/// Legacy kimi-cli paths carry no workspace data and are left untouched.
+pub fn apply_code_workspaces(sources: &mut [(PathBuf, Vec<UnifiedMessage>)]) {
+    struct RootIndexes {
+        by_slug: HashMap<String, KimiCodeWorkspace>,
+        by_session: HashMap<String, KimiCodeWorkspace>,
+    }
+
+    let mut indexes: HashMap<PathBuf, RootIndexes> = HashMap::new();
+    for (path, messages) in sources.iter() {
+        if messages.is_empty() || !is_kimi_code_path(path) {
+            continue;
+        }
+        let Some((_, root)) = kimi_code_slug_and_root(path) else {
+            continue;
+        };
+        if indexes.contains_key(root) {
+            continue;
+        }
+        indexes.insert(
+            root.to_path_buf(),
+            RootIndexes {
+                by_slug: read_workspaces_index(root),
+                by_session: read_session_index(root),
+            },
+        );
+    }
+
+    if indexes.is_empty() {
+        return;
+    }
+
+    for (path, messages) in sources.iter_mut() {
+        if messages.is_empty() || !is_kimi_code_path(path) {
+            continue;
+        }
+        let Some((slug, root)) = kimi_code_slug_and_root(path) else {
+            continue;
+        };
+        let Some(index) = indexes.get(root) else {
+            continue;
+        };
+        let session_id = extract_session_id_from_kimi_code_path(path);
+        let workspace = index
+            .by_slug
+            .get(slug)
+            .or_else(|| index.by_session.get(&session_id));
+        let Some(workspace) = workspace else {
+            continue;
+        };
+        for message in messages.iter_mut() {
+            if message.client != "kimi" {
+                continue;
+            }
+            message.set_workspace(Some(workspace.key.clone()), workspace.label.clone());
+        }
+    }
 }
 
 /// Strip the "kimi-code/" prefix from model IDs emitted by kimi-code.
@@ -894,5 +1055,127 @@ not valid json at all
             "/home/user/.kimi/sessions/group/uuid/wire.jsonl"
         )));
         assert!(!is_kimi_code_path(std::path::Path::new("wire.jsonl")));
+    }
+
+    // -------------------------------------------------------------------------
+    // Kimi Code workspace resolution tests
+    // -------------------------------------------------------------------------
+
+    const WORKSPACE_WIRE_LINE: &str = r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377014}"#;
+
+    /// Build <tmp>/.kimi-code/sessions/<SLUG>/<SESSION>/agents/main/wire.jsonl
+    /// and return the tempdir guard, the wire path, and the kimi-code root.
+    fn create_kimi_code_layout(
+        slug: &str,
+        session: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".kimi-code");
+        let wire_path = root
+            .join("sessions")
+            .join(slug)
+            .join(session)
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(&wire_path, WORKSPACE_WIRE_LINE).unwrap();
+        (dir, wire_path, root)
+    }
+
+    #[test]
+    fn test_apply_code_workspaces_resolves_slug_via_workspaces_json() {
+        let (_dir, wire_path, root) =
+            create_kimi_code_layout("wd_odyssey_4c02790435a7", "sess-abc-123");
+        std::fs::write(
+            root.join("workspaces.json"),
+            r#"{"version":1,"workspaces":{"wd_odyssey_4c02790435a7":{"root":"/home/user/Projects/golang/Odyssey","name":"Odyssey"}}}"#,
+        )
+        .unwrap();
+
+        let mut sources = vec![(wire_path.clone(), parse_kimi_code_file(&wire_path))];
+        apply_code_workspaces(&mut sources);
+
+        let messages = &sources[0].1;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/home/user/Projects/golang/Odyssey")
+        );
+        // The sidecar's `name` is preferred over the root's basename.
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("Odyssey"));
+    }
+
+    #[test]
+    fn test_apply_code_workspaces_falls_back_to_session_index() {
+        let (_dir, wire_path, root) = create_kimi_code_layout("wd_gone_0000", "sess-fallback-1");
+        // No workspaces.json entry for this slug; the session index still
+        // knows where the session ran.
+        std::fs::write(
+            root.join("workspaces.json"),
+            r#"{"version":1,"workspaces":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("session_index.jsonl"),
+            concat!(
+                r#"{"sessionId":"sess-fallback-1","sessionDir":"/x/sessions/wd_gone_0000/sess-fallback-1","workDir":"/home/user/work/api-server"}"#,
+                "\n",
+                "not json at all\n"
+            ),
+        )
+        .unwrap();
+
+        let mut sources = vec![(wire_path.clone(), parse_kimi_code_file(&wire_path))];
+        apply_code_workspaces(&mut sources);
+
+        let messages = &sources[0].1;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/home/user/work/api-server")
+        );
+        // No recorded name: the label is the workDir's basename.
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("api-server"));
+    }
+
+    #[test]
+    fn test_apply_code_workspaces_leaves_missing_slug_untouched() {
+        let (_dir, wire_path, root) = create_kimi_code_layout("wd_unknown_9999", "sess-none-1");
+        std::fs::write(
+            root.join("workspaces.json"),
+            r#"{"version":1,"workspaces":{}}"#,
+        )
+        .unwrap();
+
+        let mut sources = vec![(wire_path.clone(), parse_kimi_code_file(&wire_path))];
+        apply_code_workspaces(&mut sources);
+
+        let messages = &sources[0].1;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+    }
+
+    #[test]
+    fn test_apply_code_workspaces_ignores_legacy_kimi_cli_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        // Legacy layout: <root>/sessions/GROUP/UUID/wire.jsonl — no `agents`.
+        let wire_path = dir
+            .path()
+            .join(".kimi")
+            .join("sessions")
+            .join("group-1")
+            .join("uuid-1")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(&wire_path, WORKSPACE_WIRE_LINE).unwrap();
+
+        let mut sources = vec![(wire_path.clone(), parse_kimi_code_file(&wire_path))];
+        apply_code_workspaces(&mut sources);
+
+        let messages = &sources[0].1;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, None);
     }
 }

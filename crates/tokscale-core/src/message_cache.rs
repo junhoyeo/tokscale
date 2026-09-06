@@ -1181,7 +1181,10 @@ fn parser_version(client: ClientId) -> u32 {
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
         // kimi-code `time`) now fall back to the file mtime instead of
         // anchoring the message in a pre-epoch bucket.
-        ClientId::Kimi => 4,
+        // v4->v5: kimi-code sessions now resolve their workspace from
+        // workspaces.json/session_index.jsonl after the cache read; the bump
+        // keeps the resolution logic and the cached message shape in lockstep.
+        ClientId::Kimi => 5,
         // v1->v2: standalone Cline messages subtract cache buckets from gross
         // input tokens, reject non-finite costs, and preserve zero-cost reports.
         // v2->v3: content-aware Cline CLI turn-start classification now
@@ -3355,8 +3358,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v3_entries() {
-        assert_eq!(parser_version(ClientId::Kimi), 4);
+    fn test_kimi_parser_version_invalidates_v4_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 5);
     }
 
     /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
