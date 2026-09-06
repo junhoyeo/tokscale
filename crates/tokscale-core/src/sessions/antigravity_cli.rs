@@ -485,8 +485,13 @@ fn generation_timestamp_ms(gen: &[u8], session_anchor: Option<i64>) -> Option<i6
 ///    the one a schema change would most likely re-home;
 /// 2. a nested message holding the epoch scalar in field 1, as a varint or as a
 ///    `fixed64`;
-/// 3. the payload itself as 8 raw `fixed64`-style bytes, little-endian first
-///    (protobuf's own byte order) then big-endian.
+/// 3. the payload itself as 8 raw `fixed64`-style bytes, evaluating both
+///    little-endian (protobuf's own byte order) and big-endian. When the
+///    little-endian reading decodes as native milliseconds, a competing
+///    big-endian reading that only clears the window as an artifact of byte
+///    reversal in the nanoseconds branch is discarded in favor of the canonical
+///    LE milliseconds reading. Any other conflicting in-window endianness
+///    readings are rejected as ambiguous, falling back to the session stamp.
 ///
 /// A raw IEEE-754 `f64` reading of the same 8 bytes is deliberately *not*
 /// attempted. It is the one candidate whose false-positive rate against a
@@ -529,16 +534,46 @@ fn inferred_epoch_ms(payload: &[u8], session_anchor: Option<i64>) -> Option<i64>
         return Some(ms);
     }
     let raw: [u8; 8] = payload.try_into().ok()?;
-    [u64::from_le_bytes(raw), u64::from_be_bytes(raw)]
-        .into_iter()
-        .filter_map(epoch_scalar_to_ms)
-        .find(|&ms| accepted(ms))
+    let le = epoch_scalar_with_unit(u64::from_le_bytes(raw)).filter(|&(_, ms)| accepted(ms));
+    let be = epoch_scalar_with_unit(u64::from_be_bytes(raw)).filter(|&(_, ms)| accepted(ms));
+    match (le, be) {
+        (Some((_, le_ms)), Some((_, be_ms))) if le_ms == be_ms => Some(le_ms),
+        (Some((EpochUnit::Millis, le_ms)), Some((EpochUnit::Nanos, _))) => Some(le_ms),
+        (Some(_), Some(_)) => None,
+        (Some((_, le_ms)), None) => Some(le_ms),
+        (None, Some((_, be_ms))) => Some(be_ms),
+        (None, None) => None,
+    }
 }
 
 /// agy's "unset" marker for the `#9.#2` int64: -1, which reaches this wire
 /// reader as `u64::MAX`. It is a sentinel, never a time, so it is rejected
 /// before any unit detection can promote it into a date.
 const UNSET_TIME_SENTINEL: u64 = u64::MAX;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EpochUnit {
+    Seconds,
+    Millis,
+    Micros,
+    Nanos,
+}
+
+fn epoch_scalar_with_unit(value: u64) -> Option<(EpochUnit, i64)> {
+    if value == UNSET_TIME_SENTINEL {
+        return None;
+    }
+    let value = i64::try_from(value).ok()?;
+    [
+        (EpochUnit::Seconds, value.checked_mul(1_000)),
+        (EpochUnit::Millis, Some(value)),
+        (EpochUnit::Micros, Some(value / 1_000)),
+        (EpochUnit::Nanos, Some(value / 1_000_000)),
+    ]
+    .into_iter()
+    .filter_map(|(unit, ms)| ms.map(|ms| (unit, ms)))
+    .find(|&(_, ms)| plausible_epoch_ms(ms))
+}
 
 /// Interpret a bare integer as an epoch time, detecting its unit by magnitude.
 ///
@@ -549,19 +584,7 @@ const UNSET_TIME_SENTINEL: u64 = u64::MAX;
 /// which is what makes an unrelated 8-byte field (an id, a hash) fall through
 /// to the session-created stamp instead of becoming a wrong date.
 fn epoch_scalar_to_ms(value: u64) -> Option<i64> {
-    if value == UNSET_TIME_SENTINEL {
-        return None;
-    }
-    let value = i64::try_from(value).ok()?;
-    [
-        value.checked_mul(1_000), // seconds
-        Some(value),              // milliseconds
-        Some(value / 1_000),      // microseconds
-        Some(value / 1_000_000),  // nanoseconds
-    ]
-    .into_iter()
-    .flatten()
-    .find(|&ms| plausible_epoch_ms(ms))
+    epoch_scalar_with_unit(value).map(|(_, ms)| ms)
 }
 
 /// Whether an epoch-ms value is believable as an Antigravity CLI generation
@@ -1374,9 +1397,12 @@ mod tests {
     /// sentinel sitting next to it.
     #[test]
     fn agy_1_1_18_gen9_field_10_dates_the_turn() {
-        let session_fallback = 1_781_502_653_000_i64;
         let seconds = recent_epoch_seconds();
         let expected_ms = seconds * 1_000;
+        // Anchor the session shortly before the turn so the session window matches
+        // real-world sessions and does not unnaturally widen to invite
+        // endianness ambiguity across months.
+        let session_fallback = expected_ms - 60_000;
         let sentinel = enc_varint(2, u64::MAX);
 
         // (1) nested {#1: seconds, #2: nanos} Timestamp.
@@ -1429,6 +1455,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression test for #1256: an 8-byte payload whose little-endian reading
+    /// decodes as nanoseconds and whose big-endian reading decodes as
+    /// milliseconds can both clear an unnaturally wide session window while
+    /// pointing to dates days or months apart. Rather than letting the
+    /// little-endian reading arbitrarily outrank the big-endian reading and
+    /// silently misdate the turn, the ambiguity must be rejected so the row
+    /// falls back to the session stamp.
+    #[test]
+    fn ambiguous_competing_endianness_payload_falls_back_to_session_timestamp() {
+        // Intended BE millis: 1_788_132_511_000 (2026-08-31)
+        // Reversed LE reading as nanos: 1_787_084_994_892 (2026-08-19, off by ~12.1 days)
+        let intended_ms = 1_788_132_511_000_i64;
+        let raw_be = (intended_ms as u64).to_be_bytes();
+        let wide_session_fallback = 1_781_502_653_000_i64; // 2026-06-16 (wide enough for both)
+
+        let sentinel = enc_varint(2, u64::MAX);
+        let mut gen9 = sentinel.clone();
+        gen9.extend(enc_len(10, &raw_be));
+
+        assert_eq!(
+            gen9_timestamp(&gen9, wide_session_fallback),
+            wide_session_fallback,
+            "competing in-window endianness readings must fall back to session timestamp"
+        );
+
+        // Second observed reproduction case: 1_788_274_719_000 (2026-09-01)
+        // Reversed LE reading as nanos: 1_781_589_670_136 (2026-06-17, off by ~77.4 days)
+        let intended_ms_2 = 1_788_274_719_000_i64;
+        let raw_be_2 = (intended_ms_2 as u64).to_be_bytes();
+        let mut gen9_2 = sentinel;
+        gen9_2.extend(enc_len(10, &raw_be_2));
+
+        assert_eq!(
+            gen9_timestamp(&gen9_2, wide_session_fallback),
+            wide_session_fallback,
+            "competing in-window endianness readings must fall back to session timestamp"
+        );
+    }
+
+    /// Genuine little-endian millisecond payloads must still date the turn even
+    /// when the session window is wide enough that the byte-reversed integer
+    /// decodes as nanoseconds in-window (~1.2% of genuine LE millisecond values).
+    #[test]
+    fn genuine_le_millis_payload_dates_the_turn_with_competing_reversed_nanos() {
+        // Construct a genuine LE millisecond timestamp whose low byte is 0x18
+        // so that its byte-reversed big-endian integer starts with 0x18 and decodes
+        // into a plausible nanoseconds date.
+        let le_millis = (1_788_132_511_000_i64 & !0xff) | 0x18; // 1_788_132_510_744
+        let raw_le = (le_millis as u64).to_le_bytes();
+        let wide_session_fallback = 1_740_000_000_000_i64; // Early 2025 (accepts both)
+
+        let sentinel = enc_varint(2, u64::MAX);
+        let mut gen9 = sentinel;
+        gen9.extend(enc_len(10, &raw_le));
+
+        assert_eq!(
+            gen9_timestamp(&gen9, wide_session_fallback),
+            le_millis,
+            "genuine LE milliseconds reading must date the turn over the reversed BE nanoseconds ghost"
+        );
     }
 
     /// Nothing that is not a believable time may become one. Mis-dating a turn
