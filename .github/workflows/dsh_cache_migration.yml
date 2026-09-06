@@ -52,6 +52,7 @@ on:
       - "scripts/check-dsh-cache-migration.sh"
       - "scripts/test-check-dsh-cache-migration.sh"
       - ".github/workflows/dsh_cache_migration.yml"
+      - "rust-toolchain.toml"
   pull_request:
     branches: [main]
     paths: *dsh_cache_migration_paths
@@ -78,7 +79,7 @@ jobs:
         run: bash scripts/test-check-dsh-cache-migration.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Cache cargo registry
         uses: actions/cache@v5
