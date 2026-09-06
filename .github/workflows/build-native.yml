@@ -125,7 +125,7 @@ jobs:
           path: .
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.settings.target }}
 
