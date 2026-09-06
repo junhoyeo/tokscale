@@ -461,11 +461,13 @@ async fn race_for_quota_with(
     while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, requests.join_next()).await {
         // A `JoinError` carries no rank, so a panicked request is never
         // marked settled. If it outranked the best answer, the early break
-        // below can no longer fire and the loop runs until `join_next` has
-        // drained the set and yields `None` -- every other request has
-        // finished by then, so the round ends when the slowest of them does,
-        // not at the deadline. `call_rpc` reports every failure it has as
-        // `Err`, so this is the unreachable arm rather than the failure path.
+        // below can no longer fire, and the round ends at the earlier of two
+        // points: `join_next` draining the set and yielding `None` once every
+        // surviving request has finished, or `timeout_at` returning `Err` at
+        // the deadline -- which is what happens when a lower-ranked survivor
+        // has accepted the connection and gone quiet. `call_rpc` reports
+        // every failure it has as `Err`, so this is the unreachable arm
+        // rather than the failure path.
         let Ok((rank, answer)) = joined else { continue };
         settled[rank] = true;
         if let Some(summary) = answer {
