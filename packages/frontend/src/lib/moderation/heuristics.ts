@@ -35,6 +35,10 @@ export interface CandidateRow {
    * the matches are of any interest.
    */
   slopModels: string[];
+  /**
+   * Sum of tokens attributed to matching slopModels from daily_breakdown.source_breakdown.
+   */
+  slopTokens: number;
 }
 
 export interface CandidateContext {
@@ -172,26 +176,25 @@ export function scoreCandidate(
     }
   }
 
-  if (row.slopModels.length > 0) {
-    // Quoted verbatim so the reviewer judges the actual string rather than
-    // trusting the match — the whole point is that the name speaks for itself.
-    const shown = row.slopModels.slice(0, 3).map((name) => `"${name}"`).join(", ");
-    const extra = row.slopModels.length - 3;
+  if (row.slopModels.length > 0 && row.totalTokens > 0) {
+    const slopShare = Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens);
+    const weight = 35 * slopShare;
+    if (Math.round(weight) > 0) {
+      // Quoted verbatim so the reviewer judges the actual string rather than
+      // trusting the match — the whole point is that the name speaks for itself.
+      const shown = row.slopModels.slice(0, 3).map((name) => `"${name}"`).join(", ");
+      const extra = row.slopModels.length - 3;
 
-    signals.push({
-      key: "slopModelName",
-      label: `Reports invented model names: ${shown}${extra > 0 ? ` and ${extra} more` : ""}`,
-      // The heaviest FIXED weight: magnitude and duplication can both have
-      // innocent explanations, and a model called "slopllm" cannot.
-      //
-      // Not the highest possible score, though — siteShare is 40 * share, so an
-      // account holding more than 87.5% of every token on the site outranks
-      // this. That ordering is correct and left alone: one account owning
-      // essentially the whole site is a bigger thing to look at than a bad
-      // model name, and it is the sort of claim worth stating accurately since
-      // the weights are what the queue order rests on.
-      weight: 35,
-    });
+      signals.push({
+        key: "slopModelName",
+        label: `Reports invented model names: ${shown}${extra > 0 ? ` and ${extra} more` : ""}`,
+        // Scaled by the share of the account's tokens carried by the matching
+        // models: the name speaks for itself, but only when used to book real
+        // usage. Config artifacts carrying zero or negligible tokens scale down
+        // to 0 and drop out of the review queue (#1265).
+        weight,
+      });
+    }
   }
 
   if (row.nearDuplicateCount > 0) {
