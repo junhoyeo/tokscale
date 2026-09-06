@@ -1096,9 +1096,10 @@ fn parser_version(client: ClientId) -> u32 {
         // when reconstructing VS Code Copilot Chat requests; v8 aggregates
         // carry those sessions as zero-token.
         ClientId::Copilot => 9,
-        // Pi subagent sessions now derive agent attribution from session_info
-        // names; version-1 caches carry those messages without agent metadata.
-        ClientId::Pi => 2,
+        // Pi delegates to the shared pi-format parser. Pi subagent sessions
+        // now derive agent attribution from session_info names; version-1
+        // caches carry those messages without agent metadata.
+        ClientId::Pi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
         // message timestamp is now back-calculated to the turn start
         // (created_at - total_time_ms) instead of the recorded (end-anchored)
@@ -1174,9 +1175,10 @@ fn parser_version(client: ClientId) -> u32 {
         // of landing unpriced, and uses a UTC-stable synthetic id for the id-less
         // fallback.
         ClientId::Cursor => 3,
-        // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
-        // deduplication keys.
-        ClientId::Kimchi => 2,
+        // Kimchi delegates to the shared pi-format parser. v1->v2: Kimchi's
+        // Pi-compatible messages now carry stable namespaced deduplication
+        // keys.
+        ClientId::Kimchi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past
         // those records instead of truncating and misaligning message indices.
@@ -1282,11 +1284,14 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
-        // omp delegates to the shared pi-format parser, so any pi.rs parse
-        // change that bumps ClientId::Pi must be evaluated for Omp (and Senpi)
-        // too — the shared code path changes what byte-identical omp files
-        // parse to even though omp's own module did not change.
-        ClientId::Omp => 1,
+        // Omp delegates to the shared pi-format parser. Any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Omp together with Pi,
+        // Kimchi, and Senpi (#1195).
+        ClientId::Omp => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
+        // Senpi delegates to the shared pi-format parser. Any pi.rs parse
+        // change that bumps PI_FORMAT_PARSER_BASE_VERSION moves Senpi together
+        // with Pi, Kimchi, and Omp (#1195).
+        ClientId::Senpi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
         // v1 -> v2: the OpenCode parser now prefers `session_v2` metadata over
         // the legacy `session` join for workspace and title. A database that
         // carries both tables is byte-identical before and after, so only the
@@ -3723,6 +3728,51 @@ mod tests {
     #[test]
     fn test_junie_parser_version_invalidates_rows_without_cost_provenance() {
         assert_eq!(parser_version(ClientId::Junie), 3);
+    }
+
+    #[test]
+    fn test_pi_format_shared_parser_version_sync() {
+        use crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION;
+
+        // All four clients delegate to `sessions/pi.rs`. Their parser versions
+        // must derive from `PI_FORMAT_PARSER_BASE_VERSION` so changes inside pi.rs
+        // invalidate cached messages consistently across all delegating clients (#1195).
+        let delegating_clients = [
+            ClientId::Pi,
+            ClientId::Kimchi,
+            ClientId::Omp,
+            ClientId::Senpi,
+        ];
+
+        for client in delegating_clients {
+            assert!(
+                parser_version(client) >= PI_FORMAT_PARSER_BASE_VERSION,
+                "{:?} must derive from PI_FORMAT_PARSER_BASE_VERSION ({})",
+                client,
+                PI_FORMAT_PARSER_BASE_VERSION
+            );
+        }
+
+        assert_eq!(
+            parser_version(ClientId::Pi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Pi carries +1 for subagent session attribution"
+        );
+        assert_eq!(
+            parser_version(ClientId::Kimchi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Kimchi carries +1 for namespaced dedup keys"
+        );
+        assert_eq!(
+            parser_version(ClientId::Omp),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Omp carries base version directly"
+        );
+        assert_eq!(
+            parser_version(ClientId::Senpi),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Senpi carries base version directly and has an explicit match arm"
+        );
     }
 
     #[test]
