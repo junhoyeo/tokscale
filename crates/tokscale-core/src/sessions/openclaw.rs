@@ -3,11 +3,49 @@
 //! Parses OpenClaw transcript JSONL files from agent directories.
 //! Supports legacy sessions.json index parsing for compatibility.
 
-use super::utils::{for_each_json_line, read_file_or_none, CamelUsage};
+use super::utils::{for_each_json_line, lossy_lines, read_file_or_none, CamelUsage};
 use super::UnifiedMessage;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+// Archived transcripts are immutable zstd files. Bound expansion before parsing
+// so a corrupt archive cannot allocate its advertised decoded size.
+const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_archive(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut decoder = zstd::stream::read::Decoder::new(file)?;
+    decoder.window_log_max(26)?;
+    let mut bytes = Vec::new();
+    decoder.take(max_bytes + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::other(
+            "decoded transcript exceeds archive limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn for_each_transcript_line(path: &Path, sink: &mut dyn FnMut(usize, &str)) {
+    if path.extension().is_none_or(|extension| extension != "zst") {
+        for_each_json_line(path, sink);
+        return;
+    }
+
+    match read_archive(path, MAX_ARCHIVE_BYTES) {
+        Ok(bytes) => {
+            for (index, line) in lossy_lines(bytes.as_slice()).enumerate() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    sink(index, trimmed);
+                }
+            }
+        }
+        Err(error) => tracing::warn!(path = %path.display(), %error, "Skipping OpenClaw archive"),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct SessionIndex {
@@ -127,7 +165,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
     let mut current_provider: Option<String> = None;
     let mut buffer = Vec::with_capacity(4096);
 
-    for_each_json_line(session_path, &mut |_index, trimmed| {
+    for_each_transcript_line(session_path, &mut |_index, trimmed| {
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry: OpenClawEntry = match simd_json::from_slice(&mut buffer) {
@@ -221,6 +259,51 @@ mod tests {
         let mut file = File::create(&path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn compressed_archives_preserve_transcript_usage_and_session_identity() {
+        let dir = TempDir::new().unwrap();
+        let content = concat!(
+            "\u{feff}{\"type\":\"model_change\",\"provider\":\"anthropic\",\"modelId\":\"claude-sonnet-4-6\"}\r\n",
+            "\ninvalid json\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"output\":50,\"cacheRead\":200,\"cacheWrite\":10,\"cost\":{\"total\":0.05}},\"timestamp\":1788566869012}}\n",
+        );
+        let plain = create_test_session(&dir, "session.jsonl", content);
+        let expected = parse_openclaw_transcript(Path::new(&plain));
+        assert_eq!(expected.len(), 1);
+
+        for filename in [
+            "session.jsonl.zst",
+            "session.jsonl.deleted.2026-09-05T00-00-00.000Z.nonce.zst",
+            "session.jsonl.reset.2026-09-05T00-00-00.000Z.nonce.zst",
+        ] {
+            let path = dir.path().join(filename);
+            std::fs::write(&path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
+            assert_eq!(parse_openclaw_transcript(&path), expected, "{filename}");
+        }
+    }
+
+    #[test]
+    fn compressed_archive_enforces_decoded_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl.zst");
+        std::fs::write(&path, zstd::encode_all(&b"12345"[..], 0).unwrap()).unwrap();
+        assert_eq!(read_archive(&path, 5).unwrap(), b"12345");
+        assert!(read_archive(&path, 4).is_err());
+    }
+
+    #[test]
+    fn invalid_or_truncated_compressed_archive_does_not_emit_partial_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl.deleted.timestamp.zst");
+        let content = br#"{"type":"message","message":{"role":"assistant","model":"example","usage":{"input":100},"timestamp":1700000000000}}"#;
+        let mut bytes = zstd::encode_all(&content[..], 0).unwrap();
+        bytes.pop();
+        std::fs::write(&path, bytes).unwrap();
+        assert!(parse_openclaw_transcript(&path).is_empty());
+        std::fs::write(&path, b"not a zstd stream").unwrap();
+        assert!(parse_openclaw_transcript(&path).is_empty());
     }
 
     #[test]

@@ -1066,6 +1066,9 @@ pub fn parser_generation() -> u64 {
 
 fn parser_version(client: ClientId) -> u32 {
     match client {
+        // v1->v2: compressed OpenClaw archives were scanned as plain JSONL and
+        // cached as empty. Their bytes do not change when decoding is fixed.
+        ClientId::OpenClaw => 2,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3544,6 +3547,49 @@ mod tests {
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
         assert_eq!(parser_version(ClientId::Droid), 7);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_compressed_archives_discard_cached_empty_v1_results() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("session.jsonl.deleted.timestamp.zst");
+        let content = br#"{"type":"message","message":{"role":"assistant","model":"example","usage":{"input":100},"timestamp":1700000000000}}"#;
+        fs::write(&source, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let old_identity = CacheIdentity {
+            parser_version: 1,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let entry = CachedSourceEntry::new(
+            old_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old_identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(identity, &source).is_none());
+        let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
     }
 
     #[test]
