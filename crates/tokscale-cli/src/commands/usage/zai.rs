@@ -95,6 +95,18 @@ fn parse_reset_time_str(s: &str) -> Option<String> {
     if let Ok(ts) = s.parse::<i64>() {
         return epoch_to_rfc3339(ts);
     }
+    // The float spelling, so a string and a JSON number carrying the same
+    // value resolve the same way: `"1788701854998.0"` must agree with
+    // `1788701854998.0`, which `parse_reset_time` already accepts. Same
+    // rounding, same saturating cast, same range check downstream.
+    if let Some(ts) = s
+        .parse::<f64>()
+        .ok()
+        .filter(|f| f.is_finite())
+        .map(|f| f.round() as i64)
+    {
+        return epoch_to_rfc3339(ts);
+    }
     if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         if let Some(dt) = d.and_hms_opt(0, 0, 0) {
             return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339());
@@ -496,6 +508,28 @@ mod tests {
             parse_reset_time(Some(&val_date)).as_deref(),
             Some("2026-11-30T00:00:00+00:00")
         );
+    }
+
+    /// cubic on e5ca8b5b: the numeric-string path accepted only an integer
+    /// spelling, so `"1788701854998.0"` resolved to `None` while the same
+    /// value as a JSON number resolved to a reset time. Both entry points
+    /// must agree, or the unification `epoch_to_rfc3339` exists for is
+    /// only half true.
+    #[test]
+    fn float_epoch_string_agrees_with_float_epoch_number() {
+        let as_number = parse_reset_time(Some(&serde_json::json!(1788701854998.0)));
+        let as_string = parse_reset_time(Some(&serde_json::json!("1788701854998.0")));
+        assert_eq!(as_number.as_deref(), Some("2026-09-06T13:37:34.998+00:00"));
+        assert_eq!(as_string, as_number);
+        // seconds-precision float too, and the integer spellings still agree
+        let secs_num = parse_reset_time(Some(&serde_json::json!(1788701854.0)));
+        let secs_str = parse_reset_time(Some(&serde_json::json!("1788701854.0")));
+        assert_eq!(secs_str, secs_num);
+        assert_eq!(secs_num.as_deref(), Some("2026-09-06T13:37:34+00:00"));
+        // non-finite spellings are not epochs
+        for bad in ["inf", "-inf", "nan", "NaN"] {
+            assert_eq!(parse_reset_time_str(bad), None, "{bad}");
+        }
     }
 
     #[test]
