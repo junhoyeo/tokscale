@@ -163,6 +163,7 @@ fn current_count_label(app: &App) -> String {
         }
         Tab::Monthly => format!(" ({} months)", app.data.monthly.len()),
         Tab::Sessions => format!(" ({} sessions)", app.data.sessions.len()),
+        Tab::Projects => format!(" ({} projects)", app.data.projects.len()),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }

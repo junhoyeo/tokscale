@@ -177,6 +177,35 @@ pub struct SessionModel {
     pub color_key: String,
 }
 
+/// Per-project (workspace) usage rollup. One row per workspace grouping key
+/// so the Projects tab can show cost/tokens rolled up per project regardless
+/// of the global `GroupBy` the Models tab is using.
+#[derive(Debug, Clone)]
+pub struct ProjectUsage {
+    /// Stable grouping identity from `workspace_bucket` (the workspace key,
+    /// or the repo root under `WorktreeRollup::MergeIntoRepo`).
+    pub group_key: String,
+    pub workspace_key: Option<String>,
+    /// Display label after the `workspace_label_overrides` disambiguation pass.
+    pub label: String,
+    /// Real filesystem path the key resolves to, when it names one.
+    pub path: Option<String>,
+    /// Distinct clients seen in this project, in first-seen order.
+    pub clients: Vec<String>,
+    /// Distinct models used in this project, in first-seen order.
+    pub models: Vec<SessionModel>,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub message_count: u32,
+    pub session_count: u32,
+    /// Unix-ms timestamp of the first message observed in this project.
+    /// `0` when every message lacked a usable timestamp.
+    pub first_active_ms: i64,
+    /// Unix-ms timestamp of the most recent message observed in this project.
+    /// `0` when every message lacked a usable timestamp.
+    pub last_active_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
@@ -199,6 +228,7 @@ pub struct UsageData {
     pub minutely: Vec<MinutelyUsage>,
     pub monthly: Vec<MonthlyUsage>,
     pub sessions: Vec<SessionUsage>,
+    pub projects: Vec<ProjectUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -214,6 +244,7 @@ pub struct DataLoader {
     pub until: Option<String>,
     pub year: Option<String>,
     pub minutely_enabled: bool,
+    pub projects_enabled: bool,
     pub worktree_rollup: WorktreeRollup,
 }
 
@@ -319,6 +350,7 @@ impl DataLoader {
             until: None,
             year: None,
             minutely_enabled: false,
+            projects_enabled: false,
             worktree_rollup: WorktreeRollup::default(),
         }
     }
@@ -335,12 +367,18 @@ impl DataLoader {
             until,
             year,
             minutely_enabled: false,
+            projects_enabled: false,
             worktree_rollup: WorktreeRollup::default(),
         }
     }
 
     pub fn with_minutely_enabled(mut self, enabled: bool) -> Self {
         self.minutely_enabled = enabled;
+        self
+    }
+
+    pub fn with_projects_enabled(mut self, enabled: bool) -> Self {
+        self.projects_enabled = enabled;
         self
     }
 
@@ -463,6 +501,8 @@ impl DataLoader {
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
+        let mut project_map: HashMap<String, ProjectUsage> = HashMap::new();
+        let mut project_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         // Memoizes the filesystem probes that resolve a workspace key to a label.
         let mut workspace_labeler = tokscale_core::WorkspaceLabeler::default();
         // Labels are basenames, so two different directories that share one paint
@@ -479,14 +519,28 @@ impl DataLoader {
         } else {
             HashMap::new()
         };
+        // Projects always group by repo identity (MergeIntoRepo): Claude Code's
+        // dash-mangled slugs and the real paths other clients record must land
+        // in one row. Overrides are keyed by group key, so this needs its own
+        // pass whenever the Models grouping above uses different semantics.
+        let projects_label_overrides = if self.projects_enabled {
+            tokscale_core::workspace_label_overrides(
+                &messages,
+                WorktreeRollup::MergeIntoRepo,
+                &mut workspace_labeler,
+            )
+        } else {
+            HashMap::new()
+        };
 
         for msg in &messages {
             let normalized_model =
                 model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
             let model_key = normalize_model_for_grouping(&msg.model_id);
-            // Resolving a workspace label reads the filesystem, and every grouping
-            // except this one throws it away — the TUI defaults to ClientModel and
-            // auto-refreshes, so paying it unconditionally is pure waste.
+            // Resolving a workspace label reads the filesystem, and groupings
+            // other than WorkspaceModel throw it away — the TUI defaults to
+            // ClientModel and auto-refreshes, so it is only paid when the
+            // workspace grouping or the Projects tab actually consumes it.
             let (workspace_group_key, workspace_key, workspace_label) =
                 if *group_by == GroupBy::WorkspaceModel {
                     let (group_key, key, label) = tokscale_core::workspace_bucket(
@@ -502,6 +556,20 @@ impl DataLoader {
                 } else {
                     (String::new(), None, String::new())
                 };
+            let (project_group_key, project_key, project_label) = if self.projects_enabled {
+                let (group_key, key, label) = tokscale_core::workspace_bucket(
+                    msg,
+                    WorktreeRollup::MergeIntoRepo,
+                    &mut workspace_labeler,
+                );
+                let label = projects_label_overrides
+                    .get(&group_key)
+                    .cloned()
+                    .unwrap_or(label);
+                (group_key, key, label)
+            } else {
+                (String::new(), None, String::new())
+            };
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
                 GroupBy::ClientModel => format!("{}:{}", msg.client, normalized_model),
@@ -1025,6 +1093,92 @@ impl DataLoader {
                     });
                 }
             }
+
+            // Project aggregation: one bucket per repo identity so the Projects
+            // tab rolls up per project no matter which global grouping the
+            // Models tab is using. Gated on `projects_enabled` because the
+            // workspace resolution above is only paid when this or the
+            // WorkspaceModel grouping consumes it.
+            if self.projects_enabled {
+                let project_entry =
+                    project_map
+                        .entry(project_group_key.clone())
+                        .or_insert_with(|| ProjectUsage {
+                            group_key: project_group_key.clone(),
+                            workspace_key: project_key.clone(),
+                            label: project_label.clone(),
+                            path: None,
+                            clients: Vec::new(),
+                            models: Vec::new(),
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                            message_count: 0,
+                            session_count: 0,
+                            first_active_ms: 0,
+                            last_active_ms: 0,
+                        });
+
+                project_entry.tokens.input = project_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                project_entry.tokens.output = project_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                project_entry.tokens.cache_read = project_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                project_entry.tokens.cache_write = project_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                project_entry.tokens.reasoning = project_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                project_entry.cost += msg_cost;
+                project_entry.message_count = project_entry
+                    .message_count
+                    .saturating_add(msg.message_count.max(0) as u32);
+
+                let ts = message_timestamp_ms(msg);
+                if ts > 0 {
+                    if project_entry.first_active_ms == 0 || ts < project_entry.first_active_ms {
+                        project_entry.first_active_ms = ts;
+                    }
+                    if ts > project_entry.last_active_ms {
+                        project_entry.last_active_ms = ts;
+                    }
+                }
+
+                if !project_entry.clients.iter().any(|c| c == &msg.client) {
+                    project_entry.clients.push(msg.client.clone());
+                }
+
+                if !project_entry
+                    .models
+                    .iter()
+                    .any(|m| m.display_name == normalized_model)
+                {
+                    project_entry.models.push(SessionModel {
+                        display_name: normalized_model.clone(),
+                        provider: msg.provider_id.clone(),
+                        color_key: model_key.clone(),
+                    });
+                }
+
+                if !msg.session_id.is_empty() {
+                    let session_key = format!("{}:{}", msg.client, msg.session_id);
+                    let project_sessions = project_session_ids
+                        .entry(project_group_key.clone())
+                        .or_default();
+                    if project_sessions.insert(session_key) {
+                        project_entry.session_count += 1;
+                    }
+                }
+            }
         }
 
         let mut models: Vec<ModelUsage> = model_map
@@ -1075,6 +1229,20 @@ impl DataLoader {
                 .then_with(|| a.session_id.cmp(&b.session_id))
         });
 
+        let mut projects: Vec<ProjectUsage> = project_map.into_values().collect();
+        // Path resolution is deferred to here so it runs once per distinct
+        // project (memoized in the labeler), not once per message.
+        for project in &mut projects {
+            project.path = workspace_labeler.path(&project.group_key);
+        }
+        projects.sort_by(|a, b| {
+            b.cost
+                .total_cmp(&a.cost)
+                .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                .then_with(|| a.label.cmp(&b.label))
+                .then_with(|| a.group_key.cmp(&b.group_key))
+        });
+
         // Plain `.sum()` panics (debug) / wraps (release) on overflow across
         // many models; a single corrupt/huge bucket must not poison the
         // whole total, so fold with saturating_add like `TokenBreakdown::total`.
@@ -1098,6 +1266,7 @@ impl DataLoader {
             minutely,
             monthly,
             sessions,
+            projects,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -2123,6 +2292,196 @@ mod tests {
         assert_eq!(usage.models[0].client, "claude, qwen");
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 4.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_projects_roll_up_by_workspace_under_any_grouping() {
+        let loader = DataLoader::new(None).with_projects_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.25,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "qwen",
+                        "kimi-k2",
+                        "moonshot",
+                        "session-2",
+                        2.75,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-3",
+                        5.0,
+                        Some("/repo-b"),
+                        Some("repo-b"),
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.projects.len(), 2);
+        // Default order is cost descending.
+        let first = &usage.projects[0];
+        assert_eq!(first.group_key, "/repo-b");
+        assert_eq!(first.label, "repo-b");
+        assert_eq!(first.workspace_key.as_deref(), Some("/repo-b"));
+        assert_eq!(first.cost, 5.0);
+        assert_eq!(first.session_count, 1);
+        assert_eq!(first.clients, vec!["claude".to_string()]);
+
+        let second = &usage.projects[1];
+        assert_eq!(second.group_key, "/repo-a");
+        assert_eq!(second.cost, 4.0);
+        assert_eq!(second.session_count, 2);
+        // Clients and models track first-seen order across sources.
+        assert_eq!(
+            second.clients,
+            vec!["claude".to_string(), "qwen".to_string()]
+        );
+        let model_names: Vec<_> = second
+            .models
+            .iter()
+            .map(|m| m.display_name.as_str())
+            .collect();
+        assert_eq!(model_names, vec!["claude-sonnet-4-5", "kimi-k2"]);
+        assert_eq!(second.tokens.total(), 30);
+        assert_eq!(second.message_count, 2);
+        assert!(second.first_active_ms > 0);
+        assert_eq!(second.first_active_ms, second.last_active_ms);
+    }
+
+    #[test]
+    fn test_aggregate_messages_projects_empty_unless_enabled() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                )],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert!(usage.projects.is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_messages_projects_keeps_unknown_workspace_bucket() {
+        let loader = DataLoader::new(None).with_projects_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.projects.len(), 2);
+        assert!(usage.projects.iter().any(|project| {
+            project.workspace_key.is_none()
+                && project.label == UNKNOWN_WORKSPACE_LABEL
+                && (project.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.projects.iter().any(|project| {
+            project.workspace_key.as_deref() == Some("/repo-a")
+                && project.label == "repo-a"
+                && (project.cost - 2.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn test_aggregate_messages_projects_merge_path_and_claude_slug() {
+        // Codex records the real path; Claude Code records the dash-mangled
+        // slug. Both describe the same directory, so the Projects tab (repo
+        // identity) must land them in one row.
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("my-proj");
+        std::fs::create_dir(&project).unwrap();
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        // Windows canonical paths have a verbatim prefix that is not part of
+        // Claude Code's drive-rooted workspace slug.
+        let canonical = canonical.to_string_lossy();
+        let canonical = canonical.strip_prefix(r"\\?\").unwrap_or(&canonical);
+        let real_key = tokscale_core::sessions::normalize_workspace_key(canonical).unwrap();
+        let slug: String = real_key
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+
+        let loader = DataLoader::new(None).with_projects_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        Some(&real_key),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-opus-5",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some(&slug),
+                        None,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.projects.len(), 1);
+        let project = &usage.projects[0];
+        assert_eq!(project.group_key, real_key);
+        assert_eq!(project.label, "my-proj");
+        assert_eq!(project.cost, 3.0);
+        assert_eq!(project.session_count, 2);
+        assert_eq!(
+            project.clients,
+            vec!["codex".to_string(), "claude".to_string()]
+        );
     }
 
     #[test]
