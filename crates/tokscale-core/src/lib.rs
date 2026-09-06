@@ -355,6 +355,13 @@ pub struct ParsedMessage {
     pub duration_ms: Option<i64>,
     pub message_count: i32,
     pub agent: Option<String>,
+    /// Cost in USD as the parser reported it. This lane applies no pricing, so
+    /// the figure is only meaningful when `cost_source` is
+    /// [`CostSource::ProviderReported`]; consumers price every other row from
+    /// its tokens, exactly as the submit lane reprices only rows without an
+    /// authoritative cost.
+    pub cost: f64,
+    pub cost_source: CostSource,
 }
 
 pub struct ParsedMessages {
@@ -5965,8 +5972,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
 
-    // fx (vercel-labs/fx) per-session usage snapshots. Session titles are not
-    // applied here: `ParsedMessage` has no title field, so the shared
+    // fx (vercel-labs/fx) per-session usage snapshots. `parse_fx_file` leaves
+    // `date` empty for the streaming loader's `refresh_derived_fields` to fill
+    // in; this lane converts straight to `ParsedMessage`, so derive it here or
+    // the `year`/`since`/`until` filters below compare against "". The pinned-
+    // zone rebucket pass still runs afterwards. Session titles are not applied
+    // here: `ParsedMessage` has no title field, so the shared
     // `sessions/index.json` lookup the submit lane runs would have nothing to
     // write to.
     let fx_msgs: Vec<ParsedMessage> = scan_result
@@ -5975,7 +5986,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .flat_map(|path| {
             sessions::fx::parse_fx_file(path)
                 .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
+                .map(|mut msg| {
+                    msg.refresh_derived_fields();
+                    unified_to_parsed(&msg)
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -6400,6 +6414,8 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
+        cost: msg.cost,
+        cost_source: msg.cost_source,
     }
 }
 
@@ -10358,6 +10374,182 @@ mod tests {
         // fx records `request_count` as the row's message count, so the client
         // count is the summed count and not the row count.
         assert_eq!(parsed.counts.get(ClientId::Fx), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_keeps_provider_reported_cost() {
+        // `ParsedMessage` used to carry tokens only, so every consumer of the
+        // local lane had to price rows from tokens. fx can report a positive
+        // `total_cost` for a snapshot with no per-model entries and no tokens
+        // at all (the synthetic `fx-unknown` row), and MiMo Code embeds a
+        // per-message cost; both are authoritative on the submit lane and must
+        // reach the local consumers with their provenance intact.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let micode_dir = source_home.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(&micode_dir).unwrap();
+        {
+            let conn = rusqlite::Connection::open(micode_dir.join("mimocode.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "row-1",
+                    "micode-session",
+                    r#"{"id":"micode-msg-1","role":"assistant","modelID":"mimo-vl-8b","providerID":"xiaomi","cost":0.05,"tokens":{"input":1000,"output":200,"cache":{"read":0,"write":0}},"time":{"created":1780000000000}}"#
+                ],
+            )
+            .unwrap();
+        }
+
+        let fx_session = source_home.path().join(".fx/sessions/sess-1");
+        std::fs::create_dir_all(&fx_session).unwrap();
+        std::fs::write(
+            fx_session.join("session.json"),
+            r#"{"workspace_root":"/Users/alice/repo","updated_at_ms":1780000000000}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fx_session.join("usage-v2.json"),
+            r#"{"schema_version":1,"session_id":"sess-1","snapshot":{"schema_version":2,"total_cost":0.014,"request_count":1,"models":[]}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["micode".to_string(), "fx".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        let fx = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == "fx")
+            .collect::<Vec<_>>();
+        assert_eq!(fx.len(), 1);
+        assert_eq!(fx[0].model_id, "fx-unknown");
+        assert_eq!(
+            fx[0].input + fx[0].output + fx[0].cache_read + fx[0].cache_write + fx[0].reasoning,
+            0
+        );
+        assert!((fx[0].cost - 0.014).abs() < 1e-9, "fx cost {}", fx[0].cost);
+        assert_eq!(fx[0].cost_source, sessions::CostSource::ProviderReported);
+
+        let micode = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == "micode")
+            .collect::<Vec<_>>();
+        assert_eq!(micode.len(), 1);
+        assert!(
+            (micode[0].cost - 0.05).abs() < 1e-9,
+            "micode cost {}",
+            micode[0].cost
+        );
+        assert_eq!(
+            micode[0].cost_source,
+            sessions::CostSource::ProviderReported
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_fx_rows_carry_a_derived_date() {
+        // `parse_fx_file` leaves `date` empty and relies on the streaming
+        // loader's `refresh_derived_fields` to derive it from the timestamp.
+        // The local lane converts straight to `ParsedMessage`, so without a
+        // refresh of its own every fx row reached the date filters with
+        // `date == ""`: `year` and `since` dropped all of them, and `until`
+        // alone admitted rows past the cutoff. Default scanner settings pin no
+        // zone, so the post-parse rebucket pass cannot repair the key either.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let timestamp = 1_780_000_000_000_i64;
+        let fx_session = source_home.path().join(".fx/sessions/sess-1");
+        std::fs::create_dir_all(&fx_session).unwrap();
+        std::fs::write(
+            fx_session.join("session.json"),
+            format!(r#"{{"workspace_root":"/Users/alice/repo","updated_at_ms":{timestamp}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            fx_session.join("usage-v2.json"),
+            r#"{"schema_version":1,"session_id":"sess-1","snapshot":{"schema_version":2,"total_cost":0.01,"request_count":2,"models":[{"model":"zai/glm-5.2","total_cost":0.01,"input_tokens":1539,"output_tokens":441,"request_count":2}]}}"#,
+        )
+        .unwrap();
+
+        // The day every other parser derives for this instant on this host.
+        let expected_date = UnifiedMessage::new(
+            "fx",
+            "glm-5.2",
+            "zai",
+            "sess-1",
+            timestamp,
+            TokenBreakdown::default(),
+            0.0,
+        )
+        .date;
+        assert_eq!(expected_date.len(), 10, "{expected_date:?}");
+        let year = expected_date[..4].to_string();
+        let day_before = chrono::NaiveDate::parse_from_str(&expected_date, "%Y-%m-%d")
+            .unwrap()
+            .pred_opt()
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let fx_rows = |since: Option<String>, until: Option<String>, year: Option<String>| {
+            parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec!["fx".to_string()]),
+                since,
+                until,
+                year,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap()
+            .messages
+            .into_iter()
+            .filter(|msg| msg.client == "fx")
+            .collect::<Vec<_>>()
+        };
+
+        let unfiltered = fx_rows(None, None, None);
+        assert_eq!(unfiltered.len(), 1);
+        assert_eq!(unfiltered[0].date, expected_date);
+
+        assert_eq!(
+            fx_rows(None, None, Some(year)).len(),
+            1,
+            "the matching year must keep the fx row"
+        );
+        assert_eq!(
+            fx_rows(Some(expected_date.clone()), None, None).len(),
+            1,
+            "a since cutoff on the row's own day must keep it"
+        );
+        assert!(
+            fx_rows(None, Some(day_before), None).is_empty(),
+            "an until cutoff before the row's day must reject it"
+        );
     }
 
     #[test]
