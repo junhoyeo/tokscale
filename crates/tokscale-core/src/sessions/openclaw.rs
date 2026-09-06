@@ -63,7 +63,7 @@ pub const OPENCLAW_CODEX_HOME_DIRNAME: &str = "codex-home";
 /// archive/<archive key>.<original basename>.imported-<ts>`. A transcript it
 /// imported gets its session key as the archive key and its events are in
 /// SQLite; history it found unreferenced is not imported at all and gets
-/// [`OPENCLAW_UNREFERENCED_ARCHIVE_PREFIX`] instead, so those files are the
+/// `OPENCLAW_UNREFERENCED_ARCHIVE_PREFIX` instead, so those files are the
 /// only record of their sessions.
 pub const OPENCLAW_IMPORT_ARCHIVE_DIRNAME: &str = "session-sqlite-import-archive";
 
