@@ -3771,8 +3771,8 @@ pub fn workspace_bucket(
 /// Resolved up front rather than as a post-pass over the rows: the daily
 /// breakdown keys its legend off the label while it aggregates, so fixing the
 /// table afterwards would leave the chart showing the ambiguous name.
-pub fn workspace_label_overrides(
-    messages: &[UnifiedMessage],
+pub fn workspace_label_overrides<'a>(
+    messages: impl IntoIterator<Item = &'a UnifiedMessage>,
     rollup: WorktreeRollup,
     labeler: &mut WorkspaceLabeler,
 ) -> HashMap<String, String> {

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
@@ -182,8 +182,7 @@ pub struct SessionModel {
 /// of the global `GroupBy` the Models tab is using.
 #[derive(Debug, Clone)]
 pub struct ProjectUsage {
-    /// Stable grouping identity from `workspace_bucket` (the workspace key,
-    /// or the repo root under `WorktreeRollup::MergeIntoRepo`).
+    /// Stable workspace/repo identity, or a synthetic category for Codex chats.
     pub group_key: String,
     pub workspace_key: Option<String>,
     /// Display label after the `workspace_label_overrides` disambiguation pass.
@@ -251,9 +250,35 @@ pub struct DataLoader {
 #[cfg(test)]
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 
+const CODEX_CHAT_GROUP_KEY: &str = "\0codex-chat";
+const CODEX_CHAT_LABEL: &str = "Codex Chat";
+
 // Workspace bucketing lives in tokscale_core::workspace_bucket so this
 // aggregation and the CLI report agree on worktree rollup and on labeling
 // Claude Code's dash-mangled keys.
+
+fn is_codex_chat_workspace(key: &str) -> bool {
+    // Codex Desktop gives projectless chats a dated directory under Documents.
+    // Match the complete date/slug layout, including historical directories
+    // that no longer exist. Ordinary folders under Documents/Codex stay separate.
+    let Some((_, relative)) = key.rsplit_once("/Documents/Codex/") else {
+        return false;
+    };
+    let Some((date, slug)) = relative.split_once('/') else {
+        return false;
+    };
+    if date.len() != 10
+        || NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err()
+        || slug.is_empty()
+        || matches!(slug, "." | "..")
+        || slug.contains('/')
+    {
+        return false;
+    }
+
+    // A chat directory can become a real repository or a git worktree.
+    !Path::new(key).join(".git").exists()
+}
 
 fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
     // saturating_add (mirrors tokscale_core::TokenBreakdown::total) so a
@@ -519,19 +544,48 @@ impl DataLoader {
         } else {
             HashMap::new()
         };
-        // Projects always group by repo identity (MergeIntoRepo): Claude Code's
+        // Inspect each distinct Codex path once, rather than probing .git for
+        // every usage event. Keep the raw workspace metadata for other views.
+        let mut codex_chat_workspaces: HashSet<&str> = if self.projects_enabled {
+            messages
+                .iter()
+                .filter(|msg| msg.client == "codex")
+                .filter_map(|msg| msg.workspace_key.as_deref())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        codex_chat_workspaces.retain(|key| is_codex_chat_workspace(key));
+        let is_codex_chat = |msg: &UnifiedMessage| {
+            msg.client == "codex"
+                && msg
+                    .workspace_key
+                    .as_deref()
+                    .is_some_and(|key| codex_chat_workspaces.contains(key))
+        };
+
+        // Projects otherwise group by repo identity (MergeIntoRepo): Claude Code's
         // dash-mangled slugs and the real paths other clients record must land
         // in one row. Overrides are keyed by group key, so this needs its own
         // pass whenever the Models grouping above uses different semantics.
-        let projects_label_overrides = if self.projects_enabled {
+        let mut projects_label_overrides = if self.projects_enabled {
             tokscale_core::workspace_label_overrides(
-                &messages,
+                messages.iter().filter(|msg| !is_codex_chat(msg)),
                 WorktreeRollup::MergeIntoRepo,
                 &mut workspace_labeler,
             )
         } else {
             HashMap::new()
         };
+        if !codex_chat_workspaces.is_empty() {
+            // Reserve the category label; a real project with the same name
+            // keeps its own identity and is shown with its path instead.
+            for (key, label) in &mut projects_label_overrides {
+                if label == CODEX_CHAT_LABEL {
+                    *label = key.clone();
+                }
+            }
+        }
 
         for msg in &messages {
             let normalized_model =
@@ -557,16 +611,24 @@ impl DataLoader {
                     (String::new(), None, String::new())
                 };
             let (project_group_key, project_key, project_label) = if self.projects_enabled {
-                let (group_key, key, label) = tokscale_core::workspace_bucket(
-                    msg,
-                    WorktreeRollup::MergeIntoRepo,
-                    &mut workspace_labeler,
-                );
-                let label = projects_label_overrides
-                    .get(&group_key)
-                    .cloned()
-                    .unwrap_or(label);
-                (group_key, key, label)
+                if is_codex_chat(msg) {
+                    (
+                        CODEX_CHAT_GROUP_KEY.to_string(),
+                        None,
+                        CODEX_CHAT_LABEL.to_string(),
+                    )
+                } else {
+                    let (group_key, key, label) = tokscale_core::workspace_bucket(
+                        msg,
+                        WorktreeRollup::MergeIntoRepo,
+                        &mut workspace_labeler,
+                    );
+                    let label = projects_label_overrides
+                        .get(&group_key)
+                        .cloned()
+                        .unwrap_or(label);
+                    (group_key, key, label)
+                }
             } else {
                 (String::new(), None, String::new())
             };
@@ -2361,6 +2423,153 @@ mod tests {
         assert_eq!(second.message_count, 2);
         assert!(second.first_active_ms > 0);
         assert_eq!(second.first_active_ms, second.last_active_ms);
+    }
+
+    #[test]
+    fn codex_chat_workspace_requires_the_dated_chat_layout() {
+        for key in [
+            "/Users/alice/Documents/Codex/2026-09-05/ni-shi",
+            "/home/alice/Documents/Codex/2026-09-06/new-chat",
+            "C:/Users/alice/Documents/Codex/2026-09-06/chat",
+        ] {
+            assert!(is_codex_chat_workspace(key), "{key}");
+        }
+        for key in [
+            "/Users/alice/Projects/Codex/2026-09-05/chat",
+            "/Users/alice/Documents/Codex/my-project",
+            "/Users/alice/Documents/Codex/2026-09-05",
+            "/Users/alice/Documents/Codex/2026-09-05/",
+            "/Users/alice/Documents/Codex/2026-02-30/chat",
+            "/Users/alice/Documents/Codex/2026-9-05/chat",
+            "/Users/alice/Documents/Codex/2026-09-05/..",
+            "/Users/alice/Documents/Codex/2026-09-05/chat/nested-project",
+        ] {
+            assert!(!is_codex_chat_workspace(key), "{key}");
+        }
+
+        let dir = TempDir::new().unwrap();
+        for (name, is_worktree) in [("repo", false), ("worktree", true)] {
+            let path = dir.path().join("Documents/Codex/2026-09-05").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            if is_worktree {
+                std::fs::write(path.join(".git"), "gitdir: /repo/.git/worktrees/chat").unwrap();
+            } else {
+                std::fs::create_dir(path.join(".git")).unwrap();
+            }
+            let key = sessions::normalize_workspace_key(&path.to_string_lossy()).unwrap();
+            assert!(!is_codex_chat_workspace(&key), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_aggregate_messages_projects_merge_codex_chats_without_changing_usage() {
+        let chat_a = "/Users/alice/Documents/Codex/2026-09-05/ni-shi";
+        let chat_b = "/Users/alice/Documents/Codex/2026-09-06/new-chat";
+        let mut messages: Vec<_> = [
+            ("codex", "gpt-5.5", "chat-1", 1.0, Some(chat_a)),
+            ("codex", "gpt-5.5", "chat-1", 2.0, Some(chat_a)),
+            ("codex", "gpt-6-astra", "chat-2", 4.0, Some(chat_b)),
+            ("codex", "gpt-5.5", "repo", 8.0, Some("/repo")),
+            (
+                "claude",
+                "claude-opus-5",
+                "other-client",
+                16.0,
+                Some(chat_a),
+            ),
+            ("codex", "gpt-5.5", "unknown", 32.0, None),
+            (
+                "codex",
+                "gpt-5.5",
+                "same-name",
+                64.0,
+                Some("/real/Codex Chat"),
+            ),
+        ]
+        .into_iter()
+        .map(|(client, model, session, cost, workspace)| {
+            make_workspace_message(client, model, "openai", session, cost, workspace, None)
+        })
+        .collect();
+        messages[0].tokens.cache_read = 20;
+        messages[0].tokens.cache_write = 2;
+        messages[0].tokens.reasoning = 1;
+        messages[2].timestamp += 60_000;
+
+        for grouping in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let baseline = DataLoader::new(None)
+                .aggregate_messages(messages.clone(), &grouping)
+                .unwrap();
+            let usage = DataLoader::new(None)
+                .with_projects_enabled(true)
+                .aggregate_messages(messages.clone(), &grouping)
+                .unwrap();
+
+            assert_eq!(usage.projects.len(), 5);
+            let chat = usage
+                .projects
+                .iter()
+                .find(|p| p.label == CODEX_CHAT_LABEL)
+                .unwrap();
+            assert_eq!(chat.group_key, CODEX_CHAT_GROUP_KEY);
+            assert_eq!(chat.workspace_key, None);
+            assert_eq!(chat.path, None);
+            assert_eq!(chat.session_count, 2);
+            assert_eq!(chat.message_count, 3);
+            assert_eq!(chat.clients, ["codex"]);
+            assert_eq!(chat.models.len(), 2);
+            assert_eq!(chat.cost, 7.0);
+            assert_eq!(chat.tokens.input, 30);
+            assert_eq!(chat.tokens.output, 15);
+            assert_eq!(chat.tokens.cache_read, 20);
+            assert_eq!(chat.tokens.cache_write, 2);
+            assert_eq!(chat.tokens.reasoning, 1);
+            assert_eq!(chat.first_active_ms, messages[0].timestamp);
+            assert_eq!(chat.last_active_ms, messages[2].timestamp);
+
+            let same_name = usage
+                .projects
+                .iter()
+                .find(|p| p.group_key == "/real/Codex Chat")
+                .unwrap();
+            assert_eq!(same_name.label, "/real/Codex Chat");
+            assert_eq!(same_name.cost, 64.0);
+            let other_client = usage
+                .projects
+                .iter()
+                .find(|p| p.group_key == chat_a)
+                .unwrap();
+            assert_eq!(other_client.label, "ni-shi");
+            assert_eq!(other_client.clients, ["claude"]);
+            assert_eq!(other_client.cost, 16.0);
+            assert!(usage
+                .projects
+                .iter()
+                .any(|p| p.label == UNKNOWN_WORKSPACE_LABEL));
+
+            assert_eq!(usage.total_tokens, baseline.total_tokens);
+            assert_eq!(usage.total_cost, baseline.total_cost);
+            assert_eq!(usage.sessions.len(), baseline.sessions.len());
+            assert_eq!(usage.models.len(), baseline.models.len());
+            assert_eq!(
+                usage.projects.iter().map(|p| p.tokens.total()).sum::<u64>(),
+                usage.total_tokens
+            );
+            assert_eq!(
+                usage.projects.iter().map(|p| p.cost).sum::<f64>(),
+                usage.total_cost
+            );
+            if grouping == GroupBy::WorkspaceModel {
+                assert!(usage
+                    .models
+                    .iter()
+                    .any(|m| m.workspace_key.as_deref() == Some(chat_b)));
+            }
+        }
     }
 
     #[test]
