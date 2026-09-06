@@ -12,9 +12,17 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_RPC_BODY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
+
+pub fn max_rpc_body_bytes() -> usize {
+    std::env::var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0 && v < usize::MAX)
+        .unwrap_or(DEFAULT_MAX_RPC_BODY_BYTES)
+}
 
 /// Wall clock one `sync` may waste on failed trajectory-enrichment RPCs before
 /// it stops attempting them at all. See [`TrajectoryEnrichmentBudget`].
@@ -254,6 +262,20 @@ pub fn run_antigravity_sync() -> Result<()> {
                     artifact_hash: artifact.artifact_hash,
                 });
                 continue;
+            } else if let Some(previous) = manifest
+                .sessions
+                .iter()
+                .find(|entry| entry.session_id == candidate.session_id)
+            {
+                next_manifest.sessions.push(previous.clone());
+                continue;
+            } else if let Some(preserved) = cached_manifest_session_entry(
+                &candidate.session_id,
+                candidate.last_modified_ms,
+                &summary.connection_fingerprint,
+            ) {
+                next_manifest.sessions.push(preserved);
+                continue;
             }
         }
 
@@ -273,6 +295,15 @@ pub fn run_antigravity_sync() -> Result<()> {
             .find(|entry| entry.session_id == candidate.session_id)
         {
             next_manifest.sessions.push(previous.clone());
+        } else if let Some(preserved) = cached_manifest_session_entry(
+            &candidate.session_id,
+            candidate.last_modified_ms,
+            connections
+                .first()
+                .map(|c| c.fingerprint.as_str())
+                .unwrap_or_default(),
+        ) {
+            next_manifest.sessions.push(preserved);
         }
     }
 
@@ -862,6 +893,107 @@ fn session_artifact_file_stem(session_id: &str) -> String {
     let hash = Sha256::digest(session_id.as_bytes());
     let hash_prefix = format!("{:x}", hash);
     format!("{}-{}", sanitized, &hash_prefix[..16])
+}
+
+/// Opens this session's cached artifact for reading, or `None` when there is
+/// nothing readable at its path.
+///
+/// The `is_file` check matters: `File::open` succeeds on a directory, and
+/// `BufReader::lines` on that handle yields `Err(EISDIR)` on every call
+/// without ever terminating.
+fn open_cached_artifact(session_id: &str) -> Option<BufReader<fs::File>> {
+    let sessions_dir = get_antigravity_sessions_dir().ok()?;
+    let file_name = session_artifact_file_stem(session_id);
+    let path = sessions_dir.join(format!("{}.jsonl", file_name));
+    if !path.is_file() {
+        return None;
+    }
+    fs::File::open(&path).ok().map(BufReader::new)
+}
+
+/// The `usage` records in a cached artifact, in file order.
+///
+/// Reading stops at the first read error instead of skipping it: a
+/// persistent error (`EISDIR`, `EIO`) is returned again on every subsequent
+/// read, so skipping it would loop forever. tokscale writes these artifacts
+/// itself, so a line that fails to parse is still skipped individually.
+fn cached_artifact_usage_lines(reader: impl BufRead) -> impl Iterator<Item = Value> {
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(trimmed).ok()
+        })
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+}
+
+fn cached_artifact_has_timestamps(session_id: &str) -> bool {
+    let Some(reader) = open_cached_artifact(session_id) else {
+        return false;
+    };
+    cached_artifact_usage_lines(reader).any(|value| {
+        value
+            .get("timestamp")
+            .and_then(parse_timestamp_value)
+            .is_some()
+    })
+}
+
+/// Usage timestamps already recorded in this session's cached artifact, keyed
+/// like [`usage_timestamps_from_trajectory`] so the normaliser falls back to
+/// them per response.
+///
+/// This is what survives a failed trajectory enrichment. Regenerating from
+/// metadata alone would reset every enriched timestamp to null, while keeping
+/// the whole cached artifact would drop any usage the session gained since;
+/// for a trajectory that stays over the RPC body cap, that is every sync.
+/// Recovering per response keeps the old timestamps and admits the new usage,
+/// each exactly once.
+fn cached_usage_timestamps(session_id: &str) -> HashMap<String, i64> {
+    let mut timestamps = HashMap::new();
+    let Some(reader) = open_cached_artifact(session_id) else {
+        return timestamps;
+    };
+    for value in cached_artifact_usage_lines(reader) {
+        if let Some(timestamp) = value.get("timestamp").and_then(parse_timestamp_value) {
+            insert_usage_timestamp(&mut timestamps, &value, timestamp);
+        }
+    }
+    timestamps
+}
+
+fn cached_manifest_session_entry(
+    session_id: &str,
+    last_modified_ms: Option<i64>,
+    connection_fingerprint: &str,
+) -> Option<ManifestSessionEntry> {
+    if !cached_artifact_has_timestamps(session_id) {
+        return None;
+    }
+    let sessions_dir = get_antigravity_sessions_dir().ok()?;
+    let file_name = session_artifact_file_stem(session_id);
+    let path = sessions_dir.join(format!("{}.jsonl", file_name));
+    let relative_path = to_relative_artifact_path(&path).ok()?;
+    let contents = fs::read_to_string(&path).ok()?;
+    let artifact_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(contents.as_bytes());
+        Some(format!("sha256:{:x}", hasher.finalize()))
+    };
+    let step_count = contents.lines().filter(|l| !l.trim().is_empty()).count();
+    Some(ManifestSessionEntry {
+        session_id: session_id.to_string(),
+        artifact_path: relative_path,
+        last_modified_ms,
+        step_count: i32::try_from(step_count).ok(),
+        connection_fingerprint: connection_fingerprint.to_string(),
+        artifact_hash,
+    })
 }
 
 fn atomic_write_file(path: &Path, contents: &str) -> Result<()> {
@@ -1949,6 +2081,10 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
             Ok(value)
         }
         Err(http_err) => {
+            if is_rpc_cap_error(&http_err) {
+                remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
+                return Err(http_err);
+            }
             let value = https_rpc_request(connection, method, body).with_context(|| {
                 format!(
                     "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
@@ -2136,13 +2272,14 @@ fn https_rpc_request(
             .context("Failed to write curl.exe config for Windows RPC fallback")?;
 
         // The cap is enforced while curl is still transferring, not once the
-        // whole response is already in memory: at most MAX_RPC_BODY_BYTES + 1
+        // whole response is already in memory: at most max_rpc_body_bytes() + 1
         // bytes are ever held. Loopback is fast and `--max-time` leaves a 10s
         // window, so a DesktopAgent that streams far more than the cap would
         // otherwise be allowed to allocate all of it and only then be
         // rejected. Here it is cut off at the ceiling instead.
-        let stdout_bytes = match read_curl_stdout_with_cap(child_stdout, MAX_RPC_BODY_BYTES) {
-            Ok(bytes) if bytes.len() <= MAX_RPC_BODY_BYTES => bytes,
+        let cap = max_rpc_body_bytes();
+        let stdout_bytes = match read_curl_stdout_with_cap(child_stdout, cap) {
+            Ok(bytes) if bytes.len() <= cap => bytes,
             outcome => {
                 // Either the ceiling was blown or the pipe read failed. Both
                 // end the transfer: kill curl so it stops streaming into a
@@ -2154,10 +2291,10 @@ fn https_rpc_request(
                 let _ = stderr_drain.join();
                 let bytes =
                     outcome.context("Failed to read curl.exe response for Windows RPC fallback")?;
-                anyhow::bail!(
-                    "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
-                    bytes.len()
-                );
+                return Err(anyhow::Error::new(RpcBodyCapError {
+                    length: bytes.len(),
+                    cap,
+                }));
             }
         };
 
@@ -2257,7 +2394,7 @@ async fn https_rpc_once(
         .send()
         .await?;
     let status = response.status();
-    let response_body = read_reqwest_response_with_cap(response, MAX_RPC_BODY_BYTES).await?;
+    let response_body = read_reqwest_response_with_cap(response, max_rpc_body_bytes()).await?;
     if !status.is_success() {
         anyhow::bail!(
             "Antigravity HTTPS RPC {} failed with status {}: {}",
@@ -2315,18 +2452,20 @@ pub(crate) async fn read_reqwest_response_with_cap(
 ) -> Result<String> {
     if let Some(length) = response.content_length() {
         if length > max_body_bytes as u64 {
-            anyhow::bail!("Antigravity RPC body of {length} bytes exceeds {max_body_bytes} cap");
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: length as usize,
+                cap: max_body_bytes,
+            }));
         }
     }
 
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if body.len().saturating_add(chunk.len()) > max_body_bytes {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {} cap",
-                body.len().saturating_add(chunk.len()),
-                max_body_bytes
-            );
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: body.len().saturating_add(chunk.len()),
+                cap: max_body_bytes,
+            }));
         }
         body.extend_from_slice(&chunk);
     }
@@ -2390,13 +2529,12 @@ fn rpc_request_plain_http(
         }
     }
 
+    let cap = max_rpc_body_bytes();
     let response_body = if chunked {
         read_chunked_body(&mut reader)?
     } else if let Some(length) = content_length {
-        if length > MAX_RPC_BODY_BYTES {
-            anyhow::bail!(
-                "Antigravity RPC body of {length} bytes exceeds {MAX_RPC_BODY_BYTES} cap"
-            );
+        if length > cap {
+            return Err(anyhow::Error::new(RpcBodyCapError { length, cap }));
         }
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
@@ -2405,13 +2543,13 @@ fn rpc_request_plain_http(
         let mut text = String::new();
         reader
             .by_ref()
-            .take(MAX_RPC_BODY_BYTES as u64 + 1)
+            .take(cap as u64 + 1)
             .read_to_string(&mut text)?;
-        if text.len() > MAX_RPC_BODY_BYTES {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
-                text.len()
-            );
+        if text.len() > cap {
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: text.len(),
+                cap,
+            }));
         }
         text
     };
@@ -2429,7 +2567,7 @@ fn rpc_request_plain_http(
 }
 
 fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<String> {
-    read_chunked_body_with_cap(reader, MAX_RPC_BODY_BYTES)
+    read_chunked_body_with_cap(reader, max_rpc_body_bytes())
 }
 
 fn read_chunked_body_prefix(
@@ -2476,11 +2614,10 @@ fn read_chunked_body_with_cap(
         }
 
         if chunk_size > max_body_bytes || body.len().saturating_add(chunk_size) > max_body_bytes {
-            anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {} cap",
-                body.len().saturating_add(chunk_size),
-                max_body_bytes
-            );
+            return Err(anyhow::Error::new(RpcBodyCapError {
+                length: body.len().saturating_add(chunk_size),
+                cap: max_body_bytes,
+            }));
         }
 
         let mut chunk = vec![0_u8; chunk_size];
@@ -2655,20 +2792,57 @@ impl TrajectoryEnrichmentBudget {
             .entry(fingerprint.to_string())
             .or_insert(0) += 1;
     }
+
+    /// Record wasted time for a failure specific to a single session (such as exceeding
+    /// the RPC body cap) without incrementing the connection's consecutive failure count,
+    /// so an oversized session does not trip the connection circuit breaker for other sessions.
+    fn record_session_failure(&mut self, elapsed: Duration) {
+        self.wasted = self.wasted.saturating_add(elapsed);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RpcBodyCapError {
+    pub length: usize,
+    pub cap: usize,
+}
+
+impl std::fmt::Display for RpcBodyCapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Antigravity RPC body of {} bytes exceeds {} cap",
+            self.length, self.cap
+        )
+    }
+}
+
+impl std::error::Error for RpcBodyCapError {}
+
+fn is_rpc_cap_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<RpcBodyCapError>().is_some())
 }
 
 /// Best-effort timestamps for sessions whose metadata does not carry its own.
 ///
-/// Every failure mode ends in an empty map rather than an error: the caller
-/// falls back to the metadata-derived timestamp, which is the same outcome a
-/// failed RPC produced before this was bounded.
+/// Every failure mode logs a warning and returns Err so the caller can decide
+/// whether to preserve existing valid cached data or fall back to metadata timestamps.
 fn fetch_usage_timestamps(
     summary: &TrajectorySummary,
     connection: &AntigravityConnection,
     budget: &mut TrajectoryEnrichmentBudget,
-) -> HashMap<String, i64> {
+) -> Result<HashMap<String, i64>> {
     if !budget.should_attempt(&connection.fingerprint) {
-        return HashMap::new();
+        let err = anyhow::anyhow!(
+            "trajectory enrichment budget exhausted or circuit breaker open for connection {}",
+            connection.fingerprint
+        );
+        eprintln!(
+            "Warning: skipping Antigravity trajectory timestamp enrichment for session {}: {err:#}",
+            summary.session_id
+        );
+        return Err(err);
     }
 
     let started = Instant::now();
@@ -2679,11 +2853,20 @@ fn fetch_usage_timestamps(
     ) {
         Ok(trajectory) => {
             budget.record_success(&connection.fingerprint);
-            usage_timestamps_from_trajectory(&trajectory)
+            Ok(usage_timestamps_from_trajectory(&trajectory))
         }
-        Err(_) => {
-            budget.record_failure(&connection.fingerprint, started.elapsed());
-            HashMap::new()
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to fetch Antigravity trajectory timestamps for session {}: {err:#}",
+                summary.session_id
+            );
+            let is_cap_error = is_rpc_cap_error(&err);
+            if is_cap_error {
+                budget.record_session_failure(started.elapsed());
+            } else {
+                budget.record_failure(&connection.fingerprint, started.elapsed());
+            }
+            Err(err)
         }
     }
 }
@@ -2712,7 +2895,19 @@ fn try_fetch_session_artifact(
     }
 
     let usage_timestamps = if session_metadata_needs_trajectory_timestamps(&metadata) {
-        fetch_usage_timestamps(summary, connection, budget)
+        match fetch_usage_timestamps(summary, connection, budget) {
+            Ok(timestamps) => timestamps,
+            Err(err) => {
+                let cached = cached_usage_timestamps(&summary.session_id);
+                if !cached.is_empty() {
+                    eprintln!(
+                        "Warning: failed to enrich Antigravity timestamps for session {}: {err:#}; reusing timestamps from the cached session artifact",
+                        summary.session_id
+                    );
+                }
+                cached
+            }
+        }
     } else {
         HashMap::new()
     };
@@ -3103,6 +3298,36 @@ mod tests {
             match self.prev_config_dir.take() {
                 Some(dir) => std::env::set_var("TOKSCALE_CONFIG_DIR", dir),
                 None => std::env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+    }
+
+    /// Panic-safe environment variable guard that captures the prior value
+    /// and restores it on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -4380,11 +4605,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn rpc_request_rejects_oversized_content_length_body() {
-        let port = serve_once(
-            vec![b'a'; 32],
-            &format!("Content-Length: {}\r\n", MAX_RPC_BODY_BYTES + 1),
-        );
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
+        let cap = max_rpc_body_bytes();
+        let port = serve_once(vec![b'a'; 32], &format!("Content-Length: {}\r\n", cap + 1));
         let connection = AntigravityConnection {
             pid: 1,
             port,
@@ -4392,15 +4617,15 @@ mod tests {
             fingerprint: format!("pid:1:port:{port}"),
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds"),
-            "expected cap error, got: {err:#}"
-        );
+        assert!(is_rpc_cap_error(&err), "expected cap error, got: {err:#}");
     }
 
     #[test]
+    #[serial]
     fn read_chunked_body_rejects_oversized_accumulated_chunks() {
-        let chunk_size = MAX_RPC_BODY_BYTES / 4 + 1;
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
+        let cap = max_rpc_body_bytes();
+        let chunk_size = cap / 4 + 1;
         let mut body = Vec::new();
         for _ in 0..5 {
             body.extend_from_slice(format!("{:x}\r\n", chunk_size).as_bytes());
@@ -4416,9 +4641,371 @@ mod tests {
             fingerprint: format!("pid:1:port:{port}"),
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
+        assert!(is_rpc_cap_error(&err), "expected cap error, got: {err:#}");
+    }
+
+    #[test]
+    #[serial]
+    fn max_rpc_body_bytes_respects_env_var() {
+        let _guard = EnvVarGuard::remove("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
+        assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+        assert_eq!(DEFAULT_MAX_RPC_BODY_BYTES, 128 * 1024 * 1024);
+
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "65536");
+        assert_eq!(max_rpc_body_bytes(), 65536);
+
+        // Non-positive or unparseable values fall back to the default.
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "0");
+        assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "invalid");
+        assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+
+        // usize::MAX cannot be safely incremented by readers and must fall back.
+        let _guard = EnvVarGuard::set(
+            "TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES",
+            &usize::MAX.to_string(),
+        );
+        assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+    }
+
+    #[test]
+    fn cap_error_detected_across_error_context_chain() {
+        let root = anyhow::Error::new(RpcBodyCapError {
+            length: 5000,
+            cap: 1024,
+        });
+        let wrapped = root.context("HTTPS RPC failed for Antigravity RPC GetCascadeTrajectory");
+        assert!(is_rpc_cap_error(&wrapped));
+        assert_eq!(
+            wrapped
+                .chain()
+                .find_map(|c| c.downcast_ref::<RpcBodyCapError>().copied()),
+            Some(RpcBodyCapError {
+                length: 5000,
+                cap: 1024,
+            })
+        );
+
+        // Non-cap server errors containing "exceeds" or "cap" must not be misclassified.
+        let server_status_err = anyhow::anyhow!(
+            "Antigravity HTTPS RPC GetCascadeTrajectory failed with status 429: Rate limit quota exceeds allowed ceiling"
+        );
+        assert!(!is_rpc_cap_error(&server_status_err));
+
+        let server_cap_err = anyhow::anyhow!(
+            "Antigravity HTTPS RPC GetCascadeTrajectory failed with status 400: Monthly cap reached"
+        );
+        assert!(!is_rpc_cap_error(&server_cap_err));
+    }
+
+    #[test]
+    fn enrichment_budget_does_not_trip_breaker_on_session_failure() {
+        let mut budget = TrajectoryEnrichmentBudget::with_limits(Duration::from_secs(60), 2);
+
+        assert!(budget.should_attempt("a"));
+        budget.record_session_failure(Duration::from_millis(10));
+        budget.record_session_failure(Duration::from_millis(10));
+        budget.record_session_failure(Duration::from_millis(10));
+
         assert!(
-            err.to_string().contains("exceeds"),
-            "expected cap error, got: {err:#}"
+            budget.should_attempt("a"),
+            "session-specific failures like cap errors must not trip the connection circuit breaker"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cached_artifact_has_timestamps_checks_valid_usage_timestamp() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        assert!(!cached_artifact_has_timestamps("nonexistent-session"));
+
+        let session_with_null = serde_json::json!({
+            "type": "usage",
+            "sessionId": "null-session",
+            "timestamp": null,
+        })
+        .to_string()
+            + "\n";
+        write_session_artifact("null-session", &session_with_null).unwrap();
+        assert!(!cached_artifact_has_timestamps("null-session"));
+
+        let session_with_ts = serde_json::json!({
+            "type": "usage",
+            "sessionId": "ts-session",
+            "timestamp": 1700000000000_i64,
+        })
+        .to_string()
+            + "\n";
+        write_session_artifact("ts-session", &session_with_ts).unwrap();
+        assert!(cached_artifact_has_timestamps("ts-session"));
+    }
+
+    /// Runs `f` on its own thread and returns its result, or `None` if it has
+    /// not returned within `timeout`. A helper that spins forever fails the
+    /// test instead of hanging the whole test binary.
+    fn finishes_within<T: Send + 'static>(
+        timeout: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(timeout).ok()
+    }
+
+    #[test]
+    #[serial]
+    fn cached_usage_timestamps_returns_when_artifact_path_is_a_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        // A directory at the artifact path: `File::open` succeeds on it, and
+        // `BufReader::lines` then yields `Err(EISDIR)` on every call without
+        // ever terminating, so skipping read errors spins forever.
+        let session_id = "directory-session";
+        let artifact_path = get_antigravity_sessions_dir()
+            .unwrap()
+            .join(format!("{}.jsonl", session_artifact_file_stem(session_id)));
+        fs::create_dir_all(&artifact_path).unwrap();
+        assert!(artifact_path.is_dir());
+
+        assert!(!cached_artifact_has_timestamps(session_id));
+
+        let timestamps = finishes_within(Duration::from_secs(3), move || {
+            cached_usage_timestamps(session_id)
+        })
+        .expect("cached_usage_timestamps must return when the artifact path is a directory");
+        assert!(timestamps.is_empty());
+    }
+
+    /// Serves `prefix`, then fails every read with the same error, the way a
+    /// device or directory read keeps failing.
+    struct PersistentReadError {
+        prefix: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for PersistentReadError {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.prefix.read(buf)? {
+                0 => Err(std::io::Error::other("persistent read error")),
+                read => Ok(read),
+            }
+        }
+    }
+
+    #[test]
+    fn cached_artifact_usage_lines_stop_at_first_read_error() {
+        let prefix = concat!(
+            "{\"type\":\"usage\",\"responseId\":\"response-1\",\"timestamp\":1700000000000}\n",
+            "not json\n",
+            "\n",
+            "{\"type\":\"model\",\"responseId\":\"response-2\"}\n",
+            "{\"type\":\"usage\",\"responseId\":\"response-3\",\"timestamp\":1700000001000}\n",
+        );
+        let reader = BufReader::new(PersistentReadError {
+            prefix: std::io::Cursor::new(prefix.as_bytes().to_vec()),
+        });
+
+        let usage = finishes_within(Duration::from_secs(3), move || {
+            cached_artifact_usage_lines(reader).collect::<Vec<_>>()
+        })
+        .expect("reading must stop at the first persistent read error");
+
+        let response_ids: Vec<&str> = usage
+            .iter()
+            .filter_map(|value| value.get("responseId").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            response_ids,
+            ["response-1", "response-3"],
+            "unparseable and non-usage lines are skipped; usage lines before the error are kept"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn trajectory_enrichment_preserves_existing_cached_timestamps_on_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        let session_id = "preserve-session";
+        let existing_content = serde_json::json!({
+            "type": "usage",
+            "sessionId": session_id,
+            "modelId": "gemini-3.7-flash",
+            "timestamp": 1700000000000_i64,
+            "input": 100,
+            "output": 50,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0,
+            "responseId": "response-1",
+        })
+        .to_string()
+            + "\n";
+        let session_file = write_session_artifact(session_id, &existing_content).unwrap();
+        assert!(session_file.exists());
+        assert!(cached_artifact_has_timestamps(session_id));
+
+        let metadata = metadata_needing_enrichment();
+        let (port, _) = serve_rpc_methods(move |method| match method {
+            "GetCascadeTrajectoryGeneratorMetadata" => Some(metadata.clone()),
+            _ => None, // GetCascadeTrajectory fails
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+        let mut budget = TrajectoryEnrichmentBudget::new();
+
+        let summary = TrajectorySummary {
+            session_id: session_id.to_string(),
+            last_modified_ms: Some(1),
+            step_count: Some(1),
+            connection_fingerprint: connection.fingerprint.clone(),
+        };
+
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            .unwrap()
+            .expect("enrichment failure must still regenerate the artifact");
+        let usage: Vec<Value> = artifact
+            .contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+            .collect();
+        assert_eq!(usage.len(), 1, "{}", artifact.contents);
+        assert_eq!(usage[0]["responseId"], "response-1");
+        assert_eq!(
+            usage[0]["timestamp"], 1700000000000_i64,
+            "the cached timestamp must survive rather than reset to null"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn trajectory_enrichment_failure_keeps_cached_timestamps_and_admits_new_usage() {
+        // Session growth under a persistent enrichment failure. The cache
+        // holds r1 with an enriched timestamp; the session has since gained
+        // r2, which carries its own timestamp in metadata. r1 still asks for
+        // enrichment, and the trajectory is over the RPC body cap, so the
+        // enrichment fails on every sync without tripping the connection
+        // breaker. Freezing the whole cached artifact in that state drops r2
+        // forever; regenerating from metadata alone resets r1 to null. Both
+        // must come out, each exactly once, on every sync.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+        let _cap = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
+
+        let session_id = "growing-session";
+        let cached_content = serde_json::json!({
+            "type": "usage",
+            "sessionId": session_id,
+            "modelId": "gemini-3.7-flash",
+            "timestamp": 1700000000000_i64,
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0,
+            "responseId": "response-1",
+        })
+        .to_string()
+            + "\n";
+        write_session_artifact(session_id, &cached_content).unwrap();
+
+        let metadata = serde_json::json!({
+            "generatorMetadata": [{
+                "chatModel": {
+                    "responseModel": "gemini-3.7-flash",
+                    "retryInfos": [
+                        {
+                            "usage": {
+                                "inputTokens": 10,
+                                "outputTokens": 5,
+                                "responseId": "response-1",
+                                "messageId": "message-1"
+                            }
+                        },
+                        {
+                            "usage": {
+                                "inputTokens": 20,
+                                "outputTokens": 8,
+                                "responseId": "response-2",
+                                "messageId": "message-2",
+                                "createdAt": 1700000100000_i64
+                            }
+                        }
+                    ]
+                }
+            }]
+        })
+        .to_string();
+        // Past the 1024-byte cap pinned above, so GetCascadeTrajectory fails
+        // with RpcBodyCapError rather than a transport error.
+        let oversized_trajectory = format!(
+            r#"{{"trajectory":{{"steps":[],"padding":"{}"}}}}"#,
+            "x".repeat(4096)
+        );
+        let (port, seen) = serve_rpc_methods(move |method| match method {
+            "GetCascadeTrajectoryGeneratorMetadata" => Some(metadata.clone()),
+            "GetCascadeTrajectory" => Some(oversized_trajectory.clone()),
+            _ => None,
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+        let mut budget = TrajectoryEnrichmentBudget::new();
+        let summary = TrajectorySummary {
+            session_id: session_id.to_string(),
+            last_modified_ms: Some(2),
+            step_count: Some(2),
+            connection_fingerprint: connection.fingerprint.clone(),
+        };
+
+        for round in 1..=2 {
+            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("round {round}: a grown session must still produce an artifact")
+                });
+            let usage: Vec<(Option<String>, Option<i64>)> = artifact
+                .contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+                .map(|value| {
+                    (
+                        value
+                            .get("responseId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        value.get("timestamp").and_then(Value::as_i64),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                usage,
+                vec![
+                    (Some("response-1".to_string()), Some(1700000000000)),
+                    (Some("response-2".to_string()), Some(1700000100000)),
+                ],
+                "round {round}: r1 keeps its cached timestamp, r2 keeps its own, no duplicates"
+            );
+            // `sync` writes the artifact back, so the next round reads this one.
+            write_session_artifact(session_id, &artifact.contents).unwrap();
+        }
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .filter(|method| *method == "GetCascadeTrajectory")
+                .count(),
+            2,
+            "a cap error must not trip the breaker, so every sync retries enrichment"
         );
     }
 
