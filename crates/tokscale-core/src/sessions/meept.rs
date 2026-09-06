@@ -32,8 +32,6 @@ use rusqlite::Connection;
 use std::path::Path;
 use tracing::warn;
 
-const MEEPT_AGENT_NAME: &str = "Meept";
-
 /// One `llm_calls` row, decoded. Column order matches [`MEEPT_PROJECTION`].
 struct MeeptUsageRow {
     id: i64,
