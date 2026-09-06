@@ -14,32 +14,51 @@ use std::path::Path;
 
 pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    // Two passes over the file (#1209). A usage record does not always carry
+    // One read over the file (#1209). A usage record does not always carry
     // its own model, session, or agent id — those often arrive on a different
     // line sharing the same trace id, possibly a *later* line — so the trace
-    // map must cover the whole file before any usage emits. Pass 1 copies
-    // only the map's small owned fields per line and drops each JSON value at
-    // once; pass 2 re-reads and emits usage against the finished map. The
-    // previous shape kept every line's full DOM alive for both walks, which
-    // on multi-GB Copilot CLI exports cost gigabytes for a map worth
-    // megabytes. The index below counts successfully parsed records, not
-    // physical lines: the old shape pushed only parseable lines into `records`
-    // and enumerated that vector, so the line-index dedup-key fallback must
-    // keep counting the same way. A blank or malformed line (which the old
-    // shape dropped) must not shift the keys of the records after it.
-    let trace_contexts = collect_trace_contexts_file(path);
-    let mut candidates: Vec<CopilotUsageCandidate> = Vec::new();
+    // map must cover the whole file before any usage resolves. The read keeps
+    // only small owned fields per line — the map's, plus one compact
+    // unresolved candidate per usage record — and drops each JSON value at
+    // once; the candidates resolve against the finished map after the read.
+    // The previous shape kept every line's full DOM alive for both walks,
+    // which on multi-GB Copilot CLI exports cost gigabytes for a map worth
+    // megabytes.
+    //
+    // The map and the usage come from the same bytes on purpose. Copilot CLI
+    // appends to the live export while a scan runs, and a parser that
+    // reopened the file to emit usage against a map built by an earlier walk
+    // emitted a usage record whose context landed after that walk hit EOF as
+    // model `unknown` under its trace id — a session id the desktop and VS
+    // Code dedup in lib.rs keys on, so a turn those sources also hold can
+    // count twice.
+    //
+    // The index below counts successfully parsed records, not physical
+    // lines: the old shape pushed only parseable lines into `records` and
+    // enumerated that vector, so the line-index dedup-key fallback must keep
+    // counting the same way. A blank or malformed line (which the old shape
+    // dropped) must not shift the keys of the records after it.
+    let mut contexts: HashMap<String, TraceContext> = HashMap::new();
+    let mut fallback = TraceFallbackAccum::default();
+    let mut pending: Vec<PendingUsageCandidate> = Vec::new();
     let mut parsed = 0usize;
     for_each_json_line(path, &mut |_, trimmed| {
         if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
+            accumulate_trace_context(&mut contexts, &record);
+            fallback.accumulate(&record);
             if let Some(candidate) =
-                usage_candidate_from_record(&record, parsed, fallback_timestamp, &trace_contexts)
+                pending_candidate_from_record(&record, parsed, fallback_timestamp)
             {
-                candidates.push(candidate);
+                pending.push(candidate);
             }
             parsed += 1;
         }
     });
+    let trace_contexts = finish_trace_contexts(contexts, fallback);
+    let candidates: Vec<CopilotUsageCandidate> = pending
+        .into_iter()
+        .map(|candidate| candidate.resolve(&trace_contexts))
+        .collect();
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -102,6 +121,95 @@ struct CopilotUsageCandidate {
     dedup_key: String,
     agent: Option<String>,
     agent_is_direct: bool,
+}
+
+/// A usage record as read off the file, with everything that depends on the
+/// trace map still unresolved. The map is complete only once the whole file
+/// has been read, so each usage record waits here as a handful of small
+/// owned fields — not its JSON value — until [`PendingUsageCandidate::resolve`]
+/// turns it into a [`CopilotUsageCandidate`].
+struct PendingUsageCandidate {
+    source: CopilotUsageSource,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    response_id: Option<String>,
+    /// The record's own model attribute; the trace's model fills in when
+    /// absent.
+    model: Option<String>,
+    /// The record's own session attribute; the trace's session, then the
+    /// trace id, fill in when absent.
+    session_id: Option<String>,
+    /// The record's own turn index, part of the agent-turn dedup key.
+    turn_index: Option<i64>,
+    timestamp_ms: i64,
+    duration_ms: Option<i64>,
+    start_timestamp_ms: Option<i64>,
+    end_timestamp_ms: Option<i64>,
+    inclusive_input_tokens: i64,
+    tokens: TokenBreakdown,
+    /// Position among successfully parsed records, the dedup-key fallback for
+    /// a record with no stable identity of its own.
+    index: usize,
+    /// The record's own `gen_ai.agent.id`.
+    agent: Option<String>,
+}
+
+impl PendingUsageCandidate {
+    fn resolve(self, trace_contexts: &HashMap<String, TraceContext>) -> CopilotUsageCandidate {
+        let trace_context = self
+            .trace_id
+            .as_deref()
+            .and_then(|trace_id| trace_contexts.get(trace_id));
+
+        let model = self
+            .model
+            .or_else(|| trace_context.and_then(|context| context.model.clone()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let provider_id = inferred_provider_from_model(&model)
+            .unwrap_or("github-copilot")
+            .to_string();
+        let session_id = self
+            .session_id
+            .or_else(|| trace_context.and_then(|context| context.session_id.clone()))
+            .or_else(|| self.trace_id.clone())
+            .unwrap_or_else(|| "unknown-session".to_string());
+        let dedup_key = dedup_key(
+            self.source,
+            self.trace_id.as_deref(),
+            self.span_id.as_deref(),
+            self.turn_index,
+            &session_id,
+            self.timestamp_ms,
+            self.index,
+        );
+        // Per-record attribution first: when a chat/inference record carries its
+        // own gen_ai.agent.id (e.g. a sub-agent turn inside a shared trace), use
+        // it so sub-agents are not mis-attributed to the trace's first agent.
+        // Fall back to the trace-level agent (typically from the invoke_agent
+        // span) only when the record itself has none.
+        let agent_is_direct = self.agent.is_some();
+        let agent = self
+            .agent
+            .or_else(|| trace_context.and_then(|context| context.agent_id.clone()));
+
+        CopilotUsageCandidate {
+            source: self.source,
+            trace_id: self.trace_id,
+            response_id: self.response_id,
+            model,
+            provider_id,
+            session_id,
+            timestamp_ms: self.timestamp_ms,
+            duration_ms: self.duration_ms,
+            start_timestamp_ms: self.start_timestamp_ms,
+            end_timestamp_ms: self.end_timestamp_ms,
+            inclusive_input_tokens: self.inclusive_input_tokens,
+            tokens: self.tokens,
+            dedup_key,
+            agent,
+            agent_is_direct,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -179,20 +287,15 @@ impl CopilotUsageCandidate {
     }
 }
 
-/// First pass of [`parse_copilot_file`]: walk the file once, copying only the
-/// small owned fields the trace map needs out of each line, and drop the
-/// line's JSON value before reading the next. Peak cost is the map — one
-/// small entry per trace — not the file.
-fn collect_trace_contexts_file(path: &Path) -> HashMap<String, TraceContext> {
-    let mut contexts: HashMap<String, TraceContext> = HashMap::new();
-    let mut fallback = TraceFallbackAccum::default();
-    for_each_json_line(path, &mut |_, trimmed| {
-        if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
-            accumulate_trace_context(&mut contexts, &record);
-            fallback.accumulate(&record);
-        }
-    });
-
+/// Complete the trace map once the whole file has been read. The per-line
+/// half — [`accumulate_trace_context`] and [`TraceFallbackAccum::accumulate`]
+/// — copies only the small owned fields the map needs out of each line, so
+/// the line's JSON value can be dropped before reading the next. Peak cost is
+/// the map — one small entry per trace — not the file.
+fn finish_trace_contexts(
+    mut contexts: HashMap<String, TraceContext>,
+    fallback: TraceFallbackAccum,
+) -> HashMap<String, TraceContext> {
     // Trace-level agent is only a FALLBACK for records that carry no
     // gen_ai.agent.id of their own (see candidate_from_attributes). Prefer the
     // ROOT invoke_agent span's agent id — the invoke_agent span whose parent
@@ -242,18 +345,18 @@ fn accumulate_trace_context(contexts: &mut HashMap<String, TraceContext>, record
     }
 }
 
-/// Intermediate trace-fallback state accumulated across pass 1 of
+/// Intermediate trace-fallback state accumulated line by line in
 /// [`parse_copilot_file`], then resolved once the whole file has been seen.
 ///
 /// The fallback prefers the ROOT invoke_agent span (see
-/// [`collect_trace_contexts_file`]), which export order cannot be relied on
-/// to surface first — the root invoke_agent span may export after a nested
-/// one, or after the chat spans it should cover — so the span hierarchy must
-/// be complete before the root can be picked. That is the other half of why
-/// the parser reads the file twice: the decision needs lines that may come
-/// later than the usage they explain. All keys are owned: pass 1 drops each
-/// line's JSON value before reading the next, so nothing here may borrow
-/// from a record.
+/// [`finish_trace_contexts`]), which export order cannot be relied on to
+/// surface first — the root invoke_agent span may export after a nested one,
+/// or after the chat spans it should cover — so the span hierarchy must be
+/// complete before the root can be picked. That is the other half of why
+/// usage waits for the end of the file: the decision needs lines that may
+/// come later than the usage they explain. All keys are owned: the read
+/// drops each line's JSON value before reading the next, so nothing here may
+/// borrow from a record.
 #[derive(Default)]
 struct TraceFallbackAccum {
     /// `(trace_id, span_id) -> parent_span_id`: OTel structure, collected
@@ -384,17 +487,13 @@ fn is_root_invoke_agent(
     true
 }
 
-fn usage_candidate_from_record(
+fn pending_candidate_from_record(
     record: &Value,
     index: usize,
     fallback_timestamp: i64,
-    trace_contexts: &HashMap<String, TraceContext>,
-) -> Option<CopilotUsageCandidate> {
+) -> Option<PendingUsageCandidate> {
     let attributes = record.get("attributes").and_then(Value::as_object)?;
     let trace_id = trace_id_from_record(record).map(str::to_string);
-    let trace_context = trace_id
-        .as_deref()
-        .and_then(|trace_id| trace_contexts.get(trace_id));
 
     if is_chat_span_record(record, attributes) {
         return candidate_from_attributes(
@@ -402,7 +501,6 @@ fn usage_candidate_from_record(
             record,
             attributes,
             trace_id,
-            trace_context,
             index,
             fallback_timestamp,
         );
@@ -414,7 +512,6 @@ fn usage_candidate_from_record(
             record,
             attributes,
             trace_id,
-            trace_context,
             index,
             fallback_timestamp,
         );
@@ -426,7 +523,6 @@ fn usage_candidate_from_record(
             record,
             attributes,
             trace_id,
-            trace_context,
             index,
             fallback_timestamp,
         );
@@ -438,7 +534,6 @@ fn usage_candidate_from_record(
             record,
             attributes,
             trace_id,
-            trace_context,
             index,
             fallback_timestamp,
         );
@@ -452,10 +547,9 @@ fn candidate_from_attributes(
     record: &Value,
     attributes: &Map<String, Value>,
     trace_id: Option<String>,
-    trace_context: Option<&TraceContext>,
     index: usize,
     fallback_timestamp: i64,
-) -> Option<CopilotUsageCandidate> {
+) -> Option<PendingUsageCandidate> {
     let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
     let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
     let cache_read = attr_i64_first(
@@ -494,19 +588,8 @@ fn candidate_from_attributes(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    let model = first_non_empty_attr(attributes, MODEL_ATTRS)
-        .or_else(|| trace_context.and_then(|context| context.model.as_deref()))
-        .unwrap_or("unknown")
-        .to_string();
-    let provider_id = inferred_provider_from_model(&model)
-        .unwrap_or("github-copilot")
-        .to_string();
-    let session_id = best_session_attr(attributes)
-        .map(|(session_id, _)| session_id)
-        .or_else(|| trace_context.and_then(|context| context.session_id.as_deref()))
-        .or(trace_id.as_deref())
-        .unwrap_or("unknown-session")
-        .to_string();
+    let model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
+    let session_id = best_session_attr(attributes).map(|(session_id, _)| session_id.to_string());
     let record_timestamp_ms = timestamp_ms_from_record(record);
     let timestamp_ms = record_timestamp_ms.unwrap_or(fallback_timestamp);
     let duration_ms = duration_ms_from_record(record);
@@ -522,39 +605,28 @@ fn candidate_from_attributes(
             .zip(duration_ms)
             .map(|(start, duration)| start.saturating_add(duration))
     });
-    let dedup_key = dedup_key_for_record(
-        source,
-        record,
-        attributes,
-        trace_id.as_deref(),
-        &session_id,
-        timestamp_ms,
-        index,
-    );
-    let direct_agent = first_non_empty_attr(attributes, &["gen_ai.agent.id"]).map(str::to_string);
-    let agent_is_direct = direct_agent.is_some();
+    let span_id = span_id_from_record(record).map(str::to_string);
+    let turn_index = ["turn.index", "copilot_chat.turn.index"]
+        .iter()
+        .find_map(|key| attributes.get(*key).and_then(value_as_i64));
+    let agent = first_non_empty_attr(attributes, &["gen_ai.agent.id"]).map(str::to_string);
 
-    Some(CopilotUsageCandidate {
+    Some(PendingUsageCandidate {
         source,
         trace_id,
+        span_id,
         response_id,
         model,
-        provider_id,
         session_id,
+        turn_index,
         timestamp_ms,
         duration_ms,
         start_timestamp_ms,
         end_timestamp_ms,
         inclusive_input_tokens: input.max(0),
         tokens,
-        dedup_key,
-        // Per-record attribution first: when a chat/inference record carries its
-        // own gen_ai.agent.id (e.g. a sub-agent turn inside a shared trace), use
-        // it so sub-agents are not mis-attributed to the trace's first agent.
-        // Fall back to the trace-level agent (typically from the invoke_agent
-        // span) only when the record itself has none.
-        agent: direct_agent.or_else(|| trace_context.and_then(|tc| tc.agent_id.clone())),
-        agent_is_direct,
+        index,
+        agent,
     })
 }
 
@@ -787,17 +859,15 @@ fn parent_span_id_from_record(value: &Value) -> Option<&str> {
         })
 }
 
-fn dedup_key_for_record(
+fn dedup_key(
     source: CopilotUsageSource,
-    record: &Value,
-    attributes: &Map<String, Value>,
     trace_id: Option<&str>,
+    span_id: Option<&str>,
+    turn_index: Option<i64>,
     session_id: &str,
     timestamp_ms: i64,
     index: usize,
 ) -> String {
-    let span_id = span_id_from_record(record);
-
     match source {
         CopilotUsageSource::ChatSpan | CopilotUsageSource::AgentSummarySpan => {
             match (trace_id, span_id) {
@@ -818,9 +888,7 @@ fn dedup_key_for_record(
             // is stable across re-runs. Otherwise fall back to the line index
             // so two turn-less agent-turn records in the same trace do not
             // collide on a `0` sentinel.
-            let turn_part = ["turn.index", "copilot_chat.turn.index"]
-                .iter()
-                .find_map(|key| attributes.get(*key).and_then(value_as_i64))
+            let turn_part = turn_index
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| format!("idx-{index}"));
             if let Some(trace_id) = trace_id {
@@ -1992,12 +2060,13 @@ mod tests {
     }
 
     #[test]
-    fn two_pass_forward_reference_resolves_trace_context() {
-        // Pass 1 must cover the whole file before pass 2 emits: the usage
-        // record below carries no model, session, or agent attribute of its
-        // own, so all three resolve from the invoke_agent span exported after
-        // it. A single streaming pass would emit it as unknown/unknown-session
-        // (or with the trace id as the session fallback).
+    fn forward_reference_resolves_trace_context() {
+        // The trace map must cover the whole file before any usage resolves:
+        // the usage record below carries no model, session, or agent
+        // attribute of its own, so all three resolve from the invoke_agent
+        // span exported after it. Resolving while streaming would emit it as
+        // unknown/unknown-session (or with the trace id as the session
+        // fallback).
         let content = r#"{"type":"span","traceId":"trace-fwd","spanId":"chat-fwd","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7}}
 {"type":"span","traceId":"trace-fwd","spanId":"invoke-fwd","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-fwd","gen_ai.agent.id":"github.copilot.default"}}"#;
         let file = create_test_file(content);
@@ -2044,5 +2113,84 @@ mod tests {
             ],
             "unparsable lines must not shift fallback keys: {keys:?}",
         );
+    }
+
+    /// The trace map and the usage it attributes must come from the same
+    /// bytes. Copilot CLI appends to the live export while a scan runs, so a
+    /// parser that reopened the file to emit usage against a map built by an
+    /// earlier walk emitted a usage record whose context landed after that
+    /// walk hit EOF. The export path here starts as a symlink to a FIFO, so
+    /// the test knows when the parser has opened it; while that first open
+    /// is being served, the link is swapped to a regular file holding the
+    /// export grown by one usage/context pair, which any later open then
+    /// sees. That is an append between two reads, made deterministic.
+    /// Whatever view the parser reads, every usage row it emits must resolve
+    /// against the context in that same view.
+    #[cfg(unix)]
+    #[test]
+    fn usage_and_trace_context_come_from_one_read() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+
+        const FIRST: &str = concat!(
+            r#"{"type":"span","traceId":"trace-1","spanId":"chat-1","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-1","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-1","gen_ai.agent.id":"github.copilot.default"}}"#,
+            "\n",
+        );
+        const APPENDED: &str = concat!(
+            r#"{"type":"span","traceId":"trace-2","spanId":"chat-2","name":"chat gpt-5.4-mini","endTime":[1775934274,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":41,"gen_ai.usage.output_tokens":8}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-2","spanId":"invoke-2","name":"invoke_agent","endTime":[1775934270,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-2","gen_ai.agent.id":"github.copilot.default"}}"#,
+            "\n",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("first-open.fifo");
+        let grown = dir.path().join("grown.jsonl");
+        let export = dir.path().join("otel.jsonl");
+        let c_path = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a NUL-terminated path inside a fresh temp directory.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        std::fs::write(&grown, format!("{FIRST}{APPENDED}")).unwrap();
+        std::os::unix::fs::symlink(&fifo, &export).unwrap();
+
+        let writer = {
+            let swap = dir.path().join("swap");
+            let (fifo, grown, export) = (fifo.clone(), grown.clone(), export.clone());
+            std::thread::spawn(move || {
+                // Blocks until the parser opens the export for reading.
+                let mut first = OpenOptions::new().write(true).open(&fifo).unwrap();
+                first.write_all(FIRST.as_bytes()).unwrap();
+                // Re-point the export before ending the first read with EOF,
+                // so the swap is ordered before anything the parser does next.
+                std::os::unix::fs::symlink(&grown, &swap).unwrap();
+                std::fs::rename(&swap, &export).unwrap();
+                drop(first);
+            })
+        };
+
+        let messages = parse_copilot_file(&export);
+        writer.join().unwrap();
+
+        assert!(!messages.is_empty());
+        for message in &messages {
+            assert_eq!(
+                message.model_id, "claude-sonnet-4.6",
+                "usage in session {} resolved its model from a different read than its context",
+                message.session_id
+            );
+            assert!(
+                message.session_id.starts_with("conv-"),
+                "usage fell back to the trace id as its session: {}",
+                message.session_id
+            );
+            assert_eq!(
+                message.agent.as_deref(),
+                Some("github.copilot.default"),
+                "usage in session {} lost its trace-level agent",
+                message.session_id
+            );
+        }
     }
 }
