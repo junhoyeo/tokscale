@@ -5226,6 +5226,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     };
     counts.set(ClientId::OpenCode, opencode_count);
 
+    // MiMo Code: SQLite database(s). Dedup by the payload's own message id the
+    // same way the submit path does -- MiMo writes channel-suffixed databases,
+    // so one session can appear in `mimocode.db` and `mimocode-<channel>.db`.
+    let mut micode_seen: HashSet<String> = HashSet::new();
+    let micode_msgs: Vec<ParsedMessage> = scan_result
+        .micode_dbs
+        .iter()
+        .flat_map(|db_path| sessions::micode::parse_micode_sqlite(db_path))
+        .filter(|msg| should_keep_deduped_message(&mut micode_seen, msg))
+        .map(|msg| unified_to_parsed(&msg))
+        .collect();
+    let micode_count = summed_parsed_message_count(&micode_msgs);
+    counts.set(ClientId::MiMoCode, micode_count);
+    messages.extend(micode_msgs);
+
     let claude_home = PathBuf::from(&home_dir);
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
@@ -5949,6 +5964,24 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mux_count = summed_parsed_message_count(&mux_msgs);
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
+
+    // fx (vercel-labs/fx) per-session usage snapshots. Session titles are not
+    // applied here: `ParsedMessage` has no title field, so the shared
+    // `sessions/index.json` lookup the submit lane runs would have nothing to
+    // write to.
+    let fx_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Fx)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::fx::parse_fx_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let fx_count = summed_parsed_message_count(&fx_msgs);
+    counts.set(ClientId::Fx, fx_count);
+    messages.extend(fx_msgs);
 
     // Kilo CLI: SQLite database
     let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
@@ -10220,6 +10253,111 @@ mod tests {
                 .map(|m| &m.client)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_includes_micode_and_fx() {
+        // Regression: MiMo Code and fx both declare `parse_local: true`, and
+        // the submit path (parse_all_messages_with_pricing_with_env_strategy)
+        // parses both, so their usage did reach the leaderboard. But
+        // parse_local_clients had no block for either client, so every command
+        // built on it saw nothing: `tokscale clients` reported a zero message
+        // count, and the `tokscale report` session wiki and `tokscale wrapped`
+        // agent breakdown showed none of the usage. Pin the local path
+        // specifically -- this is the mirror of the opencodereview gap below,
+        // and a green submit-path test cannot catch it either way.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let micode_dir = source_home.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(&micode_dir).unwrap();
+        {
+            let conn = rusqlite::Connection::open(micode_dir.join("mimocode.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "row-1",
+                    "micode-session",
+                    r#"{"id":"micode-msg-1","role":"assistant","modelID":"mimo-vl-8b","providerID":"xiaomi","cost":0.05,"tokens":{"input":1000,"output":200,"cache":{"read":0,"write":0}},"time":{"created":1780000000000}}"#
+                ],
+            )
+            .unwrap();
+        }
+
+        let fx_session = source_home.path().join(".fx/sessions/sess-1");
+        std::fs::create_dir_all(&fx_session).unwrap();
+        std::fs::write(
+            fx_session.join("session.json"),
+            r#"{"workspace_root":"/Users/alice/repo","updated_at_ms":1780000000000}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fx_session.join("usage-v2.json"),
+            r#"{"schema_version":1,"session_id":"sess-1","snapshot":{"schema_version":2,"total_cost":0.01,"request_count":2,"models":[{"model":"zai/glm-5.2","total_cost":0.01,"input_tokens":1539,"output_tokens":441,"cache_read_tokens":1069,"cache_write_tokens":7,"reasoning_tokens":3,"request_count":2}]}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["micode".to_string(), "fx".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        let micode = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == "micode")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            micode.len(),
+            1,
+            "MiMo Code assistant row must reach the local parse, got {:?}",
+            parsed
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(micode[0].input, 1000);
+        assert_eq!(micode[0].output, 200);
+        assert_eq!(parsed.counts.get(ClientId::MiMoCode), 1);
+
+        let fx = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == "fx")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fx.len(),
+            1,
+            "fx per-model row must reach the local parse, got {:?}",
+            parsed
+                .messages
+                .iter()
+                .map(|m| &m.client)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(fx[0].input, 1539);
+        assert_eq!(fx[0].output, 441);
+        assert_eq!(fx[0].workspace_key.as_deref(), Some("/Users/alice/repo"));
+        // fx records `request_count` as the row's message count, so the client
+        // count is the summed count and not the row count.
+        assert_eq!(parsed.counts.get(ClientId::Fx), 2);
     }
 
     #[test]
