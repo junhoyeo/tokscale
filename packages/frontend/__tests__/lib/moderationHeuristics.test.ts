@@ -36,7 +36,12 @@ function row(overrides: Partial<CandidateRow> = {}): CandidateRow {
     dailyTokens: 1_200_000,
     nearDuplicateCount: 0,
     slopModels,
-    slopTokens: overrides.slopTokens ?? (slopModels.length > 0 ? totalTokens : 0),
+    slopTokens:
+      overrides.slopTokens !== undefined
+        ? overrides.slopTokens
+        : slopModels.length > 0
+        ? totalTokens
+        : 0,
     ...overrides,
   };
 }
@@ -146,6 +151,22 @@ describe("scoreCandidate", () => {
     expect(signalKeys(accountC)).not.toContain("slopModelName");
     expect(accountC.signals).toEqual([]);
     expect(accountC.score).toBe(0);
+  });
+
+  it("retains full slopModelName weight when breakdown data is unavailable (null slopTokens)", () => {
+    // Legacy submissions or submissions without daily breakdown data cannot compute
+    // token share, so they retain the original full weight of 35.
+    const legacy = scoreCandidate(
+      row({
+        username: "legacy-user",
+        slopModels: ["slopai/slopllm-5m"],
+        slopTokens: null,
+      }),
+      CONTEXT
+    );
+    const slopSignal = legacy.signals.find((s) => s.key === "slopModelName");
+    expect(slopSignal).toBeDefined();
+    expect(slopSignal!.weight).toBe(35);
   });
 
   it("flags a token total that matches another account almost exactly", () => {

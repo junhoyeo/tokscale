@@ -80,7 +80,10 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       JOIN submissions s ON s.user_id = u.id
     ),
     daily AS (
-      SELECT d.submission_id, SUM(d.tokens) AS daily_tokens
+      SELECT
+        d.submission_id,
+        SUM(d.tokens) AS daily_tokens,
+        BOOL_OR(d.source_breakdown IS NOT NULL AND jsonb_typeof(d.source_breakdown) = 'object') AS has_breakdown
       FROM daily_breakdown d
       GROUP BY d.submission_id
     ),
@@ -99,7 +102,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         CASE WHEN jsonb_typeof(d.source_breakdown) = 'object' THEN d.source_breakdown ELSE '{}'::jsonb END
       ) AS client(key, value)
       CROSS JOIN LATERAL jsonb_each(
-        CASE WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models' ELSE '{}'::jsonb END
+        CASE
+          WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models'
+          WHEN NOT (client.value ? 'models') AND jsonb_typeof(client.value->'modelId') = 'string' THEN jsonb_build_object(client.value->>'modelId', client.value)
+          ELSE '{}'::jsonb
+        END
       ) AS model(key, value)
       WHERE model.key ~* ${SLOP_MODEL_REGEX}
       GROUP BY d.submission_id
@@ -117,7 +124,10 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       SELECT
         p.*,
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
-        COALESCE(su.slop_tokens, 0) AS slop_tokens,
+        CASE
+          WHEN dl.has_breakdown = true THEN COALESCE(su.slop_tokens, 0)
+          ELSE NULL
+        END AS slop_tokens,
         CASE WHEN p.total_tokens > 0 THEN
           COUNT(*) OVER (
             ORDER BY p.total_tokens
@@ -171,7 +181,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     dailyTokens: toNumber(row.daily_tokens),
     nearDuplicateCount: toNumber(row.near_duplicate_count),
     slopModels: Array.isArray(row.slop_models) ? row.slop_models : [],
-    slopTokens: toNumber(row.slop_tokens),
+    slopTokens: row.slop_tokens == null ? null : toNumber(row.slop_tokens),
   }));
 
   return rankCandidates(rows, {

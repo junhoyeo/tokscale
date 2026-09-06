@@ -37,8 +37,10 @@ export interface CandidateRow {
   slopModels: string[];
   /**
    * Sum of tokens attributed to matching slopModels from daily_breakdown.source_breakdown.
+   * null if breakdown data is unavailable (legacy submissions or submissions with no
+   * daily breakdown rows), in which case token share cannot be computed and full fixed weight is retained.
    */
-  slopTokens: number;
+  slopTokens: number | null;
 }
 
 export interface CandidateContext {
@@ -176,9 +178,21 @@ export function scoreCandidate(
     }
   }
 
-  if (row.slopModels.length > 0 && row.totalTokens > 0) {
-    const slopShare = Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens);
-    const weight = 35 * slopShare;
+  if (row.slopModels.length > 0) {
+    // Scaled by the share of the account's tokens carried by the matching
+    // models: the name speaks for itself, but only when used to book real
+    // usage. Config artifacts carrying zero or negligible tokens scale down
+    // to 0 and drop out of the review queue (#1265).
+    //
+    // When per-model breakdown data is unavailable (null slopTokens from legacy
+    // rows or submissions with no daily breakdown rows), retain the original
+    // full fixed weight (35) so genuine fabrications on older submissions are not lost.
+    let weight = 35;
+    if (row.slopTokens !== null && row.totalTokens > 0) {
+      const slopShare = Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens);
+      weight = 35 * slopShare;
+    }
+
     if (Math.round(weight) > 0) {
       // Quoted verbatim so the reviewer judges the actual string rather than
       // trusting the match — the whole point is that the name speaks for itself.
@@ -188,10 +202,6 @@ export function scoreCandidate(
       signals.push({
         key: "slopModelName",
         label: `Reports invented model names: ${shown}${extra > 0 ? ` and ${extra} more` : ""}`,
-        // Scaled by the share of the account's tokens carried by the matching
-        // models: the name speaks for itself, but only when used to book real
-        // usage. Config artifacts carrying zero or negligible tokens scale down
-        // to 0 and drop out of the review queue (#1265).
         weight,
       });
     }
