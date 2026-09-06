@@ -945,7 +945,8 @@ fn cached_artifact_has_timestamps(session_id: &str) -> bool {
 
 /// Usage timestamps already recorded in this session's cached artifact, keyed
 /// like [`usage_timestamps_from_trajectory`] so the normaliser falls back to
-/// them per response.
+/// them per usage identity (`response:<id>` and `message:<id>`; the artifact
+/// records both).
 ///
 /// This is what survives a failed trajectory enrichment. Regenerating from
 /// metadata alone would reset every enriched timestamp to null, while keeping
@@ -2904,6 +2905,15 @@ fn try_fetch_session_artifact(
                         "Warning: failed to enrich Antigravity timestamps for session {}: {err:#}; reusing timestamps from the cached session artifact",
                         summary.session_id
                     );
+                } else if cached_artifact_has_timestamps(&summary.session_id) {
+                    // Timestamped usage lines that carry neither a responseId
+                    // nor a messageId: artifacts written before messageId was
+                    // recorded, or usage with no identity at all. Nothing can
+                    // be matched back, so say so instead of resetting quietly.
+                    eprintln!(
+                        "Warning: failed to enrich Antigravity timestamps for session {}: {err:#}; the cached session artifact has timestamps but none carry a responseId or messageId to reuse, so timestamps come from the current metadata only",
+                        summary.session_id
+                    );
                 }
                 cached
             }
@@ -3075,6 +3085,12 @@ fn normalize_session_metadata_with_timestamps(
                     continue;
                 }
 
+                // Both identities go into the artifact so that
+                // `cached_usage_timestamps` can key a recovered timestamp the
+                // same way trajectory enrichment did. Usage that metadata
+                // identifies only by messageId is enriched through the
+                // trajectory's `message:<id>` key; with only responseId on
+                // disk, that timestamp could never be matched back.
                 lines.push(serde_json::to_string(&serde_json::json!({
                     "type": "usage",
                     "sessionId": session_id,
@@ -3086,6 +3102,7 @@ fn normalize_session_metadata_with_timestamps(
                     "cacheWrite": 0,
                     "reasoning": reasoning,
                     "responseId": usage.get("responseId").and_then(Value::as_str),
+                    "messageId": usage.get("messageId").and_then(Value::as_str),
                 }))?);
             }
         }
@@ -3831,6 +3848,10 @@ mod tests {
             usage.get("timestamp").and_then(Value::as_i64),
             parse_timestamp_value(&serde_json::json!("2026-08-19T06:34:26.163405500Z"))
         );
+        // The identity that matched has to reach the artifact, or a later
+        // sync that fails enrichment cannot key this timestamp back.
+        assert_eq!(usage["messageId"], "message-1");
+        assert_eq!(usage["responseId"], Value::Null);
     }
 
     #[test]
@@ -4191,7 +4212,7 @@ mod tests {
     }
 
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
 
@@ -5006,6 +5027,120 @@ mod tests {
                 .count(),
             2,
             "a cap error must not trip the breaker, so every sync retries enrichment"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn trajectory_enrichment_failure_keeps_cached_timestamp_for_message_only_usage() {
+        // Usage that metadata identifies only by messageId (the #1151 shape
+        // `standalone_usage_falls_back_to_matching_message_id` supports) is
+        // enriched through the trajectory's `message:<id>` key. The cached
+        // artifact has to carry that id too, or the timestamp recovered on
+        // an earlier sync cannot be keyed back to the usage when enrichment
+        // later fails, and the row silently resets to null.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+        let _cap = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
+
+        let session_id = "message-only-session";
+        let metadata = serde_json::json!({
+            "generatorMetadata": [{
+                "chatModel": {
+                    "responseModel": "gemini-3.7-flash",
+                    "retryInfos": [{
+                        "usage": {
+                            "inputTokens": 10,
+                            "outputTokens": 5,
+                            "messageId": "message-1"
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let trajectory = serde_json::json!({
+            "trajectory": {
+                "steps": [{
+                    "metadata": {
+                        "createdAt": 1700000000000_i64,
+                        "modelUsage": {
+                            "responseId": "response-1",
+                            "messageId": "message-1"
+                        }
+                    }
+                }]
+            }
+        })
+        .to_string();
+        // Past the 1024-byte cap pinned above: RpcBodyCapError, no breaker.
+        let oversized_trajectory = format!(
+            r#"{{"trajectory":{{"steps":[],"padding":"{}"}}}}"#,
+            "x".repeat(4096)
+        );
+        let trajectory_over_cap = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&trajectory_over_cap);
+        let (port, _seen) = serve_rpc_methods(move |method| match method {
+            "GetCascadeTrajectoryGeneratorMetadata" => Some(metadata.clone()),
+            "GetCascadeTrajectory" if flag.load(Ordering::SeqCst) => {
+                Some(oversized_trajectory.clone())
+            }
+            "GetCascadeTrajectory" => Some(trajectory.clone()),
+            _ => None,
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+        let mut budget = TrajectoryEnrichmentBudget::new();
+        let summary = TrajectorySummary {
+            session_id: session_id.to_string(),
+            last_modified_ms: Some(1),
+            step_count: Some(1),
+            connection_fingerprint: connection.fingerprint.clone(),
+        };
+        let usage_rows = |artifact: &SessionArtifact| -> Vec<Value> {
+            artifact
+                .contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+                .collect()
+        };
+
+        // Round 1: enrichment succeeds and the usage is timestamped through
+        // its messageId. `sync` writes that artifact back.
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            .unwrap()
+            .expect("round 1 must produce an artifact");
+        let usage = usage_rows(&artifact);
+        assert_eq!(usage.len(), 1, "round 1: {}", artifact.contents);
+        assert_eq!(usage[0]["timestamp"], 1700000000000_i64, "round 1");
+        write_session_artifact(session_id, &artifact.contents).unwrap();
+        assert!(cached_artifact_has_timestamps(session_id));
+
+        // Round 2: the trajectory has grown past the cap, so enrichment
+        // fails; the timestamp recovered last time must survive.
+        trajectory_over_cap.store(true, Ordering::SeqCst);
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            .unwrap()
+            .expect("round 2 must still regenerate the artifact");
+        let usage = usage_rows(&artifact);
+        assert_eq!(usage.len(), 1, "round 2: {}", artifact.contents);
+        assert_eq!(
+            usage[0]["timestamp"], 1700000000000_i64,
+            "round 2: the cached timestamp must survive an enrichment failure: {}",
+            artifact.contents
+        );
+
+        // What makes that recoverable: the artifact line carries the
+        // messageId, so the cache keys the timestamp the way the trajectory
+        // enrichment does.
+        assert_eq!(usage[0]["messageId"], "message-1");
+        assert_eq!(usage[0]["responseId"], Value::Null);
+        assert_eq!(
+            cached_usage_timestamps(session_id).get("message:message-1"),
+            Some(&1700000000000),
+            "the cached artifact must key the timestamp by messageId"
         );
     }
 
