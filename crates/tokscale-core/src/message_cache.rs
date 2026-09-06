@@ -1181,10 +1181,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
         // kimi-code `time`) now fall back to the file mtime instead of
         // anchoring the message in a pre-epoch bucket.
-        // v4->v5: kimi-code sessions now resolve their workspace from
-        // workspaces.json/session_index.jsonl after the cache read; the bump
-        // keeps the resolution logic and the cached message shape in lockstep.
-        ClientId::Kimi => 5,
+        // Workspace indexes are applied after the cache read and do not
+        // change the persisted parser output.
+        ClientId::Kimi => 4,
         // v1->v2: standalone Cline messages subtract cache buckets from gross
         // input tokens, reject non-finite costs, and preserve zero-cost reports.
         // v2->v3: content-aware Cline CLI turn-start classification now
@@ -3358,8 +3357,82 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Kimi), 5);
+    fn test_kimi_parser_version_invalidates_v3_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kimi_v4_cache_reused_with_current_workspace_metadata() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let root = source_home.path().join(".kimi-code");
+        let wire_path = root
+            .join("sessions")
+            .join("workspace")
+            .join("session")
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire_path,
+            r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377014}"#,
+        )
+        .unwrap();
+        let mut cached_messages = crate::sessions::kimi::parse_kimi_code_file(&wire_path);
+        assert_eq!(cached_messages.len(), 1);
+        // A full reparse would restore the path-derived session ID, so this
+        // marker distinguishes a cache hit from equivalent parsed usage.
+        cached_messages[0].session_id = "cache-hit-marker".to_string();
+        let identity = CacheIdentity {
+            namespace: "kimi",
+            parser_version: 4,
+        };
+        let fingerprint = SourceFingerprint::from_kimi_path(&wire_path).unwrap();
+        let mut cache = SourceMessageCache::default();
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &wire_path,
+            fingerprint,
+            cached_messages.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        for name in ["first", "renamed"] {
+            let workspace = format!("/projects/{name}");
+            std::fs::write(
+                root.join("workspaces.json"),
+                serde_json::json!({
+                    "version": 1,
+                    "workspaces": { "workspace": { "root": workspace, "name": name } }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["kimi".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, "cache-hit-marker");
+            assert_eq!(
+                messages[0].workspace_key.as_deref(),
+                Some(workspace.as_str())
+            );
+            assert_eq!(messages[0].workspace_label.as_deref(), Some(name));
+            assert_eq!(messages[0].tokens, cached_messages[0].tokens);
+
+            let persisted = SourceMessageCache::load();
+            let entry = persisted.get(identity, &wire_path).unwrap();
+            assert_eq!(entry.messages, cached_messages);
+        }
     }
 
     /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
