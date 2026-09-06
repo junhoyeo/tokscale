@@ -1,0 +1,7 @@
+{"type":"session","id":"session-delta","cwd":"/fixture","createdAt":1780000000000,"parentSession":"session-charlie"}
+{"type":"request/header","seq":1,"time":1780000000001,"data":{"header":{"config":{"provider":"fixture-provider","model":"fixture-model"}}}}
+{"type":"user/message","seq":2,"time":1780000000002,"data":{"turn":0}}
+{"type":"assistant/message","seq":3,"time":1780000000003,"data":{"turn":0,"step":0,"message":{"id":"msg-charlie","source":{"provider":"fixture-provider","model":"fixture-model"}},"usage":{"inputTokens":17,"outputTokens":5,"cacheReadTokens":170,"cacheWriteTokens":2}}}
+{"type":"compaction/start","seq":4,"time":1780000000004,"data":{"compactionId":"cmp-charlie","turn":null}}
+{"type":"compaction/summary","seq":5,"time":1780000000005,"data":{"compactionId":"cmp-charlie","sourceCommandId":"cmd-cmp-charlie","provider":"fixture-provider","model":"fixture-model","shadowedTokenCount":1234,"summary":"fixture summary text","usage":{"inputTokens":503,"outputTokens":53,"cacheReadTokens":5030,"cacheWriteTokens":3}}}
+{"type":"assistant/message","seq":6,"time":1780000000006,"data":{"turn":1,"step":0,"message":{"id":"msg-delta","source":{"provider":"fixture-provider","model":"fixture-model"}},"usage":{"inputTokens":19,"outputTokens":7,"cacheReadTokens":190,"cacheWriteTokens":2}}}
