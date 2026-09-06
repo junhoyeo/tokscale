@@ -48,6 +48,33 @@ struct Sub {
     next_renew_time: Option<String>,
 }
 
+/// Z.ai does not document whether its epoch fields are seconds or
+/// milliseconds, so treat anything past the year-2286 second boundary as
+/// already being milliseconds. Shared by both entry points below: when only one
+/// of them carried the heuristic, a numeric string and a JSON number could
+/// resolve to different instants.
+fn epoch_to_rfc3339(ts: i64) -> Option<String> {
+    // `unsigned_abs`, not `abs`: the float spelling below saturates on cast, so
+    // a large negative value lands on i64::MIN, where `abs` overflows and
+    // panics in a debug build.
+    let ms = if ts.unsigned_abs() > 10_000_000_000 {
+        ts
+    } else {
+        ts * 1000
+    };
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+}
+
+/// Parse one of the timestamp shapes Z.ai sends, or `None`.
+///
+/// Unrecognized input must not be passed through as if it were a timestamp.
+/// `resets_at` is consumed as one: a raw string like `"unknown"` outranks a
+/// real reset time carried by a sibling quota entry in `build_metrics`, and it
+/// blocks the subscription-renewal fallback on the `TIME_LIMIT` path. It would
+/// then reach the screen verbatim, because `helpers::format_reset_time` echoes
+/// whatever it cannot parse as RFC 3339.
 fn parse_reset_time_str(s: &str) -> Option<String> {
     let s = s.trim();
     if s.is_empty() {
@@ -57,40 +84,38 @@ fn parse_reset_time_str(s: &str) -> Option<String> {
         return Some(s.to_string());
     }
     if let Ok(ts) = s.parse::<i64>() {
-        let ms = if ts.abs() > 10_000_000_000 {
-            ts
-        } else {
-            ts * 1000
-        };
-        return Utc
-            .timestamp_millis_opt(ms)
-            .single()
-            .map(|dt| dt.to_rfc3339());
+        return epoch_to_rfc3339(ts);
     }
     if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         if let Some(dt) = d.and_hms_opt(0, 0, 0) {
             return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339());
         }
     }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339());
+    // Offsetless date-time, with either separator. The `T` spelling is the near
+    // miss most likely to arrive from an API that almost emits RFC 3339, and
+    // dropping unrecognized input above means it would otherwise be lost.
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339());
+        }
     }
-    Some(s.to_string())
+    None
 }
 
 fn parse_reset_time(val: Option<&serde_json::Value>) -> Option<String> {
     let val = val?;
     match val {
         serde_json::Value::Number(n) => {
-            let ts = n.as_i64()?;
-            let ms = if ts.abs() > 10_000_000_000 {
-                ts
-            } else {
-                ts * 1000
-            };
-            Utc.timestamp_millis_opt(ms)
-                .single()
-                .map(|dt| dt.to_rfc3339())
+            // JSON draws no int/float distinction, so whether a millisecond
+            // epoch arrives as 1788701854998 or 1788701854998.0 is a detail of
+            // Z.ai's serializer. `as_i64` returns None for the float spelling,
+            // which would discard the reset time entirely. The cast saturates
+            // rather than wrapping, so a float too large to be an epoch lands
+            // on an i64 bound and is rejected as out of range.
+            let ts = n
+                .as_i64()
+                .or_else(|| n.as_f64().map(|f| f.round() as i64))?;
+            epoch_to_rfc3339(ts)
         }
         serde_json::Value::String(s) => parse_reset_time_str(s),
         _ => None,
@@ -293,8 +318,36 @@ mod tests {
         .expect("valid Limit fixture")
     }
 
+    fn limit_with_reset(
+        kind: &str,
+        unit: i64,
+        number: i64,
+        percentage: f64,
+        reset: serde_json::Value,
+    ) -> Limit {
+        serde_json::from_value(serde_json::json!({
+            "type": kind,
+            "unit": unit,
+            "number": number,
+            "percentage": percentage,
+            "nextResetTime": reset,
+        }))
+        .expect("valid Limit fixture")
+    }
+
     fn run(
         limits: &[Limit],
+    ) -> (
+        Option<UsageMetric>,
+        Option<UsageMetric>,
+        Option<UsageMetric>,
+    ) {
+        run_with_search_reset(limits, None)
+    }
+
+    fn run_with_search_reset(
+        limits: &[Limit],
+        search_reset: Option<String>,
     ) -> (
         Option<UsageMetric>,
         Option<UsageMetric>,
@@ -303,7 +356,7 @@ mod tests {
         let mut session = None;
         let mut weekly = None;
         let mut search = None;
-        build_metrics(limits, None, &mut session, &mut weekly, &mut search);
+        build_metrics(limits, search_reset, &mut session, &mut weekly, &mut search);
         (session, weekly, search)
     }
 
@@ -432,6 +485,118 @@ mod tests {
         let val_date = serde_json::json!("2026-11-30");
         assert_eq!(
             parse_reset_time(Some(&val_date)).as_deref(),
+            Some("2026-11-30T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn float_epoch_is_not_dropped() {
+        // JSON draws no int/float distinction, so the same millisecond epoch
+        // can arrive either way depending on Z.ai's serializer.
+        let as_int = serde_json::json!(1788701854998i64);
+        let as_float = serde_json::json!(1788701854998.0f64);
+        assert_eq!(
+            parse_reset_time(Some(&as_float)).as_deref(),
+            Some("2026-09-06T13:37:34.998+00:00")
+        );
+        assert_eq!(
+            parse_reset_time(Some(&as_float)),
+            parse_reset_time(Some(&as_int))
+        );
+    }
+
+    #[test]
+    fn second_and_millisecond_epochs_agree_across_json_types() {
+        let secs = serde_json::json!(1788701854i64);
+        let secs_float = serde_json::json!(1788701854.0f64);
+        let secs_str = serde_json::json!("1788701854");
+        assert_eq!(
+            parse_reset_time(Some(&secs)).as_deref(),
+            Some("2026-09-06T13:37:34+00:00")
+        );
+        assert_eq!(
+            parse_reset_time(Some(&secs_str)),
+            parse_reset_time(Some(&secs))
+        );
+        assert_eq!(
+            parse_reset_time(Some(&secs_float)),
+            parse_reset_time(Some(&secs))
+        );
+    }
+
+    #[test]
+    fn out_of_range_epochs_are_rejected_without_panicking() {
+        // Floats saturate on cast, so these reach the i64 bounds rather than
+        // wrapping; the numeric-string spelling reaches i64::MIN directly.
+        assert_eq!(parse_reset_time(Some(&serde_json::json!(-1e300f64))), None);
+        assert_eq!(parse_reset_time(Some(&serde_json::json!(1e300f64))), None);
+        assert_eq!(
+            parse_reset_time(Some(&serde_json::json!("-9223372036854775808"))),
+            None
+        );
+    }
+
+    #[test]
+    fn offsetless_date_time_is_accepted_with_either_separator() {
+        // Rejecting unrecognized input means a near-miss RFC 3339 value would
+        // otherwise be dropped instead of merely rendering badly.
+        assert_eq!(
+            parse_reset_time(Some(&serde_json::json!("2026-11-30T04:05:06"))).as_deref(),
+            Some("2026-11-30T04:05:06+00:00")
+        );
+        assert_eq!(
+            parse_reset_time(Some(&serde_json::json!("2026-11-30 04:05:06"))).as_deref(),
+            Some("2026-11-30T04:05:06+00:00")
+        );
+    }
+
+    #[test]
+    fn unrecognized_reset_time_is_rejected() {
+        let bogus = serde_json::json!("unknown");
+        assert_eq!(parse_reset_time(Some(&bogus)), None);
+    }
+
+    #[test]
+    fn unparseable_reset_time_never_suppresses_a_valid_one() {
+        // An unparseable value must not be treated as a timestamp, in either
+        // arrival order: as a raw string it would win both the CREDIT_LIMIT
+        // overwrite and the `resets_at.is_none()` fill-in below.
+        let valid = || {
+            limit_with_reset(
+                "TOKENS_LIMIT",
+                3,
+                5,
+                20.0,
+                serde_json::json!(1788701854998i64),
+            )
+        };
+        let bogus = || limit_with_reset("CREDIT_LIMIT", 3, 5, 80.0, serde_json::json!("unknown"));
+
+        let (session, _, _) = run(&[valid(), bogus()]);
+        let session = session.expect("session metric present");
+        assert_eq!(session.used_percent, 80.0);
+        assert_eq!(
+            session.resets_at.as_deref(),
+            Some("2026-09-06T13:37:34.998+00:00")
+        );
+
+        let (session, _, _) = run(&[bogus(), valid()]);
+        let session = session.expect("session metric present");
+        assert_eq!(session.used_percent, 80.0);
+        assert_eq!(
+            session.resets_at.as_deref(),
+            Some("2026-09-06T13:37:34.998+00:00")
+        );
+    }
+
+    #[test]
+    fn time_limit_falls_back_to_renewal_when_its_own_reset_is_unparseable() {
+        let lim = limit_with_reset("TIME_LIMIT", 0, 0, 10.0, serde_json::json!("unknown"));
+        let (_, _, search) =
+            run_with_search_reset(&[lim], Some("2026-11-30T00:00:00+00:00".to_string()));
+        let search = search.expect("web search metric present");
+        assert_eq!(
+            search.resets_at.as_deref(),
             Some("2026-11-30T00:00:00+00:00")
         );
     }
