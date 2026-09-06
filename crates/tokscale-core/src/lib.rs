@@ -11682,6 +11682,97 @@ mod tests {
         assert_eq!(parsed.counts.get(ClientId::OpenClaw), 1);
     }
 
+    /// Carried over from #1291, which #1285 made necessary and this branch
+    /// makes redundant: a plain transcript and its zstd archive in one
+    /// sessions directory count each event once through the cached cold
+    /// scan, the warm scan, and the direct aggregate, while archive-only
+    /// history survives and events with no id stay distinct rather than
+    /// collapsing on usage alone.
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_plain_and_compressed_archives_dedup_events_across_aggregate_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = client_scan_root(source_home.path(), ClientId::OpenClaw)
+            .join("main")
+            .join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let model_change =
+            r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4-6"}"#;
+        let shared = r#"{"type":"message","id":"shared-event","message":{"role":"assistant","content":[{"type":"text","text":"shared"}],"usage":{"input":100,"output":10},"timestamp":1788566869000}}"#;
+        let distinct = r#"{"type":"message","id":"distinct-event","message":{"role":"assistant","content":[{"type":"text","text":"distinct"}],"usage":{"input":100,"output":10},"timestamp":1788566869000}}"#;
+        let plain_idless = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"plain idless"}],"usage":{"input":7,"output":1},"timestamp":1788566870000}}"#;
+        let archive_only = r#"{"type":"message","id":"archive-only","message":{"role":"assistant","content":[{"type":"text","text":"older history"}],"usage":{"input":40,"output":4},"timestamp":1788566800000}}"#;
+        let archive_idless = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"archive idless"}],"usage":{"input":7,"output":1},"timestamp":1788566870000}}"#;
+
+        std::fs::write(
+            sessions_dir.join("session.jsonl"),
+            [model_change, shared, distinct, plain_idless].join("\n"),
+        )
+        .unwrap();
+        let archive = [model_change, archive_only, shared, archive_idless].join("\n");
+        std::fs::write(
+            sessions_dir.join("session.jsonl.deleted.2026-09-05T00-00-00.000Z.zst"),
+            zstd::encode_all(archive.as_bytes(), 0).unwrap(),
+        )
+        .unwrap();
+
+        let clients = vec!["openclaw".to_string()];
+        let home = source_home.path().to_str().unwrap();
+        let cold = parse_all_messages_with_pricing(home, &clients, None);
+        let warm = parse_all_messages_with_pricing(home, &clients, None);
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string()),
+            use_env_roots: false,
+            clients: Some(clients),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        for (path, messages) in [("cold", &cold), ("warm", &warm)] {
+            assert_eq!(messages.len(), 5, "{path}");
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                254,
+                "{path}",
+            );
+        }
+        assert_eq!(warm, cold);
+        assert_eq!(
+            cold.iter()
+                .filter(|message| {
+                    message.dedup_key.as_deref()
+                        == Some("openclaw:shared-event:1788566869000:100:10")
+                })
+                .count(),
+            1,
+        );
+        assert_eq!(
+            cold.iter()
+                .filter(|message| message.dedup_key.is_none())
+                .count(),
+            2,
+            "events without ids must stay distinct rather than collapsing on usage",
+        );
+        assert_eq!(direct.counts.get(ClientId::OpenClaw), 5);
+        assert_eq!(direct.messages.len(), 5);
+        assert_eq!(
+            direct
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            254,
+        );
+    }
     #[test]
     #[serial_test::serial]
     fn test_openclaw_fork_copies_count_once_across_stores_and_sessions() {
