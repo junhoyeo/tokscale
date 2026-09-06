@@ -1068,7 +1068,13 @@ fn parser_version(client: ClientId) -> u32 {
     match client {
         // v1->v2: compressed OpenClaw archives were scanned as plain JSONL and
         // cached as empty. Their bytes do not change when decoding is fixed.
-        ClientId::OpenClaw => 2,
+        // v2->v3 is reserved for transcript deduplication; merge that change
+        // before this one so each independently shipped behavior has a distinct
+        // identity. v3->v4: compaction checkpoint snapshots are no longer scan
+        // sources. Source-cache entries cannot be reached once discovery omits
+        // them, but parser_generation must change so the source-agnostic TUI
+        // aggregate cache cannot replay totals that included those snapshots.
+        ClientId::OpenClaw => 4,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3590,6 +3596,11 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    fn openclaw_checkpoint_exclusion_invalidates_v3_derived_caches() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 4);
     }
 
     #[test]
