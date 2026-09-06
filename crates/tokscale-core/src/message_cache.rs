@@ -1077,10 +1077,12 @@ fn parser_version(client: ClientId) -> u32 {
         // copy, and lets the lane match a mirror row to the rollout's record of
         // its turn. Entries below v3 have no key, so a warm JSONL entry would
         // count beside the SQLite rows for the same events. `reasoningTokens`
-        // is also split out of `output` now. This takes its own number rather
-        // than reusing 2: #1285 landed first, and a warm v2 cache it wrote has
-        // neither the keys nor the split.
-        ClientId::OpenClaw => 3,
+        // is also split out of `output` now.
+        // v3->v4 (#1293): compaction checkpoint snapshots are no longer scan
+        // sources. Source-cache entries cannot be reached once discovery omits
+        // them, but parser_generation must change so the source-agnostic TUI
+        // aggregate cache cannot replay totals that included those snapshots.
+        ClientId::OpenClaw => 4,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -1120,9 +1122,10 @@ fn parser_version(client: ClientId) -> u32 {
         // when reconstructing VS Code Copilot Chat requests; v8 aggregates
         // carry those sessions as zero-token.
         ClientId::Copilot => 9,
-        // Pi subagent sessions now derive agent attribution from session_info
-        // names; version-1 caches carry those messages without agent metadata.
-        ClientId::Pi => 2,
+        // Pi delegates to the shared pi-format parser. Pi subagent sessions
+        // now derive agent attribution from session_info names; version-1
+        // caches carry those messages without agent metadata.
+        ClientId::Pi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
         // message timestamp is now back-calculated to the turn start
         // (created_at - total_time_ms) instead of the recorded (end-anchored)
@@ -1198,9 +1201,10 @@ fn parser_version(client: ClientId) -> u32 {
         // of landing unpriced, and uses a UTC-stable synthetic id for the id-less
         // fallback.
         ClientId::Cursor => 3,
-        // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
-        // deduplication keys.
-        ClientId::Kimchi => 2,
+        // Kimchi delegates to the shared pi-format parser. v1->v2: Kimchi's
+        // Pi-compatible messages now carry stable namespaced deduplication
+        // keys.
+        ClientId::Kimchi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past
         // those records instead of truncating and misaligning message indices.
@@ -1212,7 +1216,12 @@ fn parser_version(client: ClientId) -> u32 {
         // lineage and usage structural keys before reconciliation bookkeeping.
         // v3->v4 rejects damaged lineage values and matching-critical child
         // timestamps while preserving unrelated damaged usage extensions.
-        ClientId::PrimeAgent => 4,
+        // Prime Agent also delegates to the shared pi-format parser (through
+        // `parse_pi_format_rlm_file_with_observer`), so any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Prime Agent together
+        // with Pi, Kimchi, Omp, and Senpi (#1195); the +3 offset preserves the
+        // v4 history above.
+        ClientId::PrimeAgent => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 3,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
@@ -1306,11 +1315,14 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
-        // omp delegates to the shared pi-format parser, so any pi.rs parse
-        // change that bumps ClientId::Pi must be evaluated for Omp (and Senpi)
-        // too — the shared code path changes what byte-identical omp files
-        // parse to even though omp's own module did not change.
-        ClientId::Omp => 1,
+        // Omp delegates to the shared pi-format parser. Any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Omp together with Pi,
+        // Kimchi, and Senpi (#1195).
+        ClientId::Omp => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
+        // Senpi delegates to the shared pi-format parser. Any pi.rs parse
+        // change that bumps PI_FORMAT_PARSER_BASE_VERSION moves Senpi together
+        // with Pi, Kimchi, and Omp (#1195).
+        ClientId::Senpi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
         // v1 -> v2: the OpenCode parser now prefers `session_v2` metadata over
         // the legacy `session` join for workspace and title. A database that
         // carries both tables is byte-identical before and after, so only the
@@ -3359,13 +3371,17 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kimi), 4);
     }
 
-    /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
-    /// the reasoning split need v3: a warm v2 cache carries neither, and
-    /// reusing 2 would leave every reader who already scanned under #1285
-    /// unmigrated.
+    /// Three retirements in a row, each needing its own number. #1285 took v2
+    /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
+    /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
+    /// split, so reusing 2 would have left every reader who already scanned
+    /// under #1285 unmigrated. #1293 needs v4 for the same reason one step
+    /// on: dropping checkpoint snapshots from discovery cannot reach the
+    /// source cache, so only the version can retire TUI aggregates that
+    /// still include them.
     #[test]
-    fn test_openclaw_parser_version_invalidates_keyless_v2_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 3);
+    fn test_openclaw_parser_version_invalidates_v3_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 4);
     }
 
     #[test]
@@ -3800,6 +3816,58 @@ mod tests {
     #[test]
     fn test_junie_parser_version_invalidates_rows_without_cost_provenance() {
         assert_eq!(parser_version(ClientId::Junie), 3);
+    }
+
+    #[test]
+    fn test_pi_format_shared_parser_version_sync() {
+        use crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION;
+
+        // All five clients delegate to `sessions/pi.rs` (Prime Agent through
+        // `parse_pi_format_rlm_file_with_observer`). Their parser versions
+        // must derive from `PI_FORMAT_PARSER_BASE_VERSION` so changes inside pi.rs
+        // invalidate cached messages consistently across all delegating clients (#1195).
+        let delegating_clients = [
+            ClientId::Pi,
+            ClientId::Kimchi,
+            ClientId::Omp,
+            ClientId::Senpi,
+            ClientId::PrimeAgent,
+        ];
+
+        for client in delegating_clients {
+            assert!(
+                parser_version(client) >= PI_FORMAT_PARSER_BASE_VERSION,
+                "{:?} must derive from PI_FORMAT_PARSER_BASE_VERSION ({})",
+                client,
+                PI_FORMAT_PARSER_BASE_VERSION
+            );
+        }
+
+        assert_eq!(
+            parser_version(ClientId::Pi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Pi carries +1 for subagent session attribution"
+        );
+        assert_eq!(
+            parser_version(ClientId::Kimchi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Kimchi carries +1 for namespaced dedup keys"
+        );
+        assert_eq!(
+            parser_version(ClientId::Omp),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Omp carries base version directly"
+        );
+        assert_eq!(
+            parser_version(ClientId::Senpi),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Senpi carries base version directly and has an explicit match arm"
+        );
+        assert_eq!(
+            parser_version(ClientId::PrimeAgent),
+            PI_FORMAT_PARSER_BASE_VERSION + 3,
+            "Prime Agent carries +3 for its lossy-decode and lineage-validation history"
+        );
     }
 
     #[test]

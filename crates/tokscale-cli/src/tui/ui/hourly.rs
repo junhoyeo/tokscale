@@ -201,9 +201,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let time_str = hour.datetime.format("%H:00").to_string();
         let time_style = if is_current {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
         } else if !is_narrow && !is_very_narrow {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
@@ -248,7 +246,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     hour.tokens.input,
                     hour.tokens.cache_write,
                 ))
-                .style(Style::default().fg(Color::Cyan)),
+                .style(app.theme.count_style()),
                 total_tokens_cell(hour.tokens.total(), &app.theme),
                 Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
                 Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))

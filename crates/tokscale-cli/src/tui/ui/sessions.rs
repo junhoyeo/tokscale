@@ -324,7 +324,7 @@ impl SessionColumn {
                 format_cache_hit_rate(s.tokens.cache_read, s.tokens.input, s.tokens.cache_write),
                 ctx,
             ))
-            .style(Style::default().fg(Color::Cyan)),
+            .style(app.theme.count_style()),
             // Spelled out rather than `total_tokens_cell` — same style, but the
             // helper has no width to clamp against.
             Self::Total => Cell::from(self.fit(format_tokens(s.tokens.total()), ctx))
@@ -337,7 +337,7 @@ impl SessionColumn {
             }
             Self::Duration => {
                 Cell::from(self.fit(format_duration(s.first_active_ms, s.last_active_ms), ctx))
-                    .style(Style::default().fg(Color::Yellow))
+                    .style(app.theme.hint_key_style())
             }
             Self::LastActive => Cell::from(
                 self.fit(
