@@ -2761,6 +2761,11 @@ impl TrajectoryEnrichmentBudget {
     }
 }
 
+fn is_rpc_cap_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("Antigravity RPC body") && msg.contains("exceeds") && msg.contains("cap")
+}
+
 /// Best-effort timestamps for sessions whose metadata does not carry its own.
 ///
 /// Every failure mode logs a warning and returns Err so the caller can decide
@@ -2797,7 +2802,7 @@ fn fetch_usage_timestamps(
                 "Warning: failed to fetch Antigravity trajectory timestamps for session {}: {err:#}",
                 summary.session_id
             );
-            let is_cap_error = format!("{err:#}").contains("exceeds");
+            let is_cap_error = is_rpc_cap_error(&err);
             if is_cap_error {
                 budget.record_session_failure(started.elapsed());
             } else {
@@ -4554,10 +4559,7 @@ mod tests {
             fingerprint: format!("pid:1:port:{port}"),
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("exceeds"),
-            "expected cap error, got: {err:#}"
-        );
+        assert!(is_rpc_cap_error(&err), "expected cap error, got: {err:#}");
     }
 
     #[test]
@@ -4581,10 +4583,7 @@ mod tests {
             fingerprint: format!("pid:1:port:{port}"),
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("exceeds"),
-            "expected cap error, got: {err:#}"
-        );
+        assert!(is_rpc_cap_error(&err), "expected cap error, got: {err:#}");
     }
 
     #[test]
@@ -4594,18 +4593,20 @@ mod tests {
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
         assert_eq!(DEFAULT_MAX_RPC_BODY_BYTES, 128 * 1024 * 1024);
 
-        std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "67108864");
-        assert_eq!(max_rpc_body_bytes(), 64 * 1024 * 1024);
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "65536");
+        assert_eq!(max_rpc_body_bytes(), 65536);
 
-        std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "invalid");
+        // Non-positive or unparseable values fall back to the default.
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "0");
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
 
-        std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "0");
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "invalid");
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
 
-        std::env::set_var(
+        // usize::MAX cannot be safely incremented by readers and must fall back.
+        let _guard = EnvVarGuard::set(
             "TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES",
-            usize::MAX.to_string(),
+            &usize::MAX.to_string(),
         );
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
     }
@@ -4615,7 +4616,18 @@ mod tests {
         let root = anyhow::anyhow!("Antigravity RPC body of 5000 bytes exceeds 1024 cap");
         let wrapped = root.context("HTTPS RPC failed for Antigravity RPC GetCascadeTrajectory");
         assert!(!wrapped.to_string().contains("exceeds"));
-        assert!(format!("{wrapped:#}").contains("exceeds"));
+        assert!(is_rpc_cap_error(&wrapped));
+
+        // Non-cap server errors containing "exceeds" or "cap" must not be misclassified.
+        let server_status_err = anyhow::anyhow!(
+            "Antigravity HTTPS RPC GetCascadeTrajectory failed with status 429: Rate limit quota exceeds allowed ceiling"
+        );
+        assert!(!is_rpc_cap_error(&server_status_err));
+
+        let server_cap_err = anyhow::anyhow!(
+            "Antigravity HTTPS RPC GetCascadeTrajectory failed with status 400: Monthly cap reached"
+        );
+        assert!(!is_rpc_cap_error(&server_cap_err));
     }
 
     #[test]
