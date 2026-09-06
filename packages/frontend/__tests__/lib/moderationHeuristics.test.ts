@@ -22,18 +22,26 @@ const CONTEXT: CandidateContext = {
 };
 
 function row(overrides: Partial<CandidateRow> = {}): CandidateRow {
+  const totalTokens = overrides.totalTokens ?? 1_200_000;
+  const slopModels = overrides.slopModels ?? [];
   return {
     userId: "user-1",
     username: "normal",
     avatarUrl: null,
     leaderboardHidden: false,
-    totalTokens: 1_200_000,
+    totalTokens,
     totalCost: 12,
     submitCount: 4,
     hasBackfill: false,
     dailyTokens: 1_200_000,
     nearDuplicateCount: 0,
-    slopModels: [],
+    slopModels,
+    slopTokens:
+      overrides.slopTokens !== undefined
+        ? overrides.slopTokens
+        : slopModels.length > 0
+        ? totalTokens
+        : 0,
     ...overrides,
   };
 }
@@ -98,6 +106,82 @@ describe("scoreCandidate", () => {
     expect(signalKeys(scoreCandidate(row({ slopModels: [] }), CONTEXT))).not.toContain(
       "slopModelName"
     );
+  });
+
+  it("scales slopModelName weight by the matching models' token share", () => {
+    // Real separation from issue #1265:
+    // Account A: 9.007e15 slop tokens / 9.026e15 account tokens (~99.8% share) -> weight 34.9
+    const accountA = scoreCandidate(
+      row({
+        username: "account-a",
+        totalTokens: 9_026_000_000_000_000,
+        slopModels: ["slopai/slopllm-5m"],
+        slopTokens: 9_007_000_000_000_000,
+      }),
+      CONTEXT
+    );
+    const slopSignal = accountA.signals.find((s) => s.key === "slopModelName");
+    expect(slopSignal).toBeDefined();
+    expect(slopSignal!.weight).toBeCloseTo(34.9, 1);
+  });
+
+  it("drops slopModelName signal when the weight rounds to zero", () => {
+    // 2 slop tokens on an account with normal usage -> weight rounds to 0 -> signal dropped (#1265)
+    const accountB = scoreCandidate(
+      row({
+        username: "account-b",
+        slopModels: ["fake-test-model"],
+        slopTokens: 2,
+      }),
+      CONTEXT
+    );
+    expect(signalKeys(accountB)).not.toContain("slopModelName");
+    expect(accountB.signals).toEqual([]);
+    expect(accountB.score).toBe(0);
+
+    // 0 slop tokens (mock provider in config) -> weight 0 -> signal dropped (#1265)
+    const accountC = scoreCandidate(
+      row({
+        username: "account-c",
+        slopModels: ["fake-api"],
+        slopTokens: 0,
+      }),
+      CONTEXT
+    );
+    expect(signalKeys(accountC)).not.toContain("slopModelName");
+    expect(accountC.signals).toEqual([]);
+    expect(accountC.score).toBe(0);
+  });
+
+  it("drops slopModelName when breakdown is present but totalTokens is zero", () => {
+    const zeroTokens = scoreCandidate(
+      row({
+        username: "zero-token-account",
+        totalTokens: 0,
+        slopModels: ["fake-api"],
+        slopTokens: 0,
+      }),
+      CONTEXT
+    );
+    expect(signalKeys(zeroTokens)).not.toContain("slopModelName");
+    expect(zeroTokens.signals).toEqual([]);
+    expect(zeroTokens.score).toBe(0);
+  });
+
+  it("retains full slopModelName weight when breakdown data is unavailable (null slopTokens)", () => {
+    // Legacy submissions or submissions without daily breakdown data cannot compute
+    // token share, so they retain the original full weight of 35.
+    const legacy = scoreCandidate(
+      row({
+        username: "legacy-user",
+        slopModels: ["slopai/slopllm-5m"],
+        slopTokens: null,
+      }),
+      CONTEXT
+    );
+    const slopSignal = legacy.signals.find((s) => s.key === "slopModelName");
+    expect(slopSignal).toBeDefined();
+    expect(slopSignal!.weight).toBe(35);
   });
 
   it("flags a token total that matches another account almost exactly", () => {
@@ -222,6 +306,33 @@ describe("rankCandidates", () => {
     );
 
     expect(ranked.map((c) => c.username)).toEqual(["adam", "zoe"]);
+  });
+
+  it("omits false-positive accounts with zero or negligible slop tokens from the ranked queue", () => {
+    const accountA = row({
+      userId: "a",
+      username: "account-a",
+      totalTokens: 9_026_000_000_000_000,
+      slopModels: ["slopai/slopllm-5m"],
+      slopTokens: 9_007_000_000_000_000,
+    });
+    const accountB = row({
+      userId: "b",
+      username: "account-b",
+      slopModels: ["fake-test-model"],
+      slopTokens: 2,
+    });
+    const accountC = row({
+      userId: "c",
+      username: "account-c",
+      slopModels: ["fake-api"],
+      slopTokens: 0,
+    });
+
+    const ranked = rankCandidates([accountA, accountB, accountC], CONTEXT);
+
+    // Only account-a has enough weight to remain in the queue; account-b and account-c drop out (#1265)
+    expect(ranked.map((c) => c.username)).toEqual(["account-a"]);
   });
 });
 

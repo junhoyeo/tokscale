@@ -30,6 +30,7 @@ interface CandidateDbRow extends Record<string, unknown> {
   daily_tokens: number | string | null;
   near_duplicate_count: number | string | null;
   slop_models: string[] | null;
+  slop_tokens: number | string | null;
   site_tokens: number | string | null;
   median_tokens: number | string | null;
 }
@@ -79,8 +80,35 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       JOIN submissions s ON s.user_id = u.id
     ),
     daily AS (
-      SELECT d.submission_id, SUM(d.tokens) AS daily_tokens
+      SELECT
+        d.submission_id,
+        SUM(d.tokens) AS daily_tokens,
+        BOOL_OR(d.source_breakdown IS NOT NULL AND jsonb_typeof(d.source_breakdown) = 'object') AS has_breakdown
       FROM daily_breakdown d
+      GROUP BY d.submission_id
+    ),
+    slop_users AS (
+      SELECT submission_id
+      FROM per_user
+      WHERE cardinality(slop_models) > 0
+    ),
+    slop_usage AS (
+      SELECT
+        d.submission_id,
+        SUM(COALESCE((model.value->>'tokens')::numeric, 0)) AS slop_tokens
+      FROM daily_breakdown d
+      JOIN slop_users su ON su.submission_id = d.submission_id
+      CROSS JOIN LATERAL jsonb_each(
+        CASE WHEN jsonb_typeof(d.source_breakdown) = 'object' THEN d.source_breakdown ELSE '{}'::jsonb END
+      ) AS client(key, value)
+      CROSS JOIN LATERAL jsonb_each(
+        CASE
+          WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models'
+          WHEN NOT (client.value ? 'models') AND jsonb_typeof(client.value->'modelId') = 'string' THEN jsonb_build_object(client.value->>'modelId', client.value)
+          ELSE '{}'::jsonb
+        END
+      ) AS model(key, value)
+      WHERE model.key ~* ${SLOP_MODEL_REGEX}
       GROUP BY d.submission_id
     ),
     site AS (
@@ -96,6 +124,10 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       SELECT
         p.*,
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
+        CASE
+          WHEN dl.has_breakdown = true THEN COALESCE(su.slop_tokens, 0)
+          ELSE NULL
+        END AS slop_tokens,
         CASE WHEN p.total_tokens > 0 THEN
           COUNT(*) OVER (
             ORDER BY p.total_tokens
@@ -107,6 +139,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         site.median_tokens
       FROM per_user p
       LEFT JOIN daily dl ON dl.submission_id = p.submission_id
+      LEFT JOIN slop_usage su ON su.submission_id = p.submission_id
       CROSS JOIN site
     ),
     eligible AS (
@@ -126,7 +159,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     SELECT
       user_id, username, avatar_url, leaderboard_hidden, total_tokens,
       total_cost, submit_count, has_backfill, daily_tokens,
-      near_duplicate_count, slop_models, site_tokens, median_tokens
+      near_duplicate_count, slop_models, slop_tokens, site_tokens, median_tokens
     FROM eligible
   `);
 
@@ -148,6 +181,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     dailyTokens: toNumber(row.daily_tokens),
     nearDuplicateCount: toNumber(row.near_duplicate_count),
     slopModels: Array.isArray(row.slop_models) ? row.slop_models : [],
+    slopTokens: row.slop_tokens == null ? null : toNumber(row.slop_tokens),
   }));
 
   return rankCandidates(rows, {

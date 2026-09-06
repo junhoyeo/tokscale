@@ -35,6 +35,12 @@ export interface CandidateRow {
    * the matches are of any interest.
    */
   slopModels: string[];
+  /**
+   * Sum of tokens attributed to matching slopModels from daily_breakdown.source_breakdown.
+   * null if breakdown data is unavailable (legacy submissions or submissions with no
+   * daily breakdown rows), in which case token share cannot be computed and full fixed weight is retained.
+   */
+  slopTokens: number | null;
 }
 
 export interface CandidateContext {
@@ -173,25 +179,35 @@ export function scoreCandidate(
   }
 
   if (row.slopModels.length > 0) {
-    // Quoted verbatim so the reviewer judges the actual string rather than
-    // trusting the match — the whole point is that the name speaks for itself.
-    const shown = row.slopModels.slice(0, 3).map((name) => `"${name}"`).join(", ");
-    const extra = row.slopModels.length - 3;
+    // Scaled by the share of the account's tokens carried by the matching
+    // models: the name speaks for itself, but only when used to book real
+    // usage. Config artifacts carrying zero or negligible tokens scale down
+    // to 0 and drop out of the review queue (#1265).
+    //
+    // When per-model breakdown data is unavailable (null slopTokens from legacy
+    // rows or submissions with no daily breakdown rows), retain the original
+    // full fixed weight (35) so genuine fabrications on older submissions are not lost.
+    let weight = 35;
+    if (row.slopTokens !== null) {
+      const slopShare =
+        row.totalTokens > 0
+          ? Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens)
+          : 0;
+      weight = 35 * slopShare;
+    }
 
-    signals.push({
-      key: "slopModelName",
-      label: `Reports invented model names: ${shown}${extra > 0 ? ` and ${extra} more` : ""}`,
-      // The heaviest FIXED weight: magnitude and duplication can both have
-      // innocent explanations, and a model called "slopllm" cannot.
-      //
-      // Not the highest possible score, though — siteShare is 40 * share, so an
-      // account holding more than 87.5% of every token on the site outranks
-      // this. That ordering is correct and left alone: one account owning
-      // essentially the whole site is a bigger thing to look at than a bad
-      // model name, and it is the sort of claim worth stating accurately since
-      // the weights are what the queue order rests on.
-      weight: 35,
-    });
+    if (Math.round(weight) > 0) {
+      // Quoted verbatim so the reviewer judges the actual string rather than
+      // trusting the match — the whole point is that the name speaks for itself.
+      const shown = row.slopModels.slice(0, 3).map((name) => `"${name}"`).join(", ");
+      const extra = row.slopModels.length - 3;
+
+      signals.push({
+        key: "slopModelName",
+        label: `Reports invented model names: ${shown}${extra > 0 ? ` and ${extra} more` : ""}`,
+        weight,
+      });
+    }
   }
 
   if (row.nearDuplicateCount > 0) {
