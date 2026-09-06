@@ -1056,6 +1056,23 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Meept records one `llm_calls` row per LLM provider call in a SQLite
+    // database at `~/.meept/metrics.db` (session id, provider, model, and
+    // input/output/cache-read/cache-write/reasoning token counts; error rows
+    // carry no usage). The parser reads rows read-only and never touches the
+    // daemon's live writes. Local-inference rows price like any other model
+    // through the normal pricing fallback.
+    Meept = 53 => {
+        id: "meept",
+        display: "Meept",
+        logo: None,
+        root: PathRoot::Home,
+        relative: ".meept/metrics.db",
+        pattern: "metrics.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1171,7 +1188,20 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 53);
+        assert_eq!(ClientId::COUNT, 54);
+    }
+
+    #[test]
+    fn test_meept_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("meept").expect("meept client should be registered");
+        assert_eq!(client.data().relative_path, ".meept/metrics.db");
+        assert_eq!(client.data().pattern, "metrics.db");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".meept/metrics.db")
+        );
     }
 
     #[test]
