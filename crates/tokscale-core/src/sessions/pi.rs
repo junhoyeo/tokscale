@@ -6,11 +6,13 @@
 //!
 //! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
 //! is shared: see `sessions::kimchi` for Kimchi, `sessions::senpi` for Senpi (OmO Native),
-//! and `sessions::omp` for Oh My Pi, which owns the `~/.omp/agent/sessions` root.
+//! `sessions::omp` for Oh My Pi, which owns the `~/.omp/agent/sessions` root, and
+//! `sessions::prime_agent` for Prime Agent, which enters the same parser through
+//! [`parse_pi_format_rlm_file_with_observer`].
 //!
 //! [`PI_FORMAT_PARSER_BASE_VERSION`] defines the shared base parser version for these
 //! clients, ensuring format-level changes in `pi.rs` invalidate cached messages
-//! consistently across all four (#1195).
+//! consistently across all five (#1195).
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -26,7 +28,7 @@ use std::path::Path;
 ///
 /// Any parsing change in `sessions/pi.rs` that affects how transcripts are parsed
 /// changes what byte-identical files parse to across all delegating clients:
-/// Pi, Kimchi, Oh My Pi (Omp), and Senpi.
+/// Pi, Kimchi, Oh My Pi (Omp), Senpi, and Prime Agent.
 ///
 /// Bumping this base version moves all delegating clients together in
 /// `message_cache::parser_version()`, while allowing each client to keep its

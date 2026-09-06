@@ -1190,7 +1190,12 @@ fn parser_version(client: ClientId) -> u32 {
         // lineage and usage structural keys before reconciliation bookkeeping.
         // v3->v4 rejects damaged lineage values and matching-critical child
         // timestamps while preserving unrelated damaged usage extensions.
-        ClientId::PrimeAgent => 4,
+        // Prime Agent also delegates to the shared pi-format parser (through
+        // `parse_pi_format_rlm_file_with_observer`), so any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Prime Agent together
+        // with Pi, Kimchi, Omp, and Senpi (#1195); the +3 offset preserves the
+        // v4 history above.
+        ClientId::PrimeAgent => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 3,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
@@ -3734,7 +3739,8 @@ mod tests {
     fn test_pi_format_shared_parser_version_sync() {
         use crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION;
 
-        // All four clients delegate to `sessions/pi.rs`. Their parser versions
+        // All five clients delegate to `sessions/pi.rs` (Prime Agent through
+        // `parse_pi_format_rlm_file_with_observer`). Their parser versions
         // must derive from `PI_FORMAT_PARSER_BASE_VERSION` so changes inside pi.rs
         // invalidate cached messages consistently across all delegating clients (#1195).
         let delegating_clients = [
@@ -3742,6 +3748,7 @@ mod tests {
             ClientId::Kimchi,
             ClientId::Omp,
             ClientId::Senpi,
+            ClientId::PrimeAgent,
         ];
 
         for client in delegating_clients {
@@ -3772,6 +3779,11 @@ mod tests {
             parser_version(ClientId::Senpi),
             PI_FORMAT_PARSER_BASE_VERSION,
             "Senpi carries base version directly and has an explicit match arm"
+        );
+        assert_eq!(
+            parser_version(ClientId::PrimeAgent),
+            PI_FORMAT_PARSER_BASE_VERSION + 3,
+            "Prime Agent carries +3 for its lossy-decode and lineage-validation history"
         );
     }
 
