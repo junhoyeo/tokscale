@@ -14,21 +14,32 @@ use std::path::Path;
 
 pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let mut records = Vec::new();
-    for_each_json_line(path, &mut |_index, trimmed| {
+    // Two passes over the file (#1209). A usage record does not always carry
+    // its own model, session, or agent id — those often arrive on a different
+    // line sharing the same trace id, possibly a *later* line — so the trace
+    // map must cover the whole file before any usage emits. Pass 1 copies
+    // only the map's small owned fields per line and drops each JSON value at
+    // once; pass 2 re-reads and emits usage against the finished map. The
+    // previous shape kept every line's full DOM alive for both walks, which
+    // on multi-GB Copilot CLI exports cost gigabytes for a map worth
+    // megabytes. The index below counts successfully parsed records, not
+    // physical lines: the old shape pushed only parseable lines into `records`
+    // and enumerated that vector, so the line-index dedup-key fallback must
+    // keep counting the same way. A blank or malformed line (which the old
+    // shape dropped) must not shift the keys of the records after it.
+    let trace_contexts = collect_trace_contexts_file(path);
+    let mut candidates: Vec<CopilotUsageCandidate> = Vec::new();
+    let mut parsed = 0usize;
+    for_each_json_line(path, &mut |_, trimmed| {
         if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
-            records.push(record);
+            if let Some(candidate) =
+                usage_candidate_from_record(&record, parsed, fallback_timestamp, &trace_contexts)
+            {
+                candidates.push(candidate);
+            }
+            parsed += 1;
         }
     });
-
-    let trace_contexts = collect_trace_contexts(&records);
-    let candidates: Vec<CopilotUsageCandidate> = records
-        .iter()
-        .enumerate()
-        .filter_map(|(index, record)| {
-            usage_candidate_from_record(record, index, fallback_timestamp, &trace_contexts)
-        })
-        .collect();
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -168,50 +179,31 @@ impl CopilotUsageCandidate {
     }
 }
 
-fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
-    let mut contexts = HashMap::new();
-
-    for record in records {
-        let Some(trace_id) = trace_id_from_record(record) else {
-            continue;
-        };
-
-        let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            continue;
-        };
-
-        let context = contexts
-            .entry(trace_id.to_string())
-            .or_insert(TraceContext {
-                model: None,
-                session_id: None,
-                session_id_priority: SessionIdPriority::Missing,
-                agent_id: None,
-            });
-
-        if context.model.is_none() {
-            context.model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
+/// First pass of [`parse_copilot_file`]: walk the file once, copying only the
+/// small owned fields the trace map needs out of each line, and drop the
+/// line's JSON value before reading the next. Peak cost is the map — one
+/// small entry per trace — not the file.
+fn collect_trace_contexts_file(path: &Path) -> HashMap<String, TraceContext> {
+    let mut contexts: HashMap<String, TraceContext> = HashMap::new();
+    let mut fallback = TraceFallbackAccum::default();
+    for_each_json_line(path, &mut |_, trimmed| {
+        if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
+            accumulate_trace_context(&mut contexts, &record);
+            fallback.accumulate(&record);
         }
-
-        if let Some((session_id, priority)) = best_session_attr(attributes) {
-            if priority > context.session_id_priority {
-                context.session_id = Some(session_id.to_string());
-                context.session_id_priority = priority;
-            }
-        }
-    }
+    });
 
     // Trace-level agent is only a FALLBACK for records that carry no
     // gen_ai.agent.id of their own (see candidate_from_attributes). Prefer the
     // ROOT invoke_agent span's agent id — the invoke_agent span whose parent
     // chain contains no other invoke_agent span — so a nested task/sub-agent
     // invoke inside the main invocation does not become the trace default.
-    // This is resolved in a dedicated pass because OTel export order is not
+    // This is resolved in a dedicated step because OTel export order is not
     // guaranteed: the root invoke_agent span may export after a nested one (or
     // after the chat spans it should cover), so the whole span hierarchy must
     // be known before the root can be picked. Per-record agent ids still take
     // precedence at attribution time.
-    for (trace_id, agent_id) in resolve_trace_fallback_agents(records) {
+    for (trace_id, agent_id) in fallback.resolve() {
         if let Some(context) = contexts.get_mut(&trace_id) {
             context.agent_id = Some(agent_id);
         }
@@ -220,89 +212,147 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
     contexts
 }
 
-/// Resolve the trace-level fallback agent id for each trace, preferring the
-/// ROOT invoke_agent span (the invoke_agent span whose parent chain contains no
-/// other invoke_agent span). A trace can hold several invoke_agent spans when a
-/// task/sub-agent is invoked inside the main agent invocation; the sub-agent's
-/// invoke_agent is nested and must not become the trace default. When a trace
-/// has no invoke_agent span, fall back to the first non-empty gen_ai.agent.id
-/// seen in the trace (input order).
-fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
-    // Span ids are unique only within a trace, so keep the OTel structural
-    // identity scoped by both ids.
-    let mut parent_of: HashMap<(&str, &str), &str> = HashMap::new();
-    // Span ids of every invoke_agent span, used to detect a nested invoke.
-    let mut invoke_agent_span_ids: HashSet<(&str, &str)> = HashSet::new();
-    // Per trace: invoke_agent spans in input order, each with its agent id.
-    let mut trace_invoke_agents: HashMap<&str, Vec<(&str, Option<&str>)>> = HashMap::new();
-    // Per trace: first non-empty agent id seen on any record (ultimate fallback
-    // for traces whose invoke_agent spans name no agent, or that have none).
-    let mut trace_first_agent: HashMap<&str, &str> = HashMap::new();
+fn accumulate_trace_context(contexts: &mut HashMap<String, TraceContext>, record: &Value) {
+    let Some(trace_id) = trace_id_from_record(record) else {
+        return;
+    };
 
-    for record in records {
+    let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
+        return;
+    };
+
+    let context = contexts
+        .entry(trace_id.to_string())
+        .or_insert(TraceContext {
+            model: None,
+            session_id: None,
+            session_id_priority: SessionIdPriority::Missing,
+            agent_id: None,
+        });
+
+    if context.model.is_none() {
+        context.model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
+    }
+
+    if let Some((session_id, priority)) = best_session_attr(attributes) {
+        if priority > context.session_id_priority {
+            context.session_id = Some(session_id.to_string());
+            context.session_id_priority = priority;
+        }
+    }
+}
+
+/// Intermediate trace-fallback state accumulated across pass 1 of
+/// [`parse_copilot_file`], then resolved once the whole file has been seen.
+///
+/// The fallback prefers the ROOT invoke_agent span (see
+/// [`collect_trace_contexts_file`]), which export order cannot be relied on
+/// to surface first — the root invoke_agent span may export after a nested
+/// one, or after the chat spans it should cover — so the span hierarchy must
+/// be complete before the root can be picked. That is the other half of why
+/// the parser reads the file twice: the decision needs lines that may come
+/// later than the usage they explain. All keys are owned: pass 1 drops each
+/// line's JSON value before reading the next, so nothing here may borrow
+/// from a record.
+#[derive(Default)]
+struct TraceFallbackAccum {
+    /// `(trace_id, span_id) -> parent_span_id`: OTel structure, collected
+    /// before the attributes gate so attribute-less intermediary spans still
+    /// link nested invokes back to the root.
+    parent_of: HashMap<(String, String), String>,
+    /// Span ids of every invoke_agent span, used to detect a nested invoke.
+    /// Span ids are unique only within a trace, so the identity is scoped by
+    /// both ids.
+    invoke_agent_span_ids: HashSet<(String, String)>,
+    /// Per trace: invoke_agent spans in input order, each with its agent id.
+    trace_invoke_agents: HashMap<String, Vec<(String, Option<String>)>>,
+    /// Per trace: first non-empty agent id seen on any record (ultimate
+    /// fallback for traces whose invoke_agent spans name no agent, or that
+    /// have none).
+    trace_first_agent: HashMap<String, String>,
+}
+
+impl TraceFallbackAccum {
+    fn accumulate(&mut self, record: &Value) {
         let Some(trace_id) = trace_id_from_record(record) else {
-            continue;
+            return;
         };
 
-        // Parent edges are OTel structure, not attributes. Collect them before
-        // the attributes gate so attribute-less intermediary spans still link
-        // nested invokes back to the root.
-        let span_id = span_id_from_record(record);
-        if let Some(span_id) = span_id {
-            if let Some(parent_span_id) = parent_span_id_from_record(record) {
-                parent_of.insert((trace_id, span_id), parent_span_id);
-            }
+        if let (Some(span_id), Some(parent_span_id)) = (
+            span_id_from_record(record),
+            parent_span_id_from_record(record),
+        ) {
+            self.parent_of.insert(
+                (trace_id.to_string(), span_id.to_string()),
+                parent_span_id.to_string(),
+            );
         }
 
         let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            continue;
+            return;
         };
 
         let agent_id = first_non_empty_attr(attributes, &["gen_ai.agent.id"]);
 
         if is_agent_summary_span_record(record, attributes) {
-            if let Some(span_id) = span_id {
-                invoke_agent_span_ids.insert((trace_id, span_id));
-                trace_invoke_agents
-                    .entry(trace_id)
+            if let Some(span_id) = span_id_from_record(record) {
+                self.invoke_agent_span_ids
+                    .insert((trace_id.to_string(), span_id.to_string()));
+                self.trace_invoke_agents
+                    .entry(trace_id.to_string())
                     .or_default()
-                    .push((span_id, agent_id));
+                    .push((span_id.to_string(), agent_id.map(str::to_string)));
             }
         }
 
         if let Some(agent_id) = agent_id {
-            trace_first_agent.entry(trace_id).or_insert(agent_id);
+            self.trace_first_agent
+                .entry(trace_id.to_string())
+                .or_insert_with(|| agent_id.to_string());
         }
     }
 
-    let mut fallback = HashMap::new();
+    /// Resolve the trace-level fallback agent id for each trace, preferring
+    /// the ROOT invoke_agent span (the invoke_agent span whose parent chain
+    /// contains no other invoke_agent span). A trace can hold several
+    /// invoke_agent spans when a task/sub-agent is invoked inside the main
+    /// agent invocation; the sub-agent's invoke_agent is nested and must not
+    /// become the trace default. When a trace has no invoke_agent span, fall
+    /// back to the first non-empty gen_ai.agent.id seen in the trace (input
+    /// order).
+    fn resolve(self) -> HashMap<String, String> {
+        let mut fallback = HashMap::new();
 
-    for (trace_id, invokes) in &trace_invoke_agents {
-        // Prefer the first ROOT invoke_agent span that carries an agent id.
-        // Fall back to any invoke_agent span with an agent id when no root does
-        // (e.g. only a nested invoke names an agent) so the trace still
-        // resolves to an invoke_agent default rather than a bare chat span.
-        let resolved = invokes
-            .iter()
-            .filter(|(span_id, _)| {
-                is_root_invoke_agent(trace_id, span_id, &parent_of, &invoke_agent_span_ids)
-            })
-            .find_map(|(_, agent_id)| *agent_id)
-            .or_else(|| invokes.iter().find_map(|(_, agent_id)| *agent_id));
-        if let Some(agent_id) = resolved {
-            fallback.insert((*trace_id).to_string(), agent_id.to_string());
+        for (trace_id, invokes) in &self.trace_invoke_agents {
+            // Prefer the first ROOT invoke_agent span that carries an agent id.
+            // Fall back to any invoke_agent span with an agent id when no root does
+            // (e.g. only a nested invoke names an agent) so the trace still
+            // resolves to an invoke_agent default rather than a bare chat span.
+            let resolved = invokes
+                .iter()
+                .filter(|(span_id, _)| {
+                    is_root_invoke_agent(
+                        trace_id,
+                        span_id,
+                        &self.parent_of,
+                        &self.invoke_agent_span_ids,
+                    )
+                })
+                .find_map(|(_, agent_id)| agent_id.as_deref())
+                .or_else(|| invokes.iter().find_map(|(_, agent_id)| agent_id.as_deref()));
+            if let Some(agent_id) = resolved {
+                fallback.insert(trace_id.clone(), agent_id.to_string());
+            }
         }
-    }
 
-    // Traces without any invoke_agent span (or whose invoke_agent spans name no
-    // agent) keep the first non-empty agent id seen in the trace.
-    for (trace_id, agent_id) in trace_first_agent {
+        // Traces without any invoke_agent span (or whose invoke_agent spans name no
+        // agent) keep the first non-empty agent id seen in the trace.
+        for (trace_id, agent_id) in self.trace_first_agent {
+            fallback.entry(trace_id).or_insert(agent_id);
+        }
+
         fallback
-            .entry(trace_id.to_string())
-            .or_insert_with(|| agent_id.to_string());
     }
-
-    fallback
 }
 
 /// An invoke_agent span is a ROOT when no span in its parent chain is itself an
@@ -310,20 +360,26 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
 fn is_root_invoke_agent(
     trace_id: &str,
     span_id: &str,
-    parent_of: &HashMap<(&str, &str), &str>,
-    invoke_agent_span_ids: &HashSet<(&str, &str)>,
+    parent_of: &HashMap<(String, String), String>,
+    invoke_agent_span_ids: &HashSet<(String, String)>,
 ) -> bool {
-    let mut current = parent_of.get(&(trace_id, span_id)).copied();
-    let mut visited: HashSet<(&str, &str)> = HashSet::new();
+    // One key allocation per chain step; the walk runs once per invoke_agent
+    // span (trace scale, not record scale), so clarity wins over interning.
+    let mut current = parent_of
+        .get(&(trace_id.to_owned(), span_id.to_owned()))
+        .map(String::as_str);
+    let mut visited: HashSet<(String, String)> = HashSet::new();
     while let Some(parent) = current {
-        if invoke_agent_span_ids.contains(&(trace_id, parent)) {
+        if invoke_agent_span_ids.contains(&(trace_id.to_owned(), parent.to_owned())) {
             return false;
         }
-        if !visited.insert((trace_id, parent)) {
+        if !visited.insert((trace_id.to_owned(), parent.to_owned())) {
             // Guard against malformed/cyclic parent references.
             break;
         }
-        current = parent_of.get(&(trace_id, parent)).copied();
+        current = parent_of
+            .get(&(trace_id.to_owned(), parent.to_owned()))
+            .map(String::as_str);
     }
     true
 }
@@ -1932,6 +1988,61 @@ mod tests {
                 .iter()
                 .map(|m| m.dedup_key.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn two_pass_forward_reference_resolves_trace_context() {
+        // Pass 1 must cover the whole file before pass 2 emits: the usage
+        // record below carries no model, session, or agent attribute of its
+        // own, so all three resolve from the invoke_agent span exported after
+        // it. A single streaming pass would emit it as unknown/unknown-session
+        // (or with the trace id as the session fallback).
+        let content = r#"{"type":"span","traceId":"trace-fwd","spanId":"chat-fwd","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7}}
+{"type":"span","traceId":"trace-fwd","spanId":"invoke-fwd","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-fwd","gen_ai.agent.id":"github.copilot.default"}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4.6");
+        assert_eq!(messages[0].session_id, "conv-fwd");
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+        assert_eq!(messages[0].tokens.input, 40);
+        assert_eq!(messages[0].tokens.output, 7);
+    }
+
+    #[test]
+    fn malformed_lines_do_not_shift_line_index_dedup_keys() {
+        // The line-index dedup-key fallback counts successfully parsed
+        // records, not physical lines: the old shape dropped unparsable lines
+        // before enumerating, so a blank or malformed line must not shift the
+        // keys of the records after it.
+        let content = concat!(
+            r#"{"hrTime":[1775934260,0],"spanContext":{"traceId":"trace-noidx","spanId":"turn-a","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","gen_ai.request.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":2},"_body":"copilot_chat.agent.turn"}"#,
+            "\n",
+            "\n",
+            r#"{"not json"#,
+            "\n",
+            r#"{"hrTime":[1775934261,0],"spanContext":{"traceId":"trace-noidx","spanId":"turn-b","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","gen_ai.request.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3},"_body":"copilot_chat.agent.turn"}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        let mut keys: Vec<String> = messages
+            .iter()
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "agent-turn:trace-noidx:idx-0".to_string(),
+                "agent-turn:trace-noidx:idx-1".to_string(),
+            ],
+            "unparsable lines must not shift fallback keys: {keys:?}",
         );
     }
 }
