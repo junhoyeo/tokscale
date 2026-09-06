@@ -153,6 +153,21 @@ describe("scoreCandidate", () => {
     expect(accountC.score).toBe(0);
   });
 
+  it("drops slopModelName when breakdown is present but totalTokens is zero", () => {
+    const zeroTokens = scoreCandidate(
+      row({
+        username: "zero-token-account",
+        totalTokens: 0,
+        slopModels: ["fake-api"],
+        slopTokens: 0,
+      }),
+      CONTEXT
+    );
+    expect(signalKeys(zeroTokens)).not.toContain("slopModelName");
+    expect(zeroTokens.signals).toEqual([]);
+    expect(zeroTokens.score).toBe(0);
+  });
+
   it("retains full slopModelName weight when breakdown data is unavailable (null slopTokens)", () => {
     // Legacy submissions or submissions without daily breakdown data cannot compute
     // token share, so they retain the original full weight of 35.

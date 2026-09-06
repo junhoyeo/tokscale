@@ -188,8 +188,11 @@ export function scoreCandidate(
     // rows or submissions with no daily breakdown rows), retain the original
     // full fixed weight (35) so genuine fabrications on older submissions are not lost.
     let weight = 35;
-    if (row.slopTokens !== null && row.totalTokens > 0) {
-      const slopShare = Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens);
+    if (row.slopTokens !== null) {
+      const slopShare =
+        row.totalTokens > 0
+          ? Math.min(1, Math.max(0, row.slopTokens) / row.totalTokens)
+          : 0;
       weight = 35 * slopShare;
     }
 
