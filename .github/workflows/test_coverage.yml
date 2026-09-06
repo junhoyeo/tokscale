@@ -8,6 +8,7 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
     branches: [main]

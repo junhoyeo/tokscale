@@ -17,6 +17,7 @@ on:
       - "packages/cli-*/package.json"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
