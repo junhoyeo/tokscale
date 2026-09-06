@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::widgets::{
     display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
-    truncate_to_width, viewport_scrollbar_state,
+    truncate_to_width, viewport_scrollbar_state, MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -746,6 +746,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// A multi-model session always ends in an ellipsis when some of its models did
 /// not fit, so a session that switched models never renders as a single-model
 /// one. One cell is held back for that marker when there is more than one model.
+/// The marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal
+/// locale; U+2026 is East-Asian-Ambiguous and would be two cells under a CJK
+/// locale, overflowing the budget this cell promises to keep.
 fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
@@ -777,13 +780,13 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
             spans.push(Span::styled(name.clone(), Style::default().fg(color)));
             budget -= model_len;
         } else if budget <= 1 {
-            spans.push(Span::styled("…".to_string(), Style::default().fg(color)));
+            spans.push(Span::styled(MIDDLE_ELLIPSIS, Style::default().fg(color)));
             budget = 0;
             ellipsis = true;
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{}…", head),
+                format!("{head}{MIDDLE_ELLIPSIS}"),
                 Style::default().fg(color),
             ));
             budget = 0;
@@ -796,7 +799,7 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
     // name already carries its own ellipsis, so only mark the clean-break case.
     if shown < models.len() && !ellipsis {
         spans.push(Span::styled(
-            "…".to_string(),
+            MIDDLE_ELLIPSIS,
             Style::default().fg(app.theme.muted),
         ));
     }
@@ -847,6 +850,7 @@ mod tests {
     use crate::tui::data::TokenBreakdown;
     use ratatui::{backend::TestBackend, Terminal};
     use tokscale_core::ClientId;
+    use unicode_width::UnicodeWidthStr;
 
     /// Terminal width at which each priority group first appears.
     ///
@@ -1630,7 +1634,7 @@ mod tests {
     /// `build_model_cell` measures in cells for the same reason the Session and
     /// Client cells do, and needs its own fixture because every other model in
     /// this file is ASCII. On a code-point budget a full-width name fills 17
-    /// graphemes of an 18-cell column, and the "…" it appends is the first
+    /// graphemes of an 18-cell column, and the "⋯" it appends is the first
     /// thing the solver cuts — a truncated name that does not look truncated.
     #[test]
     fn a_full_width_model_name_is_budgeted_in_cells_not_code_points() {
@@ -1659,7 +1663,7 @@ mod tests {
                     layout.model_width
                 );
                 assert!(
-                    row.contains('…'),
+                    row.contains('⋯'),
                     "an over-long full-width model name must be marked as truncated at width \
                      {width} (turn={has_turn})\n{row}"
                 );
@@ -1970,8 +1974,24 @@ mod tests {
     /// the Model-first rule put it. Pinned by `slack_goes_to_the_session_title_*`.
     const MODEL_WIDTH_22_TERMINAL: u16 = 202;
 
+    /// `unicode-width` resolves East-Asian-Ambiguous characters to one cell by
+    /// default and to two under `width_cjk`, which is what a terminal in a CJK
+    /// locale does. Inside the table border, a row whose only non-ASCII
+    /// character is the truncation marker measures the same in both ambients
+    /// exactly when that marker is not ambiguous; U+2026 fails this, U+22EF
+    /// passes it. The border itself (U+2502) is ambiguous and is trimmed off.
+    fn assert_row_measures_the_same_in_a_cjk_locale(app: &mut App, width: u16) {
+        let row = first_row_line(app, width);
+        let interior = row.trim_matches('\u{2502}');
+        assert_eq!(
+            UnicodeWidthStr::width_cjk(interior),
+            display_width(interior),
+            "the row must measure the same in a CJK locale\n{row:?}"
+        );
+    }
+
     /// A session that switched models must never render as a single-model
-    /// session. When the next name cannot fit, a trailing "…" marks that models
+    /// session. When the next name cannot fit, a trailing "⋯" marks that models
     /// were dropped instead of them vanishing silently.
     #[test]
     fn multi_model_cell_marks_models_that_did_not_fit() {
@@ -1993,9 +2013,10 @@ mod tests {
         let mut app = app_with(width, vec![s]);
         let body = render_body(&mut app, width, 12);
         assert!(
-            body.contains("gemini-2-5-flash-lite…"),
+            body.contains("gemini-2-5-flash-lite⋯"),
             "expected a truncation marker after the model that did fit\n{body}"
         );
+        assert_row_measures_the_same_in_a_cjk_locale(&mut app, width);
         assert!(
             !body.contains("claude"),
             "second model was not supposed to fit at width {width}\n{body}"
@@ -2017,13 +2038,14 @@ mod tests {
         let mut app = app_with(width, vec![s]);
         let body = render_body(&mut app, width, 12);
         assert!(
-            body.contains("a-very-long-model-nam…"),
+            body.contains("a-very-long-model-nam⋯"),
             "expected a single trailing ellipsis on the truncated name\n{body}"
         );
         assert!(
-            !body.contains("……"),
+            !body.contains("⋯⋯"),
             "truncated name must not pick up a second ellipsis\n{body}"
         );
+        assert_row_measures_the_same_in_a_cjk_locale(&mut app, width);
     }
 
     #[test]
