@@ -49,6 +49,7 @@ const WIDE_ORDER: [ProjectColumn; 12] = [
     ProjectColumn::Cost,
     ProjectColumn::LastActive,
 ];
+const COLUMN_SPACING: u16 = 1;
 
 impl ProjectColumn {
     fn header(self) -> &'static str {
@@ -72,17 +73,22 @@ impl ProjectColumn {
     /// (`Min`) column and absorbs whatever slack or shrinkage the row has left;
     /// every other column is a fixed `Length` at its natural width.
     fn constraint(self) -> Constraint {
+        if self == Self::Project {
+            Constraint::Min(self.min_width())
+        } else {
+            Constraint::Length(self.min_width())
+        }
+    }
+
+    fn min_width(self) -> u16 {
         match self {
-            Self::Project => Constraint::Min(18),
-            Self::Rank => Constraint::Length(4),
-            Self::Sessions => Constraint::Length(8),
-            Self::Sources => Constraint::Length(14),
-            Self::Models => Constraint::Length(18),
-            Self::Input | Self::Output | Self::CacheRead | Self::Total | Self::Cost => {
-                Constraint::Length(10)
-            }
-            Self::CacheWrite => Constraint::Length(11),
-            Self::LastActive => Constraint::Length(16),
+            Self::Project | Self::Models => 18,
+            Self::Rank => 4,
+            Self::Sessions => 8,
+            Self::Sources => 14,
+            Self::Input | Self::Output | Self::CacheRead | Self::Total | Self::Cost => 10,
+            Self::CacheWrite => 11,
+            Self::LastActive => 16,
         }
     }
 
@@ -175,12 +181,17 @@ fn wide_constraints() -> Vec<Constraint> {
     WIDE_ORDER.iter().map(|c| c.constraint()).collect()
 }
 
+fn wide_min_width() -> u16 {
+    WIDE_ORDER.iter().map(|c| c.min_width()).sum::<u16>()
+        + COLUMN_SPACING * WIDE_ORDER.len().saturating_sub(1) as u16
+}
+
 /// Widths the solver grants each wide column at `total` cells. Ratatui's table
 /// solves the same constraint set with one cell of `column_spacing` between
 /// columns, so this mirrors that layout exactly.
 fn wide_table_widths(total: u16) -> Vec<u16> {
     Layout::horizontal(wide_constraints())
-        .spacing(1)
+        .spacing(COLUMN_SPACING)
         .split(Rect::new(0, 0, total, 1))
         .iter()
         .map(|area| area.width)
@@ -223,8 +234,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let is_narrow = app.is_narrow();
-    let is_very_narrow = app.is_very_narrow();
+    let is_very_narrow = area.width < 60;
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -244,7 +254,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    let wide = !is_narrow && !is_very_narrow;
+    let wide = inner.width >= wide_min_width();
 
     let header_cells: Vec<String> = if wide {
         WIDE_ORDER
@@ -368,6 +378,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let table = Table::new(rows, widths)
+        .column_spacing(COLUMN_SPACING)
         .header(header)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -398,58 +409,44 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// tab's model cell: a multi-model project always ends in an ellipsis when some
 /// of its models did not fit, so it never renders as a single-model one.
 fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
+    if max_cells == 0 {
+        return Cell::from("");
+    }
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut budget = max_cells.saturating_sub(usize::from(models.len() > 1));
-    let mut shown = 0usize;
-    let mut ellipsis = false;
+    let mut budget = max_cells;
 
     for (i, model) in models.iter().enumerate() {
         if i > 0 {
             if budget < 3 {
+                spans.push(Span::styled("…", Style::default().fg(app.theme.muted)));
                 break;
             }
             spans.push(Span::styled(", ", Style::default().fg(app.theme.muted)));
             budget -= 2;
         }
 
-        if budget == 0 {
-            break;
-        }
-
         let color = app.model_color_for(&model.provider, &model.color_key);
         let name = &model.display_name;
         let model_len = display_width(name);
 
-        if model_len <= budget {
+        // Leave room to mark omitted models only while more names remain.
+        // The last name can use the full remaining width.
+        let has_more = i + 1 < models.len();
+        if model_len <= budget.saturating_sub(usize::from(has_more)) {
             spans.push(Span::styled(name.clone(), Style::default().fg(color)));
             budget -= model_len;
-        } else if budget <= 1 {
-            spans.push(Span::styled("…".to_string(), Style::default().fg(color)));
-            budget = 0;
-            ellipsis = true;
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
                 format!("{}…", head),
                 Style::default().fg(color),
             ));
-            budget = 0;
-            ellipsis = true;
+            break;
         }
-        shown += 1;
-    }
-
-    // Dropping whole models silently would misreport the project; a truncated
-    // name already carries its own ellipsis, so only mark the clean-break case.
-    if shown < models.len() && !ellipsis {
-        spans.push(Span::styled(
-            "…".to_string(),
-            Style::default().fg(app.theme.muted),
-        ));
     }
 
     Cell::from(Line::from(spans))
@@ -600,6 +597,96 @@ mod tests {
         let body = render_body(&mut app, 30, 6);
         assert!(body.contains("Project"));
         assert!(body.contains("Cost"));
+    }
+
+    #[test]
+    fn compact_layout_preserves_totals_until_all_wide_columns_fit() {
+        let mut app = make_app(200);
+        app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
+        for width in [80, 100, 120, 140, 151] {
+            let body = render_body(&mut app, width, 6);
+            let header = body.lines().nth(1).unwrap();
+            let row = body.lines().nth(2).unwrap();
+            for label in ["Project", "Sessions", "Total", "Cost ▼"] {
+                assert!(header.contains(label), "at {width} columns: {header}");
+            }
+            assert!(!header.contains("Models"), "at {width} columns: {header}");
+            for value in ["tokscale", "49.5M", "$12.35"] {
+                assert!(row.contains(value), "at {width} columns: {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_layout_fits_at_its_minimum_width() {
+        let mut app = make_app(152);
+        let last_ms = 1_736_000_000_000;
+        app.data.projects = vec![project("tokscale", 12.3456, last_ms)];
+        let body = render_body(&mut app, 152, 6);
+        let header = body.lines().nth(1).unwrap();
+        let row = body.lines().nth(2).unwrap();
+        for column in WIDE_ORDER {
+            assert!(header.contains(column.header()), "{header}");
+        }
+        let last_active = ms_to_local_naive(last_ms)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        for value in ["234K", "45.7M", "2.3M", "49.5M", "$12.35", &last_active] {
+            assert!(row.contains(value), "{row}");
+        }
+    }
+
+    fn render_models(names: &[&str], width: u16) -> String {
+        let app = make_app(200);
+        let models = names
+            .iter()
+            .map(|name| SessionModel {
+                display_name: name.to_string(),
+                provider: "openai".to_string(),
+                color_key: name.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        let table = Table::new(
+            [Row::new([build_models_cell(&models, width as usize, &app)])],
+            [Constraint::Length(width)],
+        );
+        Widget::render(table, area, &mut buffer);
+        let mut text = String::new();
+        let mut x = 0;
+        while x < width {
+            let symbol = buffer[(x, 0)].symbol();
+            text.push_str(symbol);
+            x += display_width(symbol).max(1) as u16;
+        }
+        text.trim_end().to_string()
+    }
+
+    #[test]
+    fn models_cell_shows_all_names_when_they_exactly_fit() {
+        assert_eq!(render_models(&["gpt-5", "k3"], 9), "gpt-5, k3");
+        assert_eq!(render_models(&["gpt-5", "k3", "o3"], 13), "gpt-5, k3, o3");
+        assert_eq!(render_models(&["gpt-5", "k3"], 18), "gpt-5, k3");
+    }
+
+    #[test]
+    fn models_cell_marks_truncation_within_the_available_width() {
+        for (width, expected) in [
+            (0, ""),
+            (1, "…"),
+            (5, "gpt-…"),
+            (6, "gpt-5…"),
+            (7, "gpt-5…"),
+            (8, "gpt-5, …"),
+        ] {
+            let rendered = render_models(&["gpt-5", "k3"], width);
+            assert_eq!(rendered, expected, "at {width} columns");
+            assert!(display_width(&rendered) <= width as usize);
+        }
+        assert_eq!(render_models(&["a", "🇺🇸x"], 5), "a, …");
+        assert_eq!(render_models(&["a", "🇺🇸x"], 6), "a, 🇺🇸x");
     }
 
     #[test]
