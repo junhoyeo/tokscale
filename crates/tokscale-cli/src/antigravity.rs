@@ -895,40 +895,52 @@ fn session_artifact_file_stem(session_id: &str) -> String {
     format!("{}-{}", sanitized, &hash_prefix[..16])
 }
 
-fn cached_artifact_has_timestamps(session_id: &str) -> bool {
-    let Ok(sessions_dir) = get_antigravity_sessions_dir() else {
-        return false;
-    };
+/// Opens this session's cached artifact for reading, or `None` when there is
+/// nothing readable at its path.
+///
+/// The `is_file` check matters: `File::open` succeeds on a directory, and
+/// `BufReader::lines` on that handle yields `Err(EISDIR)` on every call
+/// without ever terminating.
+fn open_cached_artifact(session_id: &str) -> Option<BufReader<fs::File>> {
+    let sessions_dir = get_antigravity_sessions_dir().ok()?;
     let file_name = session_artifact_file_stem(session_id);
     let path = sessions_dir.join(format!("{}.jsonl", file_name));
     if !path.is_file() {
-        return false;
+        return None;
     }
-    let Ok(file) = fs::File::open(&path) else {
+    fs::File::open(&path).ok().map(BufReader::new)
+}
+
+/// The `usage` records in a cached artifact, in file order.
+///
+/// Reading stops at the first read error instead of skipping it: a
+/// persistent error (`EISDIR`, `EIO`) is returned again on every subsequent
+/// read, so skipping it would loop forever. tokscale writes these artifacts
+/// itself, so a line that fails to parse is still skipped individually.
+fn cached_artifact_usage_lines(reader: impl BufRead) -> impl Iterator<Item = Value> {
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(trimmed).ok()
+        })
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+}
+
+fn cached_artifact_has_timestamps(session_id: &str) -> bool {
+    let Some(reader) = open_cached_artifact(session_id) else {
         return false;
     };
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) == Some("usage")
-            && value
-                .get("timestamp")
-                .and_then(parse_timestamp_value)
-                .is_some()
-        {
-            return true;
-        }
-    }
-    false
+    cached_artifact_usage_lines(reader).any(|value| {
+        value
+            .get("timestamp")
+            .and_then(parse_timestamp_value)
+            .is_some()
+    })
 }
 
 /// Usage timestamps already recorded in this session's cached artifact, keyed
@@ -943,29 +955,10 @@ fn cached_artifact_has_timestamps(session_id: &str) -> bool {
 /// each exactly once.
 fn cached_usage_timestamps(session_id: &str) -> HashMap<String, i64> {
     let mut timestamps = HashMap::new();
-    let Ok(sessions_dir) = get_antigravity_sessions_dir() else {
+    let Some(reader) = open_cached_artifact(session_id) else {
         return timestamps;
     };
-    let file_name = session_artifact_file_stem(session_id);
-    let path = sessions_dir.join(format!("{}.jsonl", file_name));
-    let Ok(file) = fs::File::open(&path) else {
-        return timestamps;
-    };
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) != Some("usage") {
-            continue;
-        }
+    for value in cached_artifact_usage_lines(reader) {
         if let Some(timestamp) = value.get("timestamp").and_then(parse_timestamp_value) {
             insert_usage_timestamp(&mut timestamps, &value, timestamp);
         }
@@ -4748,6 +4741,89 @@ mod tests {
             + "\n";
         write_session_artifact("ts-session", &session_with_ts).unwrap();
         assert!(cached_artifact_has_timestamps("ts-session"));
+    }
+
+    /// Runs `f` on its own thread and returns its result, or `None` if it has
+    /// not returned within `timeout`. A helper that spins forever fails the
+    /// test instead of hanging the whole test binary.
+    fn finishes_within<T: Send + 'static>(
+        timeout: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(timeout).ok()
+    }
+
+    #[test]
+    #[serial]
+    fn cached_usage_timestamps_returns_when_artifact_path_is_a_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+
+        // A directory at the artifact path: `File::open` succeeds on it, and
+        // `BufReader::lines` then yields `Err(EISDIR)` on every call without
+        // ever terminating, so skipping read errors spins forever.
+        let session_id = "directory-session";
+        let artifact_path = get_antigravity_sessions_dir()
+            .unwrap()
+            .join(format!("{}.jsonl", session_artifact_file_stem(session_id)));
+        fs::create_dir_all(&artifact_path).unwrap();
+        assert!(artifact_path.is_dir());
+
+        assert!(!cached_artifact_has_timestamps(session_id));
+
+        let timestamps = finishes_within(Duration::from_secs(3), move || {
+            cached_usage_timestamps(session_id)
+        })
+        .expect("cached_usage_timestamps must return when the artifact path is a directory");
+        assert!(timestamps.is_empty());
+    }
+
+    /// Serves `prefix`, then fails every read with the same error, the way a
+    /// device or directory read keeps failing.
+    struct PersistentReadError {
+        prefix: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for PersistentReadError {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.prefix.read(buf)? {
+                0 => Err(std::io::Error::other("persistent read error")),
+                read => Ok(read),
+            }
+        }
+    }
+
+    #[test]
+    fn cached_artifact_usage_lines_stop_at_first_read_error() {
+        let prefix = concat!(
+            "{\"type\":\"usage\",\"responseId\":\"response-1\",\"timestamp\":1700000000000}\n",
+            "not json\n",
+            "\n",
+            "{\"type\":\"model\",\"responseId\":\"response-2\"}\n",
+            "{\"type\":\"usage\",\"responseId\":\"response-3\",\"timestamp\":1700000001000}\n",
+        );
+        let reader = BufReader::new(PersistentReadError {
+            prefix: std::io::Cursor::new(prefix.as_bytes().to_vec()),
+        });
+
+        let usage = finishes_within(Duration::from_secs(3), move || {
+            cached_artifact_usage_lines(reader).collect::<Vec<_>>()
+        })
+        .expect("reading must stop at the first persistent read error");
+
+        let response_ids: Vec<&str> = usage
+            .iter()
+            .filter_map(|value| value.get("responseId").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            response_ids,
+            ["response-1", "response-3"],
+            "unparseable and non-usage lines are skipped; usage lines before the error are kept"
+        );
     }
 
     #[test]
