@@ -3689,8 +3689,8 @@ impl WorkspaceLabeler {
 
     /// The canonical repo identity for `key`: the real filesystem path, with any
     /// worktree suffix stripped. `None` when the key cannot be resolved to a path
-    /// (an opaque client id, or a directory no longer on disk), leaving the
-    /// original key as its own identity.
+    /// (an opaque client id, a directory no longer on disk, or a slug that two
+    /// directories fit), leaving the original key as its own identity.
     ///
     /// Decoding is what makes the rollup actually merge. Claude Code writes a
     /// dash-mangled slug and Codex/OpenCode write real paths, so without this the

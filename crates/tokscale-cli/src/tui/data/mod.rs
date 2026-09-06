@@ -2694,6 +2694,88 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_projects_keep_an_ambiguous_claude_slug_separate() {
+        // `a-b` and `a.b` encode to the same Claude Code slug, so with both on
+        // disk the slug is evidence for neither. Merging it into whichever one
+        // the decoder prefers moves that usage onto a project it may never have
+        // touched, and every total still reconciles, so nothing else catches it.
+        let dir = TempDir::new().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let canonical = canonical.to_string_lossy();
+        let canonical = canonical.strip_prefix(r"\\?\").unwrap_or(&canonical);
+        let root = tokscale_core::sessions::normalize_workspace_key(canonical).unwrap();
+        let dashed = format!("{root}/a-b");
+        let dotted = format!("{root}/a.b");
+        std::fs::create_dir(&dashed).unwrap();
+        std::fs::create_dir(&dotted).unwrap();
+        let slug_of = |key: &str| -> String {
+            key.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect()
+        };
+        let slug = slug_of(&dotted);
+        assert_eq!(slug, slug_of(&dashed));
+
+        let loader = DataLoader::new(None).with_projects_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        Some(&dashed),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-2",
+                        2.0,
+                        Some(&dotted),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-opus-5",
+                        "anthropic",
+                        "session-3",
+                        10.0,
+                        Some(&slug),
+                        None,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.projects.len(), 3);
+        let by_key = |key: &str| {
+            usage
+                .projects
+                .iter()
+                .find(|p| p.group_key == key)
+                .unwrap_or_else(|| panic!("no project row for {key}"))
+        };
+        assert_eq!(by_key(&dashed).cost, 1.0);
+        assert_eq!(by_key(&dashed).clients, ["codex"]);
+        assert_eq!(by_key(&dotted).cost, 2.0);
+        assert_eq!(by_key(&dotted).clients, ["codex"]);
+        // The slug keeps its own row, and does not claim a path it cannot prove.
+        let ambiguous = by_key(&slug);
+        assert_eq!(ambiguous.cost, 10.0);
+        assert_eq!(ambiguous.clients, ["claude"]);
+        assert_eq!(ambiguous.path, None);
+        assert_eq!(
+            usage.projects.iter().map(|p| p.cost).sum::<f64>(),
+            usage.total_cost
+        );
+    }
+
+    #[test]
     fn test_aggregate_messages_workspace_grouping_keeps_unknown_bucket_visible() {
         let loader = DataLoader::new(None);
         let usage = loader

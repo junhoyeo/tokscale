@@ -846,8 +846,10 @@ fn last_slug_segment(slug: &str) -> Option<String> {
 /// same map to real directory names to find which one the slug came from, which
 /// makes the recovered path exact rather than a guess.
 ///
-/// Returns `None` for keys that are already real paths, or when no directory on
-/// disk matches (a project whose folder has since been deleted or renamed).
+/// Returns `None` for keys that are already real paths, when no directory on
+/// disk matches (a project whose folder has since been deleted or renamed), and
+/// when more than one does (`a.b` beside `a-b`): the answer is adopted as a
+/// grouping identity, so a guess would move usage between projects.
 pub fn decode_claude_project_slug(key: &str) -> Option<String> {
     // A real path (already usable) keeps its separators; `normalize_workspace_key`
     // rewrites Windows backslashes to `/`, so one check covers both platforms.
@@ -913,8 +915,9 @@ fn slug_root_and_remainder(key: &str) -> Option<(PathBuf, &str)> {
 /// A dash in the slug is ambiguous — it may be a `/` boundary, or part of a
 /// directory name that genuinely contains `-`, `.` or `+` — so a single greedy
 /// pass mis-resolves paths like `claude-witness` (one directory, not two). This
-/// consumes one real directory at a time and backtracks when a branch dead-ends,
-/// which makes the result exact wherever the directory still exists on disk.
+/// consumes one real directory at a time, backtracks when a branch dead-ends,
+/// and refuses when two branches both complete, which makes every result it
+/// does give exact.
 fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<String> {
     if remaining.is_empty() {
         // Hand back a normalized key, not a native path. Every consumer compares
@@ -947,8 +950,9 @@ fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<S
         return None;
     }
 
-    // Longest candidate first: prefer `IngTian.github.io` over a shorter
-    // `IngTian` that happens to also exist.
+    // Longest candidate first: `IngTian.github.io` is the likelier match when a
+    // shorter `IngTian` also exists, so the common case completes before the
+    // budget can run out on the long shot.
     let mut candidates: Vec<String> = matched
         .into_iter()
         // `Path::is_dir` follows symlinks where `DirEntry::file_type` would not.
@@ -956,20 +960,34 @@ fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<S
         // through `/var -> /private/var`, and users symlink project roots.
         .filter(|name| dir.join(name).is_dir())
         .collect();
-    // Ties are real: `a.b` and `a-b` encode identically and nothing on disk
-    // distinguishes them, so order deterministically instead of trusting
-    // readdir order.
+    // Order deterministically instead of trusting readdir order, so a budget
+    // that runs out refuses the same slug on every run.
     candidates.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
+    // Every candidate is walked, not just the first that completes. `a.b` and
+    // `a-b` encode identically, and when both exist and both complete the slug
+    // nothing on disk says which one Claude Code was launched from. The decoded
+    // path becomes the grouping identity under worktree rollup, so answering
+    // with either would book that usage against a directory the slug may never
+    // have named. A tie here is still fine when only one branch completes.
+    let mut resolved: Option<String> = None;
     for name in candidates {
         let consumed = slugify_path_segment(&name).len() + 1;
-        if let Some(resolved) = resolve_slug_under(&dir.join(&name), &remaining[consumed..], budget)
-        {
-            return Some(resolved);
+        match resolve_slug_under(&dir.join(&name), &remaining[consumed..], budget) {
+            Some(path) => {
+                if resolved.is_some() {
+                    return None;
+                }
+                resolved = Some(path);
+            }
+            // The budget ran dry under this branch, so the siblings after it
+            // were never walked and the answer cannot be shown to be unique.
+            None if *budget == 0 => return None,
+            None => {}
         }
     }
 
-    None
+    resolved
 }
 
 /// Whether `remaining` starts with `-` + the encoded form of `name`, ending on a
@@ -1659,6 +1677,28 @@ mod tests {
         assert_eq!(super::slug_root_and_remainder("Users-me-app"), None);
         assert_eq!(super::slug_root_and_remainder("1--Users-me"), None);
         assert_eq!(super::slug_root_and_remainder(""), None);
+    }
+
+    #[test]
+    fn decode_claude_project_slug_refuses_encode_identical_siblings() {
+        let (_temp, root) = canonical_tempdir();
+        // `.` and `-` both encode to `-`, so these two directories are one slug.
+        std::fs::create_dir_all(root.join("a-b")).unwrap();
+        std::fs::create_dir_all(root.join("a.b")).unwrap();
+        let slug = slug_for(&root.join("a.b"));
+        assert_eq!(slug, slug_for(&root.join("a-b")));
+
+        // Nothing on disk says which one Claude Code was launched from, and a
+        // guess becomes a grouping identity downstream, so refuse.
+        assert_eq!(decode_claude_project_slug(&slug), None);
+
+        // A deeper segment only one sibling can satisfy settles it.
+        let nested = root.join("a-b/src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            decode_claude_project_slug(&slug_for(&nested)),
+            normalize_workspace_key(&nested.to_string_lossy())
+        );
     }
 
     #[test]
