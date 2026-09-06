@@ -142,14 +142,14 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 Some(day) => {
                     let color = intensity_color(day.intensity);
                     if is_selected {
-                        ("▓▓", Style::default().fg(Color::White).bg(color))
+                        ("▓▓", app.theme.graph_cell_selected_style(color))
                     } else {
                         ("██", Style::default().fg(color))
                     }
                 }
                 None => {
                     if is_selected {
-                        ("▓▓", Style::default().fg(Color::White).bg(theme_colors[0]))
+                        ("▓▓", app.theme.graph_cell_selected_style(theme_colors[0]))
                     } else {
                         ("· ", subtle_text_style)
                     }
@@ -305,10 +305,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     let row1_col2 = Line::from(vec![
         Span::styled(tokens_label, Style::default().fg(app.theme.muted)),
         Span::raw(" "),
-        Span::styled(
-            format_tokens(total_tokens),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(format_tokens(total_tokens), app.theme.count_style()),
     ]);
     frame.render_widget(
         Paragraph::new(row1_col2),
@@ -323,7 +320,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     let row2 = Line::from(vec![
         Span::styled("Sessions:", Style::default().fg(app.theme.muted)),
         Span::raw(" "),
-        Span::styled(sessions.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(sessions.to_string(), app.theme.count_style()),
     ]);
     frame.render_widget(Paragraph::new(row2), Rect::new(inner.x, y, col1_width, 1));
 
@@ -354,7 +351,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             format!("{} days", app.data.current_streak),
-            Style::default().fg(Color::Cyan),
+            app.theme.count_style(),
         ),
     ]);
     frame.render_widget(Paragraph::new(row3), Rect::new(inner.x, y, col1_width, 1));
@@ -369,7 +366,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             format!("{} days", app.data.longest_streak),
-            Style::default().fg(Color::Cyan),
+            app.theme.count_style(),
         ),
     ]);
     frame.render_widget(
@@ -388,7 +385,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             format!("{}/{}", active_days, total_days),
-            Style::default().fg(Color::Cyan),
+            app.theme.count_style(),
         ),
     ]);
     frame.render_widget(
@@ -431,7 +428,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
                 total_cost
             ),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.hint_key_color())
                 .add_modifier(Modifier::ITALIC),
         ));
         frame.render_widget(
@@ -497,7 +494,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(format_tokens(day.tokens), Style::default().fg(Color::Cyan)),
+            Span::styled(format_tokens(day.tokens), app.theme.count_style()),
             Span::raw("  "),
             Span::styled(
                 format_cost(day.cost),

@@ -548,6 +548,46 @@ impl Theme {
             Style::default().bg(self.current_row)
         }
     }
+
+    pub(crate) fn hint_key_color(&self) -> Color {
+        let c = if self.light {
+            if self.color_mode == TerminalColorMode::Compatible {
+                Color::DarkGray
+            } else {
+                Color::Rgb(160, 100, 20)
+            }
+        } else {
+            Color::Yellow
+        };
+        self.color(c)
+    }
+
+    pub(crate) fn hint_key_style(&self) -> Style {
+        Style::default().fg(self.hint_key_color())
+    }
+
+    pub(crate) fn count_color(&self) -> Color {
+        let c = if self.light {
+            Color::Rgb(14, 116, 144)
+        } else {
+            Color::Cyan
+        };
+        self.color(c)
+    }
+
+    pub(crate) fn count_style(&self) -> Style {
+        Style::default().fg(self.count_color())
+    }
+
+    pub(crate) fn graph_cell_selected_style(&self, bg: Color) -> Style {
+        let fg = if self.light {
+            self.foreground
+        } else {
+            Color::White
+        };
+        Style::default().fg(fg).bg(bg)
+    }
+
     /// Build a light-background variant of `name` for the current terminal.
     pub(crate) fn from_name_for_current_terminal_light(name: ThemeName) -> Self {
         Self::from_name_with_color_mode_light(name, TerminalColorMode::from_env(std::env::vars()))
@@ -578,7 +618,14 @@ impl Theme {
             self.selection = Color::Gray;
             self.striped_row = Color::White;
             self.current_row = Color::Gray;
-            self.colors[0] = Color::Gray;
+            self.colors = [
+                Color::Gray,
+                Color::Cyan,
+                Color::Blue,
+                Color::DarkGray,
+                Color::Black,
+            ];
+            self.highlight = Color::Blue;
             self.accent = Color::Blue;
             return;
         }
@@ -939,6 +986,48 @@ mod tests {
         // The light surface still inverts: white background, dark text.
         assert_eq!(theme.background, Color::White);
         assert_eq!(theme.foreground, Color::Black);
+
+        // Every contribution grade color is distinct and never blends into the white background.
+        assert!(theme.colors.iter().all(|color| *color != Color::White));
+        let mut unique_colors = theme.colors.to_vec();
+        unique_colors.sort_by_key(|c| format!("{c:?}"));
+        unique_colors.dedup();
+        assert_eq!(unique_colors.len(), 5);
+    }
+
+    #[test]
+    fn theme_hint_and_count_styles_contrast_in_light_and_dark_modes() {
+        let dark = Theme::from_name_with_color_mode(ThemeName::Green, TerminalColorMode::FullColor);
+        let light =
+            Theme::from_name_with_color_mode_light(ThemeName::Green, TerminalColorMode::FullColor);
+
+        assert_eq!(dark.hint_key_style().fg, Some(Color::Yellow));
+        assert_eq!(dark.count_style().fg, Some(Color::Cyan));
+        assert_eq!(
+            dark.graph_cell_selected_style(Color::Black).fg,
+            Some(Color::White)
+        );
+
+        assert_eq!(light.hint_key_style().fg, Some(Color::Rgb(160, 100, 20)));
+        assert_eq!(light.count_style().fg, Some(Color::Rgb(14, 116, 144)));
+        assert_eq!(
+            light.graph_cell_selected_style(Color::White).fg,
+            Some(light.foreground)
+        );
+
+        let compat_dark =
+            Theme::from_name_with_color_mode(ThemeName::Green, TerminalColorMode::Compatible);
+        let compat_light =
+            Theme::from_name_with_color_mode_light(ThemeName::Green, TerminalColorMode::Compatible);
+
+        assert_eq!(compat_dark.hint_key_style().fg, Some(Color::Yellow));
+        assert_eq!(compat_dark.count_style().fg, Some(Color::Cyan));
+        assert_eq!(compat_light.hint_key_style().fg, Some(Color::DarkGray));
+        assert_eq!(compat_light.count_style().fg, Some(Color::Blue));
+        assert_eq!(
+            compat_light.graph_cell_selected_style(Color::White).fg,
+            Some(Color::Black)
+        );
     }
 
     #[test]
@@ -967,6 +1056,8 @@ mod tests {
             theme.subtle_text_style(),
             theme.striped_row_style(),
             theme.current_row_style(),
+            theme.hint_key_style(),
+            theme.count_style(),
         ];
 
         for style in styles {
