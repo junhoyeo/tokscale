@@ -914,13 +914,25 @@ mod tests {
     /// deadline on a machine whose load is the premise of the whole change.
     /// Here the delay is only a floor: load can push the newer answer later,
     /// which is the direction the assertion wants, and the deadline is a
-    /// stall guard 27s away. The provider-path test above covers the same
+    /// stall guard 23s away. The provider-path test above covers the same
     /// ordering end to end with a delay that keeps clear of the ceiling.
+    ///
+    /// The delay sits past [`DISCOVERY_ROUND_TIMEOUT`] itself, not merely
+    /// past the old grace. "The whole round" is only proven when the round
+    /// that ran is the one this test handed in: a delay inside the production
+    /// 5s passed against a round that read the production constant instead
+    /// of its `round` parameter, and against any grace between the delay and
+    /// 5s. Past 5s, both of those return `Stale Server` here.
     #[test]
     fn a_better_ranked_candidate_is_waited_for_the_whole_round() {
-        // Past the 2s the earlier revision granted, by enough that scheduling
-        // noise cannot close the gap.
-        const NEWER_DELAY: Duration = Duration::from_secs(3);
+        // Past DISCOVERY_ROUND_TIMEOUT by enough that scheduling noise cannot
+        // close the gap: a round that still ends at the production 5s, by a
+        // grace or by ignoring its budget, has returned the stale answer
+        // before the newer one can land. Checked at compile time because a
+        // shorter delay would not fail this test; it would stop it proving
+        // anything.
+        const NEWER_DELAY: Duration = Duration::from_secs(7);
+        const _: () = assert!(NEWER_DELAY.as_millis() > DISCOVERY_ROUND_TIMEOUT.as_millis());
 
         let (older_base, newer_base, newer_seen) = spawn_ordered_pair(NEWER_DELAY);
 
