@@ -2596,110 +2596,93 @@ impl App {
 
     pub fn get_sorted_sessions(&self) -> Vec<&SessionUsage> {
         let mut sessions: Vec<&SessionUsage> = self.data.sessions.iter().collect();
-
-        let tie_breaker = |a: &&SessionUsage, b: &&SessionUsage| {
-            a.client
-                .cmp(&b.client)
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        };
-
-        match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => sessions.sort_by(|a, b| {
-                b.cost
-                    .total_cmp(&a.cost)
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Cost, SortDirection::Ascending) => sessions.sort_by(|a, b| {
-                a.cost
-                    .total_cmp(&b.cost)
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Descending) => sessions.sort_by(|a, b| {
-                b.tokens
-                    .total()
-                    .cmp(&a.tokens.total())
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Ascending) => sessions.sort_by(|a, b| {
-                a.tokens
-                    .total()
-                    .cmp(&b.tokens.total())
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            // "Date" maps to last_active for sessions: most recently active
-            // session first when descending, oldest active first when ascending.
-            (SortField::Date, SortDirection::Descending) => sessions.sort_by(|a, b| {
-                b.last_active_ms
-                    .cmp(&a.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Date, SortDirection::Ascending) => sessions.sort_by(|a, b| {
-                a.last_active_ms
-                    .cmp(&b.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
-        }
-
+        sort_usage_rows(
+            &mut sessions,
+            self.sort_field,
+            self.sort_direction,
+            |a, b| {
+                a.client
+                    .cmp(&b.client)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            },
+        );
         sessions
     }
 
     pub fn get_sorted_projects(&self) -> Vec<&ProjectUsage> {
         let mut projects: Vec<&ProjectUsage> = self.data.projects.iter().collect();
-
-        let tie_breaker = |a: &&ProjectUsage, b: &&ProjectUsage| {
-            a.label
-                .cmp(&b.label)
-                .then_with(|| a.workspace_key.cmp(&b.workspace_key))
-                .then_with(|| a.group_key.cmp(&b.group_key))
-        };
-
-        match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => projects.sort_by(|a, b| {
-                b.cost
-                    .total_cmp(&a.cost)
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Cost, SortDirection::Ascending) => projects.sort_by(|a, b| {
-                a.cost
-                    .total_cmp(&b.cost)
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Descending) => projects.sort_by(|a, b| {
-                b.tokens
-                    .total()
-                    .cmp(&a.tokens.total())
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Ascending) => projects.sort_by(|a, b| {
-                a.tokens
-                    .total()
-                    .cmp(&b.tokens.total())
-                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            // "Date" maps to last_active for projects: most recently active
-            // project first when descending, oldest active first when ascending.
-            (SortField::Date, SortDirection::Descending) => projects.sort_by(|a, b| {
-                b.last_active_ms
-                    .cmp(&a.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Date, SortDirection::Ascending) => projects.sort_by(|a, b| {
-                a.last_active_ms
-                    .cmp(&b.last_active_ms)
-                    .then_with(|| tie_breaker(a, b))
-            }),
-        }
-
+        sort_usage_rows(
+            &mut projects,
+            self.sort_field,
+            self.sort_direction,
+            |a, b| {
+                a.label
+                    .cmp(&b.label)
+                    .then_with(|| a.workspace_key.cmp(&b.workspace_key))
+                    .then_with(|| a.group_key.cmp(&b.group_key))
+            },
+        );
         projects
     }
+}
+
+/// The columns the Sessions and Projects tabs sort on. Both tabs order rows
+/// the same way -- the chosen metric, then most recent activity, then a
+/// tab-specific tie-breaker that names the row -- so the ordering lives in
+/// [`sort_usage_rows`] and each tab supplies only its tie-breaker.
+trait SortableUsage {
+    fn cost(&self) -> f64;
+    fn token_total(&self) -> u64;
+    fn last_active_ms(&self) -> i64;
+}
+
+impl SortableUsage for SessionUsage {
+    fn cost(&self) -> f64 {
+        self.cost
+    }
+    fn token_total(&self) -> u64 {
+        self.tokens.total()
+    }
+    fn last_active_ms(&self) -> i64 {
+        self.last_active_ms
+    }
+}
+
+impl SortableUsage for ProjectUsage {
+    fn cost(&self) -> f64 {
+        self.cost
+    }
+    fn token_total(&self) -> u64 {
+        self.tokens.total()
+    }
+    fn last_active_ms(&self) -> i64 {
+        self.last_active_ms
+    }
+}
+
+/// Sort `rows` by `field` in `direction`, then by most recent activity, then
+/// by `tie_breaker`. "Date" is last activity itself: most recently active
+/// first when descending, oldest first when ascending.
+fn sort_usage_rows<T: SortableUsage>(
+    rows: &mut [&T],
+    field: SortField,
+    direction: SortDirection,
+    tie_breaker: impl Fn(&T, &T) -> std::cmp::Ordering,
+) {
+    let metric = |a: &T, b: &T| match field {
+        SortField::Cost => a.cost().total_cmp(&b.cost()),
+        SortField::Tokens => a.token_total().cmp(&b.token_total()),
+        SortField::Date => a.last_active_ms().cmp(&b.last_active_ms()),
+    };
+    rows.sort_by(|a, b| {
+        let primary = match direction {
+            SortDirection::Descending => metric(b, a),
+            SortDirection::Ascending => metric(a, b),
+        };
+        primary
+            .then_with(|| b.last_active_ms().cmp(&a.last_active_ms()))
+            .then_with(|| tie_breaker(a, b))
+    })
 }
 
 #[cfg(test)]
