@@ -65,6 +65,7 @@ struct SessionEntry {
 struct OpenClawEntry {
     #[serde(rename = "type")]
     entry_type: String,
+    id: Option<String>,
     message: Option<OpenClawMessage>,
     #[serde(rename = "customType")]
     custom_type: Option<String>,
@@ -88,6 +89,23 @@ struct OpenClawModelData {
     provider: Option<String>,
     #[serde(rename = "modelId")]
     model_id: Option<String>,
+}
+
+/// Stable identity for one assistant event across live, archived, and forked
+/// transcript copies. OpenClaw preserves event IDs when copying transcript
+/// history; timestamp and usage make short IDs safe across unrelated sessions.
+fn openclaw_dedup_key(
+    event_id: &str,
+    timestamp: Option<i64>,
+    tokens: &crate::TokenBreakdown,
+) -> String {
+    match timestamp {
+        Some(timestamp) => format!(
+            "openclaw:{event_id}:{timestamp}:{}:{}",
+            tokens.input, tokens.output
+        ),
+        None => format!("openclaw:{event_id}:{}:{}", tokens.input, tokens.output),
+    }
 }
 
 pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
@@ -226,17 +244,24 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
 
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
-                    let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
+                    let message_timestamp = msg.timestamp;
+                    let timestamp = message_timestamp.unwrap_or(file_mtime_ms);
                     let cost = usage.cost.as_ref().and_then(|c| c.total).unwrap_or(0.0);
+                    let tokens = usage.to_breakdown();
+                    let dedup_key = entry
+                        .id
+                        .filter(|id| !id.is_empty())
+                        .map(|id| openclaw_dedup_key(&id, message_timestamp, &tokens));
 
-                    messages.push(UnifiedMessage::new(
+                    messages.push(UnifiedMessage::new_with_dedup(
                         "openclaw",
                         model,
                         provider,
                         session_id.to_string(),
                         timestamp,
-                        usage.to_breakdown(),
+                        tokens,
                         cost.max(0.0),
+                        dedup_key,
                     ));
                 }
             }

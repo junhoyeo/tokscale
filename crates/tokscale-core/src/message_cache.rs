@@ -1068,7 +1068,9 @@ fn parser_version(client: ClientId) -> u32 {
     match client {
         // v1->v2: compressed OpenClaw archives were scanned as plain JSONL and
         // cached as empty. Their bytes do not change when decoding is fixed.
-        ClientId::OpenClaw => 2,
+        // v2->v3: assistant events carry stable cross-transcript dedup keys;
+        // v2 cache rows have no keys and would keep counting archive copies.
+        ClientId::OpenClaw => 3,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3294,6 +3296,11 @@ mod tests {
     fn test_devin_parser_versions_invalidate_v1_entries() {
         assert_eq!(parser_version(ClientId::DevinCli), 3);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
+    }
+
+    #[test]
+    fn test_openclaw_dedup_parser_version_invalidates_v2_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 3);
     }
 
     #[test]
