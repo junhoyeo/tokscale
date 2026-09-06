@@ -931,6 +931,48 @@ fn cached_artifact_has_timestamps(session_id: &str) -> bool {
     false
 }
 
+/// Usage timestamps already recorded in this session's cached artifact, keyed
+/// like [`usage_timestamps_from_trajectory`] so the normaliser falls back to
+/// them per response.
+///
+/// This is what survives a failed trajectory enrichment. Regenerating from
+/// metadata alone would reset every enriched timestamp to null, while keeping
+/// the whole cached artifact would drop any usage the session gained since;
+/// for a trajectory that stays over the RPC body cap, that is every sync.
+/// Recovering per response keeps the old timestamps and admits the new usage,
+/// each exactly once.
+fn cached_usage_timestamps(session_id: &str) -> HashMap<String, i64> {
+    let mut timestamps = HashMap::new();
+    let Ok(sessions_dir) = get_antigravity_sessions_dir() else {
+        return timestamps;
+    };
+    let file_name = session_artifact_file_stem(session_id);
+    let path = sessions_dir.join(format!("{}.jsonl", file_name));
+    let Ok(file) = fs::File::open(&path) else {
+        return timestamps;
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("usage") {
+            continue;
+        }
+        if let Some(timestamp) = value.get("timestamp").and_then(parse_timestamp_value) {
+            insert_usage_timestamp(&mut timestamps, &value, timestamp);
+        }
+    }
+    timestamps
+}
+
 fn cached_manifest_session_entry(
     session_id: &str,
     last_modified_ms: Option<i64>,
@@ -2863,14 +2905,14 @@ fn try_fetch_session_artifact(
         match fetch_usage_timestamps(summary, connection, budget) {
             Ok(timestamps) => timestamps,
             Err(err) => {
-                if cached_artifact_has_timestamps(&summary.session_id) {
+                let cached = cached_usage_timestamps(&summary.session_id);
+                if !cached.is_empty() {
                     eprintln!(
-                        "Warning: failed to enrich Antigravity timestamps for session {}: {err:#}; preserving existing cached session",
+                        "Warning: failed to enrich Antigravity timestamps for session {}: {err:#}; reusing timestamps from the cached session artifact",
                         summary.session_id
                     );
-                    return Ok(None);
                 }
-                HashMap::new()
+                cached
             }
         }
     } else {
@@ -4749,16 +4791,146 @@ mod tests {
             connection_fingerprint: connection.fingerprint.clone(),
         };
 
-        let result = try_fetch_session_artifact(&summary, &connection, &mut budget).unwrap();
-        assert!(
-            result.is_none(),
-            "should return None to avoid overwriting cached session"
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            .unwrap()
+            .expect("enrichment failure must still regenerate the artifact");
+        let usage: Vec<Value> = artifact
+            .contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+            .collect();
+        assert_eq!(usage.len(), 1, "{}", artifact.contents);
+        assert_eq!(usage[0]["responseId"], "response-1");
+        assert_eq!(
+            usage[0]["timestamp"], 1700000000000_i64,
+            "the cached timestamp must survive rather than reset to null"
         );
+    }
 
-        // Verify disk content was NOT overwritten with timestamp: null
-        let current_content = fs::read_to_string(&session_file).unwrap();
-        assert_eq!(current_content, existing_content);
-        assert!(current_content.contains("1700000000000"));
+    #[test]
+    #[serial]
+    fn trajectory_enrichment_failure_keeps_cached_timestamps_and_admits_new_usage() {
+        // Session growth under a persistent enrichment failure. The cache
+        // holds r1 with an enriched timestamp; the session has since gained
+        // r2, which carries its own timestamp in metadata. r1 still asks for
+        // enrichment, and the trajectory is over the RPC body cap, so the
+        // enrichment fails on every sync without tripping the connection
+        // breaker. Freezing the whole cached artifact in that state drops r2
+        // forever; regenerating from metadata alone resets r1 to null. Both
+        // must come out, each exactly once, on every sync.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
+        let _cap = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
+
+        let session_id = "growing-session";
+        let cached_content = serde_json::json!({
+            "type": "usage",
+            "sessionId": session_id,
+            "modelId": "gemini-3.7-flash",
+            "timestamp": 1700000000000_i64,
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0,
+            "responseId": "response-1",
+        })
+        .to_string()
+            + "\n";
+        write_session_artifact(session_id, &cached_content).unwrap();
+
+        let metadata = serde_json::json!({
+            "generatorMetadata": [{
+                "chatModel": {
+                    "responseModel": "gemini-3.7-flash",
+                    "retryInfos": [
+                        {
+                            "usage": {
+                                "inputTokens": 10,
+                                "outputTokens": 5,
+                                "responseId": "response-1",
+                                "messageId": "message-1"
+                            }
+                        },
+                        {
+                            "usage": {
+                                "inputTokens": 20,
+                                "outputTokens": 8,
+                                "responseId": "response-2",
+                                "messageId": "message-2",
+                                "createdAt": 1700000100000_i64
+                            }
+                        }
+                    ]
+                }
+            }]
+        })
+        .to_string();
+        // Past the 1024-byte cap pinned above, so GetCascadeTrajectory fails
+        // with RpcBodyCapError rather than a transport error.
+        let oversized_trajectory = format!(
+            r#"{{"trajectory":{{"steps":[],"padding":"{}"}}}}"#,
+            "x".repeat(4096)
+        );
+        let (port, seen) = serve_rpc_methods(move |method| match method {
+            "GetCascadeTrajectoryGeneratorMetadata" => Some(metadata.clone()),
+            "GetCascadeTrajectory" => Some(oversized_trajectory.clone()),
+            _ => None,
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+        let mut budget = TrajectoryEnrichmentBudget::new();
+        let summary = TrajectorySummary {
+            session_id: session_id.to_string(),
+            last_modified_ms: Some(2),
+            step_count: Some(2),
+            connection_fingerprint: connection.fingerprint.clone(),
+        };
+
+        for round in 1..=2 {
+            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("round {round}: a grown session must still produce an artifact")
+                });
+            let usage: Vec<(Option<String>, Option<i64>)> = artifact
+                .contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|value| value.get("type").and_then(Value::as_str) == Some("usage"))
+                .map(|value| {
+                    (
+                        value
+                            .get("responseId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        value.get("timestamp").and_then(Value::as_i64),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                usage,
+                vec![
+                    (Some("response-1".to_string()), Some(1700000000000)),
+                    (Some("response-2".to_string()), Some(1700000100000)),
+                ],
+                "round {round}: r1 keeps its cached timestamp, r2 keeps its own, no duplicates"
+            );
+            // `sync` writes the artifact back, so the next round reads this one.
+            write_session_artifact(session_id, &artifact.contents).unwrap();
+        }
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .filter(|method| *method == "GetCascadeTrajectory")
+                .count(),
+            2,
+            "a cap error must not trip the breaker, so every sync retries enrichment"
+        );
     }
 
     #[test]
