@@ -73,25 +73,24 @@ const RPC_PATH: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUs
 /// rounds sits well inside the 12s-30s the cloud-backed providers here allow
 /// themselves, and leaves a healthy loopback answer -- milliseconds when idle,
 /// low seconds on a loaded machine -- several times the room it needs.
+///
+/// This is also how long a round waits for a *better-ranked* candidate once it
+/// holds an answer from a worse one. [`ports_from_cli_log`] yields candidates
+/// newest first, because the last port the log names is the current server,
+/// and an older entry can still be answered by a stale `agy` left over from a
+/// restart or an account switch, whose quota is another account's or nobody's
+/// (signed out, which parses fine and reports as "not signed in"). So a round
+/// keeps the best-ranked answer it has seen and returns the moment nothing
+/// better can still arrive. What it is waiting on until then is the current
+/// server -- the server this budget was sized for -- so there is no shorter
+/// grace for that wait. An earlier revision cut it at 2s from the first answer,
+/// which contradicted the premise above: a current server answering in 2-5s on
+/// a loaded machine lost to a stale sibling that answered at once. The cost of
+/// a single bound is confined to a newest logged port that accepts and then
+/// goes quiet while an older one still answers: that round runs to its
+/// deadline before believing the older answer, which is the worst case one
+/// stalled candidate already costs.
 const DISCOVERY_ROUND_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long an answer already in hand waits for a better-ranked one.
-///
-/// [`ports_from_cli_log`] yields candidates newest first, because the last
-/// port the log names is the current one. An older entry can still be answered
-/// by a stale `agy` left over from a restart or an account switch, whose quota
-/// is another account's or nobody's (signed out, which parses fine and reports
-/// as "not signed in"). Resolving a round by completion order throws that
-/// preference away, and healthy candidates finish microseconds apart, so which
-/// one lands first is scheduling noise.
-///
-/// So a round keeps the best-ranked answer it has seen and returns as soon as
-/// nothing better can still arrive. This is how long it waits when something
-/// better is merely slow. Only reachable when a preferred candidate has
-/// neither answered nor refused -- it accepted and went quiet -- and it never
-/// costs a summary: what waits is which server is believed, not whether one is
-/// found.
-const PREFERENCE_GRACE: Duration = Duration::from_secs(2);
 
 // ── Wire format ──
 
@@ -289,9 +288,6 @@ const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
 /// Built only once a round has a candidate to send to -- see
 /// [`race_for_quota`], which returns before reaching here on an empty list.
 fn quota_client() -> Result<reqwest::Client> {
-    #[cfg(test)]
-    QUOTA_CLIENTS_BUILT.with(|built| built.set(built.get() + 1));
-
     // `.no_proxy()` because this only ever targets 127.0.0.1: the default
     // builder honours HTTP_PROXY/system proxy settings, which would send a
     // loopback quota request to a remote host unless the user happens to have
@@ -322,24 +318,6 @@ fn quota_client() -> Result<reqwest::Client> {
         // that keeps a `call_rpc` awaited on its own from being unbounded.
         .timeout(DISCOVERY_ROUND_TIMEOUT)
         .build()?)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Clients built by [`quota_client`] on this thread.
-    ///
-    /// Compiled out of the shipped binary. It exists because "a source with no
-    /// candidates builds no client" has no other observable: the regression it
-    /// guards was a client built before discovery knew whether it had anywhere
-    /// to send, and the only symptom was time.
-    ///
-    /// Per thread rather than process-wide because a sibling test runs its own
-    /// discovery on its own thread at the same time, and a process-wide count
-    /// made this an assertion about the whole test binary's scheduling.
-    /// [`race_for_quota`] calls `quota_client` from the thread that drives it,
-    /// before it spawns anything, so a thread-local sees exactly the builds
-    /// its own test caused.
-    static QUOTA_CLIENTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 async fn call_rpc(client: reqwest::Client, port: u16) -> Result<QuotaSummary> {
@@ -423,18 +401,34 @@ fn detected_ports() -> Vec<u16> {
 ///
 /// "Best" is by position rather than by who finishes first: `ports` arrives
 /// newest first and the newest is the one the log calls current. The round
-/// returns the moment nothing better can still arrive, and waits at most
-/// [`PREFERENCE_GRACE`] for something better that is merely slow.
+/// returns the moment nothing better can still arrive, and until then waits
+/// for a better-ranked candidate exactly as long as it waits for any --
+/// [`DISCOVERY_ROUND_TIMEOUT`] says why that is one bound and not two.
 ///
 /// An empty `ports` returns before building anything, which is what keeps a
 /// machine with no Antigravity from paying for a client it has nothing to
 /// send to.
 async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
+    race_for_quota_with(ports, &quota_client).await
+}
+
+/// [`race_for_quota`] with the client build handed in.
+///
+/// Separate so a test can count the builds one call causes from that call:
+/// whether an empty round builds a client has no other observable -- the
+/// regression it guards was a client built before discovery knew whether it
+/// had anywhere to send, and the only symptom was time. A count kept inside
+/// `quota_client` instead is fed by every round in the process, on every
+/// thread, and puts a `#[cfg(test)]` hook in shipped code.
+async fn race_for_quota_with(
+    ports: Vec<u16>,
+    build_client: &dyn Fn() -> Result<reqwest::Client>,
+) -> Option<QuotaSummary> {
     if ports.is_empty() {
         return None;
     }
 
-    let client = quota_client().ok()?;
+    let client = build_client().ok()?;
     let deadline = tokio::time::Instant::now() + DISCOVERY_ROUND_TIMEOUT;
     let mut settled = vec![false; ports.len()];
     let mut requests = tokio::task::JoinSet::new();
@@ -444,13 +438,12 @@ async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
     }
 
     let mut best: Option<(usize, QuotaSummary)> = None;
-    let mut until = deadline;
 
-    while let Ok(Some(joined)) = tokio::time::timeout_at(until, requests.join_next()).await {
+    while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, requests.join_next()).await {
         // A `JoinError` carries no rank, so a panicked request cannot be
-        // marked settled and the round runs to `until` instead of returning
-        // early. `call_rpc` reports every failure it has as `Err`, so this is
-        // the unreachable arm rather than the failure path.
+        // marked settled and the round runs to its deadline instead of
+        // returning early. `call_rpc` reports every failure it has as `Err`,
+        // so this is the unreachable arm rather than the failure path.
         let Ok((rank, answer)) = joined else { continue };
         settled[rank] = true;
         if let Some(summary) = answer {
@@ -464,9 +457,6 @@ async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
         if settled[..*kept].iter().all(|done| *done) {
             break;
         }
-        // `min` rather than assignment: the grace starts at the first answer
-        // and is never extended by a later one.
-        until = until.min(tokio::time::Instant::now() + PREFERENCE_GRACE);
     }
 
     best.map(|(_, summary)| summary)
@@ -755,11 +745,11 @@ mod tests {
     /// deadline, the two black holes would hold all of it and the language
     /// server listed behind them would never be reached.
     ///
-    /// The server is ranked last on purpose, so each call also pays
-    /// `PREFERENCE_GRACE` waiting to see whether either stalled candidate --
-    /// both of which outrank it -- turns out to be merely slow. That wait is
-    /// the cost of not attributing quota to a stale server, and it is what
-    /// makes this test take seconds rather than milliseconds.
+    /// The server is ranked last on purpose, so each call also pays the whole
+    /// `DISCOVERY_ROUND_TIMEOUT` waiting to see whether either stalled
+    /// candidate -- both of which outrank it -- turns out to be merely slow.
+    /// That wait is the cost of not attributing quota to a stale server, and it
+    /// is what makes this test take seconds rather than milliseconds.
     #[test]
     #[serial]
     fn a_stalled_candidate_does_not_hide_the_language_server_behind_it() {
@@ -805,15 +795,24 @@ mod tests {
     ///
     /// The ordering here is a handshake rather than a delay race: the newer
     /// server does not answer until the older one has been asked, so "the
-    /// older finished first" holds however loaded the machine is. The 250ms
-    /// after that is slack for the older answer to reach the client, and the
-    /// newer then has `PREFERENCE_GRACE` -- eight times as long -- to overtake
-    /// it.
+    /// older finished first" holds however loaded the machine is. What follows
+    /// the handshake is a delay only the round budget covers. An earlier
+    /// revision stopped waiting for a better-ranked candidate 2s after the
+    /// first answer, and with that grace in place this test reports the stale
+    /// server: the current one answered inside the round and still lost.
+    ///
+    /// Two bounds again, as in the #1280 test above: the delay is a floor on
+    /// how late the newer answer is, and load can only make it later, which
+    /// is the direction the assertion wants -- but `DISCOVERY_ROUND_TIMEOUT` is
+    /// the ceiling it has to stay under, with 2s to spare.
     #[test]
     #[serial]
     fn the_newest_logged_port_wins_even_when_an_older_one_answers_first() {
         const OLDER_QUOTA: &str =
             r#"{"response":{"groups":[{"displayName":"Stale Server","buckets":[]}]}}"#;
+        // Past the 2s an earlier revision granted preference, so a grace that
+        // short fails this; a fifth of the round short of its deadline.
+        const NEWER_DELAY: Duration = Duration::from_secs(3);
 
         let (asked_older, older_was_asked) = std::sync::mpsc::channel::<()>();
         let (older_base, _older_seen) = spawn_server(move |_path, _calls| {
@@ -825,7 +824,7 @@ mod tests {
             // was never reached, in which case the test has nothing to say and
             // should fail rather than hang.
             let _ = older_was_asked.recv_timeout(Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(NEWER_DELAY);
             (200, FIXTURE_QUOTA.to_string())
         });
 
@@ -913,6 +912,11 @@ mod tests {
     /// it on every `tokscale usage`, in the sequential pre-flight loop rather
     /// than the fan-out. The second half of this test is what stops the first
     /// half from passing vacuously.
+    ///
+    /// The count is kept by the builder this test hands in, so it holds exactly
+    /// the builds these two calls caused: no other round, on this thread or
+    /// any other, can reach it. Nothing here is `#[serial]` and nothing needs
+    /// to be.
     #[test]
     fn a_round_with_no_candidates_builds_no_client() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -920,21 +924,28 @@ mod tests {
             .build()
             .unwrap();
 
-        let before = QUOTA_CLIENTS_BUILT.with(std::cell::Cell::get);
-        assert!(runtime.block_on(race_for_quota(Vec::new())).is_none());
+        let builds = std::cell::Cell::new(0usize);
+        let counted_client = || {
+            builds.set(builds.get() + 1);
+            quota_client()
+        };
+
+        assert!(runtime
+            .block_on(race_for_quota_with(Vec::new(), &counted_client))
+            .is_none());
         assert_eq!(
-            QUOTA_CLIENTS_BUILT.with(std::cell::Cell::get),
-            before,
+            builds.get(),
+            0,
             "an empty candidate list must return before building anything"
         );
 
         let (base, _seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
         assert!(runtime
-            .block_on(race_for_quota(vec![port_of(&base)]))
+            .block_on(race_for_quota_with(vec![port_of(&base)], &counted_client))
             .is_some());
         assert_eq!(
-            QUOTA_CLIENTS_BUILT.with(std::cell::Cell::get),
-            before + 1,
+            builds.get(),
+            1,
             "one candidate builds exactly one client, which is what makes the count \
              above meaningful"
         );
