@@ -1000,6 +1000,14 @@ fn cmd_with_home(tmp: &Path) -> Command {
         // `pricing` intentionally bypasses TOKSCALE_PRICING_CACHE_ONLY; the
         // loopback proxies below are the offline guarantee for every command.
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+        // Point every API call at a dead loopback port. `get_api_base_url`
+        // reads TOKSCALE_API_URL and falls back to https://tokscale.ai, and
+        // submit, autosubmit run, login and delete-submitted-data all format
+        // their endpoint onto it. Unpinned, those commands hit production with
+        // whatever token the test set, stopped only by the proxies below — a
+        // guard a `.no_proxy()` on one client would silently remove. Pinning it
+        // here also drops any TOKSCALE_API_URL a developer has exported.
+        .env("TOKSCALE_API_URL", "http://127.0.0.1:9")
         // Keep cache-only fixtures offline even if a future code path ignores
         // the cache-only switch or a developer has proxy variables configured.
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -1052,6 +1060,8 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
+        // Same production-endpoint pin as cmd_with_home.
+        .env("TOKSCALE_API_URL", "http://127.0.0.1:9")
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -2947,6 +2957,166 @@ fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
             "Date range: {expected_local_date} to {expected_local_date}"
         )))
         .stdout(predicate::str::contains("Total tokens: 1,750"));
+}
+
+/// Regression: an unbounded `submit` re-scans every client directory, and the
+/// silent wait used to give no hint of what was being scanned or how long it
+/// took. The scope label and the elapsed time are the observability for that
+/// wait; neither changes what gets submitted.
+#[test]
+fn test_submit_reports_scan_scope_and_elapsed() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Scanning local session data (1 client, full history)...",
+        ))
+        .stdout(predicate::str::is_match(r"Scanned in \d+\.\d+s\.").unwrap())
+        // The scan is already narrowed to one client, so the tip has nothing
+        // left to suggest.
+        .stdout(predicate::str::contains("Tip:").not());
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--since",
+            "2026-01-01",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Scanning local session data (1 client, since 2026-01-01)...",
+        ))
+        .stdout(predicate::str::contains("Tip:").not());
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "synthetic",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Scanning local session data ({} clients, full history)...",
+            tokscale_core::ClientId::COUNT
+        )));
+}
+
+/// The tip may name `--client` and nothing else.
+///
+/// `--since` does not shorten the scan: the date filters are `retain`
+/// predicates run over already-parsed messages, so the same files are read
+/// either way. It also clears `fullHistory` on the scan scope, and
+/// `planParserHighWaterSubmission` (packages/frontend/src/lib/db/parserHighWater.ts)
+/// freezes a partial snapshot for every client in `SUPPORTED_VERSIONED_PARSERS`
+/// — copilot, droid, antigravity-cli and antigravity. Advertising it as a
+/// speedup costs the user data.
+#[test]
+fn test_submit_tip_recommends_only_the_client_filter() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["--no-spinner", "submit", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Tip: narrow the scan with `--client <id>` for a faster submit.",
+        ))
+        .stdout(predicate::str::is_match(r"Tip:.*--since").unwrap().not());
+}
+
+/// Autosubmit's stdout is the scheduler's log file (`StandardOutPath` in the
+/// launchd plist, the systemd/cron redirect elsewhere), so the tip would be
+/// appended to it on every scheduled run with nobody at a prompt to act on it.
+///
+/// This covers the observable behavior end to end. It does not isolate the mode
+/// gate on its own — `submit_filters` always hands `run_submit_command` a
+/// client list, so the already-narrowed gate would suppress the tip here too.
+/// `client_scope_tip_is_interactive_only` in main.rs is the test that flips
+/// only the mode.
+///
+/// The home is deliberately empty of session data, and that is load-bearing.
+/// `autosubmit run` is the one submit path in this file that is not a dry run
+/// (`run_submit_command(.., dry_run = false, ..)` at the `AutosubmitRunDecision`
+/// call site), so any usage at all carries it past the `total_tokens == 0`
+/// short-circuit and into a real `POST {api}/api/submit` with
+/// `Authorization: Bearer test-token`. With `create_temp_fixture_dir` here the
+/// run reached "Submitting to server..." and issued that POST against
+/// `https://tokscale.ai`; the loopback proxies were all that kept the packet on
+/// the machine. `cmd_with_home` now also pins `TOKSCALE_API_URL` to a dead
+/// loopback port, so no test resolves the production endpoint any more — but
+/// an empty home is still what keeps *this* test off the submit path entirely.
+/// It ends the run at "No usage data found to submit." instead, which is what
+/// the last assertion pins, and the scope line and the tip gate are observable
+/// either way.
+///
+/// `prime_pricing_cache` is still needed: the pricing load runs before the
+/// usage check and ignores `TOKSCALE_PRICING_CACHE_ONLY`.
+#[test]
+fn test_autosubmit_run_omits_the_scan_scope_tip() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_settings_json(tmp.path(), r#"{"autosubmit":{"enabled":true}}"#);
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["--no-spinner", "autosubmit", "run", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scanning local session data ("))
+        .stdout(predicate::str::is_match(r"Scanned in \d+\.\d+s\.").unwrap())
+        .stdout(predicate::str::contains("Tip:").not())
+        .stdout(predicate::str::contains("No usage data found to submit."));
+}
+
+/// Every command `cmd_with_home` builds must resolve the API to a dead loopback
+/// port instead of production.
+///
+/// `auth::get_api_base_url` reads `TOKSCALE_API_URL` and falls back to
+/// `https://tokscale.ai`, and `submit`, `autosubmit run`, `login` and
+/// `delete-submitted-data` all format their endpoint onto whatever it returns.
+/// Before the pin the harness neither set nor removed that variable, so a
+/// non-dry-run submit under a fixture with usage sent
+/// `POST https://tokscale.ai/api/submit` carrying the test's bearer token, with
+/// only the loopback proxies stopping it, and a developer with
+/// `TOKSCALE_API_URL` exported silently redirected every test to their own
+/// server.
+///
+/// `login --token` is the cheapest command that reaches the API with no fixture
+/// at all: the `tt_` prefix check passes locally, then it GETs
+/// `{api}/api/auth/token` and prints the request URL when the connection fails.
+/// Asserting on that URL proves the child process resolved the pinned base,
+/// which reading the env map back off the `Command` would not.
+#[test]
+fn test_cmd_with_home_keeps_api_calls_off_production() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+
+    cmd_with_home(tmp.path())
+        .args(["--no-spinner", "login", "--token", "tt_not_a_real_token"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "url (http://127.0.0.1:9/api/auth/token)",
+        ))
+        .stderr(predicate::str::contains("tokscale.ai").not());
 }
 
 #[test]
@@ -5093,6 +5263,381 @@ fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
     assert!(
         stdout.contains("Dry run - not submitting data."),
         "dry-run must complete without submitting: {stdout}"
+    );
+}
+
+/// Stealth preview shorthands (`ox-alpha`, `x-preview-f-free`) resolve to
+/// their canonical upstream $0 rows, so they submit with the priced usage:
+/// no per-row warning, no aggregate line, no fix hint.
+#[test]
+fn test_submit_stealth_preview_shorthands_upload_without_warnings() {
+    let tmp = create_temp_fixture_dir();
+    // Mirror the live models.dev rows (both deprecated $0, no cache-write
+    // bucket). The shorthand ids below only resolve through them.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let priced_payload = format!(
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}}}}}}"#,
+        now
+    );
+    let models_dev_payload = format!(
+        r#"{{"timestamp":{},"data":{{"opencode-go/ox-alpha-free":{{"input_cost_per_token":0.0,"output_cost_per_token":0.0,"cache_read_input_token_cost":0.0}},"opencode/x-preview-f-free":{{"input_cost_per_token":0.0,"output_cost_per_token":0.0,"cache_read_input_token_cost":0.0}}}}}}"#,
+        now
+    );
+    write_canonical_pricing_cache_files(
+        tmp.path(),
+        &priced_payload,
+        &priced_payload,
+        &models_dev_payload,
+    );
+    write_fake_credentials(tmp.path());
+    let preview_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/stealth-preview");
+    fs::create_dir_all(&preview_dir).unwrap();
+    for (file, id, session, provider, model_id) in [
+        (
+            "ox.json",
+            "ox",
+            "stealth-preview-ox",
+            "stealth",
+            "stealth/ox-alpha",
+        ),
+        (
+            "xpreview.json",
+            "xpreview",
+            "stealth-preview-x",
+            "opencode-zen",
+            "x-preview-f-free",
+        ),
+    ] {
+        fs::write(
+            preview_dir.join(file),
+            format!(
+                r#"{{
+            "id": "{id}",
+            "sessionID": "{session}",
+            "role": "assistant",
+            "modelID": "{model_id}",
+            "providerID": "{provider}",
+            "cost": 0,
+            "tokens": {{ "input": 1000, "output": 500, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "shorthand preview usage must submit cleanly; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("unpriced"),
+        "upstream-$0 usage must not warn: {stdout}"
+    );
+    assert!(
+        !stdout.contains("custom-pricing.json"),
+        "no fix hint for priced usage: {stdout}"
+    );
+    assert!(
+        stdout.contains("Total tokens: 6,950"),
+        "both preview models (3,000 tokens) must be counted on top of the 3,950-token stock fixture: {stdout}"
+    );
+}
+
+/// Regression: a long proxy-model history fans out to one warning row per
+/// provider/model pair and used to bury the submittable summary. Detail rows
+/// are capped (mirroring the tokenless-row reporter) with an aggregate total.
+#[test]
+fn test_submit_caps_unpriced_warning_rows_and_reports_the_total() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-cap");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..21 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-cap",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 1 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Unpriced total: 21 message(s) (21 tokens) at $0.00 across 21 provider/model(s)."
+        ),
+        "the aggregate must account for every row including capped ones: {stdout}"
+    );
+}
+
+/// Regression: the hint tells the user to add custom pricing keyed by the ids
+/// printed above it, so an id the cap swallows is an unfixable gap. Nothing
+/// else surfaces the rows — `unpriced_submission_usage` is `#[serde(skip)]`
+/// and `--dry-run` runs the same reporter — so the capped tail must still be
+/// listed by id.
+#[test]
+fn test_submit_names_the_unpriced_models_past_the_detail_cap() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-tail");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..22 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-tail",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 2 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+    // Equal tokens and message counts, so the provider/model tiebreak decides:
+    // `...-20` and `...-21` are the two rows that fall past the cap.
+    assert!(
+        stdout.contains("unknown-provider-20/genuinely-unpriced-model-20"),
+        "a capped row must still be nameable for custom-pricing: {stdout}"
+    );
+    assert!(
+        stdout.contains("unknown-provider-21/genuinely-unpriced-model-21"),
+        "a capped row must still be nameable for custom-pricing: {stdout}"
+    );
+}
+
+/// Regression: the capped ids were first printed as one unbroken line, so a
+/// long unpriced history rebuilt the wall of text the cap exists to prevent.
+/// Every capped id still has to appear -- the hint asks the user to price
+/// them -- but wrapped, not on a single line.
+#[test]
+fn test_submit_wraps_the_capped_unpriced_model_names() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-wrap");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..40 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-wrap",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("... and 20 more"),
+        "rows past the cap must be acknowledged: {stdout}"
+    );
+
+    // Every capped id stays reachable: the hint tells the user to price them.
+    for i in 20..40 {
+        let id = format!("unknown-provider-{i:02}/genuinely-unpriced-model-{i:02}");
+        assert!(
+            stdout.contains(&id),
+            "capped row {id} must still be nameable for custom-pricing: {stdout}"
+        );
+    }
+
+    // ... but spread over several lines. Unwrapped, these 20 ids landed on one
+    // ~1000-character line.
+    let longest = stdout.lines().map(str::len).max().unwrap_or(0);
+    assert!(
+        longest < 300,
+        "no output line may bury the screen; longest was {longest} chars: {stdout}"
+    );
+}
+
+/// Regression: the cap used to keep the alphabetically first rows, which hid
+/// the heaviest usage behind a provider id starting with `z`. The ids the hint
+/// asks the user to price must be the ones pricing recovers the most tokens
+/// for.
+#[test]
+fn test_submit_orders_unpriced_warning_rows_by_token_impact() {
+    let tmp = create_temp_fixture_dir();
+    prime_pricing_cache_with_a_priced_model(tmp.path());
+    write_fake_credentials(tmp.path());
+    let unpriced_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/unpriced-rank");
+    fs::create_dir_all(&unpriced_dir).unwrap();
+    for i in 0..20 {
+        fs::write(
+            unpriced_dir.join(format!("unpriced-{i:02}.json")),
+            format!(
+                r#"{{
+            "id": "unpriced-{i:02}",
+            "sessionID": "unpriced-rank",
+            "role": "assistant",
+            "modelID": "genuinely-unpriced-model-{i:02}",
+            "providerID": "unknown-provider-{i:02}",
+            "cost": 0,
+            "tokens": {{ "input": 1, "output": 0, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+            "time": {{ "created": 1736510400000.0 }}
+        }}"#,
+            ),
+        )
+        .unwrap();
+    }
+    // Sorts last by provider id, so the old alphabetical order pushed the
+    // single row worth pricing past the 20-row cap.
+    fs::write(
+        unpriced_dir.join("unpriced-heavy.json"),
+        r#"{
+            "id": "unpriced-heavy",
+            "sessionID": "unpriced-rank",
+            "role": "assistant",
+            "modelID": "zz-heavy-unpriced-model",
+            "providerID": "zz-provider",
+            "cost": 0,
+            "tokens": { "input": 999, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args([
+            "--no-spinner",
+            "submit",
+            "--client",
+            "opencode",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capped warnings must not block covered usage; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let heaviest =
+        "submitting 1 unpriced zz_provider/zz-heavy-unpriced-model message(s) (999 tokens)";
+    let lightest = "submitting 1 unpriced unknown-provider-00/genuinely-unpriced-model-00";
+    let heaviest_at = stdout
+        .find(heaviest)
+        .unwrap_or_else(|| panic!("the heaviest row must get a detail line: {stdout}"));
+    let lightest_at = stdout
+        .find(lightest)
+        .unwrap_or_else(|| panic!("the lighter rows must still be listed: {stdout}"));
+    assert!(
+        heaviest_at < lightest_at,
+        "detail rows must be ordered by token impact, heaviest first: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Unpriced total: 21 message(s) (1,019 tokens) at $0.00 across 21 provider/model(s)."
+        ),
+        "the aggregate must still cover every row: {stdout}"
     );
 }
 

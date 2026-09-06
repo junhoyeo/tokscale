@@ -458,7 +458,8 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 }
                 // OpenClaw: live transcripts plus every copy OpenClaw makes of
                 // one by appending a suffix to the `.jsonl` name — published
-                // archives (`<id>.jsonl.deleted.<ts>`, `<id>.jsonl.reset.<ts>`),
+                // archives (`<id>.jsonl.deleted.<ts>`, `<id>.jsonl.reset.<ts>`, and
+                // their zstd form `<id>.jsonl.zst`),
                 // doctor backups (`<id>.jsonl.pre-doctor-<repair>-<ts>.bak`) and
                 // quarantined files (`<id>.jsonl.broken-<reason>-<ts>`). They
                 // are all the transcript format and the parser dedups the
@@ -5982,6 +5983,38 @@ mod tests {
         assert_eq!(result.get(ClientId::OpenClaw).len(), 1);
         assert!(result.get(ClientId::OpenClaw)[0]
             .ends_with("session-archived.jsonl.deleted.1700000000000"));
+    }
+
+    #[test]
+    fn scan_openclaw_compressed_transcripts_reaches_the_parser() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join(".openclaw/agents/main/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let content = br#"{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":100,"output":50},"timestamp":1788566869012}}"#;
+        for name in [
+            "plain-archive.jsonl.zst",
+            "deleted.jsonl.deleted.timestamp.nonce.zst",
+            "reset.jsonl.reset.timestamp.nonce.zst",
+        ] {
+            fs::write(
+                sessions.join(name),
+                zstd::encode_all(&content[..], 0).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(sessions.join("unrelated.zst"), b"not a session").unwrap();
+
+        let scan = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
+        assert_eq!(scan.get(ClientId::OpenClaw).len(), 3);
+        for path in scan.get(ClientId::OpenClaw) {
+            let messages = crate::sessions::openclaw::parse_openclaw_transcript(path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 150);
+        }
     }
 
     #[test]

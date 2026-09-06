@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { toggleClientFilter, resolveSelectedDay } from "../../src/lib/utils";
+import {
+  toggleClientFilter,
+  resolveSelectedDay,
+  filterByClient,
+  dayHasActivity,
+  findBestDay,
+} from "../../src/lib/utils";
 import type { ClientType, DailyContribution } from "../../src/lib/types";
 
 const availableClients: ClientType[] = ["claude", "codex", "gemini"];
@@ -71,5 +77,105 @@ describe("resolveSelectedDay", () => {
     // Same date, different (filtered) array -> caller gets the new object, never stale.
     expect(resolveSelectedDay("2026-07-11", filtered)).toBe(filtered[0]);
     expect(resolveSelectedDay("2026-07-11", filtered)).not.toBe(contributions[1]);
+  });
+});
+
+describe("unpriced Droid days still count as activity", () => {
+  it("treats token-positive zero-cost days as active", () => {
+    expect(
+      dayHasActivity({
+        ...day("2026-09-01"),
+        totals: { tokens: 150_000_000, cost: 0, messages: 31 },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps unpriced Droid tokens when the local graph is filtered to that client", () => {
+    const data = {
+      meta: {
+        generatedAt: "2026-09-02T00:00:00.000Z",
+        version: "4.15.0",
+        dateRange: { start: "2026-09-01", end: "2026-09-01" },
+      },
+      summary: {
+        totalTokens: 150_000_000,
+        totalCost: 1,
+        totalDays: 1,
+        activeDays: 1,
+        averagePerDay: 1,
+        maxCostInSingleDay: 1,
+        clients: ["droid", "codex"] as ClientType[],
+        models: ["ox-alpha-(openrouter)-0"],
+      },
+      years: [
+        {
+          year: "2026",
+          totalTokens: 150_000_000,
+          totalCost: 1,
+          range: { start: "2026-09-01", end: "2026-09-01" },
+        },
+      ],
+      contributions: [
+        {
+          date: "2026-09-01",
+          totals: { tokens: 150_000_000, cost: 0, messages: 31 },
+          intensity: 4 as const,
+          tokenBreakdown: {
+            input: 150_000_000,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          clients: [
+            {
+              client: "droid" as const,
+              modelId: "ox-alpha-(openrouter)-0",
+              tokens: {
+                input: 150_000_000,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+              },
+              cost: 0,
+              messages: 31,
+            },
+          ],
+        },
+      ],
+    };
+
+    const filtered = filterByClient(data, ["droid"]);
+    expect(filtered.summary.totalTokens).toBe(150_000_000);
+    expect(filtered.summary.activeDays).toBe(1);
+  });
+});
+
+describe("findBestDay", () => {
+  it("ranks by cost first so a free high-token day does not beat a priced day", () => {
+    const free = {
+      ...day("2026-08-01"),
+      totals: { tokens: 9_000, cost: 0, messages: 9 },
+    };
+    const priced = {
+      ...day("2026-08-02"),
+      totals: { tokens: 1_000, cost: 12, messages: 2 },
+    };
+
+    expect(findBestDay([free, priced])).toBe(priced);
+  });
+
+  it("breaks cost ties with tokens so all-free data still picks a real usage day", () => {
+    const quiet = {
+      ...day("2026-08-01"),
+      totals: { tokens: 100, cost: 0, messages: 1 },
+    };
+    const busy = {
+      ...day("2026-08-02"),
+      totals: { tokens: 9_000, cost: 0, messages: 9 },
+    };
+
+    expect(findBestDay([quiet, busy])).toBe(busy);
   });
 });

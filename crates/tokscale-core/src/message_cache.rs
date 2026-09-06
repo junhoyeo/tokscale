@@ -1066,6 +1066,21 @@ pub fn parser_generation() -> u64 {
 
 fn parser_version(client: ClientId) -> u32 {
     match client {
+        // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
+        // JSONL and cached as empty. Their bytes do not change when decoding is
+        // fixed, so only the parser version can retire those entries.
+        // v2->v3 (#1278): OpenClaw messages now carry a stable dedup key built
+        // from the event (`openclaw:<event id>:<timestamp>:<input>:<output>`,
+        // or `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
+        // Codex app-server turn) that lets a transcript migrated into the
+        // per-agent SQLite store collapse against its retained legacy JSONL
+        // copy, and lets the lane match a mirror row to the rollout's record of
+        // its turn. Entries below v3 have no key, so a warm JSONL entry would
+        // count beside the SQLite rows for the same events. `reasoningTokens`
+        // is also split out of `output` now. This takes its own number rather
+        // than reusing 2: #1285 landed first, and a warm v2 cache it wrote has
+        // neither the keys nor the split.
+        ClientId::OpenClaw => 3,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -1186,16 +1201,6 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
-        // v1->v2: OpenClaw messages now carry a stable dedup key built from
-        // the event (`openclaw:<event id>:<timestamp>:<input>:<output>`, or
-        // `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
-        // Codex app-server turn) that lets a transcript migrated into the
-        // per-agent SQLite store collapse against its retained legacy JSONL
-        // copy, and lets the lane match a mirror row to the rollout's record
-        // of its turn. v1 entries have no key, so a warm JSONL entry would
-        // count beside the SQLite rows for the same events. `reasoningTokens`
-        // is also split out of `output` now.
-        ClientId::OpenClaw => 2,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past
         // those records instead of truncating and misaligning message indices.
@@ -3354,9 +3359,13 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kimi), 4);
     }
 
+    /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
+    /// the reasoning split need v3: a warm v2 cache carries neither, and
+    /// reusing 2 would leave every reader who already scanned under #1285
+    /// unmigrated.
     #[test]
-    fn test_openclaw_parser_version_invalidates_keyless_v1_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 2);
+    fn test_openclaw_parser_version_invalidates_keyless_v2_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 3);
     }
 
     #[test]
@@ -3569,6 +3578,49 @@ mod tests {
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
         assert_eq!(parser_version(ClientId::Droid), 7);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_compressed_archives_discard_cached_empty_v1_results() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("session.jsonl.deleted.timestamp.zst");
+        let content = br#"{"type":"message","message":{"role":"assistant","model":"example","usage":{"input":100},"timestamp":1700000000000}}"#;
+        fs::write(&source, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let old_identity = CacheIdentity {
+            parser_version: 1,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let entry = CachedSourceEntry::new(
+            old_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old_identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(identity, &source).is_none());
+        let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
     }
 
     #[test]

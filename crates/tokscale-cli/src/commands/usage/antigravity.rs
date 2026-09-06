@@ -92,32 +92,56 @@ struct QuotaBucket {
 /// card on screen. The probe is a loopback request against a port read out of
 /// the CLI log, so it costs a few milliseconds.
 pub fn has_credentials() -> bool {
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return false;
-    };
-    rt.block_on(async { discover_port().await.is_some() })
+    off_caller_runtime(|| {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return false;
+        };
+        rt.block_on(async { discover_port().await.is_some() })
+    })
+    .unwrap_or(false)
 }
 
 pub fn fetch_all() -> Result<Vec<UsageOutput>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    off_caller_runtime(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
 
-    rt.block_on(async {
-        let port = discover_port()
-            .await
-            .context("Antigravity language server is not running")?;
-        let summary = call_rpc(port).await?;
+        rt.block_on(async {
+            let port = discover_port()
+                .await
+                .context("Antigravity language server is not running")?;
+            let summary = call_rpc(port).await?;
 
-        if summary.groups.is_empty() {
-            anyhow::bail!("Antigravity is running but not signed in");
-        }
+            if summary.groups.is_empty() {
+                anyhow::bail!("Antigravity is running but not signed in");
+            }
 
-        Ok(summary.groups.into_iter().map(output_for_group).collect())
+            Ok(summary.groups.into_iter().map(output_for_group).collect())
+        })
     })
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("Antigravity usage worker thread panicked")))
+}
+
+/// Run `work` on a dedicated OS thread, off whatever runtime the caller is on.
+///
+/// Both entry points above drive their own current-thread runtime, and
+/// `block_on` panics with "Cannot start a runtime from within a runtime" when
+/// the calling thread already has a Tokio runtime context entered (#1264). No
+/// caller does that today -- `tokscale usage` reaches them from a plain sync
+/// `main`, and the TUI usage refresh runs the fetcher on a bare
+/// `std::thread::spawn` -- so this is hardening rather than a live crash path:
+/// a fresh OS thread never carries a runtime context, which keeps the panic
+/// impossible for whatever entry point is added next. The scope joins before
+/// returning, so both entry points stay as synchronous as they were.
+/// `crate::antigravity::https_rpc_request` isolates its own `block_on` the
+/// same way, and that one is reachable today: `discover_port` walks into it
+/// synchronously from inside the runtime `has_credentials` just entered.
+fn off_caller_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> std::thread::Result<T> {
+    std::thread::scope(|scope| scope.spawn(work).join())
 }
 
 fn output_for_group(group: QuotaGroup) -> UsageOutput {
@@ -543,6 +567,39 @@ mod tests {
             third_party.account.as_ref().unwrap().id,
             "claude-and-gpt-models"
         );
+    }
+
+    /// Regression for #1264. Both entry points build their own current-thread
+    /// runtime, and `block_on` panics with "Cannot start a runtime from within
+    /// a runtime" when the calling thread already has a runtime context
+    /// entered. No caller does that today, so what is pinned here is hardening.
+    ///
+    /// Calling them is not sufficient on its own. Both swallow a worker panic
+    /// (`unwrap_or(false)`, `unwrap_or_else`), so a worker that still panicked
+    /// inside the caller's runtime returns exactly like a working one, and
+    /// neither return value can be asserted on because whether a language
+    /// server answers is a property of the machine. Hence the assert, which
+    /// pins the isolation itself: work left on the caller's thread sees the
+    /// entered runtime context, and only work moved off that thread does not.
+    /// The two calls still carry the other half -- an entry point that stops
+    /// using the helper panics on them while the assert stays green -- so keep
+    /// both halves.
+    #[test]
+    fn entry_points_tolerate_an_entered_tokio_runtime_context() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            assert!(
+                off_caller_runtime(|| tokio::runtime::Handle::try_current().is_err())
+                    .expect("the worker must not panic"),
+                "the work must run off the caller's runtime"
+            );
+            let _ = has_credentials();
+            let _ = fetch_all();
+        });
     }
 
     #[test]

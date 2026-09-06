@@ -1484,27 +1484,15 @@ describe("droid parser high-water", () => {
     expect(stored).toBe(621_000);
   });
 
-  it("credits nothing for a pure re-attribution of the same lifetime total", () => {
+  it("moves a re-attributed session onto the days the current parser reports", () => {
     const plan = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays);
 
-    expect(plan.mode).toBe("baseline-legacy");
-    const credited = Object.values(plan.increments).reduce(
-      (sum, day) => sum + day.tokens,
-      0
-    );
-    expect(credited).toBe(0);
-
-    // The stored rows are preserved untouched, so the device's total is the
-    // 321,000 it always was rather than the 621,000 the merge alone stores.
-    const stored = Object.keys(sessionSplitAcrossDays).reduce((sum, date) => {
-      const existing = wholeSessionOnOneDay[date];
-      const increment = plan.increments[date];
-      const merged = increment
-        ? addClientBreakdownIncrement(existing, increment)
-        : existing;
-      return sum + (merged?.tokens ?? 0);
-    }, 0);
-    expect(stored).toBe(321_000);
+    expect(plan.mode).toBe("replace");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays?.["2026-08-07"]?.tokens).toBe(21_000);
+    expect(plan.layoutDays?.["2026-08-08"]?.tokens).toBe(152_000);
+    expect(plan.layoutDays?.["2026-08-09"]?.tokens).toBe(148_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(321_000);
   });
 
   it("still credits real usage that arrives after the re-attribution", () => {
@@ -1518,11 +1506,9 @@ describe("droid parser high-water", () => {
 
     const plan = droidPlan({}, grown, state);
 
-    expect(plan.mode).toBe("incremental");
-    expect(plan.increments["2026-08-10"]?.tokens).toBe(79_000);
-    expect(
-      Object.values(plan.increments).reduce((sum, day) => sum + day.tokens, 0)
-    ).toBe(79_000);
+    expect(plan.mode).toBe("replace");
+    expect(plan.layoutDays?.["2026-08-10"]?.tokens).toBe(79_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(400_000);
   });
 
   it("does not let a date-filtered rescan advance the high-water", () => {

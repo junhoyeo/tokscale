@@ -177,6 +177,26 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("openai/gpt-daybreak-blue-latest", "gpt-5.6-sol");
     m.insert("openai/daybreak-blue-latest", "gpt-5.6-sol");
 
+    // Stealth preview shorthands for the August 2026 Z.AI GLM-5.3-Flash free
+    // preview. Sessions record the bare `ox-alpha` (and the router-qualified
+    // `stealth/ox-alpha` gateways emit), while upstream models.dev tracks the
+    // canonical free incarnations `opencode-go/ox-alpha-free` and
+    // `opencode/x-preview-f-free` at $0.00 (both deprecated). Pin the
+    // shorthand spellings to those canonical keys -- the same "canonical
+    // first-party key" pattern as `minimax-m3` above -- so the live upstream
+    // $0 row prices them instead of an unverified reseller guess. The
+    // qualified `stealth/` form must be explicit because provider-prefix
+    // stripping does not run alias resolution a second time.
+    // Sources (accessed 2026-09-03):
+    // https://openrouter.ai/stealth/ox-alpha ("free to use", ZAI reveal)
+    // https://docs.z.ai/guides/vlm/glm-5.3-flash ("tested anonymously as ox-alpha")
+    // https://models.dev/api.json (providers.opencode.models.x-preview-f-free
+    // and providers.opencode-go.models.ox-alpha-free at input = 0,
+    // output = 0, cache_read = 0, both deprecated)
+    m.insert("ox-alpha", "opencode-go/ox-alpha-free");
+    m.insert("stealth/ox-alpha", "opencode-go/ox-alpha-free");
+    m.insert("x-preview-f-free", "opencode/x-preview-f-free");
+
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
     m.insert("kimi-k2-instruct-0905", "kimi-k2.5"); // Specific version → base (avoids reseller)
@@ -365,6 +385,107 @@ mod tests {
             resolve_alias("openai/gpt-daybreak-blue-latest"),
             Some("gpt-5.6-sol")
         );
+    }
+
+    #[test]
+    fn resolves_stealth_preview_shorthands_to_canonical_upstream_keys() {
+        assert_eq!(resolve_alias("ox-alpha"), Some("opencode-go/ox-alpha-free"));
+        assert_eq!(resolve_alias("OX-ALPHA"), Some("opencode-go/ox-alpha-free"));
+        // The qualified form must be explicit because provider-prefix
+        // stripping does not run alias resolution a second time.
+        assert_eq!(
+            resolve_alias("stealth/ox-alpha"),
+            Some("opencode-go/ox-alpha-free")
+        );
+        assert_eq!(
+            resolve_alias("x-preview-f-free"),
+            Some("opencode/x-preview-f-free")
+        );
+        assert_eq!(
+            resolve_alias("X-PREVIEW-F-FREE"),
+            Some("opencode/x-preview-f-free")
+        );
+    }
+
+    #[test]
+    fn stealth_preview_shorthands_use_the_upstream_zero_row() {
+        fn zero_row() -> super::super::litellm::ModelPricing {
+            super::super::litellm::ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_read_input_token_cost: Some(0.0),
+                ..Default::default()
+            }
+        }
+
+        // Mirrors the live models.dev rows (both deprecated $0, no
+        // cache-write bucket published).
+        let service = super::super::PricingService::new_with_custom_and_models_dev(
+            super::super::custom::CustomPricing::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([
+                ("opencode-go/ox-alpha-free".to_string(), zero_row()),
+                ("opencode/x-preview-f-free".to_string(), zero_row()),
+            ]),
+        );
+        // Cache-write-bearing: the all-zero row covers every shape, so even
+        // usage the upstream row's buckets cannot describe stays priced.
+        let usage = crate::TokenBreakdown {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 50_000,
+            cache_write: 10_000,
+            reasoning: 5_000,
+        };
+
+        for (provider, model, expected_key) in [
+            (
+                Some("command-code"),
+                "ox-alpha",
+                "opencode-go/ox-alpha-free",
+            ),
+            (Some("stealth"), "ox-alpha", "opencode-go/ox-alpha-free"),
+            (
+                Some("nous"),
+                "stealth/ox-alpha",
+                "opencode-go/ox-alpha-free",
+            ),
+            (
+                Some("hermes"),
+                "stealth/ox-alpha",
+                "opencode-go/ox-alpha-free",
+            ),
+            (
+                Some("opencode-zen"),
+                "x-preview-f-free",
+                "opencode/x-preview-f-free",
+            ),
+            (
+                Some("opencode_zen"),
+                "x-preview-f-free",
+                "opencode/x-preview-f-free",
+            ),
+        ] {
+            let resolved = service
+                .resolve_for_usage_with_provider(model, provider, &usage)
+                .unwrap_or_else(|| {
+                    panic!("{provider:?}/{model} must resolve the canonical zero row")
+                });
+            assert_eq!(resolved.source, "Models.dev", "id: {model}");
+            assert_eq!(resolved.matched_key, expected_key, "id: {model}");
+            assert!(resolved.evidence.alias_applied, "id: {model}");
+            assert!(resolved.evidence.is_submission_safe(), "id: {model}");
+            assert!(
+                service.covers_usage_with_provider(model, provider, &usage),
+                "id: {model}"
+            );
+            assert_eq!(
+                service.calculate_cost_with_provider(model, provider, &usage),
+                0.0,
+                "id: {model}"
+            );
+        }
     }
 
     #[test]

@@ -187,7 +187,7 @@ export function recalculateIntensity(contributions: DailyContribution[]): DailyC
   }));
 }
 
-function calculateIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 4 {
+export function calculateIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 4 {
   if (tokens === 0 || maxTokens === 0) return 0;
   const ratio = tokens / maxTokens;
   if (ratio >= 0.75) return 4;
@@ -196,13 +196,17 @@ function calculateIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 
   return 1;
 }
 
+export function dayHasActivity(day: DailyContribution): boolean {
+  return day.totals.tokens > 0 || day.totals.cost > 0;
+}
+
 function recalculateSummary(
   contributions: DailyContribution[],
   clients: ClientType[]
 ): TokenContributionData["summary"] {
-  const activeDays = contributions.filter((c) => c.totals.cost > 0);
-  const totalCost = activeDays.reduce((sum, c) => sum + c.totals.cost, 0);
-  const totalTokens = activeDays.reduce((sum, c) => sum + c.totals.tokens, 0);
+  const activeDays = contributions.filter(dayHasActivity);
+  const totalCost = contributions.reduce((sum, c) => sum + c.totals.cost, 0);
+  const totalTokens = contributions.reduce((sum, c) => sum + c.totals.tokens, 0);
   const maxCost = Math.max(...contributions.map((c) => c.totals.cost), 0);
 
   const modelSet = new Set<string>();
@@ -287,7 +291,7 @@ export function getDayName(dateStr: string): string {
 
 export function calculateCurrentStreak(contributions: DailyContribution[]): number {
   const sorted = [...contributions]
-    .filter((c) => c.totals.cost > 0)
+    .filter(dayHasActivity)
     .sort((a, b) => b.date.localeCompare(a.date));
 
   if (sorted.length === 0) return 0;
@@ -312,7 +316,7 @@ export function calculateCurrentStreak(contributions: DailyContribution[]): numb
 
 export function calculateLongestStreak(contributions: DailyContribution[]): number {
   const activeDates = contributions
-    .filter((c) => c.totals.cost > 0)
+    .filter(dayHasActivity)
     .map((c) => c.date)
     .sort();
 
@@ -339,7 +343,12 @@ export function calculateLongestStreak(contributions: DailyContribution[]): numb
 
 export function findBestDay(contributions: DailyContribution[]): DailyContribution | null {
   if (contributions.length === 0) return null;
-  return contributions.reduce((best, current) => (current.totals.cost > best.totals.cost ? current : best));
+  return contributions.reduce((best, current) => {
+    if (current.totals.cost !== best.totals.cost) {
+      return current.totals.cost > best.totals.cost ? current : best;
+    }
+    return current.totals.tokens > best.totals.tokens ? current : best;
+  });
 }
 
 export function hexToNumber(hex: string): number {

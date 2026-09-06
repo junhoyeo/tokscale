@@ -8,6 +8,7 @@ import {
   calculateCurrentStreak,
   calculateLongestStreak,
   findBestDay,
+  dayHasActivity,
 } from "@/lib/utils";
 import { formatContributionDate } from "@/lib/date-utils";
 import { formatDuration } from "@/lib/format";
@@ -174,7 +175,7 @@ export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount, mcp
         <StatItem label="Avg / Day" value={formatCurrency(summary.averagePerDay)} />
         <StatItem label="Current Streak" value={`${currentStreak} day${currentStreak !== 1 ? "s" : ""}`} />
         <StatItem label="Longest Streak" value={`${longestStreak} day${longestStreak !== 1 ? "s" : ""}`} />
-        {bestDay && bestDay.totals.cost > 0 && (
+        {bestDay && dayHasActivity(bestDay) && (
           <StatItem label="Best Day" value={formatContributionDate(bestDay)} subValue={formatCurrency(bestDay.totals.cost)} />
         )}
         <StatItem label="Models" value={summary.models.length.toString()} />

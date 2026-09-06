@@ -2202,31 +2202,71 @@ fn https_rpc_request(
     }
 
     #[cfg(not(target_os = "windows"))]
-    antigravity_https_runtime().block_on(async {
-        let url = format!(
-            "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
-            connection.port, method
+    {
+        // `block_on` panics with "Cannot start a runtime from within a
+        // runtime" when the calling thread already has a Tokio runtime
+        // context entered (#1264): the TUI usage refresh and `tokscale
+        // usage` reach this function while `has_credentials`'s own
+        // current-thread runtime is mid-`block_on`, because
+        // `discover_port` probes the IDE's language server
+        // synchronously. A dedicated OS thread never carries a runtime
+        // context, so the nested-runtime panic is structurally
+        // impossible for every caller; the scope (not
+        // `std::thread::spawn`) is what lets the request keep borrowing
+        // `connection`/`method`/`body`. The ~microsecond spawn cost is
+        // irrelevant next to a loopback RPC with a 10s timeout, and a
+        // worker panic now degrades to `Err` instead of unwinding into
+        // whatever thread called us.
+        let joined: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>> =
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        antigravity_https_runtime()
+                            .block_on(https_rpc_once(connection, method, body))
+                    })
+                    .join()
+            });
+        joined.unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "Antigravity HTTPS RPC {method} worker thread panicked"
+            ))
+        })
+    }
+}
+
+/// The HTTPS request future for [`https_rpc_request`], named so the spawned
+/// worker above stays a one-liner: nested four levels deep, the unbreakable
+/// URL literal overflowed rustfmt's max_width and forced a hanging layout
+/// that reads as broken indentation.
+#[cfg(not(target_os = "windows"))]
+async fn https_rpc_once(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
+    let url = format!(
+        "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
+        connection.port, method
+    );
+    let response = antigravity_https_client()
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Connect-Protocol-Version", "1")
+        .header("X-Codeium-Csrf-Token", &connection.csrf_token)
+        .json(body)
+        .send()
+        .await?;
+    let status = response.status();
+    let response_body = read_reqwest_response_with_cap(response, MAX_RPC_BODY_BYTES).await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "Antigravity HTTPS RPC {} failed with status {}: {}",
+            method,
+            status,
+            response_body
         );
-        let response = antigravity_https_client()
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header("Connect-Protocol-Version", "1")
-            .header("X-Codeium-Csrf-Token", &connection.csrf_token)
-            .json(body)
-            .send()
-            .await?;
-        let status = response.status();
-        let response_body = read_reqwest_response_with_cap(response, MAX_RPC_BODY_BYTES).await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Antigravity HTTPS RPC {} failed with status {}: {}",
-                method,
-                status,
-                response_body
-            );
-        }
-        Ok(serde_json::from_str(&response_body)?)
-    })
+    }
+    Ok(serde_json::from_str(&response_body)?)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -4033,6 +4073,57 @@ mod tests {
             cached_rpc_transport(port),
             Some(RpcTransport::PlainHttp),
             "a working plaintext port must be remembered, so the TLS leg is not tried later"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn https_rpc_request_tolerates_an_entered_tokio_runtime_context() {
+        // Regression for #1264: the TUI usage refresh reaches this function
+        // while `has_credentials`'s own runtime is mid-`block_on`, and the
+        // nested `block_on` used to panic with "Cannot start a runtime from
+        // within a runtime". Entering a runtime here reproduces the caller
+        // side exactly; nothing listens on the port because the point is
+        // that the call returns an error instead of panicking.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+
+        let error = rt
+            .block_on(async { https_rpc_request(&connection, "GetUsage", &serde_json::json!({})) })
+            .unwrap_err();
+
+        // Asserting only the absence of "runtime" would also be satisfied by
+        // the panic-catch path above, whose message ("worker thread panicked")
+        // does not contain the word either -- a swallowed panic would keep this
+        // test green. Pinning the connection error the request actually
+        // produces means only the fixed path can pass.
+        // Matched on reqwest's own predicates rather than its `Display` text:
+        // that wording is an undocumented internal format a version bump can
+        // reword, while a swallowed panic does not downcast to a
+        // `reqwest::Error` at all, so this still separates the two paths.
+        let transport = error
+            .downcast_ref::<reqwest::Error>()
+            .unwrap_or_else(|| panic!("the failure must be the request's own, got: {error:#}"));
+        assert!(
+            transport.is_connect(),
+            "the request must fail connecting to the closed port, got: {error:#}"
+        );
+        assert_eq!(
+            transport.url().and_then(|url| url.port()),
+            Some(port),
+            "the failure must name the closed port, got: {error:#}"
         );
     }
 
