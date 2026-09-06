@@ -302,7 +302,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         .style(metric_cache_write_style),
                     total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
-                        .style(Style::default().fg(Color::Yellow)),
+                        .style(app.theme.hint_key_style()),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
                         .style(Style::default().fg(Color::Rgb(150, 200, 150))),
@@ -329,10 +329,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         model.tokens.input,
                         model.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
-                        .style(Style::default().fg(Color::Yellow)),
+                        .style(app.theme.hint_key_style()),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
                         .style(Style::default().fg(Color::Rgb(150, 200, 150))),
