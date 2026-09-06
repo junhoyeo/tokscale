@@ -110,6 +110,13 @@ pub struct ScanResult {
     pub crush_dbs: Vec<CrushDbSource>,
     /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
     pub zcode_db: Option<PathBuf>,
+    /// Per-agent OpenClaw transcript databases,
+    /// `<agents root>/<agentId>/agent/openclaw-agent.sqlite`, discovered under
+    /// every OpenClaw agents root the scan covers (default, legacy rebrand
+    /// paths, and configured extra roots). Current OpenClaw writes live
+    /// transcripts here; the JSONL files in `files` are legacy transcripts and
+    /// published archives.
+    pub openclaw_dbs: Vec<PathBuf>,
     /// MiMo Code SQLite databases discovered under the data dir.
     pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
@@ -136,6 +143,7 @@ impl Default for ScanResult {
             kiro_db: None,
             crush_dbs: Vec::new(),
             zcode_db: None,
+            openclaw_dbs: Vec::new(),
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
             devin_dbs: Vec::new(),
@@ -448,14 +456,27 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                                 .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
                         })
                 }
-                // OpenClaw: also match archived transcripts
-                // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
-                "*.jsonl*" => {
-                    file_name.ends_with(".jsonl")
-                        || file_name.ends_with(".jsonl.zst")
-                        || file_name.contains(".jsonl.deleted.")
-                        || file_name.contains(".jsonl.reset.")
-                }
+                // OpenClaw: live transcripts plus every copy OpenClaw makes of
+                // one by appending a suffix to the `.jsonl` name — published
+                // archives (`<id>.jsonl.deleted.<ts>`, `<id>.jsonl.reset.<ts>`, and
+                // their zstd form `<id>.jsonl.zst`),
+                // doctor backups (`<id>.jsonl.pre-doctor-<repair>-<ts>.bak`) and
+                // quarantined files (`<id>.jsonl.broken-<reason>-<ts>`). They
+                // are all the transcript format and the parser dedups the
+                // copies, so a backup that outlived its original still counts
+                // and one that did not counts once. The Codex plugin's binding
+                // sidecars (`<id>.jsonl.codex-app-server.json[.migrated]`) are
+                // JSON metadata, not transcripts: a suffix that ends in `.json`
+                // or `.json.migrated` is excluded, and nothing else is.
+                "*.jsonl*" => match file_name.split_once(".jsonl") {
+                    Some((stem, suffix)) if !stem.is_empty() => {
+                        suffix.is_empty()
+                            || (suffix.starts_with('.')
+                                && !suffix.ends_with(".json")
+                                && !suffix.ends_with(".json.migrated"))
+                    }
+                    _ => false,
+                },
                 "*.csv" => file_name.ends_with(".csv"),
                 "usage*.csv" => {
                     if is_in_archive_dir {
@@ -1049,6 +1070,43 @@ struct CrushProjectList {
 struct CrushProject {
     path: String,
     data_dir: String,
+}
+
+/// Discover every per-agent OpenClaw transcript database under one agents
+/// root: `<agents_root>/<agentId>/agent/openclaw-agent.sqlite`.
+///
+/// OpenClaw resolves the file as
+/// `dirname(<state dir>/state)/agents/<agentId>/agent/openclaw-agent.sqlite`
+/// (see `resolveOpenClawAgentSqlitePath` upstream), so relative to the agents
+/// root the scan already walks for JSONL transcripts it is a fixed two-level
+/// offset. Only the exact basename is accepted: the `-wal`/`-shm` sidecars are
+/// read through the main file, and `incognito-openclaw-agent.sqlite` is a
+/// lexical sentinel OpenClaw never persists.
+///
+/// Returns a sorted list so downstream dedup order is deterministic.
+pub fn discover_openclaw_agent_dbs(agents_root: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(agents_root) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let agent_dir = entry.path();
+            // `is_dir` follows symlinks, so a linked agent directory counts.
+            if !agent_dir.is_dir() {
+                return None;
+            }
+            let db_path = agent_dir
+                .join("agent")
+                .join(crate::sessions::openclaw::OPENCLAW_AGENT_DB_FILENAME);
+            db_path.is_file().then_some(db_path)
+        })
+        .collect();
+
+    dbs.sort_unstable();
+    dbs
 }
 
 /// Discover every OpenCode SQLite database under the opencode data dir.
@@ -1782,9 +1840,18 @@ fn scan_all_clients_with_env_strategy_inner(
     // Desktop ACP filenames need Devin CLI database titles to recover their
     // session/model/workspace metadata. Treat configured CLI roots as lookup
     // inputs for a Desktop-only scan without enabling CLI usage output.
-    let mut enabled_with_devin_lookup = enabled.clone();
+    let mut enabled_with_lookups = enabled.clone();
     if enabled.contains(&ClientId::DevinDesktop) {
-        enabled_with_devin_lookup.insert(ClientId::DevinCli);
+        enabled_with_lookups.insert(ClientId::DevinCli);
+    }
+    // OpenClaw can run Codex app-server against the user's own Codex home
+    // (`appServer.homeScope: "user"`), and the rollouts it leaves there are
+    // OpenClaw's usage (their `session_meta.originator` names OpenClaw). Treat
+    // the Codex roots as lookup inputs for an OpenClaw-only scan: the parse
+    // lanes hand those rollouts to the openclaw lane and the client filter
+    // drops the rest, so Codex usage is never output unrequested.
+    if enabled.contains(&ClientId::OpenClaw) {
+        enabled_with_lookups.insert(ClientId::Codex);
     }
 
     let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
@@ -1798,6 +1865,9 @@ fn scan_all_clients_with_env_strategy_inner(
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
     let mut devin_cli_roots: Vec<PathBuf> = Vec::new();
+    // Every OpenClaw agents root the scan covers; each is also searched for
+    // per-agent SQLite transcript databases once the roots are settled.
+    let mut openclaw_agent_roots: Vec<PathBuf> = Vec::new();
 
     for client_id in &enabled {
         if matches!(
@@ -1842,13 +1912,16 @@ fn scan_all_clients_with_env_strategy_inner(
         push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &grok_sessions);
     }
 
-    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_devin_lookup) {
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_lookups) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
         if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
         } else {
+            if client_id == ClientId::OpenClaw {
+                openclaw_agent_roots.push(path.clone());
+            }
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
@@ -1941,7 +2014,7 @@ fn scan_all_clients_with_env_strategy_inner(
     // intentionally ignored when an explicit --home override disables env roots.
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled_with_devin_lookup) {
+        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled_with_lookups) {
             warn_if_escapes_home(Path::new(home_dir), client_id, &PathBuf::from(&path));
             if client_id == ClientId::DevinCli {
                 devin_cli_roots.push(PathBuf::from(path));
@@ -1952,6 +2025,9 @@ fn scan_all_clients_with_env_strategy_inner(
                     &PathBuf::from(path),
                 );
             } else {
+                if client_id == ClientId::OpenClaw {
+                    openclaw_agent_roots.push(PathBuf::from(&path));
+                }
                 push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
             }
         }
@@ -2065,7 +2141,7 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if enabled.contains(&ClientId::Codex) {
+    if enabled_with_lookups.contains(&ClientId::Codex) {
         // Codex: ~/.codex/sessions/**/*.jsonl
         let codex_home = if use_env_roots {
             std::env::var("CODEX_HOME").unwrap_or_else(|_| join_native(home_dir, ".codex"))
@@ -2115,10 +2191,14 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::OpenClaw) {
-        // OpenClaw transcripts: ~/.openclaw/agents/**/*.jsonl
+        // OpenClaw: legacy transcripts and published archives are JSONL files
+        // under ~/.openclaw/agents/**/*.jsonl*; current OpenClaw keeps live
+        // transcripts in ~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite.
+        // Every agents root feeds both.
         let openclaw_path = ClientId::OpenClaw
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        openclaw_agent_roots.push(PathBuf::from(&openclaw_path));
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -2127,29 +2207,16 @@ fn scan_all_clients_with_env_strategy_inner(
         );
 
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
-        let clawdbot_path = join_native(home_dir, ".clawdbot/agents");
-        push_unique_scan_task(
-            &mut tasks,
-            &mut seen_scan_roots,
-            ClientId::OpenClaw,
-            clawdbot_path,
-        );
-
-        let moltbot_path = join_native(home_dir, ".moltbot/agents");
-        push_unique_scan_task(
-            &mut tasks,
-            &mut seen_scan_roots,
-            ClientId::OpenClaw,
-            moltbot_path,
-        );
-
-        let moldbot_path = join_native(home_dir, ".moldbot/agents");
-        push_unique_scan_task(
-            &mut tasks,
-            &mut seen_scan_roots,
-            ClientId::OpenClaw,
-            moldbot_path,
-        );
+        for legacy_relative in [".clawdbot/agents", ".moltbot/agents", ".moldbot/agents"] {
+            let legacy_path = join_native(home_dir, legacy_relative);
+            openclaw_agent_roots.push(PathBuf::from(&legacy_path));
+            push_unique_scan_task(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::OpenClaw,
+                legacy_path,
+            );
+        }
     }
 
     if enabled.contains(&ClientId::PrimeAgent) {
@@ -2414,6 +2481,23 @@ fn scan_all_clients_with_env_strategy_inner(
         if zcode_db_path.is_file() {
             result.zcode_db = Some(zcode_db_path);
         }
+    }
+
+    if enabled.contains(&ClientId::OpenClaw) {
+        // Every agents root registered above (default, legacy rebrands, extra
+        // roots) can hold per-agent SQLite transcript stores. Dedup by
+        // canonical path so a configured root that aliases the default one
+        // cannot present the same database twice.
+        let mut seen_openclaw_dbs: HashSet<PathBuf> = HashSet::new();
+        for root in &openclaw_agent_roots {
+            for db_path in discover_openclaw_agent_dbs(root) {
+                let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+                if seen_openclaw_dbs.insert(key) {
+                    result.openclaw_dbs.push(db_path);
+                }
+            }
+        }
+        result.openclaw_dbs.sort_unstable();
     }
 
     if enabled.contains(&ClientId::CherryStudio) {
@@ -2686,6 +2770,31 @@ fn scan_all_clients_with_env_strategy_inner(
         let key = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
         if seen.insert((ClientId::CherryStudio, key)) {
             result.get_mut(ClientId::CherryStudio).push(file);
+        }
+    }
+
+    // A Codex rollout inside an OpenClaw agent's `codex-home` is OpenClaw's
+    // usage by location, and the openclaw lane reads it as such. The Codex
+    // roots can overlap that directory — `CODEX_HOME` pointed at it, or an
+    // extra Codex scan root inside the agents tree — and the per-client dedup
+    // above would then list the same file for both clients, each lane
+    // emitting it under its own client. Ownership is decided once, here: a
+    // rollout the OpenClaw scan claims never reaches the codex lane.
+    if enabled.contains(&ClientId::OpenClaw) && !result.get(ClientId::Codex).is_empty() {
+        let openclaw_rollouts: HashSet<PathBuf> = result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .filter(|path| {
+                crate::sessions::openclaw::classify_openclaw_jsonl(path)
+                    == crate::sessions::openclaw::OpenClawJsonlKind::CodexRollout
+            })
+            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        if !openclaw_rollouts.is_empty() {
+            result.get_mut(ClientId::Codex).retain(|path| {
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                !openclaw_rollouts.contains(&key)
+            });
         }
     }
 
@@ -3875,6 +3984,25 @@ mod tests {
         // Even if an index exists, we should count JSONL transcripts (not sessions.json only)
         let mut index = File::create(openclaw_sessions.join("sessions.json")).unwrap();
         index.write_all(b"{}").unwrap();
+    }
+
+    /// The other copies OpenClaw leaves beside a transcript: a doctor backup
+    /// and a quarantined file (both transcript format), and the Codex
+    /// plugin's binding sidecar (JSON metadata, not a transcript).
+    fn setup_mock_openclaw_transcript_copies(base: &std::path::Path) {
+        let openclaw_sessions = base.join(".openclaw/agents/main/sessions");
+        fs::create_dir_all(&openclaw_sessions).unwrap();
+        for name in [
+            "session-backup.jsonl.pre-doctor-openai-codex-repair-2026-07-01T15-35-38-171Z.bak",
+            "session-broken.jsonl.broken-empty-input-20260428T0728Z",
+            // A backup whose repair name happens to mention json is still a
+            // transcript; only a suffix that *ends* in .json is metadata.
+            "session-json.jsonl.pre-doctor-json-shape-repair-2026-07-01T15-35-38-171Z.bak",
+            "session-abc.jsonl.codex-app-server.json.migrated",
+            "session-abc.jsonl.codex-app-server.json",
+        ] {
+            File::create(openclaw_sessions.join(name)).unwrap();
+        }
     }
 
     fn setup_mock_roocode_dir(base: &std::path::Path) {
@@ -5602,6 +5730,239 @@ mod tests {
             .get(ClientId::OpenClaw)
             .iter()
             .any(|path| path.ends_with("session-reset.jsonl.reset.456")));
+    }
+
+    /// Mirror the current OpenClaw layout beside the JSONL one:
+    /// `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`, with the
+    /// sidecars and sentinels that live next to a real store.
+    fn setup_mock_openclaw_sqlite_agents(base: &std::path::Path) -> Vec<PathBuf> {
+        let agents = base.join(".openclaw/agents");
+        let main_db = agents.join("main/agent/openclaw-agent.sqlite");
+        let work_db = agents.join("work/agent/openclaw-agent.sqlite");
+        for db in [&main_db, &work_db] {
+            fs::create_dir_all(db.parent().unwrap()).unwrap();
+            File::create(db).unwrap();
+        }
+        // WAL/SHM sidecars are read through the main file, and the incognito
+        // basename is a process-held sentinel, never a store to parse.
+        File::create(agents.join("main/agent/openclaw-agent.sqlite-wal")).unwrap();
+        File::create(agents.join("main/agent/openclaw-agent.sqlite-shm")).unwrap();
+        File::create(
+            agents
+                .join("main/agent")
+                .join(crate::sessions::openclaw::OPENCLAW_INCOGNITO_AGENT_DB_FILENAME),
+        )
+        .unwrap();
+        // A partial install (agent dir without a store), an agent with only
+        // legacy sessions, and a stray file at the agents root.
+        fs::create_dir_all(agents.join("empty/agent")).unwrap();
+        fs::create_dir_all(agents.join("legacy-only/sessions")).unwrap();
+        File::create(agents.join("README.txt")).unwrap();
+        // The Codex home OpenClaw gives its Codex app-server harness, with a
+        // rollout the openclaw lane reads and a history file it ignores.
+        let codex_sessions = agents.join("main/agent/codex-home/sessions/2026/08/30");
+        fs::create_dir_all(&codex_sessions).unwrap();
+        File::create(
+            codex_sessions
+                .join("rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl"),
+        )
+        .unwrap();
+        File::create(agents.join("main/agent/codex-home/history.jsonl")).unwrap();
+        vec![main_db, work_db]
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_openclaw_agent_sqlite_databases() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        let expected = setup_mock_openclaw_sqlite_agents(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
+        assert_eq!(result.openclaw_dbs, expected);
+        // JSONL discovery is unchanged (the three transcripts plus the two
+        // files under codex-home, which the lane classifies), and no SQLite
+        // file leaks into it.
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 5);
+        assert!(result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("sqlite")));
+        assert!(result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .any(|path| path.components().any(|c| c.as_os_str() == "codex-home")));
+    }
+
+    #[test]
+    fn test_scan_all_clients_openclaw_sqlite_only_discovered_when_openclaw_enabled() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_sqlite_agents(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
+        assert!(result.openclaw_dbs.is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_openclaw_sqlite_under_legacy_and_extra_roots() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let default_dbs = setup_mock_openclaw_sqlite_agents(home);
+
+        let legacy_db = home.join(".moltbot/agents/main/agent/openclaw-agent.sqlite");
+        fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();
+        File::create(&legacy_db).unwrap();
+
+        let imported_root = home.join("imports/imac/openclaw/agents");
+        let imported_db = imported_root.join("main/agent/openclaw-agent.sqlite");
+        fs::create_dir_all(imported_db.parent().unwrap()).unwrap();
+        File::create(&imported_db).unwrap();
+
+        let mut settings = ScannerSettings::default();
+        settings.extra_scan_paths.insert(
+            "openclaw".to_string(),
+            vec![
+                imported_root.clone(),
+                // Aliases the default root: must not present its stores twice.
+                home.join(".openclaw/agents"),
+            ],
+        );
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+            &settings,
+        );
+
+        let mut expected = default_dbs;
+        expected.push(legacy_db);
+        expected.push(imported_db);
+        expected.sort_unstable();
+        assert_eq!(result.openclaw_dbs, expected);
+    }
+
+    #[test]
+    fn test_discover_openclaw_agent_dbs_missing_root_is_empty() {
+        let dir = TempDir::new().unwrap();
+        assert!(discover_openclaw_agent_dbs(&dir.path().join("nope")).is_empty());
+        // A file where the agents root should be is not an error either.
+        let file_root = dir.path().join("agents");
+        File::create(&file_root).unwrap();
+        assert!(discover_openclaw_agent_dbs(&file_root).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_openclaw_transcript_copies() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        setup_mock_openclaw_transcript_copies(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
+        let names: Vec<String> = result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with(".bak")), "{names:?}");
+        assert!(
+            names.iter().any(|n| n.contains(".jsonl.broken-")),
+            "{names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains(".pre-doctor-json-shape-repair-")),
+            "a backup suffix mentioning json is still a transcript: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".codex-app-server.json")),
+            "binding sidecars are JSON metadata, not transcripts: {names:?}"
+        );
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 6);
+    }
+
+    #[test]
+    fn test_scan_all_clients_openclaw_request_scans_codex_roots_as_lookup() {
+        // OpenClaw can run Codex app-server against the user's own Codex home,
+        // and the rollouts it leaves there are OpenClaw's usage. An
+        // openclaw-only request therefore scans the Codex roots too; the
+        // parse lanes keep only the OpenClaw-originated ones.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        let codex_sessions = home.join(".codex/sessions/2026/08/30");
+        fs::create_dir_all(&codex_sessions).unwrap();
+        File::create(
+            codex_sessions
+                .join("rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl"),
+        )
+        .unwrap();
+
+        let openclaw_only = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
+        assert_eq!(openclaw_only.get(ClientId::Codex).len(), 1);
+
+        // Unrelated clients do not pull the Codex roots in.
+        let claude_only = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
+        assert!(claude_only.get(ClientId::Codex).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_openclaw_codex_home_rollout_is_listed_under_openclaw_only() {
+        // `CODEX_HOME` aimed at an agent's codex-home makes the Codex roots
+        // overlap the OpenClaw agents tree. The rollout there is OpenClaw's by
+        // location, and the scan lists it for openclaw alone; listing it for
+        // codex as well would have each lane emit it under its own client.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+        let codex_home = home.join(".openclaw/agents/main/agent/codex-home");
+        let rollout = codex_home.join(
+            "sessions/2026/08/30/rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl",
+        );
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        File::create(&rollout).unwrap();
+        let mut env = EnvGuard::capture(&["CODEX_HOME"]);
+        env.set("CODEX_HOME", &codex_home);
+
+        let both = scan_without_extra_dirs(
+            home.to_str().unwrap(),
+            &["codex".to_string(), "openclaw".to_string()],
+        );
+        assert!(
+            both.get(ClientId::Codex).is_empty(),
+            "{:?}",
+            both.get(ClientId::Codex)
+        );
+        assert!(both.get(ClientId::OpenClaw).contains(&rollout));
+
+        // Without openclaw in the request the agents tree is never walked,
+        // and the directory the user pointed Codex at is Codex's.
+        let codex_only = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
+        assert_eq!(codex_only.get(ClientId::Codex), &vec![rollout.clone()]);
     }
 
     #[test]

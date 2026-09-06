@@ -1066,9 +1066,21 @@ pub fn parser_generation() -> u64 {
 
 fn parser_version(client: ClientId) -> u32 {
     match client {
-        // v1->v2: compressed OpenClaw archives were scanned as plain JSONL and
-        // cached as empty. Their bytes do not change when decoding is fixed.
-        ClientId::OpenClaw => 2,
+        // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
+        // JSONL and cached as empty. Their bytes do not change when decoding is
+        // fixed, so only the parser version can retire those entries.
+        // v2->v3 (#1278): OpenClaw messages now carry a stable dedup key built
+        // from the event (`openclaw:<event id>:<timestamp>:<input>:<output>`,
+        // or `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
+        // Codex app-server turn) that lets a transcript migrated into the
+        // per-agent SQLite store collapse against its retained legacy JSONL
+        // copy, and lets the lane match a mirror row to the rollout's record of
+        // its turn. Entries below v3 have no key, so a warm JSONL entry would
+        // count beside the SQLite rows for the same events. `reasoningTokens`
+        // is also split out of `output` now. This takes its own number rather
+        // than reusing 2: #1285 landed first, and a warm v2 cache it wrote has
+        // neither the keys nor the split.
+        ClientId::OpenClaw => 3,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -1077,7 +1089,16 @@ fn parser_version(client: ClientId) -> u32 {
         // carried in both. Without this bump an existing cache keeps replaying
         // pre-split rows, and those sessions stay double-priced while looking
         // fixed.
-        ClientId::Codex => 7,
+        // v7->v8: rollouts whose `session_meta.originator` is OpenClaw now
+        // leave the parser tagged `client = "openclaw"` and keyed by the Codex
+        // thread id, so the openclaw lane can own them. A v7 entry for such a
+        // file holds them tagged `codex` and would keep counting them there,
+        // beside OpenClaw's own rows. The cached parse state also records
+        // which turns the rollout emitted usage for (`turn_coverage`), which
+        // the openclaw lane matches OpenClaw's per-turn mirror rows against;
+        // an entry without it would let a mirror row count beside the
+        // rollout's own record of the same turn.
+        ClientId::Codex => 8,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -3299,9 +3320,10 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
-        // bucket. The bump is what stops an existing cache from replaying
-        // pre-split rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 7);
+        // bucket, and v7->v8 retags rollouts OpenClaw originated as openclaw.
+        // Each bump is what stops an existing cache from replaying the old
+        // rows, so it has to be asserted rather than assumed.
+        assert_eq!(parser_version(ClientId::Codex), 8);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -3335,6 +3357,15 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v3_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
+    /// the reasoning split need v3: a warm v2 cache carries neither, and
+    /// reusing 2 would leave every reader who already scanned under #1285
+    /// unmigrated.
+    #[test]
+    fn test_openclaw_parser_version_invalidates_keyless_v2_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 3);
     }
 
     #[test]
