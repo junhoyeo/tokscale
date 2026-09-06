@@ -1090,18 +1090,21 @@ mod tests {
     /// check rules out; it bounds a hang, not how fast the refusal arrives.
     #[test]
     fn a_port_that_refuses_ends_the_round_on_the_refusal() {
-        let released = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            listener.local_addr().expect("addr").port()
-        };
-
+        // Port 0 is the one port nothing can ever serve: bind(0) asks the
+        // kernel to pick a port, so no socket is bound to 0 itself, and a
+        // connect to it fails at once on every platform. Any real port is a
+        // race -- an ephemeral port released before the round is free for a
+        // neighbouring test to bind, and a responder there would hand the
+        // round a summary. Holding the port bound-but-not-listening is not a
+        // portable refusal either: Linux resets the SYN, macOS drops it and
+        // the connect waits out its retransmits.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let started = std::time::Instant::now();
         let summary = runtime.block_on(race_for_quota_with(
-            vec![released],
+            vec![0],
             ROUND_STALL_GUARD,
             &quota_client,
         ));
@@ -1109,7 +1112,7 @@ mod tests {
 
         assert!(
             summary.is_none(),
-            "nothing listens on {released}, so a refused connection cannot yield a summary"
+            "nothing can serve port 0, so the round cannot yield a summary"
         );
         assert!(
             elapsed < ROUND_STALL_GUARD,
