@@ -846,8 +846,10 @@ fn last_slug_segment(slug: &str) -> Option<String> {
 /// same map to real directory names to find which one the slug came from, which
 /// makes the recovered path exact rather than a guess.
 ///
-/// Returns `None` for keys that are already real paths, or when no directory on
-/// disk matches (a project whose folder has since been deleted or renamed).
+/// Returns `None` for keys that are already real paths, when no directory on
+/// disk matches (a project whose folder has since been deleted or renamed), and
+/// when more than one does (`a.b` beside `a-b`): the answer is adopted as a
+/// grouping identity, so a guess would move usage between projects.
 pub fn decode_claude_project_slug(key: &str) -> Option<String> {
     // A real path (already usable) keeps its separators; `normalize_workspace_key`
     // rewrites Windows backslashes to `/`, so one check covers both platforms.
@@ -857,7 +859,10 @@ pub fn decode_claude_project_slug(key: &str) -> Option<String> {
 
     let (root, remaining) = slug_root_and_remainder(key)?;
     let mut budget = SLUG_DECODE_STEP_BUDGET;
-    resolve_slug_under(&root, remaining, &mut budget)
+    match resolve_slug_under(&root, remaining, &mut budget) {
+        SlugResolution::Resolved(path) => Some(path),
+        SlugResolution::DeadEnd | SlugResolution::Refused => None,
+    }
 }
 
 /// Filesystem probes one slug decode may spend before it gives up.
@@ -908,14 +913,36 @@ fn slug_root_and_remainder(key: &str) -> Option<(PathBuf, &str)> {
     ))
 }
 
+/// What walking one slug remainder under one directory found.
+///
+/// `DeadEnd` and `Refused` are kept apart on purpose. A parent that hears
+/// `DeadEnd` from a child keeps trying that child's siblings; `Refused` means
+/// the slug already fits more than one directory somewhere below (or the walk
+/// ran out of budget before that could be ruled out), and no sibling can make
+/// the answer unique again. When both were `None` a tie found one level down
+/// read as a dead end, and the parent handed back whichever other sibling
+/// completed — a third directory that happened to fit became the grouping
+/// identity for usage from all three.
+#[derive(Debug, PartialEq, Eq)]
+enum SlugResolution {
+    /// Exactly one directory under this node completes the slug.
+    Resolved(String),
+    /// Nothing under this node completes the slug.
+    DeadEnd,
+    /// More than one directory completes the slug, or the walk could not
+    /// finish checking, so no result from this subtree can be shown unique.
+    Refused,
+}
+
 /// Walk `remaining` against the real directories under `dir`.
 ///
 /// A dash in the slug is ambiguous — it may be a `/` boundary, or part of a
 /// directory name that genuinely contains `-`, `.` or `+` — so a single greedy
 /// pass mis-resolves paths like `claude-witness` (one directory, not two). This
-/// consumes one real directory at a time and backtracks when a branch dead-ends,
-/// which makes the result exact wherever the directory still exists on disk.
-fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<String> {
+/// consumes one real directory at a time, backtracks when a branch dead-ends,
+/// and refuses when two branches complete at any depth of the walk, which
+/// makes every result it does give exact.
+fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> SlugResolution {
     if remaining.is_empty() {
         // Hand back a normalized key, not a native path. Every consumer compares
         // against forward-slash markers (`workspace_repo_root` looks for
@@ -923,16 +950,23 @@ fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<S
         // returning the native spelling would silently defeat worktree rollup and
         // make a decoded key unequal to the same directory recorded by a client
         // that stores a real path.
-        return normalize_workspace_key(&dir.to_string_lossy());
+        return match normalize_workspace_key(&dir.to_string_lossy()) {
+            Some(path) => SlugResolution::Resolved(path),
+            None => SlugResolution::DeadEnd,
+        };
     }
 
     // One probe for the directory listing this node is about to make.
     if !spend_slug_budget(budget, 1) {
-        return None;
+        return SlugResolution::Refused;
     }
 
-    let matched: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
+    // A directory this process cannot list is a dead end, not a refusal:
+    // nothing under it was shown to fit the slug.
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return SlugResolution::DeadEnd;
+    };
+    let matched: Vec<String> = entries
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         // Name filter first: it is pure string work, and it rejects nearly every
@@ -944,11 +978,12 @@ fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<S
     // The `stat` per survivor is the other unbounded cost here, so charge for it
     // before paying it.
     if !spend_slug_budget(budget, matched.len() as u32) {
-        return None;
+        return SlugResolution::Refused;
     }
 
-    // Longest candidate first: prefer `IngTian.github.io` over a shorter
-    // `IngTian` that happens to also exist.
+    // Longest candidate first: `IngTian.github.io` is the likelier match when a
+    // shorter `IngTian` also exists, so the common case completes before the
+    // budget can run out on the long shot.
     let mut candidates: Vec<String> = matched
         .into_iter()
         // `Path::is_dir` follows symlinks where `DirEntry::file_type` would not.
@@ -956,20 +991,42 @@ fn resolve_slug_under(dir: &Path, remaining: &str, budget: &mut u32) -> Option<S
         // through `/var -> /private/var`, and users symlink project roots.
         .filter(|name| dir.join(name).is_dir())
         .collect();
-    // Ties are real: `a.b` and `a-b` encode identically and nothing on disk
-    // distinguishes them, so order deterministically instead of trusting
-    // readdir order.
+    // Order deterministically instead of trusting readdir order, so a budget
+    // that runs out refuses the same slug on every run.
     candidates.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
+    // Every candidate is walked, not just the first that completes. `a.b` and
+    // `a-b` encode identically, and when both exist and both complete the slug
+    // nothing on disk says which one Claude Code was launched from. The decoded
+    // path becomes the grouping identity under worktree rollup, so answering
+    // with either would book that usage against a directory the slug may never
+    // have named. A tie here is still fine when only one branch completes.
+    let mut resolved: Option<String> = None;
     for name in candidates {
         let consumed = slugify_path_segment(&name).len() + 1;
-        if let Some(resolved) = resolve_slug_under(&dir.join(&name), &remaining[consumed..], budget)
-        {
-            return Some(resolved);
+        match resolve_slug_under(&dir.join(&name), &remaining[consumed..], budget) {
+            SlugResolution::Resolved(path) => {
+                if resolved.is_some() {
+                    return SlugResolution::Refused;
+                }
+                resolved = Some(path);
+            }
+            // A refusal below is final no matter where it came from. A tie under
+            // this child already fits the slug to two directories, and the
+            // siblings still unwalked can only add fits, never remove them; a
+            // budget that ran dry under it left those siblings unchecked. Either
+            // way nothing this level finds afterwards can be shown to be unique,
+            // so it must not fall through to be walked as if the child had
+            // merely dead-ended.
+            SlugResolution::Refused => return SlugResolution::Refused,
+            SlugResolution::DeadEnd => {}
         }
     }
 
-    None
+    match resolved {
+        Some(path) => SlugResolution::Resolved(path),
+        None => SlugResolution::DeadEnd,
+    }
 }
 
 /// Whether `remaining` starts with `-` + the encoded form of `name`, ending on a
@@ -1286,9 +1343,14 @@ mod tests {
             assert!(Path::new(&decoded).is_dir(), "decoded to {decoded}");
         }
 
-        // An exhausted budget refuses rather than returning a wrong path.
+        // An exhausted budget refuses rather than returning a wrong path, and
+        // says so as a refusal rather than a dead end, so a parent level cannot
+        // walk past it to a sibling.
         let mut spent = 0u32;
-        assert_eq!(resolve_slug_under(&root, "-a-b", &mut spent), None);
+        assert_eq!(
+            resolve_slug_under(&root, "-a-b", &mut spent),
+            SlugResolution::Refused
+        );
 
         // And an ordinary slug still decodes with the budget in place.
         let plain = root.join("devpro/claude-witness");
@@ -1659,6 +1721,67 @@ mod tests {
         assert_eq!(super::slug_root_and_remainder("Users-me-app"), None);
         assert_eq!(super::slug_root_and_remainder("1--Users-me"), None);
         assert_eq!(super::slug_root_and_remainder(""), None);
+    }
+
+    #[test]
+    fn decode_claude_project_slug_refuses_encode_identical_siblings() {
+        let (_temp, root) = canonical_tempdir();
+        // `.` and `-` both encode to `-`, so these two directories are one slug.
+        std::fs::create_dir_all(root.join("a-b")).unwrap();
+        std::fs::create_dir_all(root.join("a.b")).unwrap();
+        let slug = slug_for(&root.join("a.b"));
+        assert_eq!(slug, slug_for(&root.join("a-b")));
+
+        // Nothing on disk says which one Claude Code was launched from, and a
+        // guess becomes a grouping identity downstream, so refuse.
+        assert_eq!(decode_claude_project_slug(&slug), None);
+
+        // A deeper segment only one sibling can satisfy settles it.
+        let nested = root.join("a-b/src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            decode_claude_project_slug(&slug_for(&nested)),
+            normalize_workspace_key(&nested.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn decode_claude_project_slug_refuses_a_tie_below_a_unique_sibling() {
+        // `a-b/c`, `a/b-c` and `a/b.c` all encode to one slug. Walked
+        // longest-first, `a-b` completes on its own; `a` then finds two
+        // completions underneath it. That tie used to come back as `None`,
+        // which the parent read as a dead end, so the slug decoded to `a-b/c`
+        // and Claude Code usage from both `a/` directories was booked there.
+        let (_temp, root) = canonical_tempdir();
+        for dir in ["a-b/c", "a/b-c", "a/b.c"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let slug = slug_for(&root.join("a/b.c"));
+        assert_eq!(slug, slug_for(&root.join("a/b-c")));
+        assert_eq!(slug, slug_for(&root.join("a-b/c")));
+
+        assert_eq!(decode_claude_project_slug(&slug), None);
+        // What the Projects tab consumes as the grouping identity.
+        let mut labeler = crate::WorkspaceLabeler::default();
+        assert_eq!(labeler.repo_root(&slug), None);
+    }
+
+    #[test]
+    fn decode_claude_project_slug_refuses_a_tie_under_the_first_candidate() {
+        // Mirror shape: the tie sits under `a-b`, the candidate walked first,
+        // and `a/b-c-d` then completes alone. Same swallowed tie in the other
+        // order: the slug decoded to `a/b-c-d`.
+        let (_temp, root) = canonical_tempdir();
+        for dir in ["a-b/c-d", "a-b/c.d", "a/b-c-d"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let slug = slug_for(&root.join("a-b/c.d"));
+        assert_eq!(slug, slug_for(&root.join("a-b/c-d")));
+        assert_eq!(slug, slug_for(&root.join("a/b-c-d")));
+
+        assert_eq!(decode_claude_project_slug(&slug), None);
+        let mut labeler = crate::WorkspaceLabeler::default();
+        assert_eq!(labeler.repo_root(&slug), None);
     }
 
     #[test]

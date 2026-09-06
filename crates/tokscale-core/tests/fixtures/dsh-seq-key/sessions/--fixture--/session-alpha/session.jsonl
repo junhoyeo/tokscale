@@ -1,0 +1,7 @@
+{"type":"session","id":"session-alpha","cwd":"/fixture","createdAt":1780000000000}
+{"type":"request/header","seq":1,"time":1780000000001,"data":{"header":{"config":{"provider":"fixture-provider","model":"fixture-model"}}}}
+{"type":"user/message","seq":2,"time":1780000000002,"data":{"turn":0}}
+{"type":"assistant/message","seq":3,"time":1780000000003,"data":{"turn":0,"step":0,"message":{"id":"msg-alpha","source":{"provider":"fixture-provider","model":"fixture-model"}},"usage":{"inputTokens":11,"outputTokens":2,"cacheReadTokens":110,"cacheWriteTokens":1}}}
+{"type":"compaction/start","seq":6,"time":1780000000006,"data":{"compactionId":"cmp-alpha","turn":null}}
+{"type":"compaction/summary","seq":7,"time":1780000000007,"data":{"compactionId":"cmp-alpha","sourceCommandId":"cmd-cmp-alpha","provider":"fixture-provider","model":"fixture-model","shadowedTokenCount":1234,"summary":"fixture summary text","usage":{"inputTokens":307,"outputTokens":31,"cacheReadTokens":3070,"cacheWriteTokens":7}}}
+{"type":"compaction/end","seq":8,"time":1780000000008,"data":{"compactionId":"cmp-alpha","turn":null}}

@@ -662,6 +662,10 @@ impl TryFrom<CachedUsageData> for UsageData {
             // worth round-tripping through the on-disk cache); the first
             // foreground refresh after cache hit will populate it.
             sessions: Vec::new(),
+            // Projects follow the sessions/minutely precedent: recomputed on
+            // each load so the cache schema does not need a version bump; the
+            // first background refresh after cache hit will populate them.
+            projects: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
