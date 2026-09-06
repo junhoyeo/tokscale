@@ -1077,10 +1077,12 @@ fn parser_version(client: ClientId) -> u32 {
         // copy, and lets the lane match a mirror row to the rollout's record of
         // its turn. Entries below v3 have no key, so a warm JSONL entry would
         // count beside the SQLite rows for the same events. `reasoningTokens`
-        // is also split out of `output` now. This takes its own number rather
-        // than reusing 2: #1285 landed first, and a warm v2 cache it wrote has
-        // neither the keys nor the split.
-        ClientId::OpenClaw => 3,
+        // is also split out of `output` now.
+        // v3->v4 (#1293): compaction checkpoint snapshots are no longer scan
+        // sources. Source-cache entries cannot be reached once discovery omits
+        // them, but parser_generation must change so the source-agnostic TUI
+        // aggregate cache cannot replay totals that included those snapshots.
+        ClientId::OpenClaw => 4,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3359,13 +3361,17 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kimi), 4);
     }
 
-    /// #1285 took v2 for the compressed-archive decode, so the dedup keys and
-    /// the reasoning split need v3: a warm v2 cache carries neither, and
-    /// reusing 2 would leave every reader who already scanned under #1285
-    /// unmigrated.
+    /// Three retirements in a row, each needing its own number. #1285 took v2
+    /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
+    /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
+    /// split, so reusing 2 would have left every reader who already scanned
+    /// under #1285 unmigrated. #1293 needs v4 for the same reason one step
+    /// on: dropping checkpoint snapshots from discovery cannot reach the
+    /// source cache, so only the version can retire TUI aggregates that
+    /// still include them.
     #[test]
-    fn test_openclaw_parser_version_invalidates_keyless_v2_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 3);
+    fn test_openclaw_parser_version_invalidates_v3_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 4);
     }
 
     #[test]
