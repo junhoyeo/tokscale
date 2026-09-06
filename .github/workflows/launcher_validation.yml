@@ -20,6 +20,7 @@ on:
       - "bun.lock"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "crates/**"
   pull_request:
     branches: [main]
