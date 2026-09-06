@@ -3,7 +3,7 @@
 The fixture behind the DSH v3 -> v4 change, where usage moved onto the model
 the provider reported serving (`source.replayState.response.responseModel`)
 instead of the model the request configured (`source.model`). Two DSH
-sessions, three assistant calls, one root:
+sessions, three assistant calls, two roots (one per session):
 
 - `session-echo` — one call the provider substituted (`fixture-model`
   requested, `fixture-served-model` served) and one it answered as requested,

@@ -280,8 +280,33 @@ if stored is not None:
     else:
         fate = "loaded"
 
+# Each shard meets its own fate. The canary lives in shard-01; a build that
+# serves shard-00 and discards shard-01 parses only the canary again, and the
+# served report must show that row fresh while everything else is served.
+# `discards_canary_shard` is gated like `rejects_foreign`, on a cache another
+# stub wrote: this build keeps its own shards, so the gate's control leg D
+# still serves the canary and the canary stays usable as evidence against B.
+canary_shard = shards / "shard-01.bin"
+canary_discarded = False
+if fate in ("loaded", "migrated") and canary_shard.exists():
+    canary_format = canary_shard.read_bytes()[0]
+    if config.get("discards_canary_shard") and writer.read_text() != config["label"]:
+        canary_discarded = True
+    elif canary_format == config.get("stale_format") or canary_format == config.get("invalid_format"):
+        canary_discarded = True
+
 if fate in ("loaded", "migrated"):
     doc = json.loads(served_report.read_text())
+    if canary_discarded:
+        fresh = canary_row()
+        entries = [entry for entry in doc["entries"] if entry["model"] != CANARY_MODEL]
+        if fresh is not None:
+            entries.append(fresh)
+        doc = compose(entries)
+        # A discard-and-reparse rewrites the shard it threw away.
+        canary_shard.write_bytes(
+            envelope(entry_bytes(canary, "dsh:msg:canary:stub") + b"\x02")
+        )
     if config.get("sees_edit"):
         # A fingerprint that catches the in-place edit: the canary row alone is
         # parsed again and its shard rewritten, everything else is served.
@@ -330,6 +355,8 @@ STUBS = {
     "this-v5-migrates": dict(serves=5, writes=5, cold="current", migrates_format=STUB_LEGACY_CACHE_FORMAT),
     "this-v5-invalid6": dict(serves=5, writes=5, cold="current", invalid_format=STUB_LEGACY_CACHE_FORMAT),
     "this-v5-hashes": dict(serves=5, writes=5, cold="current", sees_edit=True),
+    # Serves shard-00 and throws shard-01 -- the canary's own shard -- away.
+    "this-v5-discards-canary": dict(serves=5, writes=5, cold="current", discards_canary_shard=True),
     "this-v4-current": dict(serves=4, writes=4, cold="current"),
     "prev-v5-current": dict(serves=5, writes=5, cold="current"),
     "prev-v5-format6": dict(serves=5, writes=5, cold="current", format=STUB_LEGACY_CACHE_FORMAT),
@@ -419,6 +446,15 @@ expect "an unpinned leg that discards a cache it owns fails" \
   "can no longer fail on a missing parser-version bump"
 refute_in_failure "  ...and not because any leg disagreed" "differs"
 
+# A cache is many shards and `read_shard_with_limit` decides each one's fate on
+# its own. A build that serves every shard but the one holding the canary
+# parses only that transcript again -- one shard lost among many -- and the
+# cache-wide picture still looks served. The canary is what sees it, and this
+# is the case that keeps the stub honest about per-shard fates.
+expect "an unpinned leg that discards one shard of a cache it owns fails" \
+  1 this-v5-discards-canary prev-v5-current unpinned \
+  "parsed the canary transcript again"
+refute_in_failure "  ...and not because any leg disagreed" "differs"
 # ...and the same discard one cache format back, where the bytes cannot see it.
 # A CACHE_FORMAT_VERSION bump with no legacy branch for the released format
 # reads every released shard as Stale, silently, and rewrites it in the new
