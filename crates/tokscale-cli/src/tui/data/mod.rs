@@ -2776,6 +2776,103 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_projects_keep_a_nested_ambiguous_claude_slug_separate() {
+        // The sibling case above is the shallow shape. Here `a-b/c`, `a/b-c` and
+        // `a/b.c` share one slug, and the tie is found a level below `a`, after
+        // `a-b/c` has already completed. The decoder used to report that deeper
+        // tie as a dead end, so the slug decoded to `a-b/c` and the Claude Code
+        // usage merged into it: 3 rows, `a-b/c` at $11, and every total still
+        // reconciled.
+        let dir = TempDir::new().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let canonical = canonical.to_string_lossy();
+        let canonical = canonical.strip_prefix(r"\\?\").unwrap_or(&canonical);
+        let root = tokscale_core::sessions::normalize_workspace_key(canonical).unwrap();
+        let outer = format!("{root}/a-b/c");
+        let dashed = format!("{root}/a/b-c");
+        let dotted = format!("{root}/a/b.c");
+        for path in [&outer, &dashed, &dotted] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let slug_of = |key: &str| -> String {
+            key.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect()
+        };
+        let slug = slug_of(&dotted);
+        assert_eq!(slug, slug_of(&dashed));
+        assert_eq!(slug, slug_of(&outer));
+
+        let loader = DataLoader::new(None).with_projects_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        Some(&outer),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-2",
+                        2.0,
+                        Some(&dashed),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-3",
+                        4.0,
+                        Some(&dotted),
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-opus-5",
+                        "anthropic",
+                        "session-4",
+                        10.0,
+                        Some(&slug),
+                        None,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.projects.len(), 4);
+        let by_key = |key: &str| {
+            usage
+                .projects
+                .iter()
+                .find(|p| p.group_key == key)
+                .unwrap_or_else(|| panic!("no project row for {key}"))
+        };
+        assert_eq!(by_key(&outer).cost, 1.0);
+        assert_eq!(by_key(&outer).clients, ["codex"]);
+        assert_eq!(by_key(&dashed).cost, 2.0);
+        assert_eq!(by_key(&dashed).clients, ["codex"]);
+        assert_eq!(by_key(&dotted).cost, 4.0);
+        assert_eq!(by_key(&dotted).clients, ["codex"]);
+        let ambiguous = by_key(&slug);
+        assert_eq!(ambiguous.cost, 10.0);
+        assert_eq!(ambiguous.clients, ["claude"]);
+        assert_eq!(ambiguous.path, None);
+        assert_eq!(
+            usage.projects.iter().map(|p| p.cost).sum::<f64>(),
+            usage.total_cost
+        );
+    }
+
+    #[test]
     fn test_aggregate_messages_workspace_grouping_keeps_unknown_bucket_visible() {
         let loader = DataLoader::new(None);
         let usage = loader
