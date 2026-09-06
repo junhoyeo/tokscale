@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::widgets::{
     display_width, fit_workspace_label_to_width, format_cost, format_tokens,
     get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
-    truncate_to_width, viewport_scrollbar_state,
+    truncate_to_width, viewport_scrollbar_state, MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -407,7 +407,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// same family-shade system used in the Overview and Models tabs, joined with
 /// `", "` and truncated to `max_cells` in terminal cells. Mirrors the Sessions
 /// tab's model cell: a multi-model project always ends in an ellipsis when some
-/// of its models did not fit, so it never renders as a single-model one.
+/// of its models did not fit, so it never renders as a single-model one. The
+/// marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal locale;
+/// U+2026 is East-Asian-Ambiguous and would be two cells under a CJK locale,
+/// overflowing the budget this cell promises to keep.
 fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
     if max_cells == 0 {
         return Cell::from("");
@@ -422,7 +425,10 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
     for (i, model) in models.iter().enumerate() {
         if i > 0 {
             if budget < 3 {
-                spans.push(Span::styled("…", Style::default().fg(app.theme.muted)));
+                spans.push(Span::styled(
+                    MIDDLE_ELLIPSIS,
+                    Style::default().fg(app.theme.muted),
+                ));
                 break;
             }
             spans.push(Span::styled(", ", Style::default().fg(app.theme.muted)));
@@ -442,7 +448,7 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{}…", head),
+                format!("{head}{MIDDLE_ELLIPSIS}"),
                 Style::default().fg(color),
             ));
             break;
@@ -470,6 +476,7 @@ mod tests {
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
     use ratatui::{backend::TestBackend, Terminal};
+    use unicode_width::UnicodeWidthStr;
 
     fn project(label: &str, cost: f64, last_ms: i64) -> ProjectUsage {
         ProjectUsage {
@@ -671,21 +678,29 @@ mod tests {
         assert_eq!(render_models(&["gpt-5", "k3"], 18), "gpt-5, k3");
     }
 
+    /// Checked in both ambients: `unicode-width` resolves East-Asian-Ambiguous
+    /// characters to one cell by default and to two under `width_cjk`, which is
+    /// what a terminal in a CJK locale does, so a marker that is ambiguous keeps
+    /// the budget on one machine and blows it on another.
     #[test]
     fn models_cell_marks_truncation_within_the_available_width() {
         for (width, expected) in [
             (0, ""),
-            (1, "…"),
-            (5, "gpt-…"),
-            (6, "gpt-5…"),
-            (7, "gpt-5…"),
-            (8, "gpt-5, …"),
+            (1, "⋯"),
+            (5, "gpt-⋯"),
+            (6, "gpt-5⋯"),
+            (7, "gpt-5⋯"),
+            (8, "gpt-5, ⋯"),
         ] {
             let rendered = render_models(&["gpt-5", "k3"], width);
             assert_eq!(rendered, expected, "at {width} columns");
             assert!(display_width(&rendered) <= width as usize);
+            assert!(
+                UnicodeWidthStr::width_cjk(rendered.as_str()) <= width as usize,
+                "at {width} columns in a CJK locale: {rendered:?}"
+            );
         }
-        assert_eq!(render_models(&["a", "🇺🇸x"], 5), "a, …");
+        assert_eq!(render_models(&["a", "🇺🇸x"], 5), "a, ⋯");
         assert_eq!(render_models(&["a", "🇺🇸x"], 6), "a, 🇺🇸x");
     }
 
