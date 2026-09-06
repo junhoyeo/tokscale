@@ -13,8 +13,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_MAX_RPC_BODY_BYTES: usize = 128 * 1024 * 1024;
-#[allow(dead_code)]
-pub const MAX_RPC_BODY_BYTES: usize = DEFAULT_MAX_RPC_BODY_BYTES;
 const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
 
@@ -22,7 +20,7 @@ pub fn max_rpc_body_bytes() -> usize {
     std::env::var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
+        .filter(|&v| v > 0 && v < usize::MAX)
         .unwrap_or(DEFAULT_MAX_RPC_BODY_BYTES)
 }
 
@@ -2235,7 +2233,7 @@ fn https_rpc_request(
             .context("Failed to write curl.exe config for Windows RPC fallback")?;
 
         // The cap is enforced while curl is still transferring, not once the
-        // whole response is already in memory: at most MAX_RPC_BODY_BYTES + 1
+        // whole response is already in memory: at most max_rpc_body_bytes() + 1
         // bytes are ever held. Loopback is fast and `--max-time` leaves a 10s
         // window, so a DesktopAgent that streams far more than the cap would
         // otherwise be allowed to allocate all of it and only then be
@@ -2799,7 +2797,7 @@ fn fetch_usage_timestamps(
                 "Warning: failed to fetch Antigravity trajectory timestamps for session {}: {err:#}",
                 summary.session_id
             );
-            let is_cap_error = err.to_string().contains("exceeds");
+            let is_cap_error = format!("{err:#}").contains("exceeds");
             if is_cap_error {
                 budget.record_session_failure(started.elapsed());
             } else {
@@ -3237,6 +3235,36 @@ mod tests {
             match self.prev_config_dir.take() {
                 Some(dir) => std::env::set_var("TOKSCALE_CONFIG_DIR", dir),
                 None => std::env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+    }
+
+    /// Panic-safe environment variable guard that captures the prior value
+    /// and restores it on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -4516,14 +4544,7 @@ mod tests {
     #[test]
     #[serial]
     fn rpc_request_rejects_oversized_content_length_body() {
-        struct EnvReset;
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                std::env::remove_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
-            }
-        }
-        std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
-        let _reset = EnvReset;
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
         let cap = max_rpc_body_bytes();
         let port = serve_once(vec![b'a'; 32], &format!("Content-Length: {}\r\n", cap + 1));
         let connection = AntigravityConnection {
@@ -4534,7 +4555,7 @@ mod tests {
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
         assert!(
-            err.to_string().contains("exceeds"),
+            format!("{err:#}").contains("exceeds"),
             "expected cap error, got: {err:#}"
         );
     }
@@ -4542,14 +4563,7 @@ mod tests {
     #[test]
     #[serial]
     fn read_chunked_body_rejects_oversized_accumulated_chunks() {
-        struct EnvReset;
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                std::env::remove_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
-            }
-        }
-        std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
-        let _reset = EnvReset;
+        let _guard = EnvVarGuard::set("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "1024");
         let cap = max_rpc_body_bytes();
         let chunk_size = cap / 4 + 1;
         let mut body = Vec::new();
@@ -4568,7 +4582,7 @@ mod tests {
         };
         let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
         assert!(
-            err.to_string().contains("exceeds"),
+            format!("{err:#}").contains("exceeds"),
             "expected cap error, got: {err:#}"
         );
     }
@@ -4576,14 +4590,7 @@ mod tests {
     #[test]
     #[serial]
     fn max_rpc_body_bytes_respects_env_var() {
-        struct EnvReset;
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                std::env::remove_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
-            }
-        }
-        std::env::remove_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
-        let _reset = EnvReset;
+        let _guard = EnvVarGuard::remove("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES");
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
         assert_eq!(DEFAULT_MAX_RPC_BODY_BYTES, 128 * 1024 * 1024);
 
@@ -4595,6 +4602,20 @@ mod tests {
 
         std::env::set_var("TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES", "0");
         assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+
+        std::env::set_var(
+            "TOKSCALE_ANTIGRAVITY_MAX_RPC_BODY_BYTES",
+            usize::MAX.to_string(),
+        );
+        assert_eq!(max_rpc_body_bytes(), DEFAULT_MAX_RPC_BODY_BYTES);
+    }
+
+    #[test]
+    fn cap_error_detected_across_error_context_chain() {
+        let root = anyhow::anyhow!("Antigravity RPC body of 5000 bytes exceeds 1024 cap");
+        let wrapped = root.context("HTTPS RPC failed for Antigravity RPC GetCascadeTrajectory");
+        assert!(!wrapped.to_string().contains("exceeds"));
+        assert!(format!("{wrapped:#}").contains("exceeds"));
     }
 
     #[test]
