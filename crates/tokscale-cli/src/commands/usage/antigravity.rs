@@ -287,7 +287,13 @@ const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
 ///
 /// Built only once a round has a candidate to send to -- see
 /// [`race_for_quota`], which returns before reaching here on an empty list.
-fn quota_client() -> Result<reqwest::Client> {
+///
+/// `round` is the budget of the round this client serves,
+/// [`DISCOVERY_ROUND_TIMEOUT`] in production. It is handed in rather than read
+/// here so that a round run under a budget of its own -- which is how a test
+/// proves what the round waits for without riding the production deadline --
+/// is not cut short by this client's per-request timeout.
+fn quota_client(round: Duration) -> Result<reqwest::Client> {
     // `.no_proxy()` because this only ever targets 127.0.0.1: the default
     // builder honours HTTP_PROXY/system proxy settings, which would send a
     // loopback quota request to a remote host unless the user happens to have
@@ -316,7 +322,7 @@ fn quota_client() -> Result<reqwest::Client> {
         // The round is what bounds discovery in practice, since it abandons
         // every request still in flight at its deadline. This is the backstop
         // that keeps a `call_rpc` awaited on its own from being unbounded.
-        .timeout(DISCOVERY_ROUND_TIMEOUT)
+        .timeout(round)
         .build()?)
 }
 
@@ -409,27 +415,40 @@ fn detected_ports() -> Vec<u16> {
 /// machine with no Antigravity from paying for a client it has nothing to
 /// send to.
 async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
-    race_for_quota_with(ports, &quota_client).await
+    race_for_quota_with(ports, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
 }
 
-/// [`race_for_quota`] with the client build handed in.
+/// [`race_for_quota`] with the round budget and the client build handed in.
 ///
-/// Separate so a test can count the builds one call causes from that call:
-/// whether an empty round builds a client has no other observable -- the
-/// regression it guards was a client built before discovery knew whether it
-/// had anywhere to send, and the only symptom was time. A count kept inside
-/// `quota_client` instead is fed by every round in the process, on every
-/// thread, and puts a `#[cfg(test)]` hook in shipped code.
+/// Separate so a test can observe two things from its own call.
+///
+/// The builds the call causes: whether an empty round builds a client has no
+/// other observable -- the regression it guards was a client built before
+/// discovery knew whether it had anywhere to send, and the only symptom was
+/// time. A count kept inside `quota_client` instead is fed by every round in
+/// the process, on every thread, and puts a `#[cfg(test)]` hook in shipped
+/// code.
+///
+/// How long the round waits for a better-ranked candidate, which is the whole
+/// of `round`. Proving that takes a fixture that answers seconds late, and
+/// under the production budget that answer landed 2s short of the round's own
+/// deadline, on a machine whose load is the premise of this module: the
+/// margin was a question of scheduling, not of the code. A budget in the tens
+/// of seconds makes the deadline a stall guard again.
+///
+/// `build_client` is given `round` so the client's per-request timeout -- the
+/// backstop for a `call_rpc` awaited outside a round -- cannot undercut it.
 async fn race_for_quota_with(
     ports: Vec<u16>,
-    build_client: &dyn Fn() -> Result<reqwest::Client>,
+    round: Duration,
+    build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
 ) -> Option<QuotaSummary> {
     if ports.is_empty() {
         return None;
     }
 
-    let client = build_client().ok()?;
-    let deadline = tokio::time::Instant::now() + DISCOVERY_ROUND_TIMEOUT;
+    let client = build_client(round).ok()?;
+    let deadline = tokio::time::Instant::now() + round;
     let mut settled = vec![false; ports.len()];
     let mut requests = tokio::task::JoinSet::new();
     for (rank, port) in ports.into_iter().enumerate() {
@@ -629,6 +648,43 @@ mod tests {
             .expect("the test server reports a port")
     }
 
+    /// The round budget for a test that is not about the deadline.
+    ///
+    /// Long enough that only a fixture which never answers reaches it, so a
+    /// round run under it can be held by a fixture for seconds without the
+    /// test's pass margin becoming a question of scheduling. What it bounds is
+    /// a hang; what it never bounds is how slow this machine is allowed to be.
+    const ROUND_STALL_GUARD: Duration = Duration::from_secs(30);
+
+    /// Two healthy servers whose answers land in a known order.
+    ///
+    /// The older one answers at once. The newer one does not answer until the
+    /// older has been *asked*, and then waits `newer_delay` more -- a
+    /// handshake rather than a delay race, so "the older answered first"
+    /// holds however loaded the machine is, and the delay is a floor on how
+    /// late the newer answer is: load can only push it later. The older's
+    /// group is named `Stale Server` so a round that settled for it says so in
+    /// the failure. Returned as (older, newer, requests seen by the newer).
+    fn spawn_ordered_pair(newer_delay: Duration) -> (String, String, Arc<Mutex<Vec<Seen>>>) {
+        const OLDER_QUOTA: &str =
+            r#"{"response":{"groups":[{"displayName":"Stale Server","buckets":[]}]}}"#;
+
+        let (asked_older, older_was_asked) = std::sync::mpsc::channel::<()>();
+        let (older_base, _older_seen) = spawn_server(move |_path, _calls| {
+            let _ = asked_older.send(());
+            (200, OLDER_QUOTA.to_string())
+        });
+        let (newer_base, newer_seen) = spawn_server(move |_path, _calls| {
+            // A stall guard, not a budget: it only fires if the older server
+            // was never reached, in which case the test has nothing to say and
+            // should fail rather than hang.
+            let _ = older_was_asked.recv_timeout(ROUND_STALL_GUARD);
+            std::thread::sleep(newer_delay);
+            (200, FIXTURE_QUOTA.to_string())
+        });
+        (older_base, newer_base, newer_seen)
+    }
+
     /// The Antigravity entry of the real provider registry.
     ///
     /// Taken from the registry rather than hand-assembled because the gate
@@ -793,40 +849,23 @@ mod tests {
     /// "Antigravity is running but not signed in" error from a signed-out
     /// leftover -- an empty group list parses perfectly well.
     ///
-    /// The ordering here is a handshake rather than a delay race: the newer
-    /// server does not answer until the older one has been asked, so "the
-    /// older finished first" holds however loaded the machine is. What follows
-    /// the handshake is a delay only the round budget covers. An earlier
-    /// revision stopped waiting for a better-ranked candidate 2s after the
-    /// first answer, and with that grace in place this test reports the stale
-    /// server: the current one answered inside the round and still lost.
-    ///
-    /// Two bounds again, as in the #1280 test above: the delay is a floor on
-    /// how late the newer answer is, and load can only make it later, which
-    /// is the direction the assertion wants -- but `DISCOVERY_ROUND_TIMEOUT` is
-    /// the ceiling it has to stay under, with 2s to spare.
+    /// This is the whole path under the production budget: the log parse, the
+    /// newest-first ordering, the round and the fetch. [`spawn_ordered_pair`]
+    /// fixes the answer order by handshake, so the only clock in play is the
+    /// round's own ceiling, and the newer answer sits far inside it. How long
+    /// the round keeps waiting for the newer port is a separate property with
+    /// a budget of its own, proven by
+    /// `a_better_ranked_candidate_is_waited_for_the_whole_round`.
     #[test]
     #[serial]
     fn the_newest_logged_port_wins_even_when_an_older_one_answers_first() {
-        const OLDER_QUOTA: &str =
-            r#"{"response":{"groups":[{"displayName":"Stale Server","buckets":[]}]}}"#;
-        // Past the 2s an earlier revision granted preference, so a grace that
-        // short fails this; a fifth of the round short of its deadline.
-        const NEWER_DELAY: Duration = Duration::from_secs(3);
+        // Room for the older answer to land before the newer one, and no more:
+        // the newer answer must still arrive well inside
+        // DISCOVERY_ROUND_TIMEOUT, which on this path is a ceiling the test
+        // cannot move.
+        const NEWER_DELAY: Duration = Duration::from_millis(250);
 
-        let (asked_older, older_was_asked) = std::sync::mpsc::channel::<()>();
-        let (older_base, _older_seen) = spawn_server(move |_path, _calls| {
-            let _ = asked_older.send(());
-            (200, OLDER_QUOTA.to_string())
-        });
-        let (newer_base, newer_seen) = spawn_server(move |_path, _calls| {
-            // A stall guard, not a budget: it only fires if the older server
-            // was never reached, in which case the test has nothing to say and
-            // should fail rather than hang.
-            let _ = older_was_asked.recv_timeout(Duration::from_secs(30));
-            std::thread::sleep(NEWER_DELAY);
-            (200, FIXTURE_QUOTA.to_string())
-        });
+        let (older_base, newer_base, newer_seen) = spawn_ordered_pair(NEWER_DELAY);
 
         let home = TempDir::new().unwrap();
         let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
@@ -855,6 +894,64 @@ mod tests {
             Some("Fixture Models"),
             "the round must return the newest logged port, not whichever candidate \
              answered first"
+        );
+    }
+
+    /// A round waits for a better-ranked candidate for the whole round, not
+    /// for a grace after the first answer.
+    ///
+    /// [`DISCOVERY_ROUND_TIMEOUT`] exists because the current language server
+    /// can take seconds on a loaded machine, and the current server is the
+    /// best-ranked candidate -- the one a round holding a worse answer is
+    /// waiting on. An earlier revision cut that wait at 2s from the first
+    /// answer, so a current server answering in 2-5s lost to a stale sibling
+    /// that answered at once, and this test reports `Stale Server` against
+    /// that code.
+    ///
+    /// Driven at the round level, under [`ROUND_STALL_GUARD`], because the
+    /// delay has to be seconds to beat the grace it guards against, and under
+    /// the production budget that put the newer answer 2s from the round's
+    /// deadline on a machine whose load is the premise of the whole change.
+    /// Here the delay is only a floor: load can push the newer answer later,
+    /// which is the direction the assertion wants, and the deadline is a
+    /// stall guard 27s away. The provider-path test above covers the same
+    /// ordering end to end with a delay that keeps clear of the ceiling.
+    #[test]
+    fn a_better_ranked_candidate_is_waited_for_the_whole_round() {
+        // Past the 2s the earlier revision granted, by enough that scheduling
+        // noise cannot close the gap.
+        const NEWER_DELAY: Duration = Duration::from_secs(3);
+
+        let (older_base, newer_base, newer_seen) = spawn_ordered_pair(NEWER_DELAY);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let summary = runtime.block_on(race_for_quota_with(
+            vec![port_of(&newer_base), port_of(&older_base)],
+            ROUND_STALL_GUARD,
+            &quota_client,
+        ));
+        let elapsed = started.elapsed();
+
+        let summary = summary.unwrap_or_else(|| {
+            panic!(
+                "two healthy candidates must yield a summary (elapsed={elapsed:?}, newer \
+                 requests={:?})",
+                newer_seen.lock().map(|seen| seen.len())
+            )
+        });
+        assert_eq!(
+            summary.groups[0].display_name, "Fixture Models",
+            "the round must keep waiting for the better-ranked candidate until it answers, \
+             not settle for the worse one that answered first (elapsed={elapsed:?})"
+        );
+        assert!(
+            elapsed >= NEWER_DELAY,
+            "the newer answer cannot have arrived before its delay (elapsed={elapsed:?}); \
+             the fixture no longer exercises a late better-ranked answer"
         );
     }
 
@@ -916,7 +1013,9 @@ mod tests {
     /// The count is kept by the builder this test hands in, so it holds exactly
     /// the builds these two calls caused: no other round, on this thread or
     /// any other, can reach it. Nothing here is `#[serial]` and nothing needs
-    /// to be.
+    /// to be. The budget is [`ROUND_STALL_GUARD`] because the deadline is not
+    /// what is under test: the one candidate answers at once and the round
+    /// returns on that answer, so the budget only ever bounds a hang.
     #[test]
     fn a_round_with_no_candidates_builds_no_client() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -925,13 +1024,17 @@ mod tests {
             .unwrap();
 
         let builds = std::cell::Cell::new(0usize);
-        let counted_client = || {
+        let counted_client = |round| {
             builds.set(builds.get() + 1);
-            quota_client()
+            quota_client(round)
         };
 
         assert!(runtime
-            .block_on(race_for_quota_with(Vec::new(), &counted_client))
+            .block_on(race_for_quota_with(
+                Vec::new(),
+                ROUND_STALL_GUARD,
+                &counted_client
+            ))
             .is_none());
         assert_eq!(
             builds.get(),
@@ -941,7 +1044,11 @@ mod tests {
 
         let (base, _seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
         assert!(runtime
-            .block_on(race_for_quota_with(vec![port_of(&base)], &counted_client))
+            .block_on(race_for_quota_with(
+                vec![port_of(&base)],
+                ROUND_STALL_GUARD,
+                &counted_client
+            ))
             .is_some());
         assert_eq!(
             builds.get(),
