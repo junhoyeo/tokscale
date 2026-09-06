@@ -14,16 +14,26 @@ two legs, one root:
   verbatim. One billed call. This is the case the `seq:` fallback exists for
   and it must keep collapsing.
 
-`expected.json` carries both outcomes. `correct` is what a `compactionId`-keyed
-parser reports (both legs right); `seq_keyed` is what a `seq`-keyed one reports
-(leg B right, one of leg A's two calls dropped, 3,415 tokens).
+`expected.json` carries both outcomes, per model and in total. `current` is
+what a `compactionId`-keyed parser reports (both legs right);
+`predecessors.4` is what the `seq`-keyed parser shipped as 4.15.0 reports (leg
+B right, one of leg A's two calls dropped, 3,415 tokens).
 
-Consumed by `scripts/check-dsh-cache-migration.sh`, which runs the last
-published release and the current build over this root, cold and warm, and
-fails when a cache the previous release wrote is served by this build rather
-than reparsed.
+Consumed by `scripts/check-dsh-cache-migration.sh`, which runs a pinned 4.15.0
+and the current build over this root, cold and warm, and fails when a cache
+4.15.0 wrote is served by this build rather than reparsed. The same root runs
+a second time against the last published release. Only that run's leg A goes
+ungraded — a release that moves has no baseline to hold it to. Its warm leg is
+still compared against a cold scan, and because the last release and this
+build normally share a parser version, that comparison is the one that fails
+when the *next* bump is missing: the released rows are served there rather
+than reparsed. This fixture reports a single model, so what it can see is a
+change that moves a token total; `dsh-served-model` runs the same leg for
+changes that move only attribution.
 
-Built by `build_fixture.py` in
+The transcripts and their totals are built by `build_fixture.py` in
 [token-accounting-conformance/tokscale-dsh-seq-key-check](https://github.com/lizhuojunx86/token-accounting-conformance/tree/main/tokscale-dsh-seq-key-check),
-which derives the expected totals by arithmetic before writing anything.
-Copied verbatim; the numbers are not tuned to any binary.
+which derives them by arithmetic before writing anything; they are not tuned
+to any binary. `expected.json`'s layout is this repo's — the gate reads
+`current` and `predecessors`, and a per-model split the generator does not
+emit.
