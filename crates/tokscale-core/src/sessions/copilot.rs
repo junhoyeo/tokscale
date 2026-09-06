@@ -2125,12 +2125,16 @@ mod tests {
     /// export grown by one usage/context pair, which any later open then
     /// sees. That is an append between two reads, made deterministic.
     /// Whatever view the parser reads, every usage row it emits must resolve
-    /// against the context in that same view.
+    /// against the context in that same view. The writer opens the FIFO
+    /// nonblocking and the parser's result is asserted before the writer is
+    /// joined, so a parser that stopped opening the export fails this test
+    /// instead of blocking the join forever.
     #[cfg(unix)]
     #[test]
     fn usage_and_trace_context_come_from_one_read() {
         use std::ffi::CString;
         use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
 
         const FIRST: &str = concat!(
             r#"{"type":"span","traceId":"trace-1","spanId":"chat-1","name":"chat gpt-5.4-mini","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7}}"#,
@@ -2155,25 +2159,40 @@ mod tests {
         std::fs::write(&grown, format!("{FIRST}{APPENDED}")).unwrap();
         std::os::unix::fs::symlink(&fifo, &export).unwrap();
 
+        // Nonblocking on purpose: a writer that outlives the parser must not
+        // wait forever on the FIFO for a second reader that is never coming
+        // (its `write(true)` open would block), or the join below would hang
+        // the test binary instead of reporting the failure. Without a reader
+        // this open returns ENXIO, the thread finishes on its own, and the
+        // join reports any failed assertion it carried out.
         let writer = {
             let swap = dir.path().join("swap");
             let (fifo, grown, export) = (fifo.clone(), grown.clone(), export.clone());
             std::thread::spawn(move || {
-                // Blocks until the parser opens the export for reading.
-                let mut first = OpenOptions::new().write(true).open(&fifo).unwrap();
-                first.write_all(FIRST.as_bytes()).unwrap();
+                let mut first = OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                    .expect("writer could not open the FIFO: the parser never opened the export");
+                first
+                    .write_all(FIRST.as_bytes())
+                    .expect("writer could not write the first export to the FIFO");
                 // Re-point the export before ending the first read with EOF,
                 // so the swap is ordered before anything the parser does next.
-                std::os::unix::fs::symlink(&grown, &swap).unwrap();
-                std::fs::rename(&swap, &export).unwrap();
+                std::os::unix::fs::symlink(&grown, &swap)
+                    .expect("writer could not link the grown export");
+                std::fs::rename(&swap, &export).expect("writer could not swap the export");
                 drop(first);
             })
         };
 
         let messages = parse_copilot_file(&export);
-        writer.join().unwrap();
 
+        // Assert before joining: a read of nothing is the failure the writer
+        // is still waiting for a reader to report, and it must fail the test
+        // instead of waiting on that reader too.
         assert!(!messages.is_empty());
+        writer.join().unwrap();
         for message in &messages {
             assert_eq!(
                 message.model_id, "claude-sonnet-4.6",
