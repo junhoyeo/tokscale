@@ -1082,7 +1082,13 @@ fn parser_version(client: ClientId) -> u32 {
         // sources. Source-cache entries cannot be reached once discovery omits
         // them, but parser_generation must change so the source-agnostic TUI
         // aggregate cache cannot replay totals that included those snapshots.
-        ClientId::OpenClaw => 4,
+        // v4->v5 (#1299): legacy JSONL `openclaw doctor` archived unreferenced
+        // (`session-sqlite-import-archive/archive-tier.<session id>.jsonl…`)
+        // now reports the session id behind the archive key instead of the
+        // archived spelling. The doctor never writes to those files again, so
+        // their fingerprints stay valid and a warm v4 entry would keep serving
+        // `archive-tier.<id>` sessions without the parser ever running.
+        ClientId::OpenClaw => 5,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3371,17 +3377,19 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kimi), 4);
     }
 
-    /// Three retirements in a row, each needing its own number. #1285 took v2
+    /// Four retirements in a row, each needing its own number. #1285 took v2
     /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
     /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
     /// split, so reusing 2 would have left every reader who already scanned
     /// under #1285 unmigrated. #1293 needs v4 for the same reason one step
     /// on: dropping checkpoint snapshots from discovery cannot reach the
     /// source cache, so only the version can retire TUI aggregates that
-    /// still include them.
+    /// still include them. #1299 needs v5: the doctor's `archive-tier.`
+    /// import archives never change on disk, so a v4 entry that named their
+    /// sessions by the archived spelling is served warm forever.
     #[test]
-    fn test_openclaw_parser_version_invalidates_v3_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 4);
+    fn test_openclaw_parser_version_invalidates_v4_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 5);
     }
 
     #[test]
@@ -3637,6 +3645,93 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_v4_shards_are_reparsed_with_import_archive_session_ids() {
+        // `openclaw doctor` parks unreferenced legacy JSONL under
+        // `session-sqlite-import-archive/archive-tier.<session id>.jsonl
+        // .imported-<ts>` and never writes to it again, so its fingerprint
+        // stays valid for good. A v4 entry holds the file's rows under the
+        // archived spelling of the session id, and the loader serves a
+        // nonempty entry for an unchanged file without calling the parser,
+        // so only the version bump can retire it.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let archive = temp_home
+            .path()
+            .join("agents/main")
+            .join(crate::sessions::openclaw::OPENCLAW_IMPORT_ARCHIVE_DIRNAME);
+        fs::create_dir_all(&archive).unwrap();
+        let source = archive
+            .join("archive-tier.3139ce31-e15e-4f1b-a4b0-350a525f4331.jsonl.imported-1788148544385");
+        fs::write(
+            &source,
+            br#"{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"input":10,"output":5},"timestamp":1700000000000}}"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let stale_identity = CacheIdentity {
+            parser_version: 4,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![UnifiedMessage::new(
+                identity.namespace,
+                "gpt-5.4",
+                "openai",
+                "archive-tier.3139ce31-e15e-4f1b-a4b0-350a525f4331",
+                1700000000000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(
+            cache.get(identity, &source).is_none(),
+            "a v4 entry names the session by its archived spelling and must not be served"
+        );
+        assert_eq!(SourceFingerprint::from_path(&source).unwrap(), fingerprint);
+        let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_id, "3139ce31-e15e-4f1b-a4b0-350a525f4331");
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        let cached = warm.get(identity, &source).unwrap();
+        assert_eq!(cached.parser_version, 5);
+        assert_eq!(cached.messages, parsed);
     }
 
     #[test]
