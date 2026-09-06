@@ -580,10 +580,29 @@ impl Theme {
     }
 
     pub(crate) fn graph_cell_selected_style(&self, bg: Color) -> Style {
-        let fg = if self.light {
-            self.foreground
-        } else {
-            Color::White
+        let fg = match bg {
+            Color::Black | Color::DarkGray | Color::Blue => Color::White,
+            Color::White | Color::Gray | Color::Cyan => {
+                if self.light {
+                    self.foreground
+                } else {
+                    Color::Black
+                }
+            }
+            Color::Rgb(r, g, b) => {
+                let luminance = 299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b);
+                if luminance > 128_000 {
+                    if self.light {
+                        self.foreground
+                    } else {
+                        Color::Black
+                    }
+                } else {
+                    Color::White
+                }
+            }
+            _ if self.light => self.foreground,
+            _ => Color::White,
         };
         Style::default().fg(fg).bg(bg)
     }
@@ -1007,12 +1026,28 @@ mod tests {
             dark.graph_cell_selected_style(Color::Black).fg,
             Some(Color::White)
         );
+        assert_eq!(
+            dark.graph_cell_selected_style(Color::White).fg,
+            Some(Color::Black)
+        );
+        assert_eq!(
+            dark.graph_cell_selected_style(Color::Rgb(250, 250, 250)).fg,
+            Some(Color::Black)
+        );
+        assert_eq!(
+            dark.graph_cell_selected_style(Color::Rgb(20, 20, 20)).fg,
+            Some(Color::White)
+        );
 
         assert_eq!(light.hint_key_style().fg, Some(Color::Rgb(160, 100, 20)));
         assert_eq!(light.count_style().fg, Some(Color::Rgb(14, 116, 144)));
         assert_eq!(
             light.graph_cell_selected_style(Color::White).fg,
             Some(light.foreground)
+        );
+        assert_eq!(
+            light.graph_cell_selected_style(Color::Black).fg,
+            Some(Color::White)
         );
 
         let compat_dark =
@@ -1022,11 +1057,23 @@ mod tests {
 
         assert_eq!(compat_dark.hint_key_style().fg, Some(Color::Yellow));
         assert_eq!(compat_dark.count_style().fg, Some(Color::Cyan));
+        assert_eq!(
+            compat_dark.graph_cell_selected_style(Color::White).fg,
+            Some(Color::Black)
+        );
+        assert_eq!(
+            compat_dark.graph_cell_selected_style(Color::Black).fg,
+            Some(Color::White)
+        );
         assert_eq!(compat_light.hint_key_style().fg, Some(Color::DarkGray));
         assert_eq!(compat_light.count_style().fg, Some(Color::Blue));
         assert_eq!(
             compat_light.graph_cell_selected_style(Color::White).fg,
             Some(Color::Black)
+        );
+        assert_eq!(
+            compat_light.graph_cell_selected_style(Color::Black).fg,
+            Some(Color::White)
         );
     }
 
