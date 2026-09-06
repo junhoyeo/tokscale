@@ -95,6 +95,7 @@
 | <img width="48px" src="https://github.com/lmstudio-ai.png" alt="LM Studio" /> | [LM Studio](https://lmstudio.ai/) | `~/.lmstudio/server-logs/**/*.log` (`LM_STUDIO_HOME` supported; Chat Completions and Responses API final-response usage only; prompts and responses are not retained; local inference cost is $0) |
 | <img width="48px" src="https://github.com/unslothai.png" alt="Unsloth Studio" /> | [Unsloth Studio](https://github.com/unslothai/unsloth) | `$UNSLOTH_STUDIO_HOME/studio.db` (fallback: `~/.unsloth/studio/studio.db`; exact internal-chat and authenticated API inference usage; message content is not read; training metrics are excluded; local inference cost is $0) |
 | <img width="48px" src=".github/assets/client-hindsight.png" alt="Hindsight" /> | [Hindsight](https://github.com/vectorize-io/hindsight) | `$HINDSIGHT_HOME/usage/*.jsonl` (fallback: `~/.hindsight/usage/*.jsonl`; populated via `tokscale hindsight sync`) |
+| <img width="48px" src=".github/assets/client-meept.png" alt="Meept" /> | [Meept](https://github.com/bhodgens/meept) | `~/.meept/metrics.db` (per-call `llm_calls` rows; session id + reasoning/cache-creation tokens on schema v2; error rows excluded) |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecars (override via `JCODE_HOME`) |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `~/.local/share/mimocode/mimocode.db` (XDG data dir; SQLite) |
 | <img width="48px" src="https://github.com/JetBrains.png" alt="Junie" /> | [Junie](https://www.jetbrains.com/junie/) | `~/.junie/sessions/*/events.jsonl` |
@@ -181,7 +182,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, and Oh My Pi
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, Meept, fx, and Oh My Pi
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -417,7 +418,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `meept`.
 
 > **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
@@ -1123,7 +1124,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Meept)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1547,6 +1548,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 | Unsloth Studio | `$UNSLOTH_STUDIO_HOME/studio.db` (fallback: `~/.unsloth/studio/studio.db`) | `%UNSLOTH_STUDIO_HOME%\studio.db` (fallback: `%USERPROFILE%\.unsloth\studio\studio.db`) | Reads exact inference counters from internal assistant metadata and the content-free authenticated API usage table; never selects prompts or responses; excludes training metrics |
 | Hindsight | `$HINDSIGHT_HOME/usage/` (fallback: `~/.hindsight/usage/`) | `%HINDSIGHT_HOME%\usage\` (fallback: `%USERPROFILE%\.hindsight\usage\`) | API sync via `tokscale hindsight sync`; Hindsight writes no local session logs of its own, so data is synced from the LLM trace API into an append-only JSONL cache |
+| Meept | `~/.meept/metrics.db` | `%USERPROFILE%\.meept\metrics.db` | Reads per-call `llm_calls` rows read-only (never writes); requires meept schema v2 (session_id / reasoning_tokens / cache_creation_tokens columns); error rows carry no usage and are excluded |
 | MiniMax Code | `~/.config/tokscale/headless/mcode/` | `%APPDATA%\tokscale\headless\mcode\` | Headless capture only; Tokscale reads its own capture directory rather than MiniMax Code's shared Desktop/Runtime store, which does not identify the originating surface. Override the root with `TOKSCALE_HEADLESS_DIR` |
 
 > **Devin Desktop agent support**: Local usage parsing works for ACP-connected agents (e.g. Cascade/Windsurf, claude-code, opencode) that emit `usage_update` events in the NDJSON stream. The default **devin-cloud** agent does not emit local `usage_update` events — its usage stays server-side and cannot be tracked by tokscale without an account-level API.
