@@ -176,7 +176,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ## Features
 
 - **Interactive TUI Mode** - Beautiful terminal UI powered by Ratatui (default mode)
-  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents (plus an optional Minutely view, opt-in via `minutelyTabEnabled`)
+  - 10 interactive views: Overview, Usage, Models, Daily, Hourly, Monthly, Sessions, Projects, Stats, Agents (plus an optional Minutely view, opt-in via `minutelyTabEnabled`)
   - Keyboard & mouse navigation
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
@@ -285,7 +285,7 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **8 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Stats (contribution graph), Agents. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **10 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Monthly, Sessions, Projects (per-workspace rollups), Stats (contribution graph), Agents. In Projects, Codex Desktop's ordinary chat directories (`Documents/Codex/YYYY-MM-DD/<chat>`) are combined into **Codex Chat**, preserving their session count, tokens, and cost; directories containing a Git repository remain separate. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists

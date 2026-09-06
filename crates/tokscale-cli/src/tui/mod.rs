@@ -63,7 +63,11 @@ fn background_data_loader(
     year: Option<String>,
     minutely_enabled: bool,
 ) -> DataLoader {
-    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+    DataLoader::with_filters(None, since, until, year)
+        .with_minutely_enabled(minutely_enabled)
+        // The Projects tab rolls up workspaces regardless of the global
+        // grouping, so both background loads always pay workspace resolution.
+        .with_projects_enabled(true)
 }
 
 fn background_cache_scope(
@@ -447,6 +451,14 @@ mod tests {
 
         let disabled = background_data_loader(None, None, None, false);
         assert!(!disabled.minutely_enabled);
+    }
+
+    #[test]
+    fn background_loader_enables_projects() {
+        // The Projects tab rolls up workspaces regardless of the global
+        // grouping, so both background loads must resolve workspaces.
+        let loader = background_data_loader(None, None, None, false);
+        assert!(loader.projects_enabled);
     }
 
     #[test]

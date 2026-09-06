@@ -3011,8 +3011,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::opencodereview::parse_opencodereview_file,
     );
 
-    let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Kimi)
+    let kimi_paths = scan_result.get(ClientId::Kimi);
+    let kimi_outcomes: Vec<CachedParseOutcome> = kimi_paths
         .par_iter()
         .map(|path| {
             let parse: fn(&Path) -> Vec<UnifiedMessage> = if sessions::kimi::is_kimi_code_path(path)
@@ -3031,11 +3031,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
             )
         })
         .collect();
-    for outcome in kimi_outcomes {
-        all_messages.extend(outcome.messages);
+    // Keep each path paired with its messages so the workspace lookup can key
+    // on the kimi-code root: workspaces.json/session_index.jsonl are shared by
+    // every session under one root, so they are resolved here instead of being
+    // fingerprinted — watching them would let one new workspace invalidate
+    // every other session's cache entry.
+    let mut kimi_lane: Vec<(PathBuf, Vec<UnifiedMessage>)> =
+        Vec::with_capacity(kimi_outcomes.len());
+    for (path, outcome) in kimi_paths.iter().zip(kimi_outcomes) {
+        kimi_lane.push((path.clone(), outcome.messages));
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
+    }
+    sessions::kimi::apply_code_workspaces(&mut kimi_lane);
+    for (_, messages) in kimi_lane {
+        all_messages.extend(messages);
     }
 
     // Parse Qwen files
@@ -3685,8 +3696,8 @@ impl WorkspaceLabeler {
 
     /// The canonical repo identity for `key`: the real filesystem path, with any
     /// worktree suffix stripped. `None` when the key cannot be resolved to a path
-    /// (an opaque client id, or a directory no longer on disk), leaving the
-    /// original key as its own identity.
+    /// (an opaque client id, a directory no longer on disk, or a slug that two
+    /// directories fit), leaving the original key as its own identity.
     ///
     /// Decoding is what makes the rollup actually merge. Claude Code writes a
     /// dash-mangled slug and Codex/OpenCode write real paths, so without this the
@@ -3767,8 +3778,8 @@ pub fn workspace_bucket(
 /// Resolved up front rather than as a post-pass over the rows: the daily
 /// breakdown keys its legend off the label while it aggregates, so fixing the
 /// table afterwards would leave the chart showing the ambiguous name.
-pub fn workspace_label_overrides(
-    messages: &[UnifiedMessage],
+pub fn workspace_label_overrides<'a>(
+    messages: impl IntoIterator<Item = &'a UnifiedMessage>,
     rollup: WorktreeRollup,
     labeler: &mut WorkspaceLabeler,
 ) -> HashMap<String, String> {
