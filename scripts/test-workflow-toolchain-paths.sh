@@ -36,6 +36,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo test --workspace
 EOF_YAML
+  # No dtolnay/rust-toolchain step: this workflow runs cargo on the runner's
+  # preinstalled toolchain, so only the bare `cargo` marker classifies it.
   cat > "${work}/.github/workflows/rust_unfiltered.yml" <<'EOF_YAML'
 name: Rust Unfiltered
 
@@ -47,7 +49,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo build --release
 EOF_YAML
   cat > "${work}/.github/workflows/frontend.yml" <<'EOF_YAML'
@@ -169,6 +170,106 @@ test_rejects_missing_toolchain_pin() {
   grep -q "Missing rust-toolchain.toml" "${output}"
 }
 
+test_rejects_cargo_only_workflow_whose_filter_omits_the_pin() {
+  local work="${TMP_DIR}/cargo-only"
+  write_good_tree "${work}"
+  python3 - "${work}/.github/workflows/rust_unfiltered.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "  workflow_dispatch:\n",
+    "  pull_request:\n    paths: [\"crates/**\", \"Cargo.lock\"]\n",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/cargo-only-output.txt"
+  if run_check "${work}" "${output}"; then
+    echo "Expected toolchain path check to classify a workflow by its cargo call alone" >&2
+    return 1
+  fi
+
+  grep -q "rust_unfiltered.yml:5: \`paths:\` filter omits rust-toolchain.toml" "${output}"
+}
+
+test_rejects_yaml_extension_workflow_whose_filter_omits_the_pin() {
+  local work="${TMP_DIR}/yaml-ext"
+  write_good_tree "${work}"
+  cat > "${work}/.github/workflows/rust_yaml_ext.yaml" <<'EOF_YAML'
+name: Rust Yaml Extension
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - run: cargo test --workspace
+EOF_YAML
+
+  local output="${TMP_DIR}/yaml-ext-output.txt"
+  if run_check "${work}" "${output}"; then
+    echo "Expected toolchain path check to scan .yaml workflows too" >&2
+    return 1
+  fi
+
+  grep -q "rust_yaml_ext.yaml:4: \`paths:\` filter omits rust-toolchain.toml" "${output}"
+}
+
+test_rejects_inline_flow_mapping_trigger() {
+  local work="${TMP_DIR}/flow-mapping"
+  write_good_tree "${work}"
+  python3 - "${work}/.github/workflows/rust_unfiltered.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "on:\n  workflow_dispatch:\n",
+    'on: {pull_request: {paths: ["crates/**", "Cargo.lock"]}}\n',
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/flow-mapping-output.txt"
+  if run_check "${work}" "${output}"; then
+    echo "Expected toolchain path check to reject an inline flow mapping under on:" >&2
+    return 1
+  fi
+
+  grep -q "rust_unfiltered.yml:3: unsupported inline \`on:\` value" "${output}"
+}
+
+test_accepts_inline_event_list_trigger() {
+  local work="${TMP_DIR}/event-list"
+  write_good_tree "${work}"
+  python3 - "${work}/.github/workflows/rust_unfiltered.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "on:\n  workflow_dispatch:\n",
+    "on: [push, pull_request]\n",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/event-list-output.txt"
+  run_check "${work}" "${output}"
+
+  grep -q "Workflow toolchain paths OK: 2 Rust workflows checked (rust_anchored.yml, rust_unfiltered.yml)" "${output}"
+}
+
 test_rejects_tree_without_rust_workflows() {
   local work="${TMP_DIR}/no-rust"
   write_good_tree "${work}"
@@ -187,6 +288,10 @@ test_accepts_rust_workflows_that_watch_the_pin
 test_rejects_rust_workflow_whose_filter_omits_the_pin
 test_rejects_pin_missing_from_one_trigger_only
 test_rejects_pin_listed_in_paths_ignore
+test_rejects_cargo_only_workflow_whose_filter_omits_the_pin
+test_rejects_yaml_extension_workflow_whose_filter_omits_the_pin
+test_rejects_inline_flow_mapping_trigger
+test_accepts_inline_event_list_trigger
 test_rejects_missing_toolchain_pin
 test_rejects_tree_without_rust_workflows
 

@@ -15,7 +15,11 @@ import sys
 ROOT = pathlib.Path.cwd()
 WORKFLOWS_DIR = ROOT / ".github/workflows"
 TOOLCHAIN_FILE = "rust-toolchain.toml"
+WORKFLOW_GLOBS = ("*.yml", "*.yaml")
 RUST_MARKERS = re.compile(r"dtolnay/rust-toolchain|\bcargo\b")
+# `on: push` or `on: [push, pull_request]`: event names alone, so no `paths:`
+# can hide in them. Any other inline value (a flow mapping, an anchor) can.
+INLINE_TRIGGER_WITHOUT_FILTERS = re.compile(r"[A-Za-z_]+|\[[^\[\]{}:]*\]")
 
 
 def fail(message: str) -> None:
@@ -49,13 +53,25 @@ def unquote(value: str) -> str:
     return value
 
 
-def trigger_block(lines: list[str]) -> tuple[int, int]:
-    """Return the [start, end) line range of the top-level `on:` mapping."""
+def trigger_block(label: str, lines: list[str]) -> tuple[int, int]:
+    """Return the [start, end) line range of the top-level `on:` mapping.
+
+    An inline `on:` value is either a bare event list, which cannot carry a
+    filter and yields an empty range, or unsupported, which fails loudly
+    rather than exempting the workflow.
+    """
     start = None
     for index, line in enumerate(lines):
-        if re.match(r"""(?:on|"on"|'on'):\s*$""", line):
+        match = re.match(r"""(?:on|"on"|'on'):\s*(.*)$""", line)
+        if not match:
+            continue
+        inline = match.group(1).strip()
+        if not inline:
             start = index + 1
             break
+        if INLINE_TRIGGER_WITHOUT_FILTERS.fullmatch(inline):
+            return 0, 0
+        fail(f"{label}:{index + 1}: unsupported inline `on:` value: {inline}")
     if start is None:
         return 0, 0
     for index in range(start, len(lines)):
@@ -79,7 +95,7 @@ def list_entries(lines: list[str], start: int, indent: int) -> list[str]:
 
 def path_filters(label: str, lines: list[str]) -> list[tuple[int, str, list[str]]]:
     """Return (line_number, key, entries) for each paths/paths-ignore filter under `on:`."""
-    start, end = trigger_block(lines)
+    start, end = trigger_block(label, lines)
     anchors: dict[str, list[str]] = {}
     filters: list[tuple[int, str, list[str]]] = []
     for index in range(start, end):
@@ -141,7 +157,10 @@ def main() -> None:
 
     checked: list[str] = []
     problems: list[str] = []
-    for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+    workflows = sorted(
+        path for pattern in WORKFLOW_GLOBS for path in WORKFLOWS_DIR.glob(pattern)
+    )
+    for path in workflows:
         found = workflow_problems(path)
         if found is None:
             continue
