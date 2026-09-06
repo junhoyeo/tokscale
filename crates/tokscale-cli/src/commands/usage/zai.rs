@@ -53,15 +53,24 @@ struct Sub {
 /// already being milliseconds. Shared by both entry points below: when only one
 /// of them carried the heuristic, a numeric string and a JSON number could
 /// resolve to different instants.
+///
+/// A non-positive epoch is absent, not 1970. `null` is one way to say "no reset
+/// scheduled" and a zero epoch is the other, because a serializer whose field
+/// is not nullable emits the type's default. Left alone, 0 resolves to
+/// `1970-01-01T00:00:00+00:00`, which is a perfectly truthy `Some` everywhere
+/// `resets_at` is consumed: it outranks a real reset time carried by a sibling
+/// quota entry in `build_metrics`, it blocks the subscription-renewal fallback
+/// on the `TIME_LIMIT` path, and `helpers::format_reset_time` renders any past
+/// instant as "resets now", so the screen would say that forever.
 fn epoch_to_rfc3339(ts: i64) -> Option<String> {
-    // `unsigned_abs`, not `abs`: the float spelling below saturates on cast, so
-    // a large negative value lands on i64::MIN, where `abs` overflows and
-    // panics in a debug build.
-    let ms = if ts.unsigned_abs() > 10_000_000_000 {
-        ts
-    } else {
-        ts * 1000
-    };
+    if ts <= 0 {
+        return None;
+    }
+    // The guard above is load-bearing beyond the sentinel: it is what makes the
+    // arithmetic here total. `ts` is positive, so the `* 1000` branch tops out
+    // at 10_000_000_000_000, and the negative saturation of the float spelling
+    // below can no longer reach an overflowing `abs`.
+    let ms = if ts > 10_000_000_000 { ts } else { ts * 1000 };
     Utc.timestamp_millis_opt(ms)
         .single()
         .map(|dt| dt.to_rfc3339())
@@ -526,8 +535,11 @@ mod tests {
 
     #[test]
     fn out_of_range_epochs_are_rejected_without_panicking() {
-        // Floats saturate on cast, so these reach the i64 bounds rather than
-        // wrapping; the numeric-string spelling reaches i64::MIN directly.
+        // Floats saturate on cast rather than wrapping, so these land on the
+        // i64 bounds; the numeric-string spelling reaches i64::MIN directly.
+        // The two negatives are now turned away by the sign guard and the
+        // positive one by chrono's range check, so this stays a regression
+        // test against either half being relaxed.
         assert_eq!(parse_reset_time(Some(&serde_json::json!(-1e300f64))), None);
         assert_eq!(parse_reset_time(Some(&serde_json::json!(1e300f64))), None);
         assert_eq!(
@@ -592,6 +604,77 @@ mod tests {
     #[test]
     fn time_limit_falls_back_to_renewal_when_its_own_reset_is_unparseable() {
         let lim = limit_with_reset("TIME_LIMIT", 0, 0, 10.0, serde_json::json!("unknown"));
+        let (_, _, search) =
+            run_with_search_reset(&[lim], Some("2026-11-30T00:00:00+00:00".to_string()));
+        let search = search.expect("web search metric present");
+        assert_eq!(
+            search.resets_at.as_deref(),
+            Some("2026-11-30T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn non_positive_epochs_are_rejected_in_every_spelling() {
+        // Epoch 0 is a sentinel, not a reset time. Left alone it resolves to
+        // 1970-01-01, which is truthy everywhere `resets_at` is consumed.
+        for zero in [
+            serde_json::json!(0i64),
+            serde_json::json!(0.0f64),
+            serde_json::json!("0"),
+        ] {
+            assert_eq!(parse_reset_time(Some(&zero)), None, "spelling: {zero}");
+        }
+        // A reset time before the epoch is nonsense for a *next* reset.
+        for negative in [
+            serde_json::json!(-1i64),
+            serde_json::json!(-1.0f64),
+            serde_json::json!("-1"),
+        ] {
+            assert_eq!(
+                parse_reset_time(Some(&negative)),
+                None,
+                "spelling: {negative}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_epoch_never_suppresses_a_valid_reset_time() {
+        // Same defect class as the unparseable-string case above, reached
+        // through the numeric path: as 1970-01-01 the sentinel wins both the
+        // CREDIT_LIMIT overwrite and the `resets_at.is_none()` fill-in, and
+        // `helpers::format_reset_time` then renders "resets now" forever.
+        let valid = || {
+            limit_with_reset(
+                "TOKENS_LIMIT",
+                3,
+                5,
+                20.0,
+                serde_json::json!(1788701854998i64),
+            )
+        };
+        let sentinel = || limit_with_reset("CREDIT_LIMIT", 3, 5, 80.0, serde_json::json!(0i64));
+
+        let (session, _, _) = run(&[valid(), sentinel()]);
+        let session = session.expect("session metric present");
+        assert_eq!(session.used_percent, 80.0);
+        assert_eq!(
+            session.resets_at.as_deref(),
+            Some("2026-09-06T13:37:34.998+00:00")
+        );
+
+        let (session, _, _) = run(&[sentinel(), valid()]);
+        let session = session.expect("session metric present");
+        assert_eq!(session.used_percent, 80.0);
+        assert_eq!(
+            session.resets_at.as_deref(),
+            Some("2026-09-06T13:37:34.998+00:00")
+        );
+    }
+
+    #[test]
+    fn time_limit_falls_back_to_renewal_when_its_own_reset_is_zero() {
+        let lim = limit_with_reset("TIME_LIMIT", 0, 0, 10.0, serde_json::json!(0i64));
         let (_, _, search) =
             run_with_search_reset(&[lim], Some("2026-11-30T00:00:00+00:00".to_string()));
         let search = search.expect("web search metric present");
