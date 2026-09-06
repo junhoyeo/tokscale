@@ -1075,6 +1075,49 @@ mod tests {
         );
     }
 
+    /// A port with nothing behind it ends the round on its refusal.
+    ///
+    /// This is the premise that makes [`DISCOVERY_ROUND_TIMEOUT`] affordable
+    /// on a machine without Antigravity: `cli.log` keeps naming the ports of
+    /// servers that have since exited, and only a port that accepts and then
+    /// goes quiet may hold a round to its deadline. A refused connection is a
+    /// failure `call_rpc` reports at once, so the round has nothing left in
+    /// flight and returns without a summary.
+    ///
+    /// The port is one this test bound and released, so nothing listens on it.
+    /// Under [`ROUND_STALL_GUARD`] the deadline is reachable only by treating
+    /// the refusal as a request still in flight, which is what the elapsed
+    /// check rules out; it bounds a hang, not how fast the refusal arrives.
+    #[test]
+    fn a_port_that_refuses_ends_the_round_on_the_refusal() {
+        let released = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let summary = runtime.block_on(race_for_quota_with(
+            vec![released],
+            ROUND_STALL_GUARD,
+            &quota_client,
+        ));
+        let elapsed = started.elapsed();
+
+        assert!(
+            summary.is_none(),
+            "nothing listens on {released}, so a refused connection cannot yield a summary"
+        );
+        assert!(
+            elapsed < ROUND_STALL_GUARD,
+            "a refused connection must end the round on the refusal, not at its deadline \
+             (elapsed={elapsed:?})"
+        );
+    }
+
     /// The log is appended across every run and never rotated, so the read has
     /// to be bounded -- and the bound has to keep the *end*, because that is
     /// where the port of the currently running server was written.
