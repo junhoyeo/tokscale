@@ -2345,15 +2345,15 @@ fn https_rpc_request(
         // context entered (#1264): the TUI usage refresh and `tokscale
         // usage` reach this function while `has_credentials`'s own
         // current-thread runtime is mid-`block_on`, because
-        // `discover_port` probes the IDE's language server
-        // synchronously. A dedicated OS thread never carries a runtime
-        // context, so the nested-runtime panic is structurally
-        // impossible for every caller; the scope (not
-        // `std::thread::spawn`) is what lets the request keep borrowing
-        // `connection`/`method`/`body`. The ~microsecond spawn cost is
-        // irrelevant next to a loopback RPC with a 10s timeout, and a
-        // worker panic now degrades to `Err` instead of unwinding into
-        // whatever thread called us.
+        // `discover_quota` reaches the IDE's language server through
+        // `detect_antigravity_connections`, which is synchronous. A
+        // dedicated OS thread never carries a runtime context, so the
+        // nested-runtime panic is structurally impossible for every
+        // caller; the scope (not `std::thread::spawn`) is what lets the
+        // request keep borrowing `connection`/`method`/`body`. The
+        // ~microsecond spawn cost is irrelevant next to a loopback RPC
+        // with a 10s timeout, and a worker panic now degrades to `Err`
+        // instead of unwinding into whatever thread called us.
         let joined: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>> =
             std::thread::scope(|scope| {
                 scope
