@@ -794,10 +794,6 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
 
       const bucketAt = (power: number) =>
         payload.unattributedHistogram[String(power * UNKNOWABLE_BUCKET_WIDTH)];
-      // The two zero-gap personas cross no boundary, so 1M holds nine, not
-      // eleven — the histogram is also where "unknowable but fully covered"
-      // (overNestedZeroScalar/NoScalar) separates from "tokens actually
-      // missing", which the flat counts cannot say.
       // The two zero-gap personas and remainderPlusUnknown's 1,000 cross no
       // boundary, so 1M holds eight of the eleven — the histogram is also
       // where "unknowable but fully covered" (overNestedZeroScalar/NoScalar)
