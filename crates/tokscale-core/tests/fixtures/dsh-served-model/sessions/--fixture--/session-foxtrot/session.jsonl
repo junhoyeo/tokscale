@@ -1,0 +1,4 @@
+{"type":"session","id":"session-foxtrot","cwd":"/fixture","createdAt":1780000000000}
+{"type":"request/header","seq":1,"time":1780000000001,"data":{"header":{"config":{"provider":"fixture-provider","model":"fixture-alias-model"}}}}
+{"type":"user/message","seq":2,"time":1780000000002,"data":{"turn":0}}
+{"type":"assistant/message","seq":3,"time":1780000000003,"data":{"turn":0,"step":0,"message":{"id":"msg-foxtrot-alias","source":{"kind":"model","provider":"fixture-provider","model":"fixture-alias-model","replayState":{"response":{"kind":"pi-ai","version":2,"api":"openai-completions","provider":"fixture-provider","model":"fixture-alias-model","responseModel":"fixture-served-model","stopReason":"stop"}}}},"usage":{"inputTokens":103,"outputTokens":11,"cacheReadTokens":1030,"cacheWriteTokens":3}}}

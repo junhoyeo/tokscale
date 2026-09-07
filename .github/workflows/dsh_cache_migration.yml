@@ -1,0 +1,153 @@
+name: DSH Cache Migration
+
+# A cache written by a published release, read once by this build, must report
+# what a cold scan of this build reports. The DSH parser's cache identity has
+# moved twice since the client shipped (#1221: 3 -> 4, #1235: 4 -> 5); the unit
+# tests cover the key, this covers the reparse.
+#
+# The migration steps pin the release they read a cache from, one per identity
+# change. `latest` cannot stand in for them: it already carries the current
+# parser version, so the cache it writes is served rather than migrated and the
+# step stays green even when the version bump under test is deleted.
+#
+# The `latest` steps are not spare, and only their leg A goes ungraded. Serving
+# is exactly what makes them the only steps whose leg B reads the predecessor's
+# rows instead of reparsing them, so their B-vs-C comparison is the only
+# assertion in this job that can fail on the NEXT missing parser-version bump --
+# the pinned steps assert this build has moved past 3 and past 4, which stays
+# true forever. They run over both fixtures for that reason: dsh-seq-key reports
+# a single model and can only see a change that moves a token total, while
+# dsh-served-model's totals are identical on both sides of the attribution
+# change and only its per-model split can see one.
+#
+# Bumping DSH's parser version again means adding a step here that pins the
+# release before the bump, with a fixture whose reported figure moves across it.
+# Without one, the new identity is covered by nothing -- and until that bump is
+# published, the `latest` steps say in their log that they are grading nothing
+# about the identity path.
+#
+# A CACHE_FORMAT_VERSION bump would quiet the same half of the `latest` steps
+# if they watched the shard bytes, and adding a pinned step does not answer it:
+# `read_shard_with_limit` compares the parser identity before it looks at the
+# format, so a pinned predecessor's cache is already Stale and never reaches a
+# format branch. The wire migration deserializes a released cache one format
+# behind, serves it and re-persists it; a bump with no legacy branch discards
+# it and writes the same bytes. The script tells the two apart with a canary:
+# a transcript it plants in its copy of the fixture and edits in place, outside
+# the fingerprint's sample windows, once the release has cached it. Leg B
+# reports the cached figure if it served the rows and the edited one if it
+# parsed them again, and the `latest` steps fail on the latter. A shard that
+# fails to decode on the way -- the fate a broken legacy branch meets -- warns
+# on stderr, and the script fails on that line too.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &dsh_cache_migration_paths
+      - "crates/tokscale-core/src/sessions/dsh.rs"
+      - "crates/tokscale-core/src/message_cache.rs"
+      - "crates/tokscale-core/tests/fixtures/dsh-seq-key/**"
+      - "crates/tokscale-core/tests/fixtures/dsh-served-model/**"
+      - "scripts/check-dsh-cache-migration.sh"
+      - "scripts/test-check-dsh-cache-migration.sh"
+      - ".github/workflows/dsh_cache_migration.yml"
+      - "rust-toolchain.toml"
+  pull_request:
+    branches: [main]
+    paths: *dsh_cache_migration_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-cache-migration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dsh-cache-migration:
+    name: Released caches, this build's scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Test the gate's own red paths
+        # Stub binaries and a synthetic fixture, so the ways this gate is meant
+        # to fail are checked in seconds and before anything expensive runs. A
+        # gate whose failure paths have rotted reports success either way.
+        run: bash scripts/test-check-dsh-cache-migration.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: dsh-gate-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            dsh-gate-${{ runner.os }}-cargo-
+
+      - name: Build this tree's CLI
+        run: cargo build --release --locked -p tokscale-cli
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Install the released binaries the gate reads caches from
+        # 4.14.0 is the last release before served-model attribution (DSH
+        # parser version 3); 4.15.0 the last before compactionId keying
+        # (version 4). Any of these failing to install fails the job, which is
+        # the right direction: a gate that cannot fetch its predecessor has not
+        # run.
+        run: |
+          for release in 4.14.0 4.15.0 latest; do
+            dir="$RUNNER_TEMP/tokscale-$release"
+            mkdir -p "$dir"
+            cd "$dir"
+            npm init -y > /dev/null
+            npm install --no-save --no-audit --no-fund "tokscale@$release"
+            node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale --version
+          done
+
+      - name: Migrate a 4.14.0 cache (served-model attribution)
+        run: |
+          bash scripts/check-dsh-cache-migration.sh \
+            target/release/tokscale \
+            "$RUNNER_TEMP/tokscale-4.14.0/node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale" \
+            dsh-served-model 3
+
+      - name: Migrate a 4.15.0 cache (compactionId keying)
+        run: |
+          bash scripts/check-dsh-cache-migration.sh \
+            target/release/tokscale \
+            "$RUNNER_TEMP/tokscale-4.15.0/node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale" \
+            dsh-seq-key 4
+
+      - name: Read the last published release's cache (served-model attribution)
+        # Both fixtures, because this is the leg where the released rows are
+        # served rather than reparsed and so the only one that can catch the
+        # next missing bump -- and a bump it cannot see is a bump it does not
+        # cover. dsh-served-model is the fixture whose totals do not move across
+        # an attribution change; without it a served-model change shipped
+        # without a version bump passes every step in this job.
+        run: |
+          bash scripts/check-dsh-cache-migration.sh \
+            target/release/tokscale \
+            "$RUNNER_TEMP/tokscale-latest/node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale" \
+            dsh-served-model unpinned
+
+      - name: Read the last published release's cache (compactionId keying)
+        run: |
+          bash scripts/check-dsh-cache-migration.sh \
+            target/release/tokscale \
+            "$RUNNER_TEMP/tokscale-latest/node_modules/@tokscale/cli-linux-x64-gnu/bin/tokscale" \
+            dsh-seq-key unpinned

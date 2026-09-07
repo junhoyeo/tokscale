@@ -749,6 +749,33 @@ fn create_empty_fixture_dir() -> TempDir {
     tmp
 }
 
+fn write_openclaw_checkpoint_fixture(base: &Path) -> std::path::PathBuf {
+    let sessions = base.join(".openclaw/agents/main/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let primary = sessions.join("session-original.jsonl");
+    let original = br#"{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":100,"output":50},"timestamp":1788566869012}}"#;
+    fs::write(&primary, original).unwrap();
+
+    let checkpoint = "11111111-1111-4111-8111-111111111111";
+    let snapshot = br#"{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":900,"output":450},"timestamp":1788566869012}}"#;
+    fs::write(
+        sessions.join(format!("session-original.checkpoint.{checkpoint}.jsonl")),
+        snapshot,
+    )
+    .unwrap();
+    for reason in ["deleted", "reset"] {
+        fs::write(
+            sessions.join(format!(
+                "session-original.checkpoint.{checkpoint}.jsonl.{reason}.2026-09-05T00-00-00.000Z.zst"
+            )),
+            zstd::encode_all(&snapshot[..], 0).unwrap(),
+        )
+        .unwrap();
+    }
+
+    primary
+}
+
 #[cfg(unix)]
 fn create_timezone_boundary_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
@@ -2398,6 +2425,57 @@ fn test_mcode_headless_stream_counts_identically_cold_and_warm_cache() {
         assert_eq!(entry["cacheWrite"].as_i64(), Some(50), "{pass} cache pass");
         assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
     }
+}
+
+#[test]
+fn test_openclaw_checkpoint_snapshots_do_not_inflate_cli_aggregates_or_warm_cache() {
+    let tmp = create_empty_fixture_dir();
+    let primary = write_openclaw_checkpoint_fixture(tmp.path());
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--json", "--client", "openclaw", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} cache pass failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass} cache pass");
+        assert_eq!(json["totalInput"].as_i64(), Some(100), "{pass} cache pass");
+        assert_eq!(json["totalOutput"].as_i64(), Some(50), "{pass} cache pass");
+        assert_eq!(
+            json["entries"].as_array().unwrap().len(),
+            1,
+            "{pass} cache pass"
+        );
+    }
+
+    let source_cache = sandbox_config_dir(tmp.path())
+        .join("cache")
+        .join("source-message-cache-v2");
+    assert!(
+        source_cache.is_dir(),
+        "the checkpoint-only pass must exercise an existing source cache"
+    );
+    fs::remove_file(primary).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "openclaw", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(0));
+    assert_eq!(json["totalInput"].as_i64(), Some(0));
+    assert_eq!(json["totalOutput"].as_i64(), Some(0));
+    assert!(json["entries"].as_array().unwrap().is_empty());
 }
 
 /// The Windows regression guard for the two tests below.

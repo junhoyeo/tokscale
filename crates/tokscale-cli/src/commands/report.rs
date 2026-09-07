@@ -13,7 +13,9 @@ use tokscale_core::content_extractor::SessionContent;
 use tokscale_core::content_extractor::{extract_session_content, metadata_only_content};
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
-use tokscale_core::{parse_local_clients, LocalParseOptions, ParsedMessage, TokenBreakdown};
+use tokscale_core::{
+    parse_local_clients, CostSource, LocalParseOptions, ParsedMessage, TokenBreakdown,
+};
 
 pub struct ReportOptions {
     pub json: bool,
@@ -107,10 +109,6 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
 }
 
 fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> {
-    let existing = db
-        .get_existing_session_ids()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
     let parsed = parse_local_clients(LocalParseOptions {
         home_dir: opts.home_dir.clone(),
         use_env_roots: opts.home_dir.is_none(),
@@ -124,9 +122,24 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
 
     let pricing = load_pricing_service();
 
+    record_new_sessions(db, &parsed.messages, pricing.as_deref())
+}
+
+/// Aggregate `messages` per session and record every session the wiki has not
+/// seen yet. Recorded sessions are never rewritten, so the figures computed
+/// here are the ones the wiki keeps.
+fn record_new_sessions(
+    db: &WikiDb,
+    messages: &[ParsedMessage],
+    pricing: Option<&PricingService>,
+) -> Result<()> {
+    let existing = db
+        .get_existing_session_ids()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     let mut session_map: HashMap<String, SessionAgg> = HashMap::new();
 
-    for msg in &parsed.messages {
+    for msg in messages {
         let agg = session_map
             .entry(msg.session_id.clone())
             .or_insert_with(|| SessionAgg {
@@ -150,7 +163,7 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
         agg.total_input = agg.total_input.saturating_add(msg.input);
         agg.total_output = agg.total_output.saturating_add(msg.output);
         agg.total_cache_read = agg.total_cache_read.saturating_add(msg.cache_read);
-        agg.total_cost += compute_msg_cost(msg, pricing.as_deref());
+        agg.total_cost += compute_msg_cost(msg, pricing);
         // NOTE: the wiki `report` view intentionally groups on the raw model_id
         // and does not apply `modelAliases` folding (nor the grouping
         // normalization every other report uses). Wiki entries are persisted
@@ -1548,10 +1561,17 @@ fn load_pricing_service() -> Option<std::sync::Arc<PricingService>> {
     fresh.or_else(|| PricingService::load_cached_any_age().map(std::sync::Arc::new))
 }
 
-/// Computes a message's cost using the canonical [`PricingService`], honoring
+/// Computes a message's cost. A provider-reported cost is used as-is, the same
+/// way the submit lane never reprices an authoritative figure: some sources
+/// (fx session snapshots, for one) report a cost for a row that carries no
+/// tokens at all, and pricing that row from its tokens would record $0.00.
+/// Anything else is priced with the canonical [`PricingService`], honoring
 /// per-model rates and every billed token type (input/output/cache read/cache
 /// write/reasoning). Returns 0.0 when no pricing dataset is available.
 fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f64 {
+    if msg.cost_source == CostSource::ProviderReported {
+        return msg.cost;
+    }
     let Some(pricing) = pricing else {
         return 0.0;
     };
@@ -1631,6 +1651,8 @@ mod tests {
             duration_ms: None,
             message_count: 1,
             agent: None,
+            cost: 0.0,
+            cost_source: CostSource::Unknown,
         }
     }
 
@@ -1776,6 +1798,84 @@ mod tests {
     fn compute_msg_cost_without_pricing_is_zero() {
         let msg = parsed_message("claude-haiku-4");
         assert_eq!(compute_msg_cost(&msg, None), 0.0);
+    }
+
+    #[test]
+    fn compute_msg_cost_keeps_a_provider_reported_cost() {
+        let pricing = test_pricing_service();
+        let mut msg = parsed_message("claude-haiku-4");
+        let estimated = compute_msg_cost(&msg, Some(&pricing));
+        assert!(estimated > 0.0);
+
+        msg.cost = 0.42;
+        msg.cost_source = CostSource::ProviderReported;
+        assert_eq!(compute_msg_cost(&msg, Some(&pricing)), 0.42);
+        // An authoritative figure does not need a pricing dataset at all.
+        assert_eq!(compute_msg_cost(&msg, None), 0.42);
+
+        // A parser-side cost that is not authoritative never overrides the
+        // canonical pricing of the tokens.
+        msg.cost_source = CostSource::Estimated;
+        assert_eq!(compute_msg_cost(&msg, Some(&pricing)), estimated);
+    }
+
+    #[test]
+    fn wiki_keeps_the_reported_cost_of_a_token_free_fx_session() {
+        // fx can snapshot a session with a positive `total_cost`, no per-model
+        // entries and zero tokens; the parser attributes it to `fx-unknown`
+        // with the reported cost. Pricing that row from its tokens yields $0,
+        // and the wiki never rewrites a session it has already recorded, so
+        // the wrong figure would stick for good.
+        let home = tempfile::TempDir::new().unwrap();
+        let session = home.path().join(".fx/sessions/sess-1");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("session.json"),
+            r#"{"workspace_root":"/Users/alice/repo","updated_at_ms":1780000000000}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session.join("usage-v2.json"),
+            r#"{"schema_version":1,"session_id":"sess-1","snapshot":{"schema_version":2,"total_cost":0.014,"request_count":1,"models":[]}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["fx".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: Default::default(),
+        })
+        .unwrap();
+        let fx: Vec<&ParsedMessage> = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == "fx")
+            .collect();
+        assert_eq!(fx.len(), 1, "one fx-unknown row expected");
+        assert_eq!(
+            fx[0].input + fx[0].output + fx[0].cache_read + fx[0].cache_write + fx[0].reasoning,
+            0,
+            "the fixture must carry no tokens for the cost to come from the snapshot"
+        );
+
+        let db = WikiDb::open(&home.path().join("wiki.db")).unwrap();
+        record_new_sessions(&db, &parsed.messages, None).unwrap();
+
+        let entry = db
+            .get_entry("sess-1")
+            .unwrap()
+            .expect("the fx session must be recorded");
+        assert_eq!(entry.client, "fx");
+        assert_eq!(entry.models_used, vec!["fx-unknown".to_string()]);
+        assert!(
+            (entry.total_cost - 0.014).abs() < 1e-9,
+            "wiki must keep the provider-reported cost, got {}",
+            entry.total_cost
+        );
     }
 
     fn titled_entry(session_id: &str, title: &str) -> WikiEntry {

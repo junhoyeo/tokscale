@@ -1967,6 +1967,7 @@ fn is_openai_full_request_272k_model(model_id: &str) -> bool {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        "gpt-6-astra",
     ]
     .into_iter()
     .any(|base| matches_model_or_snapshot(model_id, base))
@@ -7357,6 +7358,9 @@ mod tests {
             "gpt-5.6-sol",
             "gpt-5.6-terra-2026-07-01",
             "gpt-5.6-luna",
+            "gpt-6-astra",
+            "openai/gpt-6-astra",
+            "gpt-6-astra-2026-09-03",
         ] {
             assert!(
                 uses_openai_full_request_272k_pricing(
@@ -7429,6 +7433,75 @@ mod tests {
         let orcarouter_expected =
             (200_000.0 * 0.000005) + (10_000.0 * 0.000030) + (72_001.0 * 0.0000005);
         assert!((orcarouter_cost - orcarouter_expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_astra_applies_full_request_pricing_above_272k_threshold() {
+        let result = LookupResult {
+            matched_key: "gpt-6-astra".into(),
+            source: "LiteLLM".into(),
+            evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
+            pricing: ModelPricing {
+                input_cost_per_token: Some(0.000010),
+                input_cost_per_token_above_272k_tokens: Some(0.000020),
+                output_cost_per_token: Some(0.000050),
+                output_cost_per_token_above_272k_tokens: Some(0.000075),
+                cache_read_input_token_cost: Some(0.000001),
+                cache_read_input_token_cost_above_272k_tokens: Some(0.000002),
+                cache_creation_input_token_cost: Some(0.0000125),
+                ..Default::default()
+            },
+        };
+
+        let usage = |input, output, cache_read, cache_write| TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning: 0,
+        };
+
+        // 1. Below or at 272k threshold: standard rates
+        let at_boundary =
+            compute_cost_for_lookup(&result, Some("openai"), &usage(272_000, 10_000, 0, 0));
+        let expected_at_boundary = 272_000.0 * 0.000010 + 10_000.0 * 0.000050; // $3.22
+        assert!((at_boundary - expected_at_boundary).abs() < 1e-12);
+
+        // 2. 1 token above threshold: entire request billed at above-272k rates
+        let above_boundary =
+            compute_cost_for_lookup(&result, Some("openai"), &usage(272_001, 10_000, 0, 0));
+        let expected_above_boundary = 272_001.0 * 0.000020 + 10_000.0 * 0.000075; // $6.19002
+        assert!((above_boundary - expected_above_boundary).abs() < 1e-12);
+
+        // 3. 300k uncached input + 10k output: reproduces issue #1279 example
+        let repro_case =
+            compute_cost_for_lookup(&result, Some("openai"), &usage(300_000, 10_000, 0, 0));
+        let expected_repro = 300_000.0 * 0.000020 + 10_000.0 * 0.000075; // $6.75
+        assert!((repro_case - expected_repro).abs() < 1e-12);
+
+        // 4. Combined prompt tokens (250k input + 50k cache read) exceed 272k
+        let cache_case =
+            compute_cost_for_lookup(&result, Some("openai"), &usage(250_000, 10_000, 50_000, 0));
+        let expected_cache = 250_000.0 * 0.000020 + 10_000.0 * 0.000075 + 50_000.0 * 0.000002; // $5.85
+        assert!((cache_case - expected_cache).abs() < 1e-12);
+
+        // 5. Non-direct provider keeps progressive tiers
+        let azure_cost =
+            compute_cost_for_lookup(&result, Some("azure"), &usage(300_000, 10_000, 0, 0));
+        let expected_azure = (272_000.0 * 0.000010 + 28_000.0 * 0.000020) + (10_000.0 * 0.000050); // $3.78
+        assert!((azure_cost - expected_azure).abs() < 1e-12);
+
+        // 6. Complete LiteLLM pricing preference is favored for openai provider
+        assert!(should_prefer_openai_tiered_litellm(
+            "gpt-6-astra",
+            Some("openai"),
+            Some(&result)
+        ));
+        assert!(!should_prefer_openai_tiered_litellm(
+            "gpt-6-astra",
+            Some("azure"),
+            Some(&result)
+        ));
     }
 
     #[test]

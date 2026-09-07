@@ -1,0 +1,58 @@
+{
+  "current": {
+    "totals": {
+      "totalInput": 621,
+      "totalOutput": 65,
+      "totalCacheRead": 6210,
+      "totalCacheWrite": 15,
+      "totalMessages": 3
+    },
+    "models": {
+      "dsh/fixture-provider/fixture-model": {
+        "input": 307,
+        "output": 31,
+        "cacheRead": 3070,
+        "cacheWrite": 7,
+        "reasoning": 0,
+        "messageCount": 1
+      },
+      "dsh/fixture-provider/fixture-served-model": {
+        "input": 314,
+        "output": 34,
+        "cacheRead": 3140,
+        "cacheWrite": 8,
+        "reasoning": 0,
+        "messageCount": 2
+      }
+    }
+  },
+  "predecessors": {
+    "3": {
+      "totals": {
+        "totalInput": 621,
+        "totalOutput": 65,
+        "totalCacheRead": 6210,
+        "totalCacheWrite": 15,
+        "totalMessages": 3
+      },
+      "models": {
+        "dsh/fixture-provider/fixture-alias-model": {
+          "input": 103,
+          "output": 11,
+          "cacheRead": 1030,
+          "cacheWrite": 3,
+          "reasoning": 0,
+          "messageCount": 1
+        },
+        "dsh/fixture-provider/fixture-model": {
+          "input": 518,
+          "output": 54,
+          "cacheRead": 5180,
+          "cacheWrite": 12,
+          "reasoning": 0,
+          "messageCount": 2
+        }
+      }
+    }
+  }
+}

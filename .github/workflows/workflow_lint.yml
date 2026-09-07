@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths: &workflow_lint_paths
       - ".github/workflows/**"
+      - "rust-toolchain.toml"
+      - "scripts/check-workflow-toolchain-paths.py"
+      - "scripts/test-workflow-toolchain-paths.sh"
   pull_request:
     branches: [main]
     paths: *workflow_lint_paths
@@ -28,3 +31,9 @@ jobs:
       - name: Lint GitHub Actions workflows
         # actionlint 1.7.12; keep the image immutable and review the version when updating this digest.
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+      - name: Verify Rust workflows re-run on toolchain pin changes
+        run: python3 scripts/check-workflow-toolchain-paths.py
+
+      - name: Run workflow check tests
+        run: bash scripts/test-workflow-toolchain-paths.sh

@@ -180,7 +180,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         month.tokens.input,
                         month.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(month.tokens.total(), &app.theme),
                     Cell::from(format_cost(month.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(month.cost, month.tokens.total()))
@@ -449,7 +449,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.input,
                         day.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
