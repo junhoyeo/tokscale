@@ -52,6 +52,32 @@ jobs:
       - name: Run Clippy (strict)
         run: cargo clippy --locked --workspace --all-features -- -D warnings
 
+  rustdoc:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: rustdoc-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rustdoc-${{ runner.os }}-cargo-
+      - name: Build docs (deny warnings)
+        # Doc comments are not compiled by clippy: broken intra-doc links,
+        # bare URLs, and `<...>` placeholders parsed as HTML tags only fail
+        # here.
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --workspace
+
   # Windows is a first-class target - `build-native.yml` ships
   # x86_64/aarch64-pc-windows-msvc artifacts - but until #997 nothing ever
   # *executed* a test there, so Windows-only defects reached users unseen.
