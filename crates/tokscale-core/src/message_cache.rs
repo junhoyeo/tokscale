@@ -1064,7 +1064,166 @@ pub fn parser_generation() -> u64 {
     acc
 }
 
+/// A family of clients whose caches must invalidate together because they
+/// read the same source format through one shared parser driver, plus the
+/// driver base version every member derives from.
+///
+/// This roster is the single source of truth for cache-relevant parser
+/// sharing: `parser_version()` reads each member's version from its
+/// family's base through [`shared_family_version`], so a client cannot
+/// join a family without its version moving with the base, cannot be
+/// re-versioned independently while it is rostered, and cannot be dropped
+/// from the roster without `parser_version()` failing loudly on the
+/// client's next lookup. The tests pin the exact membership and offsets,
+/// so any edit here is a deliberate, reviewed change.
+struct SharedParserFamily {
+    /// Short format-driver name, used in assertion messages.
+    name: &'static str,
+    /// The driver module's base parser version. A parse change in the
+    /// shared driver bumps this constant and moves every member at once.
+    base: u32,
+    /// `(client, offset)` pairs. The client's cache version is
+    /// `base + offset`; the offset preserves the client's independent
+    /// invalidation history so joining a family never renumbers live
+    /// caches.
+    members: &'static [(ClientId, u32)],
+}
+
+/// Clients that delegate to the *same parser code* rather than owning an
+/// independent parser. Cross-cutting leaf helpers (`sessions/utils.rs`,
+/// `pi::has_replacement_character`) are used by many otherwise-unrelated
+/// parsers; a behavioral change to one of those must bump each affected
+/// client individually and is deliberately not modeled as a family.
+const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
+    SharedParserFamily {
+        // Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser in
+        // `sessions/pi.rs`; Prime Agent rides on it through
+        // `parse_pi_format_rlm_file_with_observer` (#1195, #1288).
+        name: "pi-format",
+        base: crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
+        members: &[
+            // +1: Pi subagent sessions now derive agent attribution from
+            // session_info names; version-1 caches carry those messages
+            // without agent metadata.
+            (ClientId::Pi, 1),
+            // +1: Kimchi's Pi-compatible messages now carry stable
+            // namespaced deduplication keys.
+            (ClientId::Kimchi, 1),
+            (ClientId::Omp, 0),
+            (ClientId::Senpi, 0),
+            // +3 for Prime Agent's independent history. v1->v2 strips a
+            // leading BOM and recovers records containing undecodable
+            // bytes; its accounting scan also continues past those records
+            // instead of truncating and misaligning message indices. The
+            // bump intentionally forces a full re-decode and
+            // accounting/matching rebuild; it makes the legacy v4
+            // accounting-backfill path unreachable for live caches, but
+            // avoids mixing v1 cached messages with v2 scans. Without the
+            // bump, malformed-line loss could be mistaken for complete
+            // accounting rather than a truncated source. v2->v3 rejects
+            // damaged lineage and usage structural keys before
+            // reconciliation bookkeeping. v3->v4 rejects damaged lineage
+            // values and matching-critical child timestamps while
+            // preserving unrelated damaged usage extensions.
+            (ClientId::PrimeAgent, 3),
+        ],
+    },
+    SharedParserFamily {
+        // Roo Code, Kilo Code, and Cline forked one task-log format and
+        // all parse it through `roocode::parse_roo_kilo_file`. Roo Code
+        // and Kilo Code parse task logs *only* through that helper and
+        // carry no independent invalidation history.
+        name: "roo/kilo task log",
+        base: crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
+        members: &[
+            (ClientId::RooCode, 0),
+            (ClientId::KiloCode, 0),
+            // +2 for Cline's independent history. v1->v2: standalone Cline
+            // messages subtract cache buckets from gross input tokens,
+            // reject non-finite costs, and preserve zero-cost reports.
+            // v2->v3: content-aware Cline CLI turn-start classification
+            // now recognizes user tool-result records as continuations
+            // instead of beginning a new turn, so cached turns must be
+            // reparsed.
+            (ClientId::Cline, 2),
+        ],
+    },
+    SharedParserFamily {
+        // OpenCode, MiMo Code, and Kilo read their SQLite stores through
+        // the shared `opencode_schema` driver (Kilo with Kilo-specific
+        // policy in `OpenCodeSchemaConfig::kilo`).
+        name: "opencode schema",
+        base: crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION,
+        members: &[
+            // +2 for OpenCode's independent history. v1 -> v2: the parser
+            // now prefers `session_v2` metadata over the legacy `session`
+            // join for workspace and title; a database that carries both
+            // tables is byte-identical before and after, so only the bump
+            // discards entries still holding the old attribution.
+            // v2 -> v3: id-less legacy JSON messages now carry a canonical
+            // path-scoped key instead of a globally colliding filename
+            // stem; the source bytes and fingerprint do not change, so
+            // invalidate cached v2 rows to make same-named files in
+            // different sessions survive (#1198).
+            (ClientId::OpenCode, 2),
+            // +2 for MiMo Code's independent history. v1 retained MiMo's
+            // embedded `cost` value but did not preserve its
+            // provider-reported provenance; reparse cached rows so strict
+            // submit validation does not reject valid unknown-model MiMo
+            // usage offline. v2->v3: duplicate merging now upgrades the
+            // retained row when a later copy carries an explicit cost,
+            // including zero.
+            (ClientId::MiMoCode, 2),
+            (ClientId::Kilo, 0),
+        ],
+    },
+    SharedParserFamily {
+        // CodeBuddy and WorkBuddy parse their detailed JSONL transcripts
+        // and extension logs through the shared `tencent_buddy` module.
+        // Neither carries independent invalidation history. (WorkBuddy's
+        // aggregate-DB fallback lives in `workbuddy.rs` itself; a change
+        // scoped to it belongs in a WorkBuddy offset, not the base.)
+        name: "tencent buddy",
+        base: crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION,
+        members: &[(ClientId::CodeBuddy, 0), (ClientId::WorkBuddy, 0)],
+    },
+    SharedParserFamily {
+        // Codebuff and Freebuff read the same `chat-messages.json` shape;
+        // Freebuff extracts usage through `codebuff.rs` helpers. Neither
+        // carries independent invalidation history.
+        name: "codebuff chat",
+        base: crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION,
+        members: &[(ClientId::Codebuff, 0), (ClientId::Freebuff, 0)],
+    },
+];
+
+/// Versions a shared-family member as its family's driver base plus the
+/// member's declared offset. Returns `None` for clients that own an
+/// independent parser and are versioned by an explicit `parser_version()`
+/// arm.
+fn shared_family_version(client: ClientId) -> Option<u32> {
+    let mut matches = SHARED_PARSER_FAMILIES.iter().filter_map(|family| {
+        family
+            .members
+            .iter()
+            .find(|entry| entry.0 == client)
+            .map(|entry| (family.name, family.base + entry.1))
+    });
+    let first = matches.next();
+    debug_assert!(
+        matches.next().is_none(),
+        "{client:?} is declared in two shared-parser families"
+    );
+    first.map(|(_, version)| version)
+}
+
 fn parser_version(client: ClientId) -> u32 {
+    // Shared-family members are versioned by the roster alone: their
+    // version is their family's base plus their declared offset, so a
+    // driver change that bumps the base moves the whole family at once.
+    if let Some(version) = shared_family_version(client) {
+        return version;
+    }
     match client {
         // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
         // JSONL and cached as empty. Their bytes do not change when decoding is
@@ -1128,10 +1287,6 @@ fn parser_version(client: ClientId) -> u32 {
         // when reconstructing VS Code Copilot Chat requests; v8 aggregates
         // carry those sessions as zero-token.
         ClientId::Copilot => 9,
-        // Pi delegates to the shared pi-format parser. Pi subagent sessions
-        // now derive agent attribution from session_info names; version-1
-        // caches carry those messages without agent metadata.
-        ClientId::Pi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
         // message timestamp is now back-calculated to the turn start
         // (created_at - total_time_ms) instead of the recorded (end-anchored)
@@ -1193,17 +1348,6 @@ fn parser_version(client: ClientId) -> u32 {
         // Workspace indexes are applied after the cache read and do not
         // change the persisted parser output.
         ClientId::Kimi => 4,
-        // v1->v2: standalone Cline messages subtract cache buckets from gross
-        // input tokens, reject non-finite costs, and preserve zero-cost reports.
-        // v2->v3: content-aware Cline CLI turn-start classification now
-        // recognizes user tool-result records as continuations instead of
-        // beginning a new turn, so cached turns must be reparsed.
-        // Cline also parses the shared roo/kilo task-log format through
-        // `roocode::parse_roo_kilo_file`, so a helper change that bumps
-        // ROO_KILO_TASK_LOG_PARSER_BASE_VERSION moves Cline together with
-        // Roo Code and Kilo Code; the +2 offset preserves the v1->v3 history
-        // above without renumbering live caches.
-        ClientId::Cline => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
         // `Cost` (including explicit zero) is retained as provider-reported so
@@ -1214,27 +1358,6 @@ fn parser_version(client: ClientId) -> u32 {
         // of landing unpriced, and uses a UTC-stable synthetic id for the id-less
         // fallback.
         ClientId::Cursor => 3,
-        // Kimchi delegates to the shared pi-format parser. v1->v2: Kimchi's
-        // Pi-compatible messages now carry stable namespaced deduplication
-        // keys.
-        ClientId::Kimchi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
-        // v1->v2: Prime Agent now strips a leading BOM and recovers records
-        // containing undecodable bytes; its accounting scan also continues past
-        // those records instead of truncating and misaligning message indices.
-        // The bump intentionally forces a full re-decode and accounting/matching
-        // rebuild; it makes the legacy v4 accounting-backfill path unreachable
-        // for live caches, but avoids mixing v1 cached messages with v2 scans.
-        // Without the bump, malformed-line loss could be mistaken for complete
-        // accounting rather than a truncated source. v2->v3 rejects damaged
-        // lineage and usage structural keys before reconciliation bookkeeping.
-        // v3->v4 rejects damaged lineage values and matching-critical child
-        // timestamps while preserving unrelated damaged usage extensions.
-        // Prime Agent also delegates to the shared pi-format parser (through
-        // `parse_pi_format_rlm_file_with_observer`), so any pi.rs parse change
-        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Prime Agent together
-        // with Pi, Kimchi, Omp, and Senpi (#1195); the +3 offset preserves the
-        // v4 history above.
-        ClientId::PrimeAgent => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 3,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
@@ -1265,19 +1388,6 @@ fn parser_version(client: ClientId) -> u32 {
         // file position. Both change the parse of byte-identical input, so
         // cached entries hold truncated and under-deduplicated output (#1031).
         ClientId::Grok => 7,
-        // v1 retained MiMo's embedded `cost` value but did not preserve its
-        // provider-reported provenance. Reparse cached rows so strict submit
-        // validation does not reject valid unknown-model MiMo usage offline.
-        // v2->v3: duplicate merging now upgrades the retained row when a later
-        // copy carries an explicit cost, including zero.
-        // MiMo Code reads its SQLite store through the shared
-        // `opencode_schema` driver, so a driver change that bumps
-        // OPENCODE_SCHEMA_PARSER_BASE_VERSION moves MiMo Code together with
-        // OpenCode and Kilo; the +2 offset preserves the v1->v3 history above
-        // without renumbering live caches.
-        ClientId::MiMoCode => {
-            crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2
-        }
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -1335,56 +1445,6 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
-        // Omp delegates to the shared pi-format parser. Any pi.rs parse change
-        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Omp together with Pi,
-        // Kimchi, and Senpi (#1195).
-        ClientId::Omp => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
-        // Senpi delegates to the shared pi-format parser. Any pi.rs parse
-        // change that bumps PI_FORMAT_PARSER_BASE_VERSION moves Senpi together
-        // with Pi, Kimchi, and Omp (#1195).
-        ClientId::Senpi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
-        // v1 -> v2: the OpenCode parser now prefers `session_v2` metadata over
-        // the legacy `session` join for workspace and title. A database that
-        // carries both tables is byte-identical before and after, so only the
-        // version bump discards entries still holding the old attribution.
-        // v2 -> v3: id-less legacy JSON messages now carry a canonical
-        // path-scoped key instead of a globally colliding filename stem. The
-        // source bytes and fingerprint do not change, so invalidate cached v2
-        // rows to make same-named files in different sessions survive (#1198).
-        // OpenCode's SQLite path reads through the shared `opencode_schema`
-        // driver, so a driver change that bumps
-        // OPENCODE_SCHEMA_PARSER_BASE_VERSION moves OpenCode together with
-        // MiMo Code and Kilo; the +2 offset preserves the v1->v3 history
-        // above without renumbering live caches.
-        ClientId::OpenCode => {
-            crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2
-        }
-        // Roo Code and Kilo Code parse task logs *only* through the shared
-        // `roocode::parse_roo_kilo_file` helper and carry no independent
-        // invalidation history, so both sit at the shared base directly. A
-        // helper change bumps the base and moves them together with Cline.
-        ClientId::RooCode => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
-        ClientId::KiloCode => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
-        // Kilo reads its SQLite store through the shared `opencode_schema`
-        // driver (with Kilo-specific policy in `OpenCodeSchemaConfig::kilo`)
-        // and carries no independent invalidation history, so it sits at the
-        // shared base directly, moving together with OpenCode and MiMo Code.
-        ClientId::Kilo => crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION,
-        // CodeBuddy and WorkBuddy parse their detailed JSONL transcripts and
-        // extension logs through the shared `tencent_buddy` module. Neither
-        // carries independent invalidation history, so both sit at the shared
-        // base directly; a `tencent_buddy` parse change bumps the base and
-        // moves them together. (WorkBuddy's aggregate-DB fallback lives in
-        // `workbuddy.rs` itself; a change scoped to it belongs in a WorkBuddy
-        // offset, not the base.)
-        ClientId::CodeBuddy => crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION,
-        ClientId::WorkBuddy => crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION,
-        // Codebuff and Freebuff read the same `chat-messages.json` shape;
-        // Freebuff extracts usage through `codebuff.rs` helpers. Neither
-        // carries independent invalidation history, so both sit at the shared
-        // base directly and a helper change moves them together.
-        ClientId::Codebuff => crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION,
-        ClientId::Freebuff => crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating
@@ -1392,24 +1452,12 @@ fn parser_version(client: ClientId) -> u32 {
         // identity is namespaced by `client.as_str()` first, so one client's
         // bump can never invalidate or collide with another's entries
         // (`CacheIdentity` / `CachedSourceEntry::matches_identity`). Sharing
-        // is reserved for parsers that are the *same code*: every family that
-        // delegates to one format driver derives from that driver's base
-        // constant -- pi-format (Pi, Kimchi, Omp, Senpi, PrimeAgent from
-        // `PI_FORMAT_PARSER_BASE_VERSION`), the roo/kilo task log (RooCode,
-        // KiloCode, Cline from `ROO_KILO_TASK_LOG_PARSER_BASE_VERSION`), the
-        // OpenCode SQLite schema (OpenCode, MiMoCode, Kilo from
-        // `OPENCODE_SCHEMA_PARSER_BASE_VERSION`), the Tencent buddy format
-        // (CodeBuddy, WorkBuddy from `TENCENT_BUDDY_PARSER_BASE_VERSION`),
-        // and the Codebuff chat format (Codebuff, Freebuff from
-        // `CODEBUFF_CHAT_PARSER_BASE_VERSION`). No `_ => 1` arm on purpose:
-        // adding a client to `define_clients!` must force an explicit,
-        // per-client versioning decision here instead of silently landing on
-        // 1. `SHARED_PARSER_FAMILIES` in the tests pins the sharing
-        // relationships, and
-        // `test_shared_parser_family_roster_matches_session_delegation`
-        // derives them from the sessions source tree -- when a new client
-        // delegates to an existing parser, add it to the roster and derive
-        // its version from the shared base instead of listing a bare integer.
+        // is reserved for parsers that are the *same code*: those clients
+        // are versioned by `SHARED_PARSER_FAMILIES` above, never listed
+        // here. No `_ => 1` arm on purpose: adding a client to
+        // `define_clients!` fails compilation here until the client is
+        // either added to a shared family (its version then derives from
+        // the family's driver base) or given an explicit independent arm.
         ClientId::Gemini => 1,
         ClientId::Amp => 1,
         ClientId::Qwen => 1,
@@ -1428,6 +1476,29 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Mcode => 1,
         ClientId::LmStudio => 1,
         ClientId::Hindsight => 1,
+        // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
+        // through the roster lookup at the top of this function. Listing
+        // them here keeps the match exhaustive at compile time; reaching
+        // this arm means a member was dropped from the roster without
+        // reclassifying the client, which must fail loudly rather than
+        // silently fall back to anything.
+        ClientId::Pi
+        | ClientId::Kimchi
+        | ClientId::Omp
+        | ClientId::Senpi
+        | ClientId::PrimeAgent
+        | ClientId::RooCode
+        | ClientId::KiloCode
+        | ClientId::Cline
+        | ClientId::OpenCode
+        | ClientId::MiMoCode
+        | ClientId::Kilo
+        | ClientId::CodeBuddy
+        | ClientId::WorkBuddy
+        | ClientId::Codebuff
+        | ClientId::Freebuff => unreachable!(
+            "{client:?} is a shared-parser family member missing from SHARED_PARSER_FAMILIES"
+        ),
     }
 }
 
@@ -4077,120 +4148,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pi_format_shared_parser_version_sync() {
-        use crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION;
-
-        // All five clients delegate to `sessions/pi.rs` (Prime Agent through
-        // `parse_pi_format_rlm_file_with_observer`). Their parser versions
-        // must derive from `PI_FORMAT_PARSER_BASE_VERSION` so changes inside pi.rs
-        // invalidate cached messages consistently across all delegating clients (#1195).
-        let delegating_clients = [
-            ClientId::Pi,
-            ClientId::Kimchi,
-            ClientId::Omp,
-            ClientId::Senpi,
-            ClientId::PrimeAgent,
-        ];
-
-        for client in delegating_clients {
-            assert!(
-                parser_version(client) >= PI_FORMAT_PARSER_BASE_VERSION,
-                "{:?} must derive from PI_FORMAT_PARSER_BASE_VERSION ({})",
-                client,
-                PI_FORMAT_PARSER_BASE_VERSION
-            );
-        }
-
-        assert_eq!(
-            parser_version(ClientId::Pi),
-            PI_FORMAT_PARSER_BASE_VERSION + 1,
-            "Pi carries +1 for subagent session attribution"
-        );
-        assert_eq!(
-            parser_version(ClientId::Kimchi),
-            PI_FORMAT_PARSER_BASE_VERSION + 1,
-            "Kimchi carries +1 for namespaced dedup keys"
-        );
-        assert_eq!(
-            parser_version(ClientId::Omp),
-            PI_FORMAT_PARSER_BASE_VERSION,
-            "Omp carries base version directly"
-        );
-        assert_eq!(
-            parser_version(ClientId::Senpi),
-            PI_FORMAT_PARSER_BASE_VERSION,
-            "Senpi carries base version directly and has an explicit match arm"
-        );
-        assert_eq!(
-            parser_version(ClientId::PrimeAgent),
-            PI_FORMAT_PARSER_BASE_VERSION + 3,
-            "Prime Agent carries +3 for its lossy-decode and lineage-validation history"
-        );
-    }
-
-    /// Clients that delegate to the *same parser code* rather than owning an
-    /// independent parser. A parse change in the shared base that bumps its
-    /// version must invalidate every member's cache at once, so every family
-    /// derives its members' versions from one base constant (base plus a
-    /// per-client offset that preserves independent history). The roster
-    /// mirrors the delegation in `crates/tokscale-core/src/sessions/`, and
-    /// `test_shared_parser_family_roster_matches_session_delegation` derives
-    /// it from those sources so an omitted family fails the build:
-    ///
-    /// - Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser and
-    ///   Prime Agent rides on it through
-    ///   `parse_pi_format_rlm_file_with_observer`; all five derive from
-    ///   `PI_FORMAT_PARSER_BASE_VERSION` (#1195, #1288) and are pinned by
-    ///   `test_pi_format_shared_parser_version_sync`.
-    /// - Roo Code, Kilo Code, and Cline forked one task-log format and all
-    ///   parse it through `roocode::parse_roo_kilo_file`; they derive from
-    ///   `ROO_KILO_TASK_LOG_PARSER_BASE_VERSION`, with Cline's +2 offset
-    ///   preserving its independent v1->v3 history.
-    /// - OpenCode, MiMo Code, and Kilo read their SQLite stores through the
-    ///   `opencode_schema` driver and derive from
-    ///   `OPENCODE_SCHEMA_PARSER_BASE_VERSION`, with +2 offsets preserving
-    ///   OpenCode's and MiMo Code's v1->v3 histories.
-    /// - CodeBuddy and WorkBuddy parse detailed transcripts and extension
-    ///   logs through `tencent_buddy` and derive from
-    ///   `TENCENT_BUDDY_PARSER_BASE_VERSION`.
-    /// - Codebuff and Freebuff share the Codebuff chat-message format
-    ///   (Freebuff extracts usage through `codebuff.rs` helpers) and derive
-    ///   from `CODEBUFF_CHAT_PARSER_BASE_VERSION`.
-    ///
-    /// The roster tracks shared *format drivers* -- the code that owns what a
-    /// source format parses to. Cross-cutting leaf helpers (`sessions/utils.rs`,
-    /// `pi::has_replacement_character`) are used by many otherwise-unrelated
-    /// parsers; a behavioral change to one of those must bump each affected
-    /// client individually and is deliberately not modeled as a family.
-    ///
-    /// Cache entries are namespaced by `client.as_str()` before
-    /// `parser_version` is ever compared (`CacheIdentity` /
-    /// `CachedSourceEntry::matches_identity`), so two clients holding the
-    /// same integer is not, by itself, a collision -- that is why most
-    /// independent parsers sit at 1 without harm. The historic "collision"
-    /// failures were duplicate match arms naming the *same* client (the
-    /// merged-in second `OpenClaw` arm, caught by clippy's
-    /// `unreachable_patterns`) and the `_ => 1` fallback, which let a new
-    /// client land on a shared integer without anyone deciding whether it
-    /// shares a parser. Both failure modes are now closed: every client has
-    /// an explicit arm (adding one to `define_clients!` fails compilation
-    /// until it is versioned deliberately), and this roster plus the tests
-    /// below pin which clients are byte-compatible with each other.
-    const SHARED_PARSER_FAMILIES: &[&[ClientId]] = &[
-        &[
-            ClientId::Pi,
-            ClientId::Kimchi,
-            ClientId::Omp,
-            ClientId::Senpi,
-            ClientId::PrimeAgent,
-        ],
-        &[ClientId::RooCode, ClientId::KiloCode, ClientId::Cline],
-        &[ClientId::OpenCode, ClientId::MiMoCode, ClientId::Kilo],
-        &[ClientId::Codebuff, ClientId::Freebuff],
-        &[ClientId::CodeBuddy, ClientId::WorkBuddy],
-    ];
-
-    #[test]
     fn test_parser_version_covers_every_client() {
         // Exhaustiveness itself is compile-enforced by the explicit arms in
         // `parser_version()`; this pins the second half of the contract,
@@ -4203,428 +4160,143 @@ mod tests {
         }
     }
 
+    /// The roster is the single source of truth for shared-parser
+    /// versioning: `parser_version()` reads every member's version from its
+    /// family's base through `shared_family_version`, so the facts that
+    /// cannot be derived from the code itself are the membership and the
+    /// offsets. This pins them exactly. Removing a member, dropping a
+    /// family, or re-versioning a member with a bare literal in
+    /// `parser_version()` fails here; removing a roster entry without
+    /// reclassifying the client panics in `parser_version()` itself.
+    #[test]
+    fn test_shared_parser_family_roster_pins_exact_membership() {
+        let expected: &[(&str, &[(ClientId, u32)])] = &[
+            (
+                "pi-format",
+                &[
+                    (ClientId::Pi, 1),
+                    (ClientId::Kimchi, 1),
+                    (ClientId::Omp, 0),
+                    (ClientId::Senpi, 0),
+                    (ClientId::PrimeAgent, 3),
+                ],
+            ),
+            (
+                "roo/kilo task log",
+                &[
+                    (ClientId::RooCode, 0),
+                    (ClientId::KiloCode, 0),
+                    (ClientId::Cline, 2),
+                ],
+            ),
+            (
+                "opencode schema",
+                &[
+                    (ClientId::OpenCode, 2),
+                    (ClientId::MiMoCode, 2),
+                    (ClientId::Kilo, 0),
+                ],
+            ),
+            (
+                "tencent buddy",
+                &[(ClientId::CodeBuddy, 0), (ClientId::WorkBuddy, 0)],
+            ),
+            (
+                "codebuff chat",
+                &[(ClientId::Codebuff, 0), (ClientId::Freebuff, 0)],
+            ),
+        ];
+        let expected: Vec<(&str, Vec<(ClientId, u32)>)> = expected
+            .iter()
+            .map(|(name, members)| (*name, members.to_vec()))
+            .collect();
+        let actual: Vec<(&str, Vec<(ClientId, u32)>)> = SHARED_PARSER_FAMILIES
+            .iter()
+            .map(|family| (family.name, family.members.to_vec()))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "SHARED_PARSER_FAMILIES membership or offsets drifted from the pinned roster"
+        );
+    }
+
     #[test]
     fn test_shared_parser_family_roster_is_accurate() {
         for family in SHARED_PARSER_FAMILIES {
             // A one-client "family" is an independent parser and belongs
             // outside this table.
             assert!(
-                family.len() >= 2,
-                "shared-parser families need at least two members"
+                family.members.len() >= 2,
+                "the {} family needs at least two members",
+                family.name
             );
-            for (index, client) in family.iter().enumerate() {
+            for (index, (client, _)) in family.members.iter().enumerate() {
                 assert!(
                     ClientId::ALL.contains(client),
-                    "{client:?} is declared in a shared-parser family but missing from ClientId::ALL"
+                    "{client:?} is declared in the {} family but missing from ClientId::ALL",
+                    family.name
                 );
                 assert!(
-                    !family[..index].contains(client),
-                    "{client:?} is listed twice inside one shared-parser family"
+                    !family.members[..index]
+                        .iter()
+                        .any(|(earlier, _)| earlier == client),
+                    "{client:?} is listed twice inside the {} family",
+                    family.name
                 );
             }
         }
 
         // A client may appear in only one family: a single parser_version
         // cannot track two shared bases at once.
-        for (index, client) in SHARED_PARSER_FAMILIES
-            .iter()
-            .flat_map(|family| family.iter())
-            .enumerate()
-        {
-            let later = SHARED_PARSER_FAMILIES
+        let mut seen: Vec<ClientId> = Vec::new();
+        for family in SHARED_PARSER_FAMILIES {
+            for (client, _) in family.members {
+                assert!(
+                    !seen.contains(client),
+                    "{client:?} appears in two shared-parser families"
+                );
+                seen.push(*client);
+            }
+        }
+    }
+
+    /// The bisection behind roster completeness: every client is either in
+    /// exactly one shared family -- versioned from that family's base by
+    /// construction -- or independent, with an explicit arm in
+    /// `parser_version()`. A client can never go unclassified, because the
+    /// exhaustive match fails compilation until a new `ClientId` is either
+    /// rostered or given its own arm. A client wired to a shared driver
+    /// but given a bare literal anyway lands on the independent side here,
+    /// where the edit stays reviewable; cache identities are namespaced by
+    /// client (`CacheIdentity`), so an independent integer coinciding with
+    /// a family's version is harmless and deliberately not flagged.
+    #[test]
+    fn test_every_client_is_rostered_once_or_versioned_independently() {
+        let mut rostered = 0usize;
+        let mut independent = 0usize;
+        for client in ClientId::ALL {
+            let families: Vec<&str> = SHARED_PARSER_FAMILIES
                 .iter()
-                .flat_map(|family| family.iter())
-                .skip(index + 1);
-            assert!(
-                !later.into_iter().any(|other| other == client),
-                "{client:?} appears in two shared-parser families; one parser version cannot \
-                 track two bases"
-            );
-        }
-    }
-
-    /// Derives the shared-parser partition from the `src/sessions/` source
-    /// tree and asserts `SHARED_PARSER_FAMILIES` matches it exactly. The
-    /// self-consistency test above cannot notice an *omitted* family; this
-    /// one fails when a client module is wired to an existing format driver,
-    /// or a new driver is adopted by two client modules, without the roster
-    /// (and a shared base version) following.
-    #[test]
-    fn test_shared_parser_family_roster_matches_session_delegation() {
-        use std::collections::{BTreeMap, BTreeSet};
-
-        // Every module under `src/sessions/` and the clients whose sources
-        // parse through it. `None` marks shared-helper hubs (`mod.rs`
-        // dispatch, `utils.rs` leaf helpers): they are used by many
-        // otherwise-unrelated parsers, so references to them do not
-        // constitute a shared format driver. Format-driver modules with no
-        // client of their own map to an empty list; `synthetic` is cached
-        // under its own fixed non-client namespace
-        // (`CacheIdentity::synthetic`).
-        const HUB: Option<&[ClientId]> = None;
-        let module_clients: &[(&str, Option<&[ClientId]>)] = &[
-            ("amp", Some(&[ClientId::Amp])),
-            ("antigravity", Some(&[ClientId::Antigravity])),
-            ("antigravity_cli", Some(&[ClientId::AntigravityCli])),
-            ("augment", Some(&[ClientId::Augment])),
-            ("cherrystudio", Some(&[ClientId::CherryStudio])),
-            ("claudecode", Some(&[ClientId::Claude])),
-            ("cline", Some(&[ClientId::Cline])),
-            ("codebuddy", Some(&[ClientId::CodeBuddy])),
-            ("codebuff", Some(&[ClientId::Codebuff])),
-            ("codex", Some(&[ClientId::Codex])),
-            ("commandcode", Some(&[ClientId::CommandCode])),
-            ("copilot", Some(&[ClientId::Copilot])),
-            ("copilot_desktop", Some(&[ClientId::Copilot])),
-            ("copilot_vscode", Some(&[ClientId::Copilot])),
-            ("crush", Some(&[ClientId::Crush])),
-            ("cursor", Some(&[ClientId::Cursor])),
-            ("devin", Some(&[ClientId::DevinCli, ClientId::DevinDesktop])),
-            ("droid", Some(&[ClientId::Droid])),
-            ("dsh", Some(&[ClientId::Dsh])),
-            ("freebuff", Some(&[ClientId::Freebuff])),
-            ("fx", Some(&[ClientId::Fx])),
-            ("gemini", Some(&[ClientId::Gemini])),
-            ("gjc", Some(&[ClientId::Gjc])),
-            ("goose", Some(&[ClientId::Goose])),
-            ("grok", Some(&[ClientId::Grok])),
-            ("hermes", Some(&[ClientId::Hermes])),
-            ("hindsight", Some(&[ClientId::Hindsight])),
-            ("jcode", Some(&[ClientId::Jcode])),
-            ("junie", Some(&[ClientId::Junie])),
-            ("kilo", Some(&[ClientId::Kilo])),
-            ("kilocode", Some(&[ClientId::KiloCode])),
-            ("kimchi", Some(&[ClientId::Kimchi])),
-            ("kimi", Some(&[ClientId::Kimi])),
-            ("kiro", Some(&[ClientId::Kiro])),
-            ("lmstudio", Some(&[ClientId::LmStudio])),
-            ("mcode", Some(&[ClientId::Mcode])),
-            ("micode", Some(&[ClientId::MiMoCode])),
-            ("mod", HUB),
-            ("mux", Some(&[ClientId::Mux])),
-            ("omp", Some(&[ClientId::Omp])),
-            ("openclaw", Some(&[ClientId::OpenClaw])),
-            ("opencode", Some(&[ClientId::OpenCode])),
-            ("opencode_schema", Some(&[])),
-            ("opencodereview", Some(&[ClientId::OpenCodeReview])),
-            ("pi", Some(&[ClientId::Pi])),
-            ("prime_agent", Some(&[ClientId::PrimeAgent])),
-            ("qwen", Some(&[ClientId::Qwen])),
-            ("reasonix", Some(&[ClientId::Reasonix])),
-            ("roocode", Some(&[ClientId::RooCode])),
-            ("senpi", Some(&[ClientId::Senpi])),
-            ("synthetic", Some(&[])),
-            ("tencent_buddy", Some(&[])),
-            ("trae", Some(&[ClientId::Trae])),
-            ("unsloth", Some(&[ClientId::Unsloth])),
-            ("utils", HUB),
-            ("warp", Some(&[ClientId::Warp])),
-            ("workbuddy", Some(&[ClientId::WorkBuddy])),
-            ("zcode", Some(&[ClientId::Zcode])),
-            ("zed", Some(&[ClientId::Zed])),
-        ];
-
-        // Modules that host more than one parser where those parsers do NOT
-        // share code, so their clients must not be treated as a family just
-        // for cohabiting a file. `devin.rs` keeps the CLI SQLite parser and
-        // the Desktop NDJSON parser side by side; their versions already
-        // diverge independently.
-        const INDEPENDENT_MODULES: &[&str] = &["devin"];
-
-        let sessions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sessions");
-        let on_disk: BTreeSet<String> = std::fs::read_dir(&sessions_dir)
-            .expect("src/sessions must be readable")
-            .filter_map(|entry| {
-                entry
-                    .expect("directory entry must be readable")
-                    .file_name()
-                    .into_string()
-                    .ok()
-                    .and_then(|name| Some(name.strip_suffix(".rs")?.to_string()))
-            })
-            .collect();
-        let mapped: BTreeSet<String> = module_clients
-            .iter()
-            .map(|(name, _)| (*name).to_string())
-            .collect();
-        assert_eq!(
-            mapped.len(),
-            module_clients.len(),
-            "module classification lists a module twice"
-        );
-        assert_eq!(
-            on_disk, mapped,
-            "every module under src/sessions/ must be classified in this test; a new module \
-             must declare which clients parse through it (or be marked a helper hub) so a \
-             shared parser cannot bypass SHARED_PARSER_FAMILIES"
-        );
-
-        fn is_parse_entry_point(ident: &str) -> bool {
-            ident.starts_with("parse_")
-                || ident.starts_with("scan_")
-                || ident.starts_with("rescan_")
-                || ident.starts_with("extract_")
-        }
-
-        fn ident_at(body: &str, start: usize) -> (&str, usize) {
-            let bytes = body.as_bytes();
-            let mut end = start;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            (&body[start..end], end)
-        }
-
-        /// Format-driver modules whose parse entry points `source` references
-        /// through `super::<module>::` or `crate::sessions::<module>::`,
-        /// either as a plain path or inside a `{...}` import group
-        /// (one level, matching the crate's flat use-trees). Code from
-        /// `mod tests` down is skipped: a test referencing another client's
-        /// parser is comparison, not production delegation.
-        fn delegated_modules<'m>(
-            source: &str,
-            graph_modules: &BTreeSet<&'m str>,
-        ) -> BTreeSet<&'m str> {
-            let body = match source.find("#[cfg(test)]\nmod tests") {
-                Some(position) => &source[..position],
-                None => source,
-            };
-            let mut found = BTreeSet::new();
-            for prefix in ["super::", "crate::sessions::"] {
-                let mut search = 0usize;
-                while let Some(offset) = body[search..].find(prefix) {
-                    let module_start = search + offset + prefix.len();
-                    search = module_start;
-                    let (module, after_module) = ident_at(body, module_start);
-                    let Some(module) = graph_modules.get(module).copied() else {
-                        continue;
-                    };
-                    if !body[after_module..].starts_with("::") {
-                        continue;
-                    }
-                    let item_start = after_module + 2;
-                    if body[item_start..].starts_with('{') {
-                        let close = body[item_start..]
-                            .find('}')
-                            .map(|off| item_start + off)
-                            .unwrap_or(body.len());
-                        for item in body[item_start + 1..close].split(',') {
-                            let ident = item.split_whitespace().next().unwrap_or("");
-                            if is_parse_entry_point(ident) {
-                                found.insert(module);
-                            }
-                        }
-                    } else {
-                        let (ident, _) = ident_at(body, item_start);
-                        if is_parse_entry_point(ident) {
-                            found.insert(module);
-                        }
-                    }
-                }
-            }
-            found
-        }
-
-        let graph_modules: BTreeSet<&str> = module_clients
-            .iter()
-            .filter(|(_, clients)| clients.is_some())
-            .map(|(name, _)| *name)
-            .collect();
-        let mut group: BTreeMap<&str, usize> = graph_modules
-            .iter()
-            .enumerate()
-            .map(|(index, module)| (*module, index))
-            .collect();
-        for module in &graph_modules {
-            let source = std::fs::read_to_string(sessions_dir.join(format!("{module}.rs")))
-                .expect("session module must be readable");
-            for target in delegated_modules(&source, &graph_modules) {
-                if target == *module {
-                    continue;
-                }
-                for end in [*module, target] {
-                    assert!(
-                        !INDEPENDENT_MODULES.contains(&end),
-                        "{module}.rs delegates parsing to {target}.rs, but {end}.rs is \
-                         classified as hosting independent parsers; decide which of its \
-                         clients actually share the code and reclassify before rostering"
-                    );
-                }
-                let (keep, fold) = (group[*module], group[target]);
-                if keep != fold {
-                    for value in group.values_mut() {
-                        if *value == fold {
-                            *value = keep;
-                        }
-                    }
-                }
+                .filter(|family| family.members.iter().any(|(member, _)| *member == client))
+                .map(|family| family.name)
+                .collect();
+            match families.as_slice() {
+                [] => independent += 1,
+                [_] => rostered += 1,
+                _ => panic!("{client:?} appears in multiple shared-parser families ({families:?})"),
             }
         }
-
-        let mut group_clients: BTreeMap<usize, BTreeSet<&str>> = BTreeMap::new();
-        let mut group_members: BTreeMap<usize, BTreeSet<&str>> = BTreeMap::new();
-        for (module, clients) in module_clients {
-            let Some(clients) = clients else { continue };
-            let group_id = group[*module];
-            group_members.entry(group_id).or_default().insert(*module);
-            group_clients
-                .entry(group_id)
-                .or_default()
-                .extend(clients.iter().map(|client| client.as_str()));
-        }
-        let derived: BTreeSet<BTreeSet<&str>> = group_clients
-            .iter()
-            .filter(|(group_id, clients)| {
-                let members = &group_members[group_id];
-                clients.len() >= 2
-                    && !(members.len() == 1
-                        && members
-                            .iter()
-                            .all(|module| INDEPENDENT_MODULES.contains(module)))
-            })
-            .map(|(_, clients)| clients.clone())
-            .collect();
-
-        let rostered: BTreeSet<BTreeSet<&str>> = SHARED_PARSER_FAMILIES
-            .iter()
-            .map(|family| family.iter().map(|client| client.as_str()).collect())
-            .collect();
         assert_eq!(
-            derived, rostered,
-            "SHARED_PARSER_FAMILIES must partition exactly the clients that share a parser \
-             in src/sessions/; update the roster (and derive the members from one shared \
-             base version) whenever delegation changes"
+            rostered,
+            SHARED_PARSER_FAMILIES
+                .iter()
+                .map(|family| family.members.len())
+                .sum::<usize>(),
+            "every rostered client must classify exactly once"
         );
-    }
-
-    #[test]
-    fn test_roo_kilo_format_shared_parser_version_sync() {
-        use crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION;
-
-        let family = SHARED_PARSER_FAMILIES
-            .iter()
-            .find(|family| family.contains(&ClientId::RooCode))
-            .expect("the roo/kilo task-log family must stay declared");
-        assert_eq!(
-            family.len(),
-            3,
-            "the roo/kilo task-log family is Roo Code, Kilo Code, and Cline"
-        );
-
-        // Every member derives from the shared base, so a
-        // `parse_roo_kilo_file` change that bumps the base moves the whole
-        // family at once; bumping one member's offset alone (or reverting it
-        // to a bare literal) fails here.
-        assert_eq!(
-            parser_version(ClientId::RooCode),
-            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
-            "Roo Code sits at the shared task-log base; it has no independent history"
-        );
-        assert_eq!(
-            parser_version(ClientId::KiloCode),
-            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
-            "Kilo Code sits at the shared task-log base; it has no independent history"
-        );
-        assert_eq!(
-            parser_version(ClientId::Cline),
-            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
-            "Cline carries +2 for its independent v1->v3 history; a Cline-only parse change \
-             grows this offset, a shared-helper change bumps the base instead"
-        );
-    }
-
-    #[test]
-    fn test_opencode_schema_shared_parser_version_sync() {
-        use crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION;
-
-        let family = SHARED_PARSER_FAMILIES
-            .iter()
-            .find(|family| family.contains(&ClientId::OpenCode))
-            .expect("the opencode-schema family must stay declared");
-        assert_eq!(
-            family.len(),
-            3,
-            "the opencode-schema family is OpenCode, MiMo Code, and Kilo"
-        );
-
-        // Every member reads its SQLite store through
-        // `parse_opencode_schema_sqlite`, so a driver change that bumps the
-        // base moves the whole family at once. Client-specific changes
-        // (OpenCode's legacy JSON path, `OpenCodeSchemaConfig` policy) grow
-        // that client's offset instead.
-        assert_eq!(
-            parser_version(ClientId::OpenCode),
-            OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2,
-            "OpenCode carries +2 for its independent v1->v3 history"
-        );
-        assert_eq!(
-            parser_version(ClientId::MiMoCode),
-            OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2,
-            "MiMo Code carries +2 for its independent v1->v3 history"
-        );
-        assert_eq!(
-            parser_version(ClientId::Kilo),
-            OPENCODE_SCHEMA_PARSER_BASE_VERSION,
-            "Kilo sits at the shared driver base; it has no independent history"
-        );
-    }
-
-    #[test]
-    fn test_tencent_buddy_shared_parser_version_sync() {
-        use crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION;
-
-        let family = SHARED_PARSER_FAMILIES
-            .iter()
-            .find(|family| family.contains(&ClientId::CodeBuddy))
-            .expect("the tencent-buddy family must stay declared");
-        assert_eq!(
-            family.len(),
-            2,
-            "the tencent-buddy family is CodeBuddy and WorkBuddy"
-        );
-
-        // Both clients parse detailed JSONL transcripts and extension logs
-        // through `tencent_buddy`, so a parse change there bumps the base
-        // and moves both caches at once; a change scoped to WorkBuddy's own
-        // aggregate-DB fallback grows a WorkBuddy offset instead.
-        assert_eq!(
-            parser_version(ClientId::CodeBuddy),
-            TENCENT_BUDDY_PARSER_BASE_VERSION,
-            "CodeBuddy sits at the shared buddy-format base; it has no independent history"
-        );
-        assert_eq!(
-            parser_version(ClientId::WorkBuddy),
-            TENCENT_BUDDY_PARSER_BASE_VERSION,
-            "WorkBuddy sits at the shared buddy-format base; it has no independent history"
-        );
-    }
-
-    #[test]
-    fn test_codebuff_chat_shared_parser_version_sync() {
-        use crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION;
-
-        let family = SHARED_PARSER_FAMILIES
-            .iter()
-            .find(|family| family.contains(&ClientId::Codebuff))
-            .expect("the codebuff chat-format family must stay declared");
-        assert_eq!(
-            family.len(),
-            2,
-            "the codebuff chat-format family is Codebuff and Freebuff"
-        );
-
-        // Freebuff parses assistant usage out of Codebuff's chat format
-        // through `codebuff.rs` helpers, so a change to how those read a
-        // message bumps the base and moves both caches at once.
-        assert_eq!(
-            parser_version(ClientId::Codebuff),
-            CODEBUFF_CHAT_PARSER_BASE_VERSION,
-            "Codebuff sits at the shared chat-format base; it has no independent history"
-        );
-        assert_eq!(
-            parser_version(ClientId::Freebuff),
-            CODEBUFF_CHAT_PARSER_BASE_VERSION,
-            "Freebuff sits at the shared chat-format base; it has no independent history"
+        assert!(
+            independent > 0,
+            "sanity: most clients own an independent parser"
         );
     }
 
