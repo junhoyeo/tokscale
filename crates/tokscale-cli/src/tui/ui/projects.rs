@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::widgets::{
     display_width, fit_workspace_label_to_width, format_cost, format_tokens,
     get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
-    truncate_to_width, viewport_scrollbar_state, MIDDLE_ELLIPSIS,
+    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -210,6 +210,7 @@ fn sources_label(p: &ProjectUsage) -> String {
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Projects ",

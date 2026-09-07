@@ -10,6 +10,7 @@ use crate::tui::codex_login::CodexLoginOutcome;
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     get_provider_shade, light_ratio_bar_spans, truncate_ellipsis as truncate_string,
+    AMBIENT_STABLE_BORDER_SET,
 };
 
 struct ButtonSpec {
@@ -51,6 +52,7 @@ struct UsageRowView<'a> {
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Usage ",
@@ -619,6 +621,7 @@ fn render_compact_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: 
 fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageOutput]) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Usage Summary ",
@@ -1147,6 +1150,7 @@ fn render_selected_account(
     let title = format!(" Selected Account  {} ", output_display_name(app, selected));
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             truncate_string(&title, area.width.saturating_sub(4) as usize),
@@ -1672,6 +1676,7 @@ fn metric_label_width(width: usize) -> usize {
 fn render_accounts_table(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageOutput]) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Accounts ",

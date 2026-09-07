@@ -13,6 +13,7 @@ use ratatui::{
 use tokscale_core::GroupBy;
 
 use crate::tui::themes::Theme;
+use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
 
 use super::{DialogContent, DialogResult};
 
@@ -100,6 +101,7 @@ impl DialogContent for GroupByPickerDialog {
         let block = Block::default()
             .title(" Group By ")
             .borders(Borders::ALL)
+            .border_set(AMBIENT_STABLE_BORDER_SET)
             .border_style(Style::default().fg(theme.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);

@@ -1,13 +1,14 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::widgets::{format_cost, format_tokens};
+use super::widgets::{format_cost, format_tokens, AMBIENT_STABLE_BORDER_SET};
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, aggregate_by_weekday, find_peak_hour};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Hourly Profile ",

@@ -7,6 +7,7 @@ use super::widgets::{
     fit_workspace_label_to_width, format_cache_hit_rate, format_cost, format_cost_per_million,
     format_ms_per_1k, format_tokens, get_client_display_name, get_provider_display_name,
     total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
+    AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -114,6 +115,7 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Models ",

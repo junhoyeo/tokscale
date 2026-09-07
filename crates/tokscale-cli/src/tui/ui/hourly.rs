@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::hourly_profile;
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
-    viewport_scrollbar_state,
+    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Hourly Usage ",

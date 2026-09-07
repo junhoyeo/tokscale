@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Tabs};
 
 use crate::tui::app::{App, ClickAction, Tab};
+use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
 
 const TAB_PADDING_LEFT_WIDTH: u16 = 1;
 const TAB_PADDING_RIGHT_WIDTH: u16 = 1;
@@ -40,6 +41,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " tokscale ",
@@ -68,7 +70,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
-        .divider(Span::styled(" │ ", Style::default().fg(app.theme.border)));
+        .divider(Span::styled(" | ", Style::default().fg(app.theme.border)));
 
     frame.render_widget(tabs, area);
 

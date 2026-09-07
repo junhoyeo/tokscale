@@ -1,4 +1,5 @@
 use ratatui::prelude::*;
+use ratatui::symbols::border::Set as BorderSet;
 use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::sessions::WORKTREE_SEPARATOR;
 use tokscale_core::ClientId;
@@ -133,6 +134,38 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
 pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
+
+/// Box-drawing border for every framed block, built from the ASCII set plus
+/// one exception: horizontal lines stay U+2500 (`─`) so they still join at the
+/// corners.
+///
+/// Every code point in ratatui's default sets (PLAIN, ROUNDED, DOUBLE, …) is
+/// East-Asian-Ambiguous: one cell to `unicode-width` — and to ratatui's own
+/// cell math — but two cells in a terminal running a CJK locale. On such a
+/// terminal a border drawn at the last column wraps onto the next row and
+/// every column of the table inside shifts right by one, so a row laid out to
+/// exactly fit the block no longer does. `│` `─` `┌` are exactly the same
+/// class of bug as the U+2026 ellipsis fixed in #1304, just drawn by the
+/// frame instead of the content. ASCII is one cell in every terminal, so a
+/// frame drawn with it measures the same in both ambients and the table's
+/// width budget holds.
+///
+/// Why keep `─`: Unicode assigns no unambiguous light horizontal — the
+/// dashes U+2010..U+2015 are all Ambiguous too — so there is no replacement
+/// that both joins at the corners and stays one cell under `width_cjk`. A
+/// horizontal line only overflows sideways into its own span, so it moves
+/// nothing; the verticals and corners are what carry a row's width, and those
+/// are ASCII here.
+pub const AMBIENT_STABLE_BORDER_SET: BorderSet = BorderSet {
+    vertical_left: "|",
+    vertical_right: "|",
+    horizontal_top: "─",
+    horizontal_bottom: "─",
+    top_left: "+",
+    top_right: "+",
+    bottom_left: "+",
+    bottom_right: "+",
+};
 
 /// Longest prefix of `s` that fits in `max_cells` terminal cells. Never splits
 /// a grapheme, so the result can come in one cell short of the budget rather

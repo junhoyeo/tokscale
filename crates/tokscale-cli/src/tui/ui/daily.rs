@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
-    viewport_scrollbar_state,
+    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -19,6 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Daily Usage ",
@@ -318,6 +319,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             title,

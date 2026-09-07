@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::truncate_ellipsis as truncate;
+use crate::tui::ui::widgets::{truncate_ellipsis as truncate, AMBIENT_STABLE_BORDER_SET};
 
 use super::{DialogContent, DialogResult};
 
@@ -208,6 +208,7 @@ impl DialogContent for ConfirmDialog {
         let block = Block::default()
             .title(self.title)
             .borders(Borders::ALL)
+            .border_set(AMBIENT_STABLE_BORDER_SET)
             .border_style(Style::default().fg(tone));
         let inner = block.inner(area);
         frame.render_widget(block, area);

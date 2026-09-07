@@ -5,7 +5,7 @@ use ratatui::widgets::{
 
 use super::widgets::{
     format_cost, get_client_display_name, total_tokens_cell, truncate_text,
-    viewport_scrollbar_state,
+    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
@@ -13,6 +13,7 @@ use crate::ClientFilter;
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Agents ",

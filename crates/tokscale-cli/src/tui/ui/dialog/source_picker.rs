@@ -14,6 +14,7 @@ use ratatui::{
 
 use crate::tui::client_ui;
 use crate::tui::themes::Theme;
+use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
 use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
@@ -133,6 +134,7 @@ impl DialogContent for ClientPickerDialog {
         let block = Block::default()
             .title(" Clients ")
             .borders(Borders::ALL)
+            .border_set(AMBIENT_STABLE_BORDER_SET)
             .border_style(Style::default().fg(theme.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);

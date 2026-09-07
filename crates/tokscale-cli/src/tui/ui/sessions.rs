@@ -7,7 +7,7 @@ use ratatui::widgets::{
 use super::widgets::{
     display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
-    truncate_to_width, viewport_scrollbar_state, MIDDLE_ELLIPSIS,
+    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -483,6 +483,7 @@ fn session_label(s: &SessionUsage) -> &str {
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Sessions ",
@@ -1708,43 +1709,43 @@ mod tests {
                 59u16,
                 true,
                 SortField::Cost,
-                "│Session                           Cost ▼                 │",
-                "│A fairly long ses...              $12.35                 │",
+                "|Session                           Cost ▼                 |",
+                "|A fairly long ses...              $12.35                 |",
             ),
             (
                 59,
                 true,
                 SortField::Date,
-                "│Session                           Cost                   │",
-                "│A fairly long ses...              $12.35                 │",
+                "|Session                           Cost                   |",
+                "|A fairly long ses...              $12.35                 |",
             ),
             (
                 60,
                 true,
                 SortField::Cost,
-                "│Session     Client     Turn   Msgs    Tokens     Cost ▼   │",
-                "│A fairly lo OpenCode   137    428     49.5M      $12.35   │",
+                "|Session     Client     Turn   Msgs    Tokens     Cost ▼   |",
+                "|A fairly lo OpenCode   137    428     49.5M      $12.35   |",
             ),
             (
                 60,
                 false,
                 SortField::Tokens,
-                "│Session         Client     Msgs    Tokens ▼   Cost        │",
-                "│A fairly long s OpenCode   428     49.5M      $12.35      │",
+                "|Session         Client     Msgs    Tokens ▼   Cost        |",
+                "|A fairly long s OpenCode   428     49.5M      $12.35      |",
             ),
             (
                 79,
                 true,
                 SortField::Tokens,
-                "│Session           Client       Turn      Msgs      Tokens ▼      Cost        │",
-                "│A fairly long ses OpenCode     137       428       49.5M         $12.35      │",
+                "|Session           Client       Turn      Msgs      Tokens ▼      Cost        |",
+                "|A fairly long ses OpenCode     137       428       49.5M         $12.35      |",
             ),
             (
                 79,
                 false,
                 SortField::Date,
-                "│Session               Client         Msgs      Tokens         Cost           │",
-                "│A fairly long session OpenCode       428       49.5M          $12.35         │",
+                "|Session               Client         Msgs      Tokens         Cost           |",
+                "|A fairly long session OpenCode       428       49.5M          $12.35         |",
             ),
         ] {
             let mut s = fat_session();
