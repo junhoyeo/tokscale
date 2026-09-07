@@ -39,10 +39,12 @@ export interface CandidateRow {
    * Sum of tokens booked under the matching `slopModels` in
    * daily_breakdown.source_breakdown, or null when this account's tokens are
    * not fully attributed to named models — no daily rows at all, a row with no
-   * breakdown, a per-model map that leaves a remainder no `modelId` claims, or
-   * daily rows that do not cover the stored total. Null means the share is
-   * unknown, not that it is small: the signal then keeps its full fixed weight
-   * instead of being scaled by a share computed from partial attribution.
+   * breakdown, a per-model map that leaves a remainder no `modelId` claims,
+   * tokens parked under a key that names nothing (see
+   * `UNNAMED_MODEL_REGEX`), or daily rows that do not cover the stored total.
+   * Null means the share is unknown, not that it is small: the signal then
+   * keeps its full fixed weight instead of being scaled by a share computed
+   * from partial attribution.
    */
   slopTokens: number | null;
 }
@@ -113,6 +115,31 @@ export const SLOP_MODEL_PATTERNS = [
  * `notaslopname` no longer does.
  */
 export const SLOP_MODEL_REGEX = `(^|[^a-z0-9])(${SLOP_MODEL_PATTERNS.join("|")})`;
+
+/**
+ * Keys of a `source_breakdown` per-model map that identify no model, so the
+ * tokens under them are unattributed however complete the map looks.
+ *
+ * `unknown` is written by us, not by a submitter: modelsForHighWater() in
+ * lib/db/parserHighWater.ts parks an entry's unclaimed scalar remainder under
+ * `breakdown.modelId || "unknown"`, and breakdownFromModels() then rewrites
+ * the entry's scalar as the sum of that map. A remainder that used to be
+ * visible as `tokens` > Σ`models` therefore comes back as an explicit cell
+ * whose key names nothing, with the scalar and the nested sum in agreement —
+ * so checking only for a scalar remainder no longer sees it. Every
+ * SUPPORTED_VERSIONED_PARSER client (copilot, droid, antigravity) reaches
+ * stored source_breakdown through addClientBreakdownIncrement(), i.e. through
+ * exactly that rewrite.
+ *
+ * Keys holding no alphanumeric character at all are the parser debris
+ * documented above (`*`, `{`, `│`), which cannot be a model id either.
+ *
+ * Bare UUIDs are deliberately NOT matched. They are common debris, but a UUID
+ * is also a plausible fine-tune or deployment id, and unlike `unknown` no
+ * code path here parks a remainder under one — so treating them as unnamed
+ * would pin accounts at full weight on a guess.
+ */
+export const UNNAMED_MODEL_REGEX = `^([^a-zA-Z0-9]*|unknown)$`;
 
 /** A user holding more than this share of all tokens is worth a look. */
 export const SITE_SHARE_THRESHOLD = 0.05;

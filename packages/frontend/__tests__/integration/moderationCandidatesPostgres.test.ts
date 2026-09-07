@@ -16,9 +16,11 @@ const describeWithPostgres = integrationEnabled ? describe : describe.skip;
  * `daily_breakdown.source_breakdown`. Everything `slopTokens` promises — that
  * a legacy entry's scalar remainder is credited to its own `modelId` rather
  * than dropped, that the remainder is not also counted inside the nested
- * per-model sum, and that anything short of full attribution comes back NULL
- * so the scorer falls back to the full fixed weight — is only observable by
- * running it. Each persona below changes an assertion here when the
+ * per-model sum, that a cell whose key names nothing (`unknown`, parser
+ * debris) is not mistaken for attribution once the same remainder has been
+ * normalized into the map, and that anything short of full attribution comes
+ * back NULL so the scorer falls back to the full fixed weight — is only
+ * observable by running it. Each persona below changes an assertion here when the
  * corresponding piece of SQL is altered.
  *
  * Unlike the ratchet census fixture, this one does not assume it owns the
@@ -48,6 +50,15 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     "artifact",
     // Fully attributed, and all of it is booked under the slop model.
     "wholly",
+    // The remainder already normalized into the literal `unknown` cell that
+    // modelsForHighWater() writes: the nested sum equals the scalar, so
+    // nothing looks missing, yet the bucket names no model.
+    "unknownBucket",
+    // The same shape under the parser debris key heuristics.ts documents.
+    "debrisBucket",
+    // A real model name that merely contains the sentinel, guarding the
+    // anchors on UNNAMED_MODEL_REGEX.
+    "namedLikeUnknown",
   ] as const;
   type Persona = (typeof personas)[number];
 
@@ -76,6 +87,9 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     mixed: 1_600_000,
     artifact: 1_700_000,
     wholly: 1_800_000,
+    unknownBucket: 2_100_000,
+    debrisBucket: 2_200_000,
+    namedLikeUnknown: 2_300_000,
   };
 
   const githubIdBase =
@@ -112,6 +126,11 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         mixed: ["fake-api"],
         artifact: ["fake-api", "claude-sonnet-4"],
         wholly: ["slopllm"],
+        // submit/route.ts adds every key of the client's model map to
+        // models_used, debris buckets included.
+        unknownBucket: ["unknown", "fake-api"],
+        debrisBucket: ["*", "fake-api"],
+        namedLikeUnknown: ["unknown-model", "fake-api"],
       };
 
       for (const [index, persona] of personas.entries()) {
@@ -199,6 +218,40 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         claude: {
           ...model(totals.wholly),
           models: { slopllm: model(totals.wholly) },
+        },
+      });
+
+      // Both of these are what breakdownFromModels(modelsForHighWater(...))
+      // stores for a high-water client: no `modelId`, and a scalar exactly
+      // equal to the nested sum, so the implicit-remainder check sees nothing
+      // missing.
+      await day("unknownBucket", "2026-01-01", totals.unknownBucket, {
+        copilot: {
+          ...model(totals.unknownBucket),
+          models: {
+            unknown: model(totals.unknownBucket - 2),
+            "fake-api": model(2),
+          },
+        },
+      });
+
+      await day("debrisBucket", "2026-01-01", totals.debrisBucket, {
+        copilot: {
+          ...model(totals.debrisBucket),
+          models: {
+            "*": model(totals.debrisBucket - 2),
+            "fake-api": model(2),
+          },
+        },
+      });
+
+      await day("namedLikeUnknown", "2026-01-01", totals.namedLikeUnknown, {
+        copilot: {
+          ...model(totals.namedLikeUnknown),
+          models: {
+            "unknown-model": model(totals.namedLikeUnknown - 2),
+            "fake-api": model(2),
+          },
         },
       });
     });
@@ -289,5 +342,37 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     expect(
       candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
     ).toBe(35);
+  });
+
+  it("reports unknown attribution when the remainder sits in the `unknown` cell", async () => {
+    const candidate = await candidateFor("unknownBucket");
+
+    // 2 slop tokens against 2,100,000 would scale the weight to 0.00003 and
+    // Math.round it away, dropping the account out of the queue.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution when the remainder sits in a debris cell", async () => {
+    const candidate = await candidateFor("debrisBucket");
+
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("still counts a model whose name merely contains the sentinel", async () => {
+    const candidate = await candidateFor("namedLikeUnknown");
+
+    // `unknown-model` is a name, not the `unknown` bucket: dropping the
+    // anchors from UNNAMED_MODEL_REGEX would turn this into null and pin a
+    // real account at full weight forever.
+    expect(candidate.slopTokens).toBe(2);
+    expect(candidate.signals.map((signal) => signal.key)).not.toContain(
+      "slopModelName"
+    );
   });
 });

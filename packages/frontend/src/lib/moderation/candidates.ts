@@ -5,6 +5,7 @@ import {
   MAX_IMPLIED_RATE,
   MEDIAN_RATIO_THRESHOLD,
   SLOP_MODEL_REGEX,
+  UNNAMED_MODEL_REGEX,
   rankCandidates,
   SITE_SHARE_THRESHOLD,
   type CandidateRow,
@@ -107,10 +108,17 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     -- own modelId, so this reads it back the same way instead of dropping
     -- it. Without a modelId the remainder belongs to no named model, and it
     -- is deliberately left out of attributed_tokens below.
+    --
+    -- nested_named_tokens is the part of the map that a model actually
+    -- claims. It is separate from nested_tokens because the two answer
+    -- different questions: the remainder is what the map does not cover
+    -- (so it must subtract the WHOLE map, unnamed cells included, or the
+    -- same tokens get counted twice), while attribution is what the map
+    -- credits to a model (so it must skip the cells that name nothing).
     client_attribution AS (
       SELECT
         d.submission_id,
-        m.nested_tokens,
+        m.nested_named_tokens,
         m.nested_slop_tokens,
         GREATEST(
           COALESCE((client.value->>'tokens')::numeric, 0) - m.nested_tokens,
@@ -118,6 +126,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         ) AS remainder,
         CASE
           WHEN jsonb_typeof(client.value->'modelId') = 'string'
+            AND client.value->>'modelId' !~* ${UNNAMED_MODEL_REGEX}
           THEN client.value->>'modelId'
         END AS remainder_model
       FROM daily_breakdown d
@@ -129,6 +138,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         SELECT
           COALESCE(SUM(COALESCE((model.value->>'tokens')::numeric, 0)), 0)
             AS nested_tokens,
+          COALESCE(
+            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
+              FILTER (WHERE model.key !~* ${UNNAMED_MODEL_REGEX}),
+            0
+          ) AS nested_named_tokens,
           COALESCE(
             SUM(COALESCE((model.value->>'tokens')::numeric, 0))
               FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
@@ -148,9 +162,10 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         ) AS slop_tokens,
         -- Everything these same entries attribute to SOME named model. Adding
         -- the remainder to the nested sum cannot double count it: the
-        -- remainder is by construction what the nested sum leaves over.
+        -- remainder is by construction what the whole nested sum leaves over,
+        -- and only the named part of that sum is counted here.
         SUM(
-          nested_tokens
+          nested_named_tokens
           + CASE WHEN remainder_model IS NOT NULL THEN remainder ELSE 0 END
         ) AS attributed_tokens
       FROM client_attribution
@@ -170,10 +185,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         p.*,
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
         -- A share is only meaningful when every one of this account's tokens
-        -- is attributed to a named model. An unattributed remainder could be
-        -- all slop, and dividing the attributed part by the full total scales
-        -- the weight towards zero — which drops a real fabrication out of the
-        -- queue. Incomplete attribution therefore yields NULL, which the
+        -- is attributed to a named model. Tokens nobody claims — a scalar
+        -- remainder with no modelId, or a cell keyed 'unknown' or '*' — could
+        -- be all slop, and dividing the attributed part by the full total
+        -- scales the weight towards zero, which drops a real fabrication out
+        -- of the queue. Incomplete attribution therefore yields NULL, which the
         -- scorer reads as "share unknown" and answers with the full weight.
         CASE
           WHEN dl.every_day_attributed = true

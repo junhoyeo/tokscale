@@ -12,6 +12,8 @@ on:
       - "packages/frontend/drizzle.config.ts"
       - "packages/frontend/scripts/check-migrations.ts"
       - "packages/frontend/src/lib/db/**"
+      - "packages/frontend/src/lib/moderation/**"
+      - "packages/frontend/__tests__/integration/moderationCandidatesPostgres.test.ts"
       - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
       - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
       - ".github/workflows/frontend_migration_ci.yml"
