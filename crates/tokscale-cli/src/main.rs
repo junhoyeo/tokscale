@@ -5530,7 +5530,7 @@ fn run_graph_command(
 /// This deliberately does NOT upload: backfilled aggregates cannot be verified
 /// the way locally-scanned sessions are, so submitting them requires
 /// server-side support for tagging backfilled data distinctly from live CLI
-/// usage. See https://github.com/junhoyeo/tokscale/issues/888.
+/// usage. See <https://github.com/junhoyeo/tokscale/issues/888>.
 fn run_import_command(
     file: String,
     format: String,

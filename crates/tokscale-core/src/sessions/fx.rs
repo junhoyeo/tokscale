@@ -18,19 +18,19 @@
 //!
 //! Cache split. The two sidecars are read back differently because they sit at
 //! different scopes. `session.json` is per-session, so it is a related file of
-//! the snapshot's cache fingerprint ([`fx_session_meta_path`]) and a
+//! the snapshot's cache fingerprint (`fx_session_meta_path`) and a
 //! sidecar-only edit invalidates exactly that one entry. `index.json` is one
 //! file shared by every session, so it is deliberately *not* in any
 //! fingerprint — appending a new session to it would otherwise invalidate every
 //! other session's entry. Its title is resolved after the cache instead, by
-//! [`apply_session_titles`], which reads the index once per scan and writes the
+//! `apply_session_titles`, which reads the index once per scan and writes the
 //! title onto freshly parsed and cache-served messages alike. Titles are
 //! collected per sessions directory, because an fx session id is only unique
 //! within one `sessions/` tree.
 //!
 //! Cost provenance. `total_cost` is optional on the wire at both levels, so its
 //! presence is preserved rather than defaulted: a snapshot that never carried a
-//! cost must not be submitted as an authoritative $0.00. See [`reported_cost`].
+//! cost must not be submitted as an authoritative $0.00. See `reported_cost`.
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};

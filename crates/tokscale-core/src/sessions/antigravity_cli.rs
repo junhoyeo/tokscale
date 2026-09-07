@@ -23,7 +23,7 @@
 //!   - `#21` (string, optional)  → model display label (`Gemini 3.6 Flash (High)`)
 //!   - `#9` (message)            → per-generation wall-clock time. Two layouts
 //!     exist depending on the agy version, both handled by
-//!     [`generation_timestamp_ms`]:
+//!     `generation_timestamp_ms`:
 //!     - agy ≤ 1.1.17: `#9.#4` = `{#1: seconds, #2: nanos}` Timestamp.
 //!     - agy 1.1.18: `#4` is gone. `#9` instead carries `#2` = `u64::MAX` (an
 //!       `int64` -1 "unset" sentinel, never a time) and a new `#10` holding 8
@@ -51,7 +51,7 @@
 //! - `trajectory_metadata_blob.#1.#1` (string)                  → workspace URI
 //!
 //! `#19` is optional in practice: some continuation turns omit it while still
-//! writing `#21`. [`SessionModels`] recovers the machine id for those rows from
+//! writing `#21`. `SessionModels` recovers the machine id for those rows from
 //! the rest of the same conversation. `#21` was present on every row observed so
 //! far, including the ones missing `#19`, but nothing here requires it — a row
 //! carrying neither field is handled too. `#21` serves only as a join key

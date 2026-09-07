@@ -4,8 +4,8 @@
 //! 1. File-based (Kiro CLI): ~/.kiro/sessions/cli/*.json + *.jsonl
 //! 2. Kiro IDE globalStorage snapshots
 //! 3. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
-//!    (conversations_v2 table with history[*].request_metadata)
-//! 4. File-based (Kiro IDE): ~/.kiro/sessions/<workspace>/sess_<uuid>/
+//!    (conversations_v2 table with `history[*].request_metadata`)
+//! 4. File-based (Kiro IDE): `~/.kiro/sessions/<workspace>/sess_<uuid>/`
 //!    session.json (metadata) + messages.jsonl (conversation). This is the
 //!    VS Code-based Kiro IDE layout, distinct from the CLI's cli/*.json layout.
 //!

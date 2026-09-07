@@ -1,7 +1,7 @@
 //! Oh My Pi (omp) session parser
 //!
 //! Oh My Pi is a pi-mono descendant and writes the same session JSONL record
-//! format, so parsing delegates to [`super::pi::parse_pi_format_file`]; only the
+//! format, so parsing delegates to `super::pi::parse_pi_format_file`; only the
 //! scan root and client id differ.
 //!
 //! Layout is one level deeper than Pi's. A top-level session is

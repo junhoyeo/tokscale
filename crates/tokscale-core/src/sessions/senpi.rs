@@ -1,7 +1,7 @@
 //! Senpi (OmO Native) session parser
 //!
 //! Senpi is a pi-mono descendant using the same JSONL record format, so parsing
-//! delegates to [`super::pi::parse_pi_format_file`]; only the scan root and
+//! delegates to `super::pi::parse_pi_format_file`; only the scan root and
 //! client id differ. Two divergences from Pi matter here: `usage.reasoning` is
 //! parsed but never summed, because senpi documents it as a subset of `output`
 //! while tokscale totals reasoning as its own additive bucket; and

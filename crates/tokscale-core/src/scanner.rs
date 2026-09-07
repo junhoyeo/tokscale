@@ -48,7 +48,7 @@ pub struct ScannerSettings {
     /// [`ScanResult::opencode_dbs`] list; duplicates (by canonical path)
     /// are removed and non-existent entries are silently skipped so stale
     /// config does not break the scan. WAL/SHM sidecar files are rejected
-    /// with the same [`is_opencode_db_filename`] check used for
+    /// with the same `is_opencode_db_filename` check used for
     /// auto-discovery.
     #[serde(default)]
     pub opencode_db_paths: Vec<PathBuf>,

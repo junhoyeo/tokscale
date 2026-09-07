@@ -2,10 +2,10 @@
 //!
 //! Parses wire.jsonl from both `kimi-cli` and `kimi-code`.
 //!
-//! ~/.kimi/sessions/[GROUP_ID]/[SESSION_UUID]/wire.jsonl
+//! `~/.kimi/sessions/[GROUP_ID]/[SESSION_UUID]/wire.jsonl`
 //!   Token data comes from StatusUpdate messages.
 //!
-//! ~/.kimi-code/sessions/[WORKSPACE]/[SESSION]/agents/[AGENT]/wire.jsonl
+//! `~/.kimi-code/sessions/[WORKSPACE]/[SESSION]/agents/[AGENT]/wire.jsonl`
 //!   Token data comes from usage.record lines.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line};

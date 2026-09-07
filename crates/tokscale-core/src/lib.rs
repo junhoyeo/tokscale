@@ -75,7 +75,7 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
 
 /// Canonical model identity — the model id that leaves the machine.
 ///
-/// This is [`normalize_syntactic`] with **no alias folding**: purely structural
+/// This is `normalize_syntactic` with **no alias folding**: purely structural
 /// canonicalization (lowercase, strip a `(reasoning-tier)` suffix, strip a
 /// trailing `-YYYYMMDD` date, rewrite `.`→`-` inside claude version numbers, and
 /// fold an `anthropic/claude-…` prefix). It never consults the user's

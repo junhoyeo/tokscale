@@ -9,7 +9,7 @@ pub enum PathRoot {
     /// the XDG config home on Linux. When an explicit home is supplied — or,
     /// on Windows, when the resolved home is not the Win32 profile — this root
     /// is derived from that home using the matching platform convention; see
-    /// [`app_data_follows_home`].
+    /// `app_data_follows_home`.
     AppData,
     EnvVar {
         var: &'static str,

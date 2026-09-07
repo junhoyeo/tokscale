@@ -601,7 +601,7 @@ pub(crate) struct OpenClawSqliteScan {
 /// app-server as its agent runtime) are read like any other: OpenClaw mirrors
 /// the final assistant message of each Codex turn into its own transcript with
 /// the usage of that turn's last model response. Those rows come out keyed by
-/// the Codex thread and turn (see [`CODEX_MIRROR_DEDUP_PREFIX`]); the caller
+/// the Codex thread and turn (see `CODEX_MIRROR_DEDUP_PREFIX`); the caller
 /// swaps each for the rollout's record of that turn when it has read one, and
 /// keeps it otherwise, so the usage is never silently dropped. The legacy JSONL
 /// parser never filtered on the harness either.

@@ -1,6 +1,6 @@
 //! Mux (coder/mux) session parser
 //!
-//! Parses session-usage.json files from ~/.mux/sessions/<workspaceId>/session-usage.json
+//! Parses session-usage.json files from `~/.mux/sessions/<workspaceId>/session-usage.json`
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;

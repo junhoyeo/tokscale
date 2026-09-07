@@ -36,7 +36,7 @@
 //! `objc_retain`) on macOS 26.2, so it is NOT a valid liveness check for "is FM
 //! working on this box". This module uses only the non-streaming
 //! `FMLanguageModelSessionRespondWithSchema` path (a PROGRAMMATIC
-//! GenerationSchema built via [`imp::build_schema`], NOT the JSON-Schema-string
+//! GenerationSchema built via `imp::build_schema`, NOT the JSON-Schema-string
 //! `...FromJSON` variant) and is unaffected. For end-to-end verification use the
 //! `#[ignore]`d live test in this module (`live_summarize_smoke`), not the
 //! streaming example.

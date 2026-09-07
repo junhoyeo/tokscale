@@ -1,6 +1,6 @@
 //! Freebuff session parser
 //!
-//! Freebuff (https://github.com/CodebuffAI/freebuff) is not a separate program
+//! Freebuff (<https://github.com/CodebuffAI/freebuff>) is not a separate program
 //! from Codebuff: it is the same CLI compiled with `FREEBUFF_MODE=true`, a
 //! free-only build that strips paid features. It therefore resolves the same
 //! config dir (`~/.config/manicode[-dev|-staging]`) and writes the same

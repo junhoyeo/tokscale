@@ -6,7 +6,7 @@
 //! MiMo Code stores assistant turns in OpenCode's message schema, so the parse
 //! itself lives in [`super::opencode_schema`]; only the places where MiMo's
 //! behaviour departs from OpenCode's are declared here, as
-//! [`OpenCodeSchemaConfig::micode`].
+//! `OpenCodeSchemaConfig::micode`.
 
 use super::opencode_schema::{parse_opencode_schema_sqlite, OpenCodeSchemaConfig};
 use super::UnifiedMessage;

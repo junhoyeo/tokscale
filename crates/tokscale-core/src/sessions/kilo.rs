@@ -6,7 +6,7 @@
 //! Kilo stores assistant turns in OpenCode's message schema, so the parse
 //! itself lives in [`super::opencode_schema`]; only the places where Kilo's
 //! behaviour departs from OpenCode's are declared here, as
-//! [`OpenCodeSchemaConfig::kilo`].
+//! `OpenCodeSchemaConfig::kilo`.
 
 use super::opencode_schema::{parse_opencode_schema_sqlite, OpenCodeSchemaConfig};
 use super::utils::file_modified_timestamp_ms;

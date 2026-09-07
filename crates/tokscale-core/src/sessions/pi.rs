@@ -2,13 +2,13 @@
 //!
 //! Parses JSONL files from `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. Current
 //! OMP builds write a `title` metadata record before the `session` header in
-//! newly-created session files; see [`PRE_SESSION_METADATA_TYPES`].
+//! newly-created session files; see `PRE_SESSION_METADATA_TYPES`.
 //!
-//! Pi descendants reuse this record layout verbatim, so [`parse_pi_format_file`]
+//! Pi descendants reuse this record layout verbatim, so `parse_pi_format_file`
 //! is shared: see `sessions::kimchi` for Kimchi, `sessions::senpi` for Senpi (OmO Native),
 //! `sessions::omp` for Oh My Pi, which owns the `~/.omp/agent/sessions` root, and
 //! `sessions::prime_agent` for Prime Agent, which enters the same parser through
-//! [`parse_pi_format_rlm_file_with_observer`].
+//! `parse_pi_format_rlm_file_with_observer`.
 //!
 //! [`PI_FORMAT_PARSER_BASE_VERSION`] defines the shared base parser version for these
 //! clients, ensuring format-level changes in `pi.rs` invalidate cached messages
@@ -257,7 +257,7 @@ pub struct PiUsage {
     pub cache_write: Option<i64>,
     #[allow(dead_code)]
     pub total_tokens: Option<i64>,
-    /// Parsed so the omission in [`PiUsage::to_breakdown`] is a real decision
+    /// Parsed so the omission in `PiUsage::to_breakdown` is a real decision
     /// rather than an accident of the schema, but never summed.
     #[allow(dead_code)]
     pub reasoning: Option<i64>,
