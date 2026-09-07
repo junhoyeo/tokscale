@@ -15,13 +15,37 @@ const describeWithPostgres = integrationEnabled ? describe : describe.skip;
  * nothing about what the statement extracts from
  * `daily_breakdown.source_breakdown`. Everything `slopTokens` promises — that
  * a legacy entry's scalar remainder is credited to its own `modelId` rather
- * than dropped, that the remainder is not also counted inside the nested
+ * than dropped, that the remainder is not credited when that `modelId` itself
+ * names nothing, that the remainder is not also counted inside the nested
  * per-model sum, that a cell whose key names nothing (`unknown`, parser
  * debris) is not mistaken for attribution once the same remainder has been
- * normalized into the map, and that anything short of full attribution comes
- * back NULL so the scorer falls back to the full fixed weight — is only
- * observable by running it. Each persona below changes an assertion here when the
- * corresponding piece of SQL is altered.
+ * normalized into the map, that a map summing past its own entry's scalar
+ * cannot inflate attribution past the account's total, and that anything short
+ * of full attribution comes back NULL so the scorer falls back to the full
+ * fixed weight — is only observable by running it.
+ *
+ * Six mutations of the attribution SQL were run against this fixture. Five are
+ * killed by a named persona:
+ *
+ *   - dropping the scalar clamp on the named nested sum -> overNested
+ *   - weakening that clamp to LEAST(named, scalar) -> overNested
+ *   - dropping the UNNAMED_MODEL_REGEX guard on the client-level `modelId`
+ *     -> unknownModelId
+ *   - dropping the UNNAMED_MODEL_REGEX filter on the named nested sum
+ *     -> remainderPlusUnknown
+ *   - dropping `attributed_tokens >= total_tokens` -> six personas
+ *
+ * The sixth survives and is meant to: dropping `every_day_attributed` from the
+ * completeness gate leaves the suite green, because that clause is redundant
+ * by arithmetic rather than untested. submissions.total_tokens is written as
+ * SUM(daily.tokens) (submit/route.ts STEP 3d) and a day scalar is written as
+ * the sum of its client scalars, so a daily row carrying no breakdown always
+ * drags attributed_tokens below total_tokens on its own. It is kept as defence
+ * in depth for the case where those two representations drift apart, which is
+ * the class of bug #960 is. Do not read its survival as licence to delete it.
+ *
+ * Weakening any of the other five without a red test is how a fail-open
+ * reaches the review queue unnoticed. Mutate before trusting this file.
  *
  * Unlike the ratchet census fixture, this one does not assume it owns the
  * database: every persona is `leaderboard_hidden`, so it stays in the ranked
@@ -59,6 +83,17 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     // A real model name that merely contains the sentinel, guarding the
     // anchors on UNNAMED_MODEL_REGEX.
     "namedLikeUnknown",
+    // The scalar is honest but the map outruns it: applyCostCompleteness()
+    // unions the stored and incoming model maps while taking `tokens` from the
+    // incoming entry, so a same-device resubmit that declares
+    // costIsComplete:false and drops a previously-seen model stores a map whose
+    // sum is larger than the entry's own scalar.
+    "overNested",
+    // The legacy client-level `modelId` shape, but the id itself names nothing.
+    "unknownModelId",
+    // A scalar remainder AND an unnamed cell in the same entry: the only shape
+    // where the clamp and the named-cell filter disagree.
+    "remainderPlusUnknown",
   ] as const;
   type Persona = (typeof personas)[number];
 
@@ -90,6 +125,9 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     unknownBucket: 2_100_000,
     debrisBucket: 2_200_000,
     namedLikeUnknown: 2_300_000,
+    overNested: 3_100_000,
+    unknownModelId: 2_400_000,
+    remainderPlusUnknown: 2_500_000,
   };
 
   const githubIdBase =
@@ -131,6 +169,9 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         unknownBucket: ["unknown", "fake-api"],
         debrisBucket: ["*", "fake-api"],
         namedLikeUnknown: ["unknown-model", "fake-api"],
+        overNested: ["claude-sonnet-4", "unknown", "fake-api"],
+        unknownModelId: ["unknown", "fake-api"],
+        remainderPlusUnknown: ["claude-sonnet-4", "unknown", "fake-api"],
       };
 
       for (const [index, persona] of personas.entries()) {
@@ -254,6 +295,52 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
           },
         },
       });
+
+      // Exactly what mergeClientBreakdownsWithRegressionGuard() returns for a
+      // stored {claude-sonnet-4: 3,100,000} merged with an incoming
+      // {unknown: 3,099,998, fake-api: 2} under costIsComplete:false —
+      // applyCostCompleteness() unions the two maps and keeps the incoming
+      // scalar, so Sigma(models) is 6,200,000 against a scalar of 3,100,000.
+      // The day scalar still equals Sigma(client scalars), so nothing upstream
+      // of the model map looks wrong.
+      await day("overNested", "2026-01-01", totals.overNested, {
+        copilot: {
+          ...model(totals.overNested),
+          models: {
+            "claude-sonnet-4": model(totals.overNested),
+            unknown: model(totals.overNested - 2),
+            "fake-api": model(2),
+          },
+        },
+      });
+
+      // The eead1190..e4fd6668 shape with the `unknown` that
+      // normalizeSubmissionData() writes for a blank modelId: the scalar
+      // remainder is real but no model claims it.
+      await day("unknownModelId", "2026-01-01", totals.unknownModelId, {
+        claude: {
+          ...model(totals.unknownModelId),
+          modelId: "unknown",
+          models: { "fake-api": model(2) },
+        },
+      });
+
+      // 1,000 tokens under `unknown` and 2 under the slop model, inside an
+      // entry whose scalar still leaves 2,498,998 over for its own modelId.
+      // Both the clamp and the named-cell filter are active here and they
+      // disagree: only the filter keeps the 1,000 out of the attributed sum.
+      await day(
+        "remainderPlusUnknown",
+        "2026-01-01",
+        totals.remainderPlusUnknown,
+        {
+          claude: {
+            ...model(totals.remainderPlusUnknown),
+            modelId: "claude-sonnet-4",
+            models: { unknown: model(1_000), "fake-api": model(2) },
+          },
+        }
+      );
     });
   });
 
@@ -358,6 +445,49 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
   it("reports unknown attribution when the remainder sits in a debris cell", async () => {
     const candidate = await candidateFor("debrisBucket");
 
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution when a model map outruns the entry's own scalar", async () => {
+    const candidate = await candidateFor("overNested");
+
+    // Sigma(models) is 6,200,000 against a 3,100,000 scalar, so the named cells
+    // alone already sum past the account's total and the completeness gate
+    // waves the row through unless the named sum is clamped by what the
+    // `unknown` cell has already consumed. Counting only the named cells gives
+    // 3,100,002 >= 3,100,000 -> slopTokens 2 -> weight 35 * 2/3,100,000, which
+    // Math.round drops: the account leaves the queue while 3,099,998 tokens sit
+    // unclaimed.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("does not credit a remainder to a client-level modelId that names nothing", async () => {
+    const candidate = await candidateFor("unknownModelId");
+
+    // Without the UNNAMED_MODEL_REGEX guard on `modelId`, the 2,399,998-token
+    // remainder (2,400,000 scalar less the 2 the map accounts for) is credited
+    // to the literal string "unknown", attribution reads as complete at
+    // 2,400,000, and slopTokens 2 against 2,400,000 rounds the weight away.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("does not attribute an unnamed cell that sits alongside a scalar remainder", async () => {
+    const candidate = await candidateFor("remainderPlusUnknown");
+
+    // Attribution reaches 2,499,000 of 2,500,000: the 2 nested slop tokens plus
+    // the 2,498,998 remainder claude-sonnet-4 claims, with the 1,000 `unknown`
+    // tokens left out. Dropping the UNNAMED_MODEL_REGEX filter on the nested
+    // named sum lands on exactly 2,500,000 and the gate passes — the clamp
+    // cannot catch it, because this map fits inside its own scalar.
     expect(candidate.slopTokens).toBeNull();
     expect(
       candidate.signals.find((signal) => signal.key === "slopModelName")?.weight

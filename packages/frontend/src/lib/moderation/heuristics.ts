@@ -39,12 +39,13 @@ export interface CandidateRow {
    * Sum of tokens booked under the matching `slopModels` in
    * daily_breakdown.source_breakdown, or null when this account's tokens are
    * not fully attributed to named models — no daily rows at all, a row with no
-   * breakdown, a per-model map that leaves a remainder no `modelId` claims,
-   * tokens parked under a key that names nothing (see
-   * `UNNAMED_MODEL_REGEX`), or daily rows that do not cover the stored total.
-   * Null means the share is unknown, not that it is small: the signal then
-   * keeps its full fixed weight instead of being scaled by a share computed
-   * from partial attribution.
+   * breakdown, a per-model map that leaves a remainder no `modelId` claims, a
+   * client-level `modelId` that names nothing, tokens parked under a map key
+   * that names nothing (see `UNNAMED_MODEL_REGEX`), a map whose own sum
+   * outruns the entry's scalar so the named cells cannot all be paid for, or
+   * daily rows that do not cover the stored total. Null means the share is
+   * unknown, not that it is small: the signal then keeps its full fixed weight
+   * instead of being scaled by a share computed from partial attribution.
    */
   slopTokens: number | null;
 }
@@ -120,16 +121,39 @@ export const SLOP_MODEL_REGEX = `(^|[^a-z0-9])(${SLOP_MODEL_PATTERNS.join("|")})
  * Keys of a `source_breakdown` per-model map that identify no model, so the
  * tokens under them are unattributed however complete the map looks.
  *
- * `unknown` is written by us, not by a submitter: modelsForHighWater() in
- * lib/db/parserHighWater.ts parks an entry's unclaimed scalar remainder under
- * `breakdown.modelId || "unknown"`, and breakdownFromModels() then rewrites
- * the entry's scalar as the sum of that map. A remainder that used to be
- * visible as `tokens` > Σ`models` therefore comes back as an explicit cell
- * whose key names nothing, with the scalar and the nested sum in agreement —
- * so checking only for a scalar remainder no longer sees it. Every
- * SUPPORTED_VERSIONED_PARSER client (copilot, droid, antigravity) reaches
- * stored source_breakdown through addClientBreakdownIncrement(), i.e. through
- * exactly that rewrite.
+ * `unknown` is routine modern data, not a legacy artifact, and it arrives by
+ * three independent routes:
+ *
+ *   - Parsers emit it as the model id of a token-bearing message whose model
+ *     is missing or blank. `model_id()` in sessions/augment.rs and in
+ *     sessions/jcode.rs both return "unknown" for a blank id — augment.rs has
+ *     a test asserting exactly that for a message carrying 7 input and 1
+ *     output tokens — and sessions/claudecode.rs and sessions/gemini.rs fall
+ *     back to the same literal.
+ *   - normalizeSubmissionData() in app/api/submit/route.ts rewrites any null,
+ *     non-string or whitespace-only `modelId` to the literal "unknown" on
+ *     every POST /api/submit, for every client, before validation. The map key
+ *     is that value verbatim.
+ *   - modelsForHighWater() in lib/db/parserHighWater.ts parks an entry's
+ *     unclaimed scalar remainder under `breakdown.modelId || "unknown"`, and
+ *     breakdownFromModels() then rewrites the entry's scalar as the sum of
+ *     that map. A remainder that used to be visible as `tokens` > Σ`models`
+ *     therefore comes back as an explicit cell whose key names nothing, with
+ *     the scalar and the nested sum in agreement — so checking only for a
+ *     scalar remainder no longer sees it.
+ *
+ * Treating those tokens as unattributed is correct in every one of the three:
+ * a token whose model is the string "unknown" is a token no model claims. But
+ * the blast radius is wide and it is not confined to legacy rows — a single
+ * such token anywhere in an account's daily rows makes `slopTokens` NULL, so
+ * the slopModelName signal keeps its full fixed weight and the #1265 share
+ * scaling never applies to that account. That is the fail-closed direction (a
+ * share computed from partial attribution can only be too small), and it is
+ * chosen deliberately over an upper bound like (slop + unattributed) / total,
+ * which puts the fabrication case back on an estimate. Narrowing it needs
+ * measured evidence about how `unknown` tokens are distributed across real
+ * source_breakdown rows; nobody has run that query, so do not narrow it on the
+ * assumption that these cells are rare.
  *
  * Keys holding no alphanumeric character at all are the parser debris
  * documented above (`*`, `{`, `│`), which cannot be a model id either.

@@ -109,16 +109,36 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     -- it. Without a modelId the remainder belongs to no named model, and it
     -- is deliberately left out of attributed_tokens below.
     --
-    -- nested_named_tokens is the part of the map that a model actually
+    -- attributed_nested_tokens is the part of the map that a model actually
     -- claims. It is separate from nested_tokens because the two answer
     -- different questions: the remainder is what the map does not cover
     -- (so it must subtract the WHOLE map, unnamed cells included, or the
     -- same tokens get counted twice), while attribution is what the map
     -- credits to a model (so it must skip the cells that name nothing).
+    --
+    -- The map is not guaranteed to fit inside the entry's own scalar, so the
+    -- named part is clamped by what the scalar has left after the unnamed
+    -- cells. applyCostCompleteness() in lib/db/helpers.ts unions the stored
+    -- and incoming model maps while taking the scalar from the incoming
+    -- entry, so a same-device resubmit declaring costIsComplete:false (#1044)
+    -- that drops a previously-seen model stores a map summing past that
+    -- scalar. Counting the named cells raw then floats attribution past the
+    -- account's total while the unnamed cells still hold real tokens, and the
+    -- completeness gate below waves the row through. Charging the unnamed
+    -- cells against the scalar FIRST is the fail-closed order: it can only
+    -- understate what is attributed, never overstate it. On a well-formed
+    -- entry, whose map fits inside its scalar, the clamp is inert.
     client_attribution AS (
       SELECT
         d.submission_id,
-        m.nested_named_tokens,
+        GREATEST(
+          LEAST(
+            m.nested_named_tokens,
+            COALESCE((client.value->>'tokens')::numeric, 0)
+              - m.nested_unnamed_tokens
+          ),
+          0
+        ) AS attributed_nested_tokens,
         m.nested_slop_tokens,
         GREATEST(
           COALESCE((client.value->>'tokens')::numeric, 0) - m.nested_tokens,
@@ -145,6 +165,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
           ) AS nested_named_tokens,
           COALESCE(
             SUM(COALESCE((model.value->>'tokens')::numeric, 0))
+              FILTER (WHERE model.key ~* ${UNNAMED_MODEL_REGEX}),
+            0
+          ) AS nested_unnamed_tokens,
+          COALESCE(
+            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
               FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
             0
           ) AS nested_slop_tokens
@@ -163,9 +188,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         -- Everything these same entries attribute to SOME named model. Adding
         -- the remainder to the nested sum cannot double count it: the
         -- remainder is by construction what the whole nested sum leaves over,
-        -- and only the named part of that sum is counted here.
+        -- and only the named part of that sum is counted here. A non-zero
+        -- remainder also implies the clamp above was inert, since a map that
+        -- leaves the scalar something over cannot have outrun it.
         SUM(
-          nested_named_tokens
+          attributed_nested_tokens
           + CASE WHEN remainder_model IS NOT NULL THEN remainder ELSE 0 END
         ) AS attributed_tokens
       FROM client_attribution
@@ -186,10 +213,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
         -- A share is only meaningful when every one of this account's tokens
         -- is attributed to a named model. Tokens nobody claims — a scalar
-        -- remainder with no modelId, or a cell keyed 'unknown' or '*' — could
-        -- be all slop, and dividing the attributed part by the full total
-        -- scales the weight towards zero, which drops a real fabrication out
-        -- of the queue. Incomplete attribution therefore yields NULL, which the
+        -- remainder with no modelId, a cell keyed 'unknown' or '*', or the
+        -- part of a scalar an over-nested map leaves unaccounted — could be
+        -- all slop, and dividing the attributed part by the full total scales
+        -- the weight towards zero, which drops a real fabrication out of the
+        -- queue. Incomplete attribution therefore yields NULL, which the
         -- scorer reads as "share unknown" and answers with the full weight.
         CASE
           WHEN dl.every_day_attributed = true
