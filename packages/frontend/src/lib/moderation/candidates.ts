@@ -285,6 +285,19 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
           THEN COALESCE(su.slop_tokens, 0)
           ELSE NULL
         END AS slop_tokens,
+        -- Observability for the fail-closed completeness gate above, NOT
+        -- inputs to the decision: they re-export the gate's own clause values
+        -- verbatim so the application can report which clause failed without
+        -- re-deriving it. Projected through these existing joins rather than
+        -- read back by correlated subqueries in the outer SELECT — a second
+        -- reference to a CTE makes PostgreSQL materialize it, and the
+        -- correlated lookup then rescans the unindexed tuplestore once per
+        -- eligible row. The attribution CTEs are scoped to submissions with a
+        -- slop model match, so these come back NULL anywhere else and must
+        -- not be read as a verdict for non-slop accounts.
+        su.has_over_nested_entry AS has_over_nested_entry,
+        dl.every_day_attributed AS every_day_attributed,
+        su.attributed_tokens AS attributed_tokens,
         CASE WHEN p.total_tokens > 0 THEN
           COUNT(*) OVER (
             ORDER BY p.total_tokens
@@ -317,18 +330,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       user_id, username, avatar_url, leaderboard_hidden, total_tokens,
       total_cost, submit_count, has_backfill, daily_tokens,
       near_duplicate_count, slop_models, slop_tokens,
-      -- Observability for the fail-closed completeness gate above, NOT inputs
-      -- to the decision: they re-export the gate's own clause values verbatim
-      -- so the application can report which clause failed without
-      -- re-deriving it. The attribution CTEs are scoped to submissions with a
-      -- slop model match, so these come back NULL anywhere else and must not
-      -- be read as a verdict for non-slop accounts.
-      (SELECT su.has_over_nested_entry FROM slop_usage su
-        WHERE su.submission_id = eligible.submission_id) AS has_over_nested_entry,
-      (SELECT dl.every_day_attributed FROM daily dl
-        WHERE dl.submission_id = eligible.submission_id) AS every_day_attributed,
-      (SELECT su.attributed_tokens FROM slop_usage su
-        WHERE su.submission_id = eligible.submission_id) AS attributed_tokens,
+      has_over_nested_entry, every_day_attributed, attributed_tokens,
       site_tokens, median_tokens
     FROM eligible
   `);
