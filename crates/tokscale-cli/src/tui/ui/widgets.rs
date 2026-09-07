@@ -135,32 +135,30 @@ pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Box-drawing border for every framed block, built from the ASCII set plus
-/// one exception: horizontal lines stay U+2500 (`─`) so they still join at the
-/// corners.
+/// Box-drawing border for every framed block, built entirely from ASCII.
 ///
 /// Every code point in ratatui's default sets (PLAIN, ROUNDED, DOUBLE, …) is
 /// East-Asian-Ambiguous: one cell to `unicode-width` — and to ratatui's own
-/// cell math — but two cells in a terminal running a CJK locale. On such a
-/// terminal a border drawn at the last column wraps onto the next row and
-/// every column of the table inside shifts right by one, so a row laid out to
-/// exactly fit the block no longer does. `│` `─` `┌` are exactly the same
-/// class of bug as the U+2026 ellipsis fixed in #1304, just drawn by the
-/// frame instead of the content. ASCII is one cell in every terminal, so a
-/// frame drawn with it measures the same in both ambients and the table's
+/// cell math — but two cells in a terminal running a CJK locale. Ratatui's
+/// crossterm backend streams adjacent buffer cells without repositioning
+/// between them, so every ambiguous glyph makes the emitted row one physical
+/// cell wider than the buffer believes; the overflow pushes the rest of the
+/// row past the terminal edge, wrapping onto — or, on the last row, scrolling
+/// — the line below while the diff buffer still thinks nothing moved. `│` `─`
+/// `┌` are exactly the same class of bug as the U+2026 ellipsis fixed in
+/// #1304, just drawn by the frame instead of the content. That includes the
+/// horizontals: a top or bottom edge drawn with `─` emits at roughly twice
+/// the row width, and the footer's bottom border sits on the terminal's last
+/// row where the wrap becomes a scroll. Unicode assigns no unambiguous light
+/// horizontal — the dashes U+2010..U+2015 are all Ambiguous as well — so the
+/// horizontal is ASCII `-` like every other member: one cell in every
+/// terminal, so a frame measures the same in both ambients and the table's
 /// width budget holds.
-///
-/// Why keep `─`: Unicode assigns no unambiguous light horizontal — the
-/// dashes U+2010..U+2015 are all Ambiguous too — so there is no replacement
-/// that both joins at the corners and stays one cell under `width_cjk`. A
-/// horizontal line only overflows sideways into its own span, so it moves
-/// nothing; the verticals and corners are what carry a row's width, and those
-/// are ASCII here.
 pub const AMBIENT_STABLE_BORDER_SET: BorderSet = BorderSet {
     vertical_left: "|",
     vertical_right: "|",
-    horizontal_top: "─",
-    horizontal_bottom: "─",
+    horizontal_top: "-",
+    horizontal_bottom: "-",
     top_left: "+",
     top_right: "+",
     bottom_left: "+",

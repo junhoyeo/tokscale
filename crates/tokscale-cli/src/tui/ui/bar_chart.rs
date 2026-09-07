@@ -140,9 +140,12 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
                     .set_style(Style::default().fg(app.theme.muted));
             }
         }
+        // ASCII `-`, not U+2500 `─`: the box-drawing horizontal is
+        // East-Asian-Ambiguous and doubles the emitted axis width in a CJK
+        // locale, same as the border glyphs in `AMBIENT_STABLE_BORDER_SET`.
         for x in (area.x + y_label_width)..(area.x + area.width) {
             buf[(x, axis_y)]
-                .set_char('─')
+                .set_char('-')
                 .set_style(Style::default().fg(app.theme.muted));
         }
     }
