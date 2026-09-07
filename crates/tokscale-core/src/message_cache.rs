@@ -1094,6 +1094,16 @@ struct SharedParserFamily {
 /// `pi::has_replacement_character`) are used by many otherwise-unrelated
 /// parsers; a behavioral change to one of those must bump each affected
 /// client individually and is deliberately not modeled as a family.
+///
+/// Residual risk this roster does not close: a *new* client that delegates
+/// to an existing shared driver but is given an independent literal arm in
+/// `parser_version()` and left out of this roster is not detected here. The
+/// exhaustive match and the `ClientId::ALL` bisection only enforce that
+/// every client is classified, not that a shared delegate is rostered, and
+/// tying the two together would require routing and versioning to consume
+/// one descriptor. When adding a client that reuses an existing parser,
+/// roster it in the matching family; that pairing is a code-review
+/// responsibility.
 const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
     SharedParserFamily {
         // Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser in
