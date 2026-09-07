@@ -24,32 +24,52 @@ const describeWithPostgres = integrationEnabled ? describe : describe.skip;
  * short of full attribution comes back NULL so the scorer falls back to the
  * full fixed weight — is only observable by running it.
  *
- * Seven mutations of the attribution SQL were run against this fixture. Six
- * are killed by a named persona:
+ * Over-nesting is guarded in TWO places in candidates.ts, and only one of them
+ * decides anything. `has_over_nested_entry` — BOOL_OR of a per-entry flag,
+ * ANDed into the completeness gate — is the guard. Zeroing
+ * attributed_nested_tokens for the same entry is defence in depth that no
+ * assertion here can observe, because the flag has already forced the whole
+ * submission to NULL before the attributed sum is compared to anything. Each
+ * of these four counts was measured by editing the SQL and re-running this
+ * file against postgres:16, not reasoned about:
  *
- *   - dropping the over-nesting guard entirely, attributing nested_named_tokens
- *     unconditionally -> overNested, overNestedNamed, overNestedAllNamed
- *   - weakening that guard to the clamp
- *     GREATEST(LEAST(named, scalar - unnamed), 0)
- *     -> overNestedNamed, overNestedAllNamed, but NOT overNested
- *   - weakening it to LEAST(named, scalar) -> all three
- *   - dropping the UNNAMED_MODEL_REGEX guard on the client-level `modelId`
- *     -> unknownModelId
- *   - dropping the UNNAMED_MODEL_REGEX filter on the named nested sum
- *     -> remainderPlusUnknown, unknownBucket, debrisBucket
- *   - dropping `attributed_tokens >= total_tokens` -> eight personas
+ *   - dropping the flag, leaving the zeroed attribution to carry the
+ *     contradiction on its own -> 2 failed / 15 passed: ONLY
+ *     overNestedZeroScalar and overNestedNoScalar, and none of the three
+ *     over-nested personas that carry a real scalar
+ *   - dropping the zeroing, leaving the flag -> 17 passed. The zeroing is
+ *     currently unobservable. It is kept because it costs nothing and would
+ *     matter if the flag were ever narrowed, NOT because anything tests it,
+ *     and the same is true of any clamp put in its place: with the flag
+ *     standing, GREATEST(LEAST(named, scalar - unnamed), 0) is green too.
+ *     Do not read a green run as evidence that this expression is right.
+ *   - dropping BOTH -> 5 failed / 12 passed: every over-nested persona. This
+ *     is the revert-the-whole-treatment mutation and the one the three
+ *     original personas still guard.
+ *   - dropping `attributed_tokens >= total_tokens`, leaving the flag
+ *     -> 5 failed / 12 passed: unclaimed, unknownBucket, debrisBucket,
+ *     unknownModelId, remainderPlusUnknown. Eight before the flag existed;
+ *     the three over-nested personas moved to the flag's column.
  *
- * The two clamp mutations are why three over-nested personas exist rather than
- * one. A clamp of the named cells can never push a row below the gate: its
- * ceiling is the entry's OWN scalar and the gate's threshold is total_tokens,
- * the sum of those same scalars, so a clamped over-nested entry lands exactly
- * ON the gate — the passing side. It only appears to work when an unnamed cell
- * happens to subtract from that ceiling, which is the single case `overNested`
- * covers and both other personas do not — which is why the exact clamp this
- * fixture was first written against, GREATEST(LEAST(named, scalar - unnamed),
- * 0), leaves `overNested` GREEN and kills only the other two. Any future
- * rewrite that reaches for a clamp instead of failing the contradictory entry
- * closed must go red on at least two of these three, never on none.
+ * Two further mutations of the name filters are each killed by a persona:
+ * dropping the UNNAMED_MODEL_REGEX guard on the client-level `modelId`
+ * -> unknownModelId, and dropping the UNNAMED_MODEL_REGEX filter on the named
+ * nested sum -> remainderPlusUnknown, unknownBucket, debrisBucket.
+ *
+ * Why the flag rather than arithmetic, which is the whole reason
+ * overNestedZeroScalar and overNestedNoScalar exist: the gate compares
+ * attributed_tokens against total_tokens, and total_tokens is SUM(daily.tokens)
+ * which is in turn the sum of the client scalars (recalculateDayTotals). An
+ * entry whose own scalar is 0 or absent therefore adds nothing to the
+ * threshold, so zeroing its attribution subtracts nothing from the other side
+ * either — the gate passes EXACTLY, on the passing side, and the account
+ * leaves the queue. Measured before the flag: slopTokens 2 against a 1,200,000
+ * total, weight 35 * 2/1,200,000, Math.round -> 0, slopModelName absent. This
+ * is the same shape as the clamp failure the original three personas were
+ * written for (a ceiling equal to the entry's own scalar can never push a row
+ * below a threshold summed from those same scalars) with the ceiling and the
+ * scalar both at zero — which is exactly why a clamp-shaped fix, or a
+ * zeroing-shaped one, cannot reach it and a flag can.
  *
  * The seventh survives and is meant to: dropping `every_day_attributed` from
  * the completeness gate leaves the suite green, because that clause is
@@ -115,6 +135,17 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     //     incoming legacy-partial one, over-nested by 2 tokens with no unnamed
     //     cell and no second large cell.
     "overNestedAllNamed",
+    //   - the same contradiction in an entry whose OWN scalar is zero, which
+    //     no arithmetic gate can catch: such an entry adds nothing to
+    //     attributed_tokens and nothing to total_tokens (day scalars are
+    //     summed from client scalars), so zeroing its attribution moves
+    //     neither side of `attributed_tokens >= total_tokens` and the gate
+    //     passes exactly. Only an explicit over_nested flag fails it closed.
+    "overNestedZeroScalar",
+    //   - the same shape with the `tokens` key absent rather than 0, since
+    //     the query reaches the scalar through COALESCE(...->>'tokens', 0)
+    //     and both spellings land on the same value.
+    "overNestedNoScalar",
     // The legacy client-level `modelId` shape, but the id itself names nothing.
     "unknownModelId",
     // A scalar remainder AND an unnamed cell in the same entry: the only shape
@@ -154,6 +185,8 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     overNested: 3_100_000,
     overNestedNamed: 3_200_000,
     overNestedAllNamed: 4_100_000,
+    overNestedZeroScalar: 5_100_000,
+    overNestedNoScalar: 5_200_000,
     unknownModelId: 2_400_000,
     remainderPlusUnknown: 2_500_000,
   };
@@ -200,6 +233,8 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         overNested: ["claude-sonnet-4", "unknown", "fake-api"],
         overNestedNamed: ["claude-sonnet-4", "claude-opus-4", "fake-api"],
         overNestedAllNamed: ["claude-sonnet-4", "fake-api"],
+        overNestedZeroScalar: ["claude-sonnet-4", "fake-api"],
+        overNestedNoScalar: ["claude-sonnet-4", "fake-api"],
         unknownModelId: ["unknown", "fake-api"],
         remainderPlusUnknown: ["claude-sonnet-4", "unknown", "fake-api"],
       };
@@ -374,6 +409,47 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
             "fake-api": model(2),
           },
         },
+      });
+
+      // The contradiction in an entry carrying no tokens of its own. The
+      // account's whole scalar sits on a well-formed `claude` entry, so
+      // attributed_tokens reaches total_tokens on that entry alone; the
+      // `copilot` entry adds 0 to the attributed sum AND 0 to the day scalar
+      // that total_tokens is built from, so no arithmetic comparison between
+      // the two can register it. Its map still claims 2 slop tokens that
+      // nothing in the submission backs.
+      //
+      // Reachable through applyReplaceLayouts() (submit/route.ts), which calls
+      // applyCostCompleteness() directly and so bypasses the token-decrease
+      // regression guard that would otherwise keep the larger stored entry;
+      // applyCostCompleteness() returns {...next, models: union} — incoming
+      // scalar, unioned map — and NonNegativeIntegerSchema permits tokens 0.
+      await day(
+        "overNestedZeroScalar",
+        "2026-01-01",
+        totals.overNestedZeroScalar,
+        {
+          claude: {
+            ...model(totals.overNestedZeroScalar),
+            models: {
+              "claude-sonnet-4": model(totals.overNestedZeroScalar),
+            },
+          },
+          copilot: { ...model(0), models: { "fake-api": model(2) } },
+        }
+      );
+
+      // Identical, with the `tokens` key deleted rather than set to 0: the
+      // query reads the scalar as COALESCE((value->>'tokens')::numeric, 0), so
+      // an absent key and a 0 are the same number and must fail closed alike.
+      const noScalarCopilot: Record<string, unknown> = { ...model(0) };
+      delete noScalarCopilot.tokens;
+      await day("overNestedNoScalar", "2026-01-01", totals.overNestedNoScalar, {
+        claude: {
+          ...model(totals.overNestedNoScalar),
+          models: { "claude-sonnet-4": model(totals.overNestedNoScalar) },
+        },
+        copilot: { ...noScalarCopilot, models: { "fake-api": model(2) } },
       });
 
       // The eead1190..e4fd6668 shape with the `unknown` that
@@ -554,6 +630,35 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     // entry. Under the clamp it read as fully attributed with slopTokens 2 and
     // the slopModelName signal absent, which drops the account out of
     // rankCandidates() entirely unless it is already hidden.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution when a contradictory entry carries no tokens of its own", async () => {
+    const candidate = await candidateFor("overNestedZeroScalar");
+
+    // The one case no arithmetic gate reaches. Attribution from the `claude`
+    // entry alone is 5,100,000 >= total 5,100,000, and the `copilot` entry
+    // moves neither number: zeroing its attribution subtracts nothing, and its
+    // 0 scalar added nothing to the day total that total_tokens was summed
+    // from. Measured before the over_nested flag existed: slopTokens 2, weight
+    // 35 * 2/5,100,000, Math.round -> 0, slopModelName absent from the row.
+    // Only an explicit per-entry flag fails this closed, which is why deleting
+    // `has_over_nested_entry` from the gate must turn this test red.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution when the contradictory entry has no tokens key at all", async () => {
+    const candidate = await candidateFor("overNestedNoScalar");
+
+    // Same shape with the key absent instead of 0. COALESCE collapses the two
+    // spellings to the same scalar, so this pins that an entry can go missing
+    // its scalar entirely and still be caught.
     expect(candidate.slopTokens).toBeNull();
     expect(
       candidate.signals.find((signal) => signal.key === "slopModelName")?.weight

@@ -41,12 +41,22 @@ export interface CandidateRow {
    * not fully attributed to named models — no daily rows at all, a row with no
    * breakdown, a per-model map that leaves a remainder no `modelId` claims, a
    * client-level `modelId` that names nothing, tokens parked under a map key
-   * that names nothing (see `UNNAMED_MODEL_REGEX`), a map whose own sum
-   * outruns the entry's scalar so the entry contradicts itself and attributes
-   * nothing at all, or daily rows that do not cover the stored total. Null
-   * means the share is unknown, not that it is small: the signal then keeps
-   * its full fixed weight instead of being scaled by a share computed from
-   * partial attribution.
+   * that names nothing (see `UNNAMED_MODEL_REGEX`), any client entry whose
+   * per-model map sums past the entry's own scalar so the entry contradicts
+   * itself, or daily rows that do not cover the stored total. Null means the
+   * share is unknown, not that it is small: the signal then keeps its full
+   * fixed weight instead of being scaled by a share computed from partial
+   * attribution.
+   *
+   * The over-nesting condition is stated as a property of the ENTRY, not of
+   * the account's arithmetic, and that distinction is the whole point: the
+   * query carries it as its own flag rather than inferring it from a shortfall
+   * in the attributed sum. A contradictory entry whose own `tokens` scalar is
+   * 0 or absent subtracts nothing from that sum and adds nothing to the total
+   * it is compared against, so before the flag existed this field came back 2
+   * for a map holding 2 slop tokens against a scalar of 0 — measured, not
+   * theorised — in flat contradiction of this doc. Do not re-express the
+   * condition as a subtraction.
    */
   slopTokens: number | null;
 }

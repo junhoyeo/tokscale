@@ -120,16 +120,51 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     -- does not, the entry contradicts itself: the scalar says N tokens were
     -- submitted and the map claims more than N are accounted for, so nothing
     -- the map holds can be reconciled against the account's total. Such an
-    -- entry therefore attributes NOTHING, which drops the account below the
-    -- completeness gate below and fails it closed at the full fixed weight.
+    -- entry raises over_nested, and the completeness gate below fails the
+    -- whole submission closed on that flag alone.
+    --
+    -- Such an entry ALSO attributes nothing, but be clear about what that
+    -- second guard is worth: it is unobservable. The flag alone already forces
+    -- slop_tokens to NULL whatever the attributed sum comes out at, so
+    -- removing the zeroing leaves the integration fixture entirely green
+    -- (measured: 17/17). It is kept as defence in depth against a future
+    -- narrowing of the flag, not because any test can tell it is there — and
+    -- for the same reason a clamp put in its place would also look green. The
+    -- fixture header records which mutation each persona actually kills.
+    --
+    -- The flag is load-bearing and the zeroed attribution alone is NOT enough,
+    -- because the gate is an inequality over sums and a zero-scalar entry
+    -- moves neither side of it. attributed_tokens is compared against
+    -- total_tokens, which is SUM(daily.tokens) and in turn SUM(client scalars)
+    -- (recalculateDayTotals in lib/db/helpers.ts adds client.tokens || 0).
+    -- An entry whose own scalar is 0 or absent therefore adds 0 to the
+    -- threshold as well as 0 to the attributed sum, so zeroing it opens no gap
+    -- and the gate passes EXACTLY, on the passing side. Measured against
+    -- postgres:16 before this flag existed: {claude: scalar 1,200,000 / map
+    -- {claude-sonnet-4: 1,200,000}} beside {copilot: scalar 0 / map
+    -- {fake-api: 2}} returned slopTokens 2 rather than NULL, weight
+    -- 35 * 2/1,200,000, which Math.round drops -- the slopModelName signal
+    -- vanished and rankCandidates() dropped the account. Deleting the tokens
+    -- key outright behaved identically. This is the same failure the clamp
+    -- note below describes, one construction over: there the ceiling equals
+    -- the scalar, here the ceiling IS zero and so is the scalar.
+    --
+    -- nested_slop_tokens is deliberately NOT zeroed alongside the attribution.
+    -- It is the numerator, and zeroing it would round the weight to 0 on its
+    -- own -- fail-open by a second route -- if this gate were ever loosened.
+    -- The over-nested entry's slop tokens are only ever read when the whole
+    -- submission is already NULL, so the pass-through is inert by design.
     --
     -- applyCostCompleteness() in lib/db/helpers.ts unions the stored and
     -- incoming model maps while taking the scalar from the incoming entry, so
     -- a same-device resubmit declaring costIsComplete:false (#1044) that drops
     -- a previously-seen model stores exactly that divergence.
     --
-    -- CLAMPING the named sum instead is what let this fail open, and it is the
-    -- mistake to avoid re-introducing. Every clamp of the named cells has a
+    -- CLAMPING the named sum instead is what let this fail open before the
+    -- flag existed. Reading that history as current behaviour would be wrong:
+    -- with over_nested standing, the clamp below decides nothing either way.
+    -- It is recorded because it explains why the guard has to sit OUTSIDE the
+    -- attributed sum. Every clamp of the named cells has a
     -- ceiling of the entry's OWN scalar, while the gate's threshold is
     -- total_tokens -- the sum of those same scalars. So a clamped over-nested
     -- entry does not land below the gate, it lands exactly ON it, which is the
@@ -145,6 +180,8 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     client_attribution AS (
       SELECT
         d.submission_id,
+        m.nested_tokens > COALESCE((client.value->>'tokens')::numeric, 0)
+          AS over_nested,
         CASE
           WHEN m.nested_tokens > COALESCE((client.value->>'tokens')::numeric, 0)
             THEN 0
@@ -187,6 +224,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     slop_usage AS (
       SELECT
         submission_id,
+        -- Any single self-contradictory entry makes the whole submission's
+        -- attribution unknowable, so this is BOOL_OR and not a per-entry
+        -- subtraction: see the over_nested note above for why subtraction
+        -- cannot express it.
+        BOOL_OR(over_nested) AS has_over_nested_entry,
         SUM(
           nested_slop_tokens
           + CASE WHEN remainder_model ~* ${SLOP_MODEL_REGEX} THEN remainder ELSE 0 END
@@ -219,14 +261,21 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
         -- A share is only meaningful when every one of this account's tokens
         -- is attributed to a named model. Tokens nobody claims — a scalar
-        -- remainder with no modelId, a cell keyed 'unknown' or '*', or every
-        -- token of an entry whose map outruns its own scalar — could be
-        -- all slop, and dividing the attributed part by the full total scales
-        -- the weight towards zero, which drops a real fabrication out of the
-        -- queue. Incomplete attribution therefore yields NULL, which the
-        -- scorer reads as "share unknown" and answers with the full weight.
+        -- remainder with no modelId, or a cell keyed 'unknown' or '*' — could
+        -- be all slop, and dividing the attributed part by the full total
+        -- scales the weight towards zero, which drops a real fabrication out
+        -- of the queue. Incomplete attribution therefore yields NULL, which
+        -- the scorer reads as "share unknown" and answers with the full
+        -- weight.
+        --
+        -- has_over_nested_entry is a separate clause rather than another way
+        -- of failing the sum comparison, because a self-contradictory entry
+        -- whose own scalar is 0 or absent contributes nothing to EITHER side
+        -- of that comparison and so cannot fail it. See the over_nested note
+        -- in client_attribution for the measurement.
         CASE
           WHEN dl.every_day_attributed = true
+            AND COALESCE(su.has_over_nested_entry, false) = false
             AND COALESCE(su.attributed_tokens, 0) >= p.total_tokens
           THEN COALESCE(su.slop_tokens, 0)
           ELSE NULL
