@@ -1,13 +1,11 @@
 use chrono::{Local, NaiveDate, Timelike};
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::hourly_profile;
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    ambient_stable_scrollbar, format_cache_hit_rate, format_cost, format_cost_per_million,
+    format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
@@ -334,9 +332,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if hourly_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(hourly_len, scroll_offset, data_rows_shown);

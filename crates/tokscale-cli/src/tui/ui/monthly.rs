@@ -1,11 +1,9 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    ambient_stable_scrollbar, format_cache_hit_rate, format_cost, format_cost_per_million,
+    format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -255,9 +253,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if monthly_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(monthly_len, scroll_offset, visible_height);
@@ -525,9 +521,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if days_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state = viewport_scrollbar_state(days_len, scroll_offset, visible_height);
 

@@ -1,13 +1,11 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    fit_workspace_label_to_width, format_cache_hit_rate, format_cost, format_cost_per_million,
-    format_ms_per_1k, format_tokens, get_client_display_name, get_provider_display_name,
-    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
-    AMBIENT_STABLE_BORDER_SET,
+    ambient_stable_scrollbar, fit_workspace_label_to_width, format_cache_hit_rate, format_cost,
+    format_cost_per_million, format_ms_per_1k, format_tokens, get_client_display_name,
+    get_provider_display_name, total_tokens_cell, truncate_text, truncate_to_width,
+    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -393,9 +391,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if models_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(models_len, scroll_offset, visible_height);

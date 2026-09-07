@@ -1,11 +1,9 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    format_cost, get_client_display_name, total_tokens_cell, truncate_text,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    ambient_stable_scrollbar, format_cost, get_client_display_name, total_tokens_cell,
+    truncate_text, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
@@ -176,9 +174,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if agents_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(agents_len, scroll_offset, visible_height);

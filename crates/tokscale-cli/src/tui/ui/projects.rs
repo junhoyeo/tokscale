@@ -1,13 +1,12 @@
 use chrono::{Local, NaiveDateTime, TimeZone};
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    display_width, fit_workspace_label_to_width, format_cost, format_tokens,
-    get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
-    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
+    ambient_stable_scrollbar, display_width, fit_workspace_label_to_width, format_cost,
+    format_tokens, get_compact_client_display_name, prefix_to_width, total_tokens_cell,
+    truncate_text, truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -386,9 +385,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if projects_len > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(projects_len, scroll_offset, visible_height);

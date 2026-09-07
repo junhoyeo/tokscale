@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::symbols::border::Set as BorderSet;
-use ratatui::widgets::{Cell, ScrollbarState};
+use ratatui::widgets::{Cell, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use tokscale_core::sessions::WORKTREE_SEPARATOR;
 use tokscale_core::ClientId;
 use unicode_segmentation::UnicodeSegmentation;
@@ -90,6 +90,24 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
     } else {
         format!("{:.0}ms", value)
     }
+}
+
+/// Vertical scrollbar drawn only from width-stable glyphs, for the same
+/// reason as [`AMBIENT_STABLE_BORDER_SET`]: ratatui's defaults — `║` track,
+/// `█` thumb, `▲`/`▼` endpoints — are all East-Asian-Ambiguous, and the
+/// scrollbar overlays the frame's outermost right column, exactly where a
+/// glyph that streams two cells wide in a CJK locale wraps into the next row
+/// (or scrolls the screen from the bottom row). The endpoints and thumb are
+/// East-Asian-Neutral (U+25B4/U+25BE/U+25AE) — one cell under both `width`
+/// and `width_cjk`, the same class as the U+22EF truncation marker — and the
+/// track is ASCII. Every scrollbar goes through here so no caller
+/// reintroduces a default symbol.
+pub fn ambient_stable_scrollbar() -> Scrollbar<'static> {
+    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("\u{25B4}")) // ▴
+        .end_symbol(Some("\u{25BE}")) // ▾
+        .track_symbol(Some("|"))
+        .thumb_symbol("\u{25AE}") // ▮
 }
 
 pub fn viewport_scrollbar_state(

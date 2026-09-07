@@ -1,10 +1,10 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use super::widgets::{
-    fit_workspace_label_to_width, format_tokens, truncate_to_width, viewport_scrollbar_state,
-    AMBIENT_STABLE_BORDER_SET,
+    ambient_stable_scrollbar, fit_workspace_label_to_width, format_tokens, truncate_to_width,
+    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, ChartGranularity};
 use tokscale_core::GroupBy;
@@ -395,11 +395,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     }
 
     if models_len > items_per_page {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("|"))
-            .thumb_symbol("█");
+        let scrollbar = ambient_stable_scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(models_len, scroll_offset, items_per_page);
