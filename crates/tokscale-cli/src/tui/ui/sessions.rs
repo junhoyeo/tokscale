@@ -552,8 +552,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▲",
-                SortDirection::Descending => " ▼",
+                SortDirection::Ascending => " ▴",
+                SortDirection::Descending => " ▾",
             }
         } else {
             ""
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     /// The active sort arrow is legible whenever its column is admitted, and
-    /// absent from the whole header when it is not. Today `Last Active ▼` is
+    /// absent from the whole header when it is not. Today `Last Active ▾` is
     /// missing at 77 of 121 widths.
     ///
     /// Both directions, because `make_app` fixes the sort to descending and an
@@ -1343,8 +1343,8 @@ mod tests {
         for width in 80u16..=SWEEP_MAX {
             for has_turn in [true, false] {
                 for (direction, arrow) in [
-                    (SortDirection::Descending, '▼'),
-                    (SortDirection::Ascending, '▲'),
+                    (SortDirection::Descending, '▾'),
+                    (SortDirection::Ascending, '▴'),
                 ] {
                     for (field, column) in [
                         (SortField::Cost, SessionColumn::Cost),
@@ -1375,7 +1375,7 @@ mod tests {
                         }
                         // The other glyph must never appear at all — one active
                         // sort, one arrow.
-                        let other = if arrow == '▼' { '▲' } else { '▼' };
+                        let other = if arrow == '▾' { '▴' } else { '▾' };
                         assert!(
                             !header.contains(other),
                             "both arrows drawn at width {width} (turn={has_turn})\n{header}"
@@ -1706,7 +1706,7 @@ mod tests {
                 59u16,
                 true,
                 SortField::Cost,
-                "|Session                           Cost ▼                 |",
+                "|Session                           Cost ▾                 |",
                 "|A fairly long ses...              $12.35                 |",
             ),
             (
@@ -1720,21 +1720,21 @@ mod tests {
                 60,
                 true,
                 SortField::Cost,
-                "|Session     Client     Turn   Msgs    Tokens     Cost ▼   |",
+                "|Session     Client     Turn   Msgs    Tokens     Cost ▾   |",
                 "|A fairly lo OpenCode   137    428     49.5M      $12.35   |",
             ),
             (
                 60,
                 false,
                 SortField::Tokens,
-                "|Session         Client     Msgs    Tokens ▼   Cost        |",
+                "|Session         Client     Msgs    Tokens ▾   Cost        |",
                 "|A fairly long s OpenCode   428     49.5M      $12.35      |",
             ),
             (
                 79,
                 true,
                 SortField::Tokens,
-                "|Session           Client       Turn      Msgs      Tokens ▼      Cost        |",
+                "|Session           Client       Turn      Msgs      Tokens ▾      Cost        |",
                 "|A fairly long ses OpenCode     137       428       49.5M         $12.35      |",
             ),
             (
@@ -1951,7 +1951,7 @@ mod tests {
             app.sort_field = SortField::Tokens;
             let header = header_line(&mut app, 200);
             assert!(
-                header.contains("Total ▼"),
+                header.contains("Total ▾"),
                 "tokens sort indicator misplaced (turn={has_turn})\n{header}"
             );
 
@@ -1959,7 +1959,7 @@ mod tests {
             app.sort_field = SortField::Date;
             let header = header_line(&mut app, 200);
             assert!(
-                header.contains("Last Active ▼"),
+                header.contains("Last Active ▾"),
                 "date sort indicator misplaced (turn={has_turn})\n{header}"
             );
         }

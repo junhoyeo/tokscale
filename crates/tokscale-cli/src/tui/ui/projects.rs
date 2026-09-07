@@ -246,8 +246,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▲",
-                SortDirection::Descending => " ▼",
+                SortDirection::Ascending => " ▴",
+                SortDirection::Descending => " ▾",
             }
         } else {
             ""
@@ -612,7 +612,7 @@ mod tests {
             let body = render_body(&mut app, width, 6);
             let header = body.lines().nth(1).unwrap();
             let row = body.lines().nth(2).unwrap();
-            for label in ["Project", "Sessions", "Total", "Cost ▼"] {
+            for label in ["Project", "Sessions", "Total", "Cost ▾"] {
                 assert!(header.contains(label), "at {width} columns: {header}");
             }
             assert!(!header.contains("Models"), "at {width} columns: {header}");
