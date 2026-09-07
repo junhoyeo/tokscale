@@ -509,8 +509,12 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     knowable: number;
     unknowable: number;
     byReason: Record<string, number>;
-    unattributedTokens: number;
-    unknowableTotalTokens: number;
+    /**
+     * Decimal strings: the sums are exact bigints in the emitter, and
+     * JSON.stringify refuses a bigint, so they travel as their digits.
+     */
+    unattributedTokens: string;
+    unknowableTotalTokens: string;
     unattributedHistogram: Record<string, number>;
   }
 
@@ -783,12 +787,14 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         debrisBucket: totals.debrisBucket - 2,
       };
       expect(payload.unattributedTokens).toBe(
-        Object.values(expectedUnattributed).reduce((sum, n) => sum + n, 0)
+        String(Object.values(expectedUnattributed).reduce((sum, n) => sum + n, 0))
       );
       expect(payload.unknowableTotalTokens).toBe(
-        (Object.keys(expectedUnattributed) as Persona[]).reduce(
-          (sum, persona) => sum + totals[persona],
-          0
+        String(
+          (Object.keys(expectedUnattributed) as Persona[]).reduce(
+            (sum, persona) => sum + totals[persona],
+            0
+          )
         )
       );
 
@@ -855,6 +861,117 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     await fixtureDb`DELETE FROM users WHERE id = ${sloplessId}`;
   });
 
+  it("carries a one-token gate shortfall above 2^53 exactly through the driver", async () => {
+    // The SQL gate can fail `attributed_tokens >= total_tokens` by exactly
+    // one token above 2^53 — 9,007,199,254,740,995 < 9,007,199,254,740,996 —
+    // while both operands collapse to the SAME Number on the way out of
+    // postgres-js. Only the real driver strings can prove the classifier
+    // still reports `unattributed_tokens` (not `unknown`) and the telemetry
+    // the true one-token gap. Deltas against a same-fixture baseline keep
+    // the assertions independent of the shared personas.
+    const total = "9007199254740996"; // 2^53 + 4
+    const attributedNamed = "9007199254740993"; // + fake-api's 2 = total - 1
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 8);
+    const bigUserId = randomUUID();
+    const bigSubmissionId = randomUUID();
+    const bigDeviceId = randomUUID();
+
+    const baselineSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let baseline: UnknowableLogPayload;
+    try {
+      await getModerationCandidates();
+      const payloads = parseUnknowableWarnings(baselineSpy.mock.calls);
+      expect(payloads).toHaveLength(1);
+      baseline = payloads[0];
+    } finally {
+      baselineSpy.mockRestore();
+    }
+
+    // JSON built by hand: routing the token counts through a JS object would
+    // round 9,007,199,254,740,995 at JSON.stringify time, which is the exact
+    // loss this test exists to rule out. The ::text::jsonb chain pins the
+    // parameter as text so postgres-js does not double-encode it — a bare
+    // ::jsonb cast makes Postgres infer a jsonb parameter, which the driver
+    // JSON-stringifies into a jsonb STRING (jsonb_typeof = 'string').
+    const cell = (tokens: string) =>
+      `{"tokens":${tokens},"cost":0,"input":${tokens},"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"messages":1}`;
+    const breakdown = `{"claude":{"tokens":${total},"cost":0,"input":${total},"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"messages":1,"models":{"claude-sonnet-4":${cell(
+      attributedNamed
+    )},"fake-api":${cell("2")}}}}`;
+
+    await fixtureDb.begin(async (sql) => {
+      await sql`
+        INSERT INTO users (id, github_id, username, leaderboard_hidden)
+        VALUES (
+          ${bigUserId},
+          ${githubIdBase - 2_000_000 - Number.parseInt(suffix.slice(0, 6), 16)},
+          ${`mod_bigint_${suffix}`},
+          true
+        )
+      `;
+      await sql`
+        INSERT INTO submissions (
+          id, user_id, total_tokens, total_cost, input_tokens, output_tokens,
+          date_start, date_end, sources_used, models_used
+        )
+        VALUES (
+          ${bigSubmissionId}, ${bigUserId}, ${total}, 0, ${total}, 0,
+          '2026-01-01', '2026-01-02', ARRAY['claude'],
+          ARRAY['claude-sonnet-4', 'fake-api']
+        )
+      `;
+      await sql`
+        INSERT INTO submitted_devices (id, user_id, device_key)
+        VALUES (${bigDeviceId}, ${bigUserId}, ${`mod-bigint-${suffix}-device`})
+      `;
+      await sql`
+        INSERT INTO daily_breakdown (
+          submission_id, submitted_device_id, date, tokens, cost,
+          input_tokens, output_tokens, source_breakdown
+        )
+        VALUES (
+          ${bigSubmissionId}, ${bigDeviceId}, '2026-01-01', ${total}, 0,
+          ${total}, 0, ${breakdown}::text::jsonb
+        )
+      `;
+    });
+
+    try {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await getModerationCandidates();
+        const payloads = parseUnknowableWarnings(warnSpy.mock.calls);
+        expect(payloads).toHaveLength(1);
+        const payload = payloads[0];
+
+        expect(payload.knowable).toBe(baseline.knowable);
+        expect(payload.unknowable).toBe(baseline.unknowable + 1);
+        expect(payload.byReason).toEqual({
+          ...baseline.byReason,
+          unattributed_tokens: baseline.byReason.unattributed_tokens + 1,
+        });
+        // `unknown` is the clause a Number pipeline reports for this row.
+        expect(payload.byReason.unknown).toBe(baseline.byReason.unknown);
+        expect(
+          BigInt(payload.unattributedTokens) -
+            BigInt(baseline.unattributedTokens)
+        ).toBe(1n);
+        expect(
+          BigInt(payload.unknowableTotalTokens) -
+            BigInt(baseline.unknowableTotalTokens)
+        ).toBe(BigInt(total));
+        // A one-token gap crosses no bucket boundary.
+        expect(payload.unattributedHistogram).toEqual(
+          baseline.unattributedHistogram
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      await fixtureDb`DELETE FROM users WHERE id = ${bigUserId}`;
+    }
+  });
+
   it("still emits the line when every slop-matched candidate is knowable", async () => {
     // The breadth metric is a fraction, and a window where nothing failed
     // must contribute its denominator: a suppressed line is indistinguishable
@@ -894,8 +1011,8 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         unattributed_tokens: 0,
         unknown: 0,
       });
-      expect(payload.unattributedTokens).toBe(0);
-      expect(payload.unknowableTotalTokens).toBe(0);
+      expect(payload.unattributedTokens).toBe("0");
+      expect(payload.unknowableTotalTokens).toBe("0");
       expect(
         Object.values(payload.unattributedHistogram).every(
           (count) => count === 0

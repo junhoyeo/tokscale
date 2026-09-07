@@ -70,8 +70,23 @@ export interface CandidateRow {
    */
   hasOverNestedEntry: boolean;
   everyDayAttributed: boolean;
-  /** Tokens the daily rows attribute to SOME named model. */
-  attributedTokens: number;
+  /**
+   * Tokens the daily rows attribute to SOME named model — the gate's left
+   * operand, held as bigint because PostgreSQL decides the gate over
+   * numeric/bigint and production totals exceed Number.MAX_SAFE_INTEGER. A
+   * one-token shortfall above 2^53 rounds into apparent equality as a Number,
+   * which would misclassify the failure as `unknown` and zero the measured
+   * gap.
+   */
+  attributedTokens: bigint;
+  /**
+   * The gate's right operand (`submissions.total_tokens`) at full precision.
+   * `totalTokens` above is the same value as a Number for scoring ratios and
+   * the UI, where a few units of drift at 10^15 cannot move a threshold;
+   * every comparison or subtraction against `attributedTokens` must use this
+   * field instead.
+   */
+  totalTokensExact: bigint;
 }
 
 export interface CandidateContext {
@@ -94,7 +109,14 @@ export interface CandidateSignal {
   weight: number;
 }
 
-export interface ScoredCandidate extends CandidateRow {
+/**
+ * The bigint gate operands are stripped rather than inherited: a scored
+ * candidate is what the admin route serializes with NextResponse.json, and
+ * JSON.stringify throws on bigint. They exist for the unknowable-reason
+ * classification and telemetry, which consume CandidateRow directly.
+ */
+export interface ScoredCandidate
+  extends Omit<CandidateRow, "attributedTokens" | "totalTokensExact"> {
   score: number;
   signals: CandidateSignal[];
 }
@@ -150,11 +172,13 @@ export interface UnknowableStats {
    * Sum over unknowable candidates of GREATEST(total - attributed, 0) — the
    * tokens no named model accounts for. The clamp is defence against the
    * attributed sum overshooting the stored total on drifted data; on
-   * well-formed rows the gate itself guarantees attributed < total.
+   * well-formed rows the gate itself guarantees attributed < total. Held as
+   * bigint end-to-end: the operands are exact off the driver, and a Number
+   * detour would erase one-token gaps above 2^53.
    */
-  unattributedTokens: number;
-  /** Sum of unknowable candidates' stored totals. */
-  unknowableTotalTokens: number;
+  unattributedTokens: bigint;
+  /** Sum of unknowable candidates' stored totals, exact for the same reason. */
+  unknowableTotalTokens: bigint;
   /**
    * Log-scale histogram of per-candidate unattributed tokens over the
    * unknowable set: key n counts candidates with at least
@@ -186,7 +210,7 @@ export function classifyUnknowableReason(row: CandidateRow): UnknowableReason {
   if (!row.everyDayAttributed) {
     return "missing_breakdown";
   }
-  if (row.attributedTokens < row.totalTokens) {
+  if (row.attributedTokens < row.totalTokensExact) {
     return "unattributed_tokens";
   }
   return "unknown";
@@ -210,8 +234,8 @@ export function aggregateUnknowableStats(
       unattributed_tokens: 0,
       unknown: 0,
     },
-    unattributedTokens: 0,
-    unknowableTotalTokens: 0,
+    unattributedTokens: 0n,
+    unknowableTotalTokens: 0n,
     unattributedHistogram: Object.fromEntries(
       Array.from({ length: UNKNOWABLE_HISTOGRAM_BUCKETS }, (_, i) => [
         String(2 ** i * UNKNOWABLE_BUCKET_WIDTH),
@@ -230,24 +254,26 @@ export function aggregateUnknowableStats(
     }
     stats.unknowable += 1;
     stats.byReason[classifyUnknowableReason(candidate)] += 1;
-    const unattributed = Math.max(
-      0,
-      candidate.totalTokens - candidate.attributedTokens
-    );
+    // bigint throughout: the gate operands are exact off the driver, and a
+    // Math.max/Math.min detour through Number would round a real one-token
+    // shortfall above 2^53 back into the zero gap this exists to measure.
+    const unattributed =
+      candidate.totalTokensExact > candidate.attributedTokens
+        ? candidate.totalTokensExact - candidate.attributedTokens
+        : 0n;
     stats.unattributedTokens += unattributed;
-    stats.unknowableTotalTokens += candidate.totalTokens;
+    stats.unknowableTotalTokens += candidate.totalTokensExact;
     // Cap the walk at the largest allocated key: a gap past it still counts
     // in every bucket up to and including the top one, instead of minting a
     // key the allocation above never made — `undefined + 1` is NaN, which
     // JSON.stringify then serializes as null, corrupting the telemetry on
-    // exactly the largest accounts.
-    const cap = Math.min(
-      unattributed,
-      2 ** (UNKNOWABLE_HISTOGRAM_BUCKETS - 1) * UNKNOWABLE_BUCKET_WIDTH
-    );
+    // exactly the largest accounts. Boundaries are small exact integers, so
+    // lifting one into BigInt for the comparison loses nothing.
+    const maxBoundary =
+      2 ** (UNKNOWABLE_HISTOGRAM_BUCKETS - 1) * UNKNOWABLE_BUCKET_WIDTH;
     for (
       let boundary = UNKNOWABLE_BUCKET_WIDTH;
-      boundary <= cap;
+      boundary <= maxBoundary && BigInt(boundary) <= unattributed;
       boundary *= 2
     ) {
       stats.unattributedHistogram[String(boundary)] += 1;
@@ -363,8 +389,10 @@ export const UNKNOWABLE_BUCKET_WIDTH = 1_000_000;
  * still contributes its denominator (knowable > 0, unknowable = 0) instead of
  * silence, so the rate is derivable rather than only its failures. The JSON
  * payload carries the counts, per-reason breakdown, and unattributed-token
- * histogram. Operators aggregate by `event` over any log window to answer
- * "what fraction of submissions went unknowable in window W".
+ * histogram; the two token sums travel as decimal strings because they are
+ * exact bigints and JSON.stringify refuses a bigint outright. Operators
+ * aggregate by `event` over any log window to answer "what fraction of
+ * submissions went unknowable in window W".
  */
 export const UNKNOWABLE_EVENT = "moderation_unknowable_submissions";
 
@@ -506,8 +534,15 @@ export function scoreCandidate(
     }
   }
 
+  // Strip the bigint gate operands before the spread (see ScoredCandidate):
+  // NextResponse.json would otherwise throw on the first candidate row.
+  const {
+    attributedTokens: _attributedTokens,
+    totalTokensExact: _totalTokensExact,
+    ...serializable
+  } = row;
   return {
-    ...row,
+    ...serializable,
     score: signals.reduce((sum, signal) => sum + signal.weight, 0),
     signals,
   };

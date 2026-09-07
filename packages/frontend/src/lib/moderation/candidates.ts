@@ -53,6 +53,27 @@ function toNumber(value: number | string | null | undefined): number {
 }
 
 /**
+ * Exact counterpart of toNumber() for the completeness gate's own operands.
+ * The gate compares SUM(numeric) >= bigint in SQL, and above 2^53 a Number
+ * round-trip collapses a real one-token shortfall into apparent equality —
+ * classifyUnknowableReason() would then report `unknown` and the measured gap
+ * would be zero, on exactly the totals large enough to matter. postgres-js
+ * hands both column types over as decimal strings; keep the integral part
+ * digit-for-digit and never round. Garbage degrades to 0n the way toNumber()
+ * degrades to 0, so a driver surprise cannot throw the whole queue away.
+ */
+function toBigInt(value: number | string | null | undefined): bigint {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? BigInt(Math.trunc(value)) : 0n;
+  }
+  if (typeof value === "string") {
+    const integral = /^-?\d+/.exec(value.trim());
+    return integral ? BigInt(integral[0]) : 0n;
+  }
+  return 0n;
+}
+
+/**
  * Builds the review queue: every user with at least one suspicion signal, plus
  * everyone currently hidden so past decisions stay visible and reversible.
  *
@@ -352,7 +373,8 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     slopTokens: row.slop_tokens == null ? null : toNumber(row.slop_tokens),
     hasOverNestedEntry: row.has_over_nested_entry === true,
     everyDayAttributed: row.every_day_attributed === true,
-    attributedTokens: toNumber(row.attributed_tokens),
+    attributedTokens: toBigInt(row.attributed_tokens),
+    totalTokensExact: toBigInt(row.total_tokens),
   }));
 
   const stats = aggregateUnknowableStats(rows);
@@ -370,8 +392,11 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       knowable: stats.knowable,
       unknowable: stats.unknowable,
       byReason: stats.byReason,
-      unattributedTokens: stats.unattributedTokens,
-      unknowableTotalTokens: stats.unknowableTotalTokens,
+      // Decimal strings, not numbers: JSON.stringify throws on a bigint, and
+      // a Number here would round away exactly the sub-2^53 precision the
+      // bigint pipeline exists to keep.
+      unattributedTokens: stats.unattributedTokens.toString(),
+      unknowableTotalTokens: stats.unknowableTotalTokens.toString(),
       unattributedHistogram: stats.unattributedHistogram,
     })}`
   );
