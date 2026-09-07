@@ -358,8 +358,10 @@ export const UNKNOWABLE_BUCKET_WIDTH = 1_000_000;
 
 /**
  * The single structured-log event name the fail-closed breadth telemetry is
- * emitted under. One line per getModerationCandidates() invocation in which
- * at least one slop-matched candidate's token share was unknowable; the JSON
+ * emitted under. One line per getModerationCandidates() invocation,
+ * unconditionally: a window where every slop-matched candidate was knowable
+ * still contributes its denominator (knowable > 0, unknowable = 0) instead of
+ * silence, so the rate is derivable rather than only its failures. The JSON
  * payload carries the counts, per-reason breakdown, and unattributed-token
  * histogram. Operators aggregate by `event` over any log window to answer
  * "what fraction of submissions went unknowable in window W".

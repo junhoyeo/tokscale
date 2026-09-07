@@ -858,4 +858,55 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
 
     await fixtureDb`DELETE FROM users WHERE id = ${sloplessId}`;
   });
+
+  it("still emits the line when every slop-matched candidate is knowable", async () => {
+    // The breadth metric is a fraction, and a window where nothing failed
+    // must contribute its denominator: a suppressed line is indistinguishable
+    // from a window that was never measured, and aggregating only failure
+    // lines can never produce a zero rate. Runs last because it removes the
+    // unknowable personas for good — afterAll's per-persona DELETE is a no-op
+    // for rows already gone.
+    const unknowablePersonas: Persona[] = [
+      "unclaimed",
+      "mixed",
+      "unknownBucket",
+      "debrisBucket",
+      "unknownModelId",
+      "remainderPlusUnknown",
+      "overNested",
+      "overNestedNamed",
+      "overNestedAllNamed",
+      "overNestedZeroScalar",
+      "overNestedNoScalar",
+    ];
+    for (const persona of unknowablePersonas) {
+      await fixtureDb`DELETE FROM users WHERE id = ${ids[persona].userId}`;
+    }
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await getModerationCandidates();
+      const payloads = parseUnknowableWarnings(warnSpy.mock.calls);
+      expect(payloads).toHaveLength(1);
+      const payload = payloads[0];
+      // partial, blend, legacy, artifact, wholly, namedLikeUnknown remain.
+      expect(payload.knowable).toBe(6);
+      expect(payload.unknowable).toBe(0);
+      expect(payload.byReason).toEqual({
+        missing_breakdown: 0,
+        over_nested: 0,
+        unattributed_tokens: 0,
+        unknown: 0,
+      });
+      expect(payload.unattributedTokens).toBe(0);
+      expect(payload.unknowableTotalTokens).toBe(0);
+      expect(
+        Object.values(payload.unattributedHistogram).every(
+          (count) => count === 0
+        )
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });

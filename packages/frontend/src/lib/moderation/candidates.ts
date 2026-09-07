@@ -335,10 +335,6 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
 
   const dbRows = (result as unknown as CandidateDbRow[]) ?? [];
 
-  if (dbRows.length === 0) {
-    return [];
-  }
-
   const rows: CandidateRow[] = dbRows.map((row) => ({
     userId: row.user_id,
     username: row.username,
@@ -358,23 +354,28 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
   }));
 
   const stats = aggregateUnknowableStats(rows);
-  // One structured line per invocation, only when the fail-closed path fired.
-  // This is the telemetry the breadth question is answered from: aggregate by
-  // event over any log window to get the fraction of slop-matched submissions
-  // that were unknowable, broken down by which gate clause failed and how
-  // many of their tokens no named model accounts for.
-  if (stats.unknowable > 0) {
-    console.warn(
-      `[moderation] ${JSON.stringify({
-        event: UNKNOWABLE_EVENT,
-        knowable: stats.knowable,
-        unknowable: stats.unknowable,
-        byReason: stats.byReason,
-        unattributedTokens: stats.unattributedTokens,
-        unknowableTotalTokens: stats.unknowableTotalTokens,
-        unattributedHistogram: stats.unattributedHistogram,
-      })}`
-    );
+  // One structured line per invocation, unconditionally. This is the
+  // telemetry the breadth question is answered from: aggregate by event over
+  // any log window to get the fraction of slop-matched submissions that were
+  // unknowable, broken down by which gate clause failed and how many of their
+  // tokens no named model accounts for. The line must also fire when nothing
+  // was unknowable — the rate is a fraction, and a fully-knowable window has
+  // to contribute its denominator; emitting only failures cannot distinguish
+  // "nothing failed" from "nothing was measured".
+  console.warn(
+    `[moderation] ${JSON.stringify({
+      event: UNKNOWABLE_EVENT,
+      knowable: stats.knowable,
+      unknowable: stats.unknowable,
+      byReason: stats.byReason,
+      unattributedTokens: stats.unattributedTokens,
+      unknowableTotalTokens: stats.unknowableTotalTokens,
+      unattributedHistogram: stats.unattributedHistogram,
+    })}`
+  );
+
+  if (dbRows.length === 0) {
+    return [];
   }
 
   return rankCandidates(rows, {
