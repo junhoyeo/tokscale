@@ -83,33 +83,78 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       SELECT
         d.submission_id,
         SUM(d.tokens) AS daily_tokens,
-        BOOL_OR(d.source_breakdown IS NOT NULL AND jsonb_typeof(d.source_breakdown) = 'object') AS has_breakdown
+        -- COALESCE rather than a bare comparison: jsonb_typeof(NULL) is NULL
+        -- and BOOL_AND skips NULL inputs, so one legacy row with no breakdown
+        -- next to one attributed row would still report "all attributed".
+        BOOL_AND(
+          COALESCE(jsonb_typeof(d.source_breakdown) = 'object', false)
+        ) AS every_day_attributed
       FROM daily_breakdown d
       GROUP BY d.submission_id
     ),
+    -- Scoped to accounts that actually have a matching name: the per-model
+    -- expansion below is the expensive part of this query, and slop_tokens is
+    -- only ever read when slop_models is non-empty.
     slop_users AS (
       SELECT submission_id
       FROM per_user
       WHERE cardinality(slop_models) > 0
     ),
-    slop_usage AS (
+    -- One row per (daily row, client entry). nested_tokens is what the
+    -- entry's per-model map accounts for; remainder is the scalar total a
+    -- legacy entry carries beyond it. modelsForHighWater() in
+    -- lib/db/parserHighWater.ts credits exactly that remainder to the entry's
+    -- own modelId, so this reads it back the same way instead of dropping
+    -- it. Without a modelId the remainder belongs to no named model, and it
+    -- is deliberately left out of attributed_tokens below.
+    client_attribution AS (
       SELECT
         d.submission_id,
-        SUM(COALESCE((model.value->>'tokens')::numeric, 0)) AS slop_tokens
+        m.nested_tokens,
+        m.nested_slop_tokens,
+        GREATEST(
+          COALESCE((client.value->>'tokens')::numeric, 0) - m.nested_tokens,
+          0
+        ) AS remainder,
+        CASE
+          WHEN jsonb_typeof(client.value->'modelId') = 'string'
+          THEN client.value->>'modelId'
+        END AS remainder_model
       FROM daily_breakdown d
       JOIN slop_users su ON su.submission_id = d.submission_id
       CROSS JOIN LATERAL jsonb_each(
         CASE WHEN jsonb_typeof(d.source_breakdown) = 'object' THEN d.source_breakdown ELSE '{}'::jsonb END
       ) AS client(key, value)
-      CROSS JOIN LATERAL jsonb_each(
-        CASE
-          WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models'
-          WHEN NOT (client.value ? 'models') AND jsonb_typeof(client.value->'modelId') = 'string' THEN jsonb_build_object(client.value->>'modelId', client.value)
-          ELSE '{}'::jsonb
-        END
-      ) AS model(key, value)
-      WHERE model.key ~* ${SLOP_MODEL_REGEX}
-      GROUP BY d.submission_id
+      CROSS JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(COALESCE((model.value->>'tokens')::numeric, 0)), 0)
+            AS nested_tokens,
+          COALESCE(
+            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
+              FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
+            0
+          ) AS nested_slop_tokens
+        FROM jsonb_each(
+          CASE WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models' ELSE '{}'::jsonb END
+        ) AS model(key, value)
+      ) AS m
+    ),
+    slop_usage AS (
+      SELECT
+        submission_id,
+        SUM(
+          nested_slop_tokens
+          + CASE WHEN remainder_model ~* ${SLOP_MODEL_REGEX} THEN remainder ELSE 0 END
+        ) AS slop_tokens,
+        -- Everything these same entries attribute to SOME named model. Adding
+        -- the remainder to the nested sum cannot double count it: the
+        -- remainder is by construction what the nested sum leaves over.
+        SUM(
+          nested_tokens
+          + CASE WHEN remainder_model IS NOT NULL THEN remainder ELSE 0 END
+        ) AS attributed_tokens
+      FROM client_attribution
+      GROUP BY submission_id
     ),
     site AS (
       SELECT
@@ -124,8 +169,16 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       SELECT
         p.*,
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
+        -- A share is only meaningful when every one of this account's tokens
+        -- is attributed to a named model. An unattributed remainder could be
+        -- all slop, and dividing the attributed part by the full total scales
+        -- the weight towards zero — which drops a real fabrication out of the
+        -- queue. Incomplete attribution therefore yields NULL, which the
+        -- scorer reads as "share unknown" and answers with the full weight.
         CASE
-          WHEN dl.has_breakdown = true THEN COALESCE(su.slop_tokens, 0)
+          WHEN dl.every_day_attributed = true
+            AND COALESCE(su.attributed_tokens, 0) >= p.total_tokens
+          THEN COALESCE(su.slop_tokens, 0)
           ELSE NULL
         END AS slop_tokens,
         CASE WHEN p.total_tokens > 0 THEN

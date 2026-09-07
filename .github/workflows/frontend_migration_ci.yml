@@ -69,3 +69,8 @@ jobs:
         env:
           RATCHET_CENSUS_DB_INTEGRATION: "1"
         run: bun run --cwd packages/frontend test:reconciliation:db
+
+      - name: Execute moderation candidate query against PostgreSQL
+        env:
+          MODERATION_CANDIDATES_DB_INTEGRATION: "1"
+        run: bun run --cwd packages/frontend test:moderation:db

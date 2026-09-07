@@ -36,9 +36,13 @@ export interface CandidateRow {
    */
   slopModels: string[];
   /**
-   * Sum of tokens attributed to matching slopModels from daily_breakdown.source_breakdown.
-   * null if breakdown data is unavailable (legacy submissions or submissions with no
-   * daily breakdown rows), in which case token share cannot be computed and full fixed weight is retained.
+   * Sum of tokens booked under the matching `slopModels` in
+   * daily_breakdown.source_breakdown, or null when this account's tokens are
+   * not fully attributed to named models — no daily rows at all, a row with no
+   * breakdown, a per-model map that leaves a remainder no `modelId` claims, or
+   * daily rows that do not cover the stored total. Null means the share is
+   * unknown, not that it is small: the signal then keeps its full fixed weight
+   * instead of being scaled by a share computed from partial attribution.
    */
   slopTokens: number | null;
 }
@@ -184,9 +188,10 @@ export function scoreCandidate(
     // usage. Config artifacts carrying zero or negligible tokens scale down
     // to 0 and drop out of the review queue (#1265).
     //
-    // When per-model breakdown data is unavailable (null slopTokens from legacy
-    // rows or submissions with no daily breakdown rows), retain the original
-    // full fixed weight (35) so genuine fabrications on older submissions are not lost.
+    // When the account's tokens are not fully attributed to named models
+    // (null slopTokens), retain the original full fixed weight (35): a partial
+    // attribution divided by the full total understates the share, and
+    // understating it here is how a genuine fabrication leaves the queue.
     let weight = 35;
     if (row.slopTokens !== null) {
       const slopShare =
