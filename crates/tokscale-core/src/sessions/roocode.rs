@@ -11,6 +11,16 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Shared base parser version for the roo/kilo task-log format.
+///
+/// Roo Code, Kilo Code, and Cline all parse this format through
+/// [`parse_roo_kilo_file`], so a change here alters what byte-identical task
+/// logs parse to for every one of them at once. Bump this base when that
+/// happens; `message_cache::parser_version()` derives each member's version
+/// from it (base plus a per-client offset that preserves independent history)
+/// so no member can be left serving stale cache entries.
+pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 1;
+
 #[derive(Debug, Deserialize)]
 struct UiMessageEntry {
     #[serde(rename = "type")]

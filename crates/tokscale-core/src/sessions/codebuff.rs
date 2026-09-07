@@ -23,6 +23,19 @@ use std::path::Path;
 
 const DEFAULT_MODEL: &str = "codebuff-unknown";
 
+/// Shared base parser version for the Codebuff chat-message format.
+///
+/// Freebuff persists the same `chat-messages.json` shape and parses assistant
+/// usage through this module's helpers (`extract_assistant_usage`,
+/// `is_assistant_role`, `message_timestamp`, `parse_chat_id_to_millis`,
+/// `derive_context_from_path`), so a change to how those read a message
+/// alters what byte-identical files parse to for both clients at once. Bump
+/// this base when that happens; `message_cache::parser_version()` derives
+/// each member's version from it (base plus a per-client offset that
+/// preserves independent history) so no member can be left serving stale
+/// cache entries.
+pub(crate) const CODEBUFF_CHAT_PARSER_BASE_VERSION: u32 = 1;
+
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
 pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(bytes) = read_file_or_none(path) else {

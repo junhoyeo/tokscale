@@ -1198,7 +1198,12 @@ fn parser_version(client: ClientId) -> u32 {
         // v2->v3: content-aware Cline CLI turn-start classification now
         // recognizes user tool-result records as continuations instead of
         // beginning a new turn, so cached turns must be reparsed.
-        ClientId::Cline => 3,
+        // Cline also parses the shared roo/kilo task-log format through
+        // `roocode::parse_roo_kilo_file`, so a helper change that bumps
+        // ROO_KILO_TASK_LOG_PARSER_BASE_VERSION moves Cline together with
+        // Roo Code and Kilo Code; the +2 offset preserves the v1->v3 history
+        // above without renumbering live caches.
+        ClientId::Cline => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
         // `Cost` (including explicit zero) is retained as provider-reported so
@@ -1265,7 +1270,14 @@ fn parser_version(client: ClientId) -> u32 {
         // validation does not reject valid unknown-model MiMo usage offline.
         // v2->v3: duplicate merging now upgrades the retained row when a later
         // copy carries an explicit cost, including zero.
-        ClientId::MiMoCode => 3,
+        // MiMo Code reads its SQLite store through the shared
+        // `opencode_schema` driver, so a driver change that bumps
+        // OPENCODE_SCHEMA_PARSER_BASE_VERSION moves MiMo Code together with
+        // OpenCode and Kilo; the +2 offset preserves the v1->v3 history above
+        // without renumbering live caches.
+        ClientId::MiMoCode => {
+            crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2
+        }
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -1339,7 +1351,40 @@ fn parser_version(client: ClientId) -> u32 {
         // path-scoped key instead of a globally colliding filename stem. The
         // source bytes and fingerprint do not change, so invalidate cached v2
         // rows to make same-named files in different sessions survive (#1198).
-        ClientId::OpenCode => 3,
+        // OpenCode's SQLite path reads through the shared `opencode_schema`
+        // driver, so a driver change that bumps
+        // OPENCODE_SCHEMA_PARSER_BASE_VERSION moves OpenCode together with
+        // MiMo Code and Kilo; the +2 offset preserves the v1->v3 history
+        // above without renumbering live caches.
+        ClientId::OpenCode => {
+            crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2
+        }
+        // Roo Code and Kilo Code parse task logs *only* through the shared
+        // `roocode::parse_roo_kilo_file` helper and carry no independent
+        // invalidation history, so both sit at the shared base directly. A
+        // helper change bumps the base and moves them together with Cline.
+        ClientId::RooCode => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
+        ClientId::KiloCode => crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
+        // Kilo reads its SQLite store through the shared `opencode_schema`
+        // driver (with Kilo-specific policy in `OpenCodeSchemaConfig::kilo`)
+        // and carries no independent invalidation history, so it sits at the
+        // shared base directly, moving together with OpenCode and MiMo Code.
+        ClientId::Kilo => crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION,
+        // CodeBuddy and WorkBuddy parse their detailed JSONL transcripts and
+        // extension logs through the shared `tencent_buddy` module. Neither
+        // carries independent invalidation history, so both sit at the shared
+        // base directly; a `tencent_buddy` parse change bumps the base and
+        // moves them together. (WorkBuddy's aggregate-DB fallback lives in
+        // `workbuddy.rs` itself; a change scoped to it belongs in a WorkBuddy
+        // offset, not the base.)
+        ClientId::CodeBuddy => crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION,
+        ClientId::WorkBuddy => crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION,
+        // Codebuff and Freebuff read the same `chat-messages.json` shape;
+        // Freebuff extracts usage through `codebuff.rs` helpers. Neither
+        // carries independent invalidation history, so both sit at the shared
+        // base directly and a helper change moves them together.
+        ClientId::Codebuff => crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION,
+        ClientId::Freebuff => crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating
@@ -1347,27 +1392,30 @@ fn parser_version(client: ClientId) -> u32 {
         // identity is namespaced by `client.as_str()` first, so one client's
         // bump can never invalidate or collide with another's entries
         // (`CacheIdentity` / `CachedSourceEntry::matches_identity`). Sharing
-        // is reserved for parsers that are the *same code*: the pi-format
-        // family (Pi, Kimchi, Omp, Senpi, PrimeAgent) derives from
-        // `PI_FORMAT_PARSER_BASE_VERSION` above, and the roo/kilo task-log
-        // family (RooCode, KiloCode -- Cline carries its own history) parses
-        // through `roocode::parse_roo_kilo_file`. No `_ => 1` arm on purpose:
+        // is reserved for parsers that are the *same code*: every family that
+        // delegates to one format driver derives from that driver's base
+        // constant -- pi-format (Pi, Kimchi, Omp, Senpi, PrimeAgent from
+        // `PI_FORMAT_PARSER_BASE_VERSION`), the roo/kilo task log (RooCode,
+        // KiloCode, Cline from `ROO_KILO_TASK_LOG_PARSER_BASE_VERSION`), the
+        // OpenCode SQLite schema (OpenCode, MiMoCode, Kilo from
+        // `OPENCODE_SCHEMA_PARSER_BASE_VERSION`), the Tencent buddy format
+        // (CodeBuddy, WorkBuddy from `TENCENT_BUDDY_PARSER_BASE_VERSION`),
+        // and the Codebuff chat format (Codebuff, Freebuff from
+        // `CODEBUFF_CHAT_PARSER_BASE_VERSION`). No `_ => 1` arm on purpose:
         // adding a client to `define_clients!` must force an explicit,
         // per-client versioning decision here instead of silently landing on
         // 1. `SHARED_PARSER_FAMILIES` in the tests pins the sharing
-        // relationships -- when a new client delegates to an existing parser,
-        // declare it there (and derive from a shared base like the pi-format
-        // family) instead of listing a bare integer.
+        // relationships, and
+        // `test_shared_parser_family_roster_matches_session_delegation`
+        // derives them from the sessions source tree -- when a new client
+        // delegates to an existing parser, add it to the roster and derive
+        // its version from the shared base instead of listing a bare integer.
         ClientId::Gemini => 1,
         ClientId::Amp => 1,
         ClientId::Qwen => 1,
-        ClientId::RooCode => 1,
-        ClientId::KiloCode => 1,
         ClientId::Mux => 1,
-        ClientId::Kilo => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
-        ClientId::Codebuff => 1,
         ClientId::Antigravity => 1,
         ClientId::Zed => 1,
         ClientId::Trae => 1,
@@ -1375,10 +1423,7 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Gjc => 1,
         ClientId::CommandCode => 1,
         ClientId::AntigravityCli => 1,
-        ClientId::CodeBuddy => 1,
-        ClientId::WorkBuddy => 1,
         ClientId::Augment => 1,
-        ClientId::Freebuff => 1,
         ClientId::CherryStudio => 1,
         ClientId::Mcode => 1,
         ClientId::LmStudio => 1,
@@ -4085,22 +4130,38 @@ mod tests {
 
     /// Clients that delegate to the *same parser code* rather than owning an
     /// independent parser. A parse change in the shared base that bumps its
-    /// version must invalidate every member's cache at once, so these
-    /// versions have to move together. The roster mirrors the delegation in
-    /// `crates/tokscale-core/src/sessions/`:
+    /// version must invalidate every member's cache at once, so every family
+    /// derives its members' versions from one base constant (base plus a
+    /// per-client offset that preserves independent history). The roster
+    /// mirrors the delegation in `crates/tokscale-core/src/sessions/`, and
+    /// `test_shared_parser_family_roster_matches_session_delegation` derives
+    /// it from those sources so an omitted family fails the build:
     ///
     /// - Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser and
     ///   Prime Agent rides on it through
     ///   `parse_pi_format_rlm_file_with_observer`; all five derive from
-    ///   `PI_FORMAT_PARSER_BASE_VERSION` (#1195, #1288) and are pinned
-    ///   numerically by `test_pi_format_shared_parser_version_sync`.
+    ///   `PI_FORMAT_PARSER_BASE_VERSION` (#1195, #1288) and are pinned by
+    ///   `test_pi_format_shared_parser_version_sync`.
     /// - Roo Code, Kilo Code, and Cline forked one task-log format and all
-    ///   parse it through `roocode::parse_roo_kilo_file`. They are only
-    ///   rostered here, not base-derived: Cline carries independent
-    ///   invalidation history (v1->v3) that predates the roster, and
-    ///   unpinning its cache version to renumber it would discard live
-    ///   caches. A roocode helper change must therefore bump every rostered
-    ///   member explicitly.
+    ///   parse it through `roocode::parse_roo_kilo_file`; they derive from
+    ///   `ROO_KILO_TASK_LOG_PARSER_BASE_VERSION`, with Cline's +2 offset
+    ///   preserving its independent v1->v3 history.
+    /// - OpenCode, MiMo Code, and Kilo read their SQLite stores through the
+    ///   `opencode_schema` driver and derive from
+    ///   `OPENCODE_SCHEMA_PARSER_BASE_VERSION`, with +2 offsets preserving
+    ///   OpenCode's and MiMo Code's v1->v3 histories.
+    /// - CodeBuddy and WorkBuddy parse detailed transcripts and extension
+    ///   logs through `tencent_buddy` and derive from
+    ///   `TENCENT_BUDDY_PARSER_BASE_VERSION`.
+    /// - Codebuff and Freebuff share the Codebuff chat-message format
+    ///   (Freebuff extracts usage through `codebuff.rs` helpers) and derive
+    ///   from `CODEBUFF_CHAT_PARSER_BASE_VERSION`.
+    ///
+    /// The roster tracks shared *format drivers* -- the code that owns what a
+    /// source format parses to. Cross-cutting leaf helpers (`sessions/utils.rs`,
+    /// `pi::has_replacement_character`) are used by many otherwise-unrelated
+    /// parsers; a behavioral change to one of those must bump each affected
+    /// client individually and is deliberately not modeled as a family.
     ///
     /// Cache entries are namespaced by `client.as_str()` before
     /// `parser_version` is ever compared (`CacheIdentity` /
@@ -4124,6 +4185,9 @@ mod tests {
             ClientId::PrimeAgent,
         ],
         &[ClientId::RooCode, ClientId::KiloCode, ClientId::Cline],
+        &[ClientId::OpenCode, ClientId::MiMoCode, ClientId::Kilo],
+        &[ClientId::Codebuff, ClientId::Freebuff],
+        &[ClientId::CodeBuddy, ClientId::WorkBuddy],
     ];
 
     #[test]
@@ -4181,42 +4245,132 @@ mod tests {
 
     #[test]
     fn test_roo_kilo_format_shared_parser_version_sync() {
+        use crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION;
+
         let family = SHARED_PARSER_FAMILIES
             .iter()
             .find(|family| family.contains(&ClientId::RooCode))
             .expect("the roo/kilo task-log family must stay declared");
+        assert_eq!(
+            family.len(),
+            3,
+            "the roo/kilo task-log family is Roo Code, Kilo Code, and Cline"
+        );
 
-        // Roo Code and Kilo Code parse task logs *only* through the shared
-        // `roocode::parse_roo_kilo_file` helper, and Cline parses the same
-        // task-log format through it (Cline's independent v1->v3 history is
-        // its own `parse_cline_cli_file` path, not the shared helper). When
-        // the shared helper changes what a byte-identical task log parses
-        // to, bump every rostered member together; a bump on exactly one
-        // member means the others keep serving rows the parser no longer
-        // produces.
-        for member in *family {
-            let version = parser_version(*member);
-            assert!(
-                version >= 1,
-                "{member:?} must carry an explicit parser_version"
-            );
-        }
+        // Every member derives from the shared base, so a
+        // `parse_roo_kilo_file` change that bumps the base moves the whole
+        // family at once; bumping one member's offset alone (or reverting it
+        // to a bare literal) fails here.
         assert_eq!(
             parser_version(ClientId::RooCode),
-            1,
-            "Roo Code's task-log parser has no independent invalidation history"
+            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
+            "Roo Code sits at the shared task-log base; it has no independent history"
         );
         assert_eq!(
             parser_version(ClientId::KiloCode),
-            1,
-            "Kilo Code shares the task-log parser and has no independent invalidation history"
+            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION,
+            "Kilo Code sits at the shared task-log base; it has no independent history"
         );
         assert_eq!(
             parser_version(ClientId::Cline),
+            ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
+            "Cline carries +2 for its independent v1->v3 history; a Cline-only parse change \
+             grows this offset, a shared-helper change bumps the base instead"
+        );
+    }
+
+    #[test]
+    fn test_opencode_schema_shared_parser_version_sync() {
+        use crate::sessions::opencode_schema::OPENCODE_SCHEMA_PARSER_BASE_VERSION;
+
+        let family = SHARED_PARSER_FAMILIES
+            .iter()
+            .find(|family| family.contains(&ClientId::OpenCode))
+            .expect("the opencode-schema family must stay declared");
+        assert_eq!(
+            family.len(),
             3,
-            "Cline carries independent invalidation history (v1->v3); do not renumber a live \
-             cache version -- if the shared helper changes, bump Cline to 4 and Roo/Kilo to 2 \
-             together"
+            "the opencode-schema family is OpenCode, MiMo Code, and Kilo"
+        );
+
+        // Every member reads its SQLite store through
+        // `parse_opencode_schema_sqlite`, so a driver change that bumps the
+        // base moves the whole family at once. Client-specific changes
+        // (OpenCode's legacy JSON path, `OpenCodeSchemaConfig` policy) grow
+        // that client's offset instead.
+        assert_eq!(
+            parser_version(ClientId::OpenCode),
+            OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2,
+            "OpenCode carries +2 for its independent v1->v3 history"
+        );
+        assert_eq!(
+            parser_version(ClientId::MiMoCode),
+            OPENCODE_SCHEMA_PARSER_BASE_VERSION + 2,
+            "MiMo Code carries +2 for its independent v1->v3 history"
+        );
+        assert_eq!(
+            parser_version(ClientId::Kilo),
+            OPENCODE_SCHEMA_PARSER_BASE_VERSION,
+            "Kilo sits at the shared driver base; it has no independent history"
+        );
+    }
+
+    #[test]
+    fn test_tencent_buddy_shared_parser_version_sync() {
+        use crate::sessions::tencent_buddy::TENCENT_BUDDY_PARSER_BASE_VERSION;
+
+        let family = SHARED_PARSER_FAMILIES
+            .iter()
+            .find(|family| family.contains(&ClientId::CodeBuddy))
+            .expect("the tencent-buddy family must stay declared");
+        assert_eq!(
+            family.len(),
+            2,
+            "the tencent-buddy family is CodeBuddy and WorkBuddy"
+        );
+
+        // Both clients parse detailed JSONL transcripts and extension logs
+        // through `tencent_buddy`, so a parse change there bumps the base
+        // and moves both caches at once; a change scoped to WorkBuddy's own
+        // aggregate-DB fallback grows a WorkBuddy offset instead.
+        assert_eq!(
+            parser_version(ClientId::CodeBuddy),
+            TENCENT_BUDDY_PARSER_BASE_VERSION,
+            "CodeBuddy sits at the shared buddy-format base; it has no independent history"
+        );
+        assert_eq!(
+            parser_version(ClientId::WorkBuddy),
+            TENCENT_BUDDY_PARSER_BASE_VERSION,
+            "WorkBuddy sits at the shared buddy-format base; it has no independent history"
+        );
+    }
+
+    #[test]
+    fn test_codebuff_chat_shared_parser_version_sync() {
+        use crate::sessions::codebuff::CODEBUFF_CHAT_PARSER_BASE_VERSION;
+
+        let family = SHARED_PARSER_FAMILIES
+            .iter()
+            .find(|family| family.contains(&ClientId::Codebuff))
+            .expect("the codebuff chat-format family must stay declared");
+        assert_eq!(
+            family.len(),
+            2,
+            "the codebuff chat-format family is Codebuff and Freebuff"
+        );
+
+        // Freebuff parses assistant usage out of Codebuff's chat format
+        // through `codebuff.rs` helpers, so a change to how those read a
+        // message bumps the base and moves both caches at once.
+        assert_eq!(
+            parser_version(ClientId::Codebuff),
+            CODEBUFF_CHAT_PARSER_BASE_VERSION,
+            "Codebuff sits at the shared chat-format base; it has no independent history"
+        );
+        assert_eq!(
+            parser_version(ClientId::Freebuff),
+            CODEBUFF_CHAT_PARSER_BASE_VERSION,
+            "Freebuff sits at the shared chat-format base; it has no independent history"
         );
     }
 

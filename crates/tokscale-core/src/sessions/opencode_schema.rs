@@ -24,6 +24,19 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
+
+/// Shared base parser version for the OpenCode SQLite session-schema driver.
+///
+/// OpenCode, MiMo Code, and Kilo all read their SQLite stores through
+/// [`parse_opencode_schema_sqlite`], so a change to this driver (or to the
+/// shared `Deserialize` types it ingests) alters what byte-identical
+/// databases parse to for every adopter at once. Bump this base when that
+/// happens; `message_cache::parser_version()` derives each member's version
+/// from it (base plus a per-client offset that preserves independent history)
+/// so no member can be left serving stale cache entries. Per-client policy
+/// differences live in [`OpenCodeSchemaConfig`]; a change scoped to one
+/// client's config belongs in that client's offset instead.
+pub(crate) const OPENCODE_SCHEMA_PARSER_BASE_VERSION: u32 = 1;
 use crate::{provider_identity, TokenBreakdown};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
