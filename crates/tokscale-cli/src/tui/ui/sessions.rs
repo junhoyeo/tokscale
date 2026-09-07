@@ -1978,18 +1978,54 @@ mod tests {
 
     /// `unicode-width` resolves East-Asian-Ambiguous characters to one cell by
     /// default and to two under `width_cjk`, which is what a terminal in a CJK
-    /// locale does. Inside the table border, a row whose only non-ASCII
-    /// character is the truncation marker measures the same in both ambients
-    /// exactly when that marker is not ambiguous; U+2026 fails this, U+22EF
-    /// passes it. The border itself (U+2502) is ambiguous and is trimmed off.
-    fn assert_row_measures_the_same_in_a_cjk_locale(app: &mut App, width: u16) {
-        let row = first_row_line(app, width);
-        let interior = row.trim_matches('\u{2502}');
-        assert_eq!(
-            UnicodeWidthStr::width_cjk(interior),
-            display_width(interior),
-            "the row must measure the same in a CJK locale\n{row:?}"
-        );
+    /// locale does. Ratatui's crossterm backend streams adjacent cells without
+    /// repositioning between them, so any row whose glyphs measure wider under
+    /// `width_cjk` than under `width` overflows the terminal edge when drawn.
+    /// Every row of the rendered frame is asserted whole — borders, corners,
+    /// header, scrollbar column and all, nothing trimmed — so the top and
+    /// bottom edges, the sort indicator, an active scrollbar, and the cell
+    /// contents (truncation marker included: U+2026 fails this, U+22EF passes)
+    /// are all held to the same invariant: the frame measures identically in
+    /// both ambients.
+    fn assert_frame_measures_the_same_in_a_cjk_locale(app: &mut App, width: u16, height: u16) {
+        let frame = render_body(app, width, height);
+        for row in frame.lines() {
+            assert_eq!(
+                UnicodeWidthStr::width_cjk(row),
+                display_width(row),
+                "every row must measure the same in a CJK locale\n{row:?}\n{frame}"
+            );
+        }
+    }
+
+    /// The frame stays width-stable while scrolled: with more sessions than
+    /// fit, the scrollbar overlays the outermost right column — endpoints on
+    /// the first and last inner rows, thumb and track between — which is
+    /// exactly where a glyph that streams two cells wide in a CJK locale
+    /// wraps into the next row, or scrolls the screen when it lands near the
+    /// bottom. A CJK session title exercises the content path too: W-class
+    /// glyphs are two cells in both ambients, so they keep the equality.
+    #[test]
+    fn scrolled_frame_measures_the_same_in_a_cjk_locale() {
+        let width = MODEL_WIDTH_22_TERMINAL;
+        let sessions: Vec<SessionUsage> = (0..30)
+            .map(|i| {
+                let mut s = session(
+                    &format!("session-{i}"),
+                    "opencode",
+                    i as f64,
+                    1_736_000_000_000 + i as i64 * 60_000,
+                );
+                if i == 29 {
+                    // Sorted by cost descending, so the CJK title is on the
+                    // first visible row.
+                    s.title = Some("한국어 세션 제목".to_string());
+                }
+                s
+            })
+            .collect();
+        let mut app = app_with(width, sessions);
+        assert_frame_measures_the_same_in_a_cjk_locale(&mut app, width, 8);
     }
 
     /// A session that switched models must never render as a single-model
@@ -2018,7 +2054,7 @@ mod tests {
             body.contains("gemini-2-5-flash-lite⋯"),
             "expected a truncation marker after the model that did fit\n{body}"
         );
-        assert_row_measures_the_same_in_a_cjk_locale(&mut app, width);
+        assert_frame_measures_the_same_in_a_cjk_locale(&mut app, width, 12);
         assert!(
             !body.contains("claude"),
             "second model was not supposed to fit at width {width}\n{body}"
@@ -2047,7 +2083,7 @@ mod tests {
             !body.contains("⋯⋯"),
             "truncated name must not pick up a second ellipsis\n{body}"
         );
-        assert_row_measures_the_same_in_a_cjk_locale(&mut app, width);
+        assert_frame_measures_the_same_in_a_cjk_locale(&mut app, width, 12);
     }
 
     #[test]
