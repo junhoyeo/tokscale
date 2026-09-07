@@ -6,6 +6,8 @@ import {
   MEDIAN_RATIO_THRESHOLD,
   SLOP_MODEL_REGEX,
   UNNAMED_MODEL_REGEX,
+  UNKNOWABLE_EVENT,
+  aggregateUnknowableStats,
   rankCandidates,
   SITE_SHARE_THRESHOLD,
   type CandidateRow,
@@ -32,6 +34,9 @@ interface CandidateDbRow extends Record<string, unknown> {
   near_duplicate_count: number | string | null;
   slop_models: string[] | null;
   slop_tokens: number | string | null;
+  has_over_nested_entry: boolean | null;
+  every_day_attributed: boolean | null;
+  attributed_tokens: number | string | null;
   site_tokens: number | string | null;
   median_tokens: number | string | null;
 }
@@ -311,7 +316,20 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     SELECT
       user_id, username, avatar_url, leaderboard_hidden, total_tokens,
       total_cost, submit_count, has_backfill, daily_tokens,
-      near_duplicate_count, slop_models, slop_tokens, site_tokens, median_tokens
+      near_duplicate_count, slop_models, slop_tokens,
+      -- Observability for the fail-closed completeness gate above, NOT inputs
+      -- to the decision: they re-export the gate's own clause values verbatim
+      -- so the application can report which clause failed without
+      -- re-deriving it. The attribution CTEs are scoped to submissions with a
+      -- slop model match, so these come back NULL anywhere else and must not
+      -- be read as a verdict for non-slop accounts.
+      (SELECT su.has_over_nested_entry FROM slop_usage su
+        WHERE su.submission_id = eligible.submission_id) AS has_over_nested_entry,
+      (SELECT dl.every_day_attributed FROM daily dl
+        WHERE dl.submission_id = eligible.submission_id) AS every_day_attributed,
+      (SELECT su.attributed_tokens FROM slop_usage su
+        WHERE su.submission_id = eligible.submission_id) AS attributed_tokens,
+      site_tokens, median_tokens
     FROM eligible
   `);
 
@@ -334,7 +352,30 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     nearDuplicateCount: toNumber(row.near_duplicate_count),
     slopModels: Array.isArray(row.slop_models) ? row.slop_models : [],
     slopTokens: row.slop_tokens == null ? null : toNumber(row.slop_tokens),
+    hasOverNestedEntry: row.has_over_nested_entry === true,
+    everyDayAttributed: row.every_day_attributed === true,
+    attributedTokens: toNumber(row.attributed_tokens),
   }));
+
+  const stats = aggregateUnknowableStats(rows);
+  // One structured line per invocation, only when the fail-closed path fired.
+  // This is the telemetry the breadth question is answered from: aggregate by
+  // event over any log window to get the fraction of slop-matched submissions
+  // that were unknowable, broken down by which gate clause failed and how
+  // many of their tokens no named model accounts for.
+  if (stats.unknowable > 0) {
+    console.warn(
+      `[moderation] ${JSON.stringify({
+        event: UNKNOWABLE_EVENT,
+        knowable: stats.knowable,
+        unknowable: stats.unknowable,
+        byReason: stats.byReason,
+        unattributedTokens: stats.unattributedTokens,
+        unknowableTotalTokens: stats.unknowableTotalTokens,
+        unattributedHistogram: stats.unattributedHistogram,
+      })}`
+    );
+  }
 
   return rankCandidates(rows, {
     siteTokens: toNumber(dbRows[0].site_tokens),
