@@ -4243,6 +4243,260 @@ mod tests {
         }
     }
 
+    /// Derives the shared-parser partition from the `src/sessions/` source
+    /// tree and asserts `SHARED_PARSER_FAMILIES` matches it exactly. The
+    /// self-consistency test above cannot notice an *omitted* family; this
+    /// one fails when a client module is wired to an existing format driver,
+    /// or a new driver is adopted by two client modules, without the roster
+    /// (and a shared base version) following.
+    #[test]
+    fn test_shared_parser_family_roster_matches_session_delegation() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Every module under `src/sessions/` and the clients whose sources
+        // parse through it. `None` marks shared-helper hubs (`mod.rs`
+        // dispatch, `utils.rs` leaf helpers): they are used by many
+        // otherwise-unrelated parsers, so references to them do not
+        // constitute a shared format driver. Format-driver modules with no
+        // client of their own map to an empty list; `synthetic` is cached
+        // under its own fixed non-client namespace
+        // (`CacheIdentity::synthetic`).
+        const HUB: Option<&[ClientId]> = None;
+        let module_clients: &[(&str, Option<&[ClientId]>)] = &[
+            ("amp", Some(&[ClientId::Amp])),
+            ("antigravity", Some(&[ClientId::Antigravity])),
+            ("antigravity_cli", Some(&[ClientId::AntigravityCli])),
+            ("augment", Some(&[ClientId::Augment])),
+            ("cherrystudio", Some(&[ClientId::CherryStudio])),
+            ("claudecode", Some(&[ClientId::Claude])),
+            ("cline", Some(&[ClientId::Cline])),
+            ("codebuddy", Some(&[ClientId::CodeBuddy])),
+            ("codebuff", Some(&[ClientId::Codebuff])),
+            ("codex", Some(&[ClientId::Codex])),
+            ("commandcode", Some(&[ClientId::CommandCode])),
+            ("copilot", Some(&[ClientId::Copilot])),
+            ("copilot_desktop", Some(&[ClientId::Copilot])),
+            ("copilot_vscode", Some(&[ClientId::Copilot])),
+            ("crush", Some(&[ClientId::Crush])),
+            ("cursor", Some(&[ClientId::Cursor])),
+            ("devin", Some(&[ClientId::DevinCli, ClientId::DevinDesktop])),
+            ("droid", Some(&[ClientId::Droid])),
+            ("dsh", Some(&[ClientId::Dsh])),
+            ("freebuff", Some(&[ClientId::Freebuff])),
+            ("fx", Some(&[ClientId::Fx])),
+            ("gemini", Some(&[ClientId::Gemini])),
+            ("gjc", Some(&[ClientId::Gjc])),
+            ("goose", Some(&[ClientId::Goose])),
+            ("grok", Some(&[ClientId::Grok])),
+            ("hermes", Some(&[ClientId::Hermes])),
+            ("hindsight", Some(&[ClientId::Hindsight])),
+            ("jcode", Some(&[ClientId::Jcode])),
+            ("junie", Some(&[ClientId::Junie])),
+            ("kilo", Some(&[ClientId::Kilo])),
+            ("kilocode", Some(&[ClientId::KiloCode])),
+            ("kimchi", Some(&[ClientId::Kimchi])),
+            ("kimi", Some(&[ClientId::Kimi])),
+            ("kiro", Some(&[ClientId::Kiro])),
+            ("lmstudio", Some(&[ClientId::LmStudio])),
+            ("mcode", Some(&[ClientId::Mcode])),
+            ("micode", Some(&[ClientId::MiMoCode])),
+            ("mod", HUB),
+            ("mux", Some(&[ClientId::Mux])),
+            ("omp", Some(&[ClientId::Omp])),
+            ("openclaw", Some(&[ClientId::OpenClaw])),
+            ("opencode", Some(&[ClientId::OpenCode])),
+            ("opencode_schema", Some(&[])),
+            ("opencodereview", Some(&[ClientId::OpenCodeReview])),
+            ("pi", Some(&[ClientId::Pi])),
+            ("prime_agent", Some(&[ClientId::PrimeAgent])),
+            ("qwen", Some(&[ClientId::Qwen])),
+            ("reasonix", Some(&[ClientId::Reasonix])),
+            ("roocode", Some(&[ClientId::RooCode])),
+            ("senpi", Some(&[ClientId::Senpi])),
+            ("synthetic", Some(&[])),
+            ("tencent_buddy", Some(&[])),
+            ("trae", Some(&[ClientId::Trae])),
+            ("unsloth", Some(&[ClientId::Unsloth])),
+            ("utils", HUB),
+            ("warp", Some(&[ClientId::Warp])),
+            ("workbuddy", Some(&[ClientId::WorkBuddy])),
+            ("zcode", Some(&[ClientId::Zcode])),
+            ("zed", Some(&[ClientId::Zed])),
+        ];
+
+        // Modules that host more than one parser where those parsers do NOT
+        // share code, so their clients must not be treated as a family just
+        // for cohabiting a file. `devin.rs` keeps the CLI SQLite parser and
+        // the Desktop NDJSON parser side by side; their versions already
+        // diverge independently.
+        const INDEPENDENT_MODULES: &[&str] = &["devin"];
+
+        let sessions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sessions");
+        let on_disk: BTreeSet<String> = std::fs::read_dir(&sessions_dir)
+            .expect("src/sessions must be readable")
+            .filter_map(|entry| {
+                entry
+                    .expect("directory entry must be readable")
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .and_then(|name| Some(name.strip_suffix(".rs")?.to_string()))
+            })
+            .collect();
+        let mapped: BTreeSet<String> = module_clients
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        assert_eq!(
+            mapped.len(),
+            module_clients.len(),
+            "module classification lists a module twice"
+        );
+        assert_eq!(
+            on_disk, mapped,
+            "every module under src/sessions/ must be classified in this test; a new module \
+             must declare which clients parse through it (or be marked a helper hub) so a \
+             shared parser cannot bypass SHARED_PARSER_FAMILIES"
+        );
+
+        fn is_parse_entry_point(ident: &str) -> bool {
+            ident.starts_with("parse_")
+                || ident.starts_with("scan_")
+                || ident.starts_with("rescan_")
+                || ident.starts_with("extract_")
+        }
+
+        fn ident_at(body: &str, start: usize) -> (&str, usize) {
+            let bytes = body.as_bytes();
+            let mut end = start;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            (&body[start..end], end)
+        }
+
+        /// Format-driver modules whose parse entry points `source` references
+        /// through `super::<module>::` or `crate::sessions::<module>::`,
+        /// either as a plain path or inside a `{...}` import group
+        /// (one level, matching the crate's flat use-trees). Code from
+        /// `mod tests` down is skipped: a test referencing another client's
+        /// parser is comparison, not production delegation.
+        fn delegated_modules<'m>(
+            source: &str,
+            graph_modules: &BTreeSet<&'m str>,
+        ) -> BTreeSet<&'m str> {
+            let body = match source.find("#[cfg(test)]\nmod tests") {
+                Some(position) => &source[..position],
+                None => source,
+            };
+            let mut found = BTreeSet::new();
+            for prefix in ["super::", "crate::sessions::"] {
+                let mut search = 0usize;
+                while let Some(offset) = body[search..].find(prefix) {
+                    let module_start = search + offset + prefix.len();
+                    search = module_start;
+                    let (module, after_module) = ident_at(body, module_start);
+                    let Some(module) = graph_modules.get(module).copied() else {
+                        continue;
+                    };
+                    if !body[after_module..].starts_with("::") {
+                        continue;
+                    }
+                    let item_start = after_module + 2;
+                    if body[item_start..].starts_with('{') {
+                        let close = body[item_start..]
+                            .find('}')
+                            .map(|off| item_start + off)
+                            .unwrap_or(body.len());
+                        for item in body[item_start + 1..close].split(',') {
+                            let ident = item.split_whitespace().next().unwrap_or("");
+                            if is_parse_entry_point(ident) {
+                                found.insert(module);
+                            }
+                        }
+                    } else {
+                        let (ident, _) = ident_at(body, item_start);
+                        if is_parse_entry_point(ident) {
+                            found.insert(module);
+                        }
+                    }
+                }
+            }
+            found
+        }
+
+        let graph_modules: BTreeSet<&str> = module_clients
+            .iter()
+            .filter(|(_, clients)| clients.is_some())
+            .map(|(name, _)| *name)
+            .collect();
+        let mut group: BTreeMap<&str, usize> = graph_modules
+            .iter()
+            .enumerate()
+            .map(|(index, module)| (*module, index))
+            .collect();
+        for module in &graph_modules {
+            let source = std::fs::read_to_string(sessions_dir.join(format!("{module}.rs")))
+                .expect("session module must be readable");
+            for target in delegated_modules(&source, &graph_modules) {
+                if target == *module {
+                    continue;
+                }
+                for end in [*module, target] {
+                    assert!(
+                        !INDEPENDENT_MODULES.contains(&end),
+                        "{module}.rs delegates parsing to {target}.rs, but {end}.rs is \
+                         classified as hosting independent parsers; decide which of its \
+                         clients actually share the code and reclassify before rostering"
+                    );
+                }
+                let (keep, fold) = (group[*module], group[target]);
+                if keep != fold {
+                    for value in group.values_mut() {
+                        if *value == fold {
+                            *value = keep;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut group_clients: BTreeMap<usize, BTreeSet<&str>> = BTreeMap::new();
+        let mut group_members: BTreeMap<usize, BTreeSet<&str>> = BTreeMap::new();
+        for (module, clients) in module_clients {
+            let Some(clients) = clients else { continue };
+            let group_id = group[*module];
+            group_members.entry(group_id).or_default().insert(*module);
+            group_clients
+                .entry(group_id)
+                .or_default()
+                .extend(clients.iter().map(|client| client.as_str()));
+        }
+        let derived: BTreeSet<BTreeSet<&str>> = group_clients
+            .iter()
+            .filter(|(group_id, clients)| {
+                let members = &group_members[group_id];
+                clients.len() >= 2
+                    && !(members.len() == 1
+                        && members
+                            .iter()
+                            .all(|module| INDEPENDENT_MODULES.contains(module)))
+            })
+            .map(|(_, clients)| clients.clone())
+            .collect();
+
+        let rostered: BTreeSet<BTreeSet<&str>> = SHARED_PARSER_FAMILIES
+            .iter()
+            .map(|family| family.iter().map(|client| client.as_str()).collect())
+            .collect();
+        assert_eq!(
+            derived, rostered,
+            "SHARED_PARSER_FAMILIES must partition exactly the clients that share a parser \
+             in src/sessions/; update the roster (and derive the members from one shared \
+             base version) whenever delegation changes"
+        );
+    }
+
     #[test]
     fn test_roo_kilo_format_shared_parser_version_sync() {
         use crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION;
