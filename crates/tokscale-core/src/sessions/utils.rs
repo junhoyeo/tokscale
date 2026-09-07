@@ -644,6 +644,12 @@ pub(crate) struct CamelUsage {
     /// a disagreeing total must not silently override them.
     #[allow(dead_code)]
     pub(crate) total_tokens: Option<i64>,
+    /// Reasoning tokens, when the writer records them. OpenClaw adds this to
+    /// the block for turns it ran through Codex app-server, where it is the
+    /// Codex `reasoning_output_tokens` figure — a subset of `output`, never
+    /// added on top of it. Only [`CamelUsage::to_breakdown_with_reasoning`]
+    /// reads it; `gjc` keeps ignoring it through [`CamelUsage::to_breakdown`].
+    pub(crate) reasoning_tokens: Option<i64>,
     pub(crate) cost: Option<CamelCost>,
 }
 
@@ -658,6 +664,27 @@ impl CamelUsage {
             cache_write: self.cache_write.unwrap_or(0).max(0),
             reasoning: 0,
         }
+    }
+
+    /// [`CamelUsage::to_breakdown`] plus the `reasoningTokens` split.
+    ///
+    /// `reasoningTokens` is a subset of `output` (it is what OpenClaw copies
+    /// from Codex's `reasoning_output_tokens`, and OpenClaw's own `totalTokens`
+    /// never adds it on top), while `TokenBreakdown` buckets are additive. So
+    /// it is moved out of `output` into `reasoning` rather than carried in
+    /// both, clamped so a row claiming more reasoning than output cannot
+    /// drive the output bucket negative — the same correction the Codex
+    /// parser applies to the same figure.
+    pub(crate) fn to_breakdown_with_reasoning(&self) -> TokenBreakdown {
+        let mut breakdown = self.to_breakdown();
+        let reasoning = self
+            .reasoning_tokens
+            .unwrap_or(0)
+            .max(0)
+            .min(breakdown.output);
+        breakdown.output -= reasoning;
+        breakdown.reasoning = reasoning;
+        breakdown
     }
 }
 

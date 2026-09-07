@@ -158,9 +158,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
                     Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+                        app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     }),
@@ -170,9 +168,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 let mut cells =
                     vec![
                         Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
+                            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         }),
@@ -195,9 +191,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 let mut cells =
                     vec![
                         Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
+                            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().add_modifier(Modifier::BOLD)
                         }),
@@ -222,7 +216,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.input,
                         day.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
@@ -471,7 +465,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.tokens.input,
                         row.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(row.tokens.total(), &app.theme),
                     Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
                 ]

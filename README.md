@@ -57,7 +57,7 @@
 |------|----------|---------------|
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+, all channels including `opencode-stable.db`) or/and `~/.local/share/opencode/storage/message/` (legacy/unmigrated) |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` and `~/.claude/transcripts/` |
-| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ legacy: `.clawdbot`, `.moltbot`, `.moldbot`) |
+| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + legacy: `.clawdbot`, `.moltbot`, `.moldbot`) |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` and `~/.prime/agent/session-artifacts/` (RLM child sessions) |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | via Codex — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
@@ -176,7 +176,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ## Features
 
 - **Interactive TUI Mode** - Beautiful terminal UI powered by Ratatui (default mode)
-  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents (plus an optional Minutely view, opt-in via `minutelyTabEnabled`)
+  - 10 interactive views: Overview, Usage, Models, Daily, Hourly, Monthly, Sessions, Projects, Stats, Agents (plus an optional Minutely view, opt-in via `minutelyTabEnabled`)
   - Keyboard & mouse navigation
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
@@ -285,7 +285,7 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **8 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Stats (contribution graph), Agents. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **10 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Monthly, Sessions, Projects (per-workspace rollups), Stats (contribution graph), Agents. In Projects, Codex Desktop's ordinary chat directories (`Documents/Codex/YYYY-MM-DD/<chat>`) are combined into **Codex Chat**, preserving their session count, tokens, and cost; directories containing a Git repository remain separate. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists
@@ -1810,9 +1810,13 @@ Augment Code / Auggie CLI writes one JSON snapshot per chat session. Tokscale re
 
 ### OpenClaw
 
-Location: `~/.openclaw/agents/*/sessions/sessions.json` (also scans legacy paths: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
+Location: `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite` (current OpenClaw) plus `~/.openclaw/agents/<agentId>/sessions/*.jsonl*` (legacy transcripts, published archives, and doctor backups such as `*.jsonl.pre-doctor-*.bak`; also scans legacy paths: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
 
-Index file pointing to JSONL session files:
+Current OpenClaw (2026.x) stores live transcripts in a per-agent SQLite database. Tokscale opens every agent database read-only (safe in WAL mode while the gateway is running), reads the `transcript_events` table, counts assistant events that carry a `usage` block (except OpenClaw's own transcript-bookkeeping rows such as `delivery-mirror`, which are not model output), and falls back to the `session_windows` model/provider when an event does not name its own. For turns OpenClaw ran through the Codex app-server harness, the transcript only mirrors the final assistant message with the last model response's usage, so Tokscale also reads the Codex rollouts OpenClaw keeps under `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/` (its default per-agent `CODEX_HOME`), attributes every response in them to `openclaw` under the OpenClaw session they were mirrored into, and drops the transcript's mirror row for each turn the rollout holds (a mirror row for a turn the rollout lacks, because the rollout was cut short or the turn ran after it was read, is kept). Rollouts OpenClaw creates in a shared user Codex home (`appServer.homeScope: "user"`, or a supervision branch) carry `originator: "openclaw"` and are attributed the same way instead of to the Codex client. A thread the Codex client already counts (one OpenClaw resumed from the user's own Codex home through supervision) keeps its usage under `codex` and the mirror rows of its turns are dropped, so nothing is counted twice; a mirror row whose rollout cannot be found anywhere is kept as is. Copies of a transcript that `/fork` writes under a new session id, and legacy JSONL that `openclaw doctor --fix` imported into SQLite, count once. Legacy JSONL the doctor found unreferenced is never imported; it moves to `session-sqlite-import-archive/archive-tier.<sessionId>.jsonl.imported-<ts>` and is read from there under its original session id.
+
+Legacy installs wrote one JSONL file per session (indexed by `sessions.json`), and `openclaw doctor --fix` imports them into SQLite while leaving the originals in place. Every assistant event is keyed by its own event id, timestamp and token counts across both stores, so a migrated transcript that still exists as JSONL is counted once.
+
+Legacy index file pointing to JSONL session files:
 ```json
 {
   "agent:main:main": {

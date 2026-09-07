@@ -1066,6 +1066,29 @@ pub fn parser_generation() -> u64 {
 
 fn parser_version(client: ClientId) -> u32 {
     match client {
+        // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
+        // JSONL and cached as empty. Their bytes do not change when decoding is
+        // fixed, so only the parser version can retire those entries.
+        // v2->v3 (#1278): OpenClaw messages now carry a stable dedup key built
+        // from the event (`openclaw:<event id>:<timestamp>:<input>:<output>`,
+        // or `openclaw:codex-mirror:<thread>:<turn>:…` for a row that mirrors a
+        // Codex app-server turn) that lets a transcript migrated into the
+        // per-agent SQLite store collapse against its retained legacy JSONL
+        // copy, and lets the lane match a mirror row to the rollout's record of
+        // its turn. Entries below v3 have no key, so a warm JSONL entry would
+        // count beside the SQLite rows for the same events. `reasoningTokens`
+        // is also split out of `output` now.
+        // v3->v4 (#1293): compaction checkpoint snapshots are no longer scan
+        // sources. Source-cache entries cannot be reached once discovery omits
+        // them, but parser_generation must change so the source-agnostic TUI
+        // aggregate cache cannot replay totals that included those snapshots.
+        // v4->v5 (#1299): legacy JSONL `openclaw doctor` archived unreferenced
+        // (`session-sqlite-import-archive/archive-tier.<session id>.jsonl…`)
+        // now reports the session id behind the archive key instead of the
+        // archived spelling. The doctor never writes to those files again, so
+        // their fingerprints stay valid and a warm v4 entry would keep serving
+        // `archive-tier.<id>` sessions without the parser ever running.
+        ClientId::OpenClaw => 5,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -1074,7 +1097,16 @@ fn parser_version(client: ClientId) -> u32 {
         // carried in both. Without this bump an existing cache keeps replaying
         // pre-split rows, and those sessions stay double-priced while looking
         // fixed.
-        ClientId::Codex => 7,
+        // v7->v8: rollouts whose `session_meta.originator` is OpenClaw now
+        // leave the parser tagged `client = "openclaw"` and keyed by the Codex
+        // thread id, so the openclaw lane can own them. A v7 entry for such a
+        // file holds them tagged `codex` and would keep counting them there,
+        // beside OpenClaw's own rows. The cached parse state also records
+        // which turns the rollout emitted usage for (`turn_coverage`), which
+        // the openclaw lane matches OpenClaw's per-turn mirror rows against;
+        // an entry without it would let a mirror row count beside the
+        // rollout's own record of the same turn.
+        ClientId::Codex => 8,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -1096,9 +1128,10 @@ fn parser_version(client: ClientId) -> u32 {
         // when reconstructing VS Code Copilot Chat requests; v8 aggregates
         // carry those sessions as zero-token.
         ClientId::Copilot => 9,
-        // Pi subagent sessions now derive agent attribution from session_info
-        // names; version-1 caches carry those messages without agent metadata.
-        ClientId::Pi => 2,
+        // Pi delegates to the shared pi-format parser. Pi subagent sessions
+        // now derive agent attribution from session_info names; version-1
+        // caches carry those messages without agent metadata.
+        ClientId::Pi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
         // message timestamp is now back-calculated to the turn start
         // (created_at - total_time_ms) instead of the recorded (end-anchored)
@@ -1157,6 +1190,8 @@ fn parser_version(client: ClientId) -> u32 {
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
         // kimi-code `time`) now fall back to the file mtime instead of
         // anchoring the message in a pre-epoch bucket.
+        // Workspace indexes are applied after the cache read and do not
+        // change the persisted parser output.
         ClientId::Kimi => 4,
         // v1->v2: standalone Cline messages subtract cache buckets from gross
         // input tokens, reject non-finite costs, and preserve zero-cost reports.
@@ -1174,9 +1209,10 @@ fn parser_version(client: ClientId) -> u32 {
         // of landing unpriced, and uses a UTC-stable synthetic id for the id-less
         // fallback.
         ClientId::Cursor => 3,
-        // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
-        // deduplication keys.
-        ClientId::Kimchi => 2,
+        // Kimchi delegates to the shared pi-format parser. v1->v2: Kimchi's
+        // Pi-compatible messages now carry stable namespaced deduplication
+        // keys.
+        ClientId::Kimchi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 1,
         // v1->v2: Prime Agent now strips a leading BOM and recovers records
         // containing undecodable bytes; its accounting scan also continues past
         // those records instead of truncating and misaligning message indices.
@@ -1188,7 +1224,12 @@ fn parser_version(client: ClientId) -> u32 {
         // lineage and usage structural keys before reconciliation bookkeeping.
         // v3->v4 rejects damaged lineage values and matching-critical child
         // timestamps while preserving unrelated damaged usage extensions.
-        ClientId::PrimeAgent => 4,
+        // Prime Agent also delegates to the shared pi-format parser (through
+        // `parse_pi_format_rlm_file_with_observer`), so any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Prime Agent together
+        // with Pi, Kimchi, Omp, and Senpi (#1195); the +3 offset preserves the
+        // v4 history above.
+        ClientId::PrimeAgent => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION + 3,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
@@ -1282,11 +1323,14 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
-        // omp delegates to the shared pi-format parser, so any pi.rs parse
-        // change that bumps ClientId::Pi must be evaluated for Omp (and Senpi)
-        // too — the shared code path changes what byte-identical omp files
-        // parse to even though omp's own module did not change.
-        ClientId::Omp => 1,
+        // Omp delegates to the shared pi-format parser. Any pi.rs parse change
+        // that bumps PI_FORMAT_PARSER_BASE_VERSION moves Omp together with Pi,
+        // Kimchi, and Senpi (#1195).
+        ClientId::Omp => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
+        // Senpi delegates to the shared pi-format parser. Any pi.rs parse
+        // change that bumps PI_FORMAT_PARSER_BASE_VERSION moves Senpi together
+        // with Pi, Kimchi, and Omp (#1195).
+        ClientId::Senpi => crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION,
         // v1 -> v2: the OpenCode parser now prefers `session_v2` metadata over
         // the legacy `session` join for workspace and title. A database that
         // carries both tables is byte-identical before and after, so only the
@@ -3296,9 +3340,10 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
-        // bucket. The bump is what stops an existing cache from replaying
-        // pre-split rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 7);
+        // bucket, and v7->v8 retags rollouts OpenClaw originated as openclaw.
+        // Each bump is what stops an existing cache from replaying the old
+        // rows, so it has to be asserted rather than assumed.
+        assert_eq!(parser_version(ClientId::Codex), 8);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -3332,6 +3377,95 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v3_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 4);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kimi_v4_cache_reused_with_current_workspace_metadata() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let root = source_home.path().join(".kimi-code");
+        let wire_path = root
+            .join("sessions")
+            .join("workspace")
+            .join("session")
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire_path,
+            r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377014}"#,
+        )
+        .unwrap();
+        let mut cached_messages = crate::sessions::kimi::parse_kimi_code_file(&wire_path);
+        assert_eq!(cached_messages.len(), 1);
+        // A full reparse would restore the path-derived session ID, so this
+        // marker distinguishes a cache hit from equivalent parsed usage.
+        cached_messages[0].session_id = "cache-hit-marker".to_string();
+        let identity = CacheIdentity {
+            namespace: "kimi",
+            parser_version: 4,
+        };
+        let fingerprint = SourceFingerprint::from_kimi_path(&wire_path).unwrap();
+        let mut cache = SourceMessageCache::default();
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &wire_path,
+            fingerprint,
+            cached_messages.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        for name in ["first", "renamed"] {
+            let workspace = format!("/projects/{name}");
+            std::fs::write(
+                root.join("workspaces.json"),
+                serde_json::json!({
+                    "version": 1,
+                    "workspaces": { "workspace": { "root": workspace, "name": name } }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["kimi".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, "cache-hit-marker");
+            assert_eq!(
+                messages[0].workspace_key.as_deref(),
+                Some(workspace.as_str())
+            );
+            assert_eq!(messages[0].workspace_label.as_deref(), Some(name));
+            assert_eq!(messages[0].tokens, cached_messages[0].tokens);
+
+            let persisted = SourceMessageCache::load();
+            let entry = persisted.get(identity, &wire_path).unwrap();
+            assert_eq!(entry.messages, cached_messages);
+        }
+    }
+
+    /// Four retirements in a row, each needing its own number. #1285 took v2
+    /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
+    /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
+    /// split, so reusing 2 would have left every reader who already scanned
+    /// under #1285 unmigrated. #1293 needs v4 for the same reason one step
+    /// on: dropping checkpoint snapshots from discovery cannot reach the
+    /// source cache, so only the version can retire TUI aggregates that
+    /// still include them. #1299 needs v5: the doctor's `archive-tier.`
+    /// import archives never change on disk, so a v4 entry that named their
+    /// sessions by the archived spelling is served warm forever.
+    #[test]
+    fn test_openclaw_parser_version_invalidates_v4_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 5);
     }
 
     #[test]
@@ -3547,6 +3681,136 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn openclaw_compressed_archives_discard_cached_empty_v1_results() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("session.jsonl.deleted.timestamp.zst");
+        let content = br#"{"type":"message","message":{"role":"assistant","model":"example","usage":{"input":100},"timestamp":1700000000000}}"#;
+        fs::write(&source, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let old_identity = CacheIdentity {
+            parser_version: 1,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let entry = CachedSourceEntry::new(
+            old_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old_identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(identity, &source).is_none());
+        let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_v4_shards_are_reparsed_with_import_archive_session_ids() {
+        // `openclaw doctor` parks unreferenced legacy JSONL under
+        // `session-sqlite-import-archive/archive-tier.<session id>.jsonl
+        // .imported-<ts>` and never writes to it again, so its fingerprint
+        // stays valid for good. A v4 entry holds the file's rows under the
+        // archived spelling of the session id, and the loader serves a
+        // nonempty entry for an unchanged file without calling the parser,
+        // so only the version bump can retire it.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let archive = temp_home
+            .path()
+            .join("agents/main")
+            .join(crate::sessions::openclaw::OPENCLAW_IMPORT_ARCHIVE_DIRNAME);
+        fs::create_dir_all(&archive).unwrap();
+        let source = archive
+            .join("archive-tier.3139ce31-e15e-4f1b-a4b0-350a525f4331.jsonl.imported-1788148544385");
+        fs::write(
+            &source,
+            br#"{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"input":10,"output":5},"timestamp":1700000000000}}"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let stale_identity = CacheIdentity {
+            parser_version: 4,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![UnifiedMessage::new(
+                identity.namespace,
+                "gpt-5.4",
+                "openai",
+                "archive-tier.3139ce31-e15e-4f1b-a4b0-350a525f4331",
+                1700000000000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(
+            cache.get(identity, &source).is_none(),
+            "a v4 entry names the session by its archived spelling and must not be served"
+        );
+        assert_eq!(SourceFingerprint::from_path(&source).unwrap(), fingerprint);
+        let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_id, "3139ce31-e15e-4f1b-a4b0-350a525f4331");
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        let cached = warm.get(identity, &source).unwrap();
+        assert_eq!(cached.parser_version, 5);
+        assert_eq!(cached.messages, parsed);
+    }
+
+    #[test]
     fn test_dsh_compaction_identity_parser_version_invalidates_v4_entries() {
         // A finished transcript is never rewritten when attribution starts
         // preferring compactionId, so its fingerprint remains valid and only
@@ -3723,6 +3987,58 @@ mod tests {
     #[test]
     fn test_junie_parser_version_invalidates_rows_without_cost_provenance() {
         assert_eq!(parser_version(ClientId::Junie), 3);
+    }
+
+    #[test]
+    fn test_pi_format_shared_parser_version_sync() {
+        use crate::sessions::pi::PI_FORMAT_PARSER_BASE_VERSION;
+
+        // All five clients delegate to `sessions/pi.rs` (Prime Agent through
+        // `parse_pi_format_rlm_file_with_observer`). Their parser versions
+        // must derive from `PI_FORMAT_PARSER_BASE_VERSION` so changes inside pi.rs
+        // invalidate cached messages consistently across all delegating clients (#1195).
+        let delegating_clients = [
+            ClientId::Pi,
+            ClientId::Kimchi,
+            ClientId::Omp,
+            ClientId::Senpi,
+            ClientId::PrimeAgent,
+        ];
+
+        for client in delegating_clients {
+            assert!(
+                parser_version(client) >= PI_FORMAT_PARSER_BASE_VERSION,
+                "{:?} must derive from PI_FORMAT_PARSER_BASE_VERSION ({})",
+                client,
+                PI_FORMAT_PARSER_BASE_VERSION
+            );
+        }
+
+        assert_eq!(
+            parser_version(ClientId::Pi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Pi carries +1 for subagent session attribution"
+        );
+        assert_eq!(
+            parser_version(ClientId::Kimchi),
+            PI_FORMAT_PARSER_BASE_VERSION + 1,
+            "Kimchi carries +1 for namespaced dedup keys"
+        );
+        assert_eq!(
+            parser_version(ClientId::Omp),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Omp carries base version directly"
+        );
+        assert_eq!(
+            parser_version(ClientId::Senpi),
+            PI_FORMAT_PARSER_BASE_VERSION,
+            "Senpi carries base version directly and has an explicit match arm"
+        );
+        assert_eq!(
+            parser_version(ClientId::PrimeAgent),
+            PI_FORMAT_PARSER_BASE_VERSION + 3,
+            "Prime Agent carries +3 for its lossy-decode and lineage-validation history"
+        );
     }
 
     #[test]

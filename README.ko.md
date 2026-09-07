@@ -57,7 +57,7 @@
 |------|----------|---------------|
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+, `opencode-stable.db` 등 모든 채널 포함) 또는 `~/.local/share/opencode/storage/message/` |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` 및 `~/.claude/transcripts/` |
-| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ 레거시: `.clawdbot`, `.moltbot`, `.moldbot`) |
+| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + 레거시: `.clawdbot`, `.moltbot`, `.moldbot`) |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 및 `~/.prime/agent/session-artifacts/` (RLM 하위 세션) |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
@@ -1772,9 +1772,13 @@ Augment Code / Auggie CLI는 채팅 세션마다 하나의 JSON 스냅샷을 기
 
 ### OpenClaw
 
-위치: `~/.openclaw/agents/*/sessions/sessions.json` (레거시 경로도 스캔: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
+위치: `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite` (현재 OpenClaw) 및 `~/.openclaw/agents/<agentId>/sessions/*.jsonl*` (레거시 트랜스크립트, 발행된 아카이브, `*.jsonl.pre-doctor-*.bak` 같은 doctor 백업; 레거시 경로도 스캔: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
 
-JSONL 세션 파일을 가리키는 인덱스 파일:
+현재 OpenClaw(2026.x)는 실시간 트랜스크립트를 에이전트별 SQLite 데이터베이스에 저장합니다. Tokscale은 모든 에이전트 데이터베이스를 읽기 전용으로 열어(게이트웨이가 실행 중인 WAL 모드에서도 안전) `transcript_events` 테이블을 읽고, `usage` 블록이 있는 assistant 이벤트를 집계하며(모델 출력이 아닌 OpenClaw 자체 부기 행, 예: `delivery-mirror`는 제외), 이벤트에 model/provider가 없으면 `session_windows`의 값으로 대체합니다. OpenClaw가 Codex app-server 하네스로 실행한 턴은 트랜스크립트에 마지막 model response의 usage를 가진 최종 assistant 메시지만 미러링되므로, Tokscale은 OpenClaw가 `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`(기본 에이전트별 `CODEX_HOME`)에 남기는 Codex rollout도 읽어 그 안의 모든 response를 미러링된 OpenClaw 세션 아래 `openclaw`로 귀속하고, 해당 thread의 미러 행은 제외합니다. OpenClaw가 사용자 Codex 홈을 공유하도록 설정된 경우(`appServer.homeScope: "user"` 또는 supervision branch) `~/.codex/sessions`에 생성되는 rollout에는 `originator: "openclaw"`가 기록되며, Codex 클라이언트가 아니라 같은 방식으로 `openclaw`에 귀속됩니다. Codex 클라이언트가 이미 집계하는 thread(supervision으로 사용자 자신의 Codex 홈에서 resume한 경우)는 `codex`로 유지되고 그 미러 행은 제외되어 이중 집계가 없으며, rollout을 어디서도 찾을 수 없는 미러 행은 그대로 유지됩니다. `/fork`가 새 세션 id로 복사한 트랜스크립트와 `openclaw doctor --fix`가 SQLite로 가져온 레거시 JSONL은 한 번만 집계됩니다.
+
+레거시 설치는 세션마다 JSONL 파일 하나를 기록했고(`sessions.json`으로 인덱싱), `openclaw doctor --fix`는 이를 SQLite로 가져오되 원본 파일은 그대로 둡니다. 두 저장소 모두에서 assistant 이벤트는 자체 이벤트 id·timestamp·토큰 수로 식별되므로, JSONL로도 남아 있는 마이그레이션된 트랜스크립트는 한 번만 집계됩니다.
+
+JSONL 세션 파일을 가리키는 레거시 인덱스 파일:
 ```json
 {
   "agent:main:main": {

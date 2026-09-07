@@ -197,7 +197,7 @@ pub fn suffix_to_width(s: &str, max_cells: usize) -> &str {
 /// pushed the rest of the table sideways. U+22EF is Neutral, so it is one cell
 /// in both ambients and the budget this module computes is the width the
 /// terminal actually uses.
-const MIDDLE_ELLIPSIS: &str = "⋯";
+pub(crate) const MIDDLE_ELLIPSIS: &str = "⋯";
 
 /// Fit `s` into `max_cells` by dropping its MIDDLE instead of its tail.
 ///

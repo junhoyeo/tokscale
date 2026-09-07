@@ -58,7 +58,7 @@
 |------|----------|---------------|
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+，包含 `opencode-stable.db` 等所有渠道) 或 `~/.local/share/opencode/storage/message/` |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` 和 `~/.claude/transcripts/` |
-| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) |
+| <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 和 `~/.prime/agent/session-artifacts/`（RLM 子会话） |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | 通过 Codex 追踪 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
@@ -1771,9 +1771,13 @@ Augment Code / Auggie CLI 为每个聊天会话写入一份 JSON 快照。Toksca
 
 ### OpenClaw
 
-位置：`~/.openclaw/agents/*/sessions/sessions.json`（也扫描旧版路径：`~/.clawdbot/`、`~/.moltbot/`、`~/.moldbot/`）
+位置：`~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`（当前版本 OpenClaw）以及 `~/.openclaw/agents/<agentId>/sessions/*.jsonl*`（旧版转录、已发布的归档，以及 `*.jsonl.pre-doctor-*.bak` 之类的 doctor 备份；也扫描旧版路径：`~/.clawdbot/`、`~/.moltbot/`、`~/.moldbot/`）
 
-指向 JSONL 会话文件的索引文件：
+当前版本的 OpenClaw（2026.x）把实时转录保存在按 agent 划分的 SQLite 数据库中。Tokscale 以只读方式打开每个 agent 数据库（Gateway 运行时的 WAL 模式下同样安全），读取 `transcript_events` 表，统计带有 `usage` 块的 assistant 事件（OpenClaw 自身用于记录的行，例如 `delivery-mirror`，不是模型输出，会被排除）；事件本身未标明 model/provider 时回退到 `session_windows` 中的值。对于 OpenClaw 通过 Codex app-server harness 运行的回合，转录只镜像带有最后一次 model response usage 的最终 assistant 消息，因此 Tokscale 还会读取 OpenClaw 保存在 `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（默认的按 agent 划分的 `CODEX_HOME`）下的 Codex rollout，把其中的每一次 response 归属到镜像所在的 OpenClaw 会话下的 `openclaw`，并丢弃这些 thread 的镜像行。OpenClaw 在共享的用户 Codex 主目录（`appServer.homeScope: "user"` 或 supervision branch）中创建的 rollout 带有 `originator: "openclaw"`，同样归属到 `openclaw` 而不是 Codex 客户端。Codex 客户端已经统计的 thread（通过 supervision 从用户自己的 Codex 主目录 resume 的会话）保留在 `codex` 下并丢弃其镜像行，因此不会重复统计；在任何地方都找不到 rollout 的镜像行会原样保留。`/fork` 以新会话 id 复制的转录，以及 `openclaw doctor --fix` 导入 SQLite 的旧版 JSONL，都只统计一次。
+
+旧版安装为每个会话写入一个 JSONL 文件（由 `sessions.json` 索引），`openclaw doctor --fix` 会把它们导入 SQLite 但保留原文件。两种存储中的 assistant 事件都以自身的事件 id、timestamp 和 token 数作为键，因此仍以 JSONL 形式保留的已迁移转录只会统计一次。
+
+指向 JSONL 会话文件的旧版索引文件：
 ```json
 {
   "agent:main:main": {

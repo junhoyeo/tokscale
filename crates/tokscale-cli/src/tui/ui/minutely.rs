@@ -144,9 +144,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 vec![
                     Cell::from(minute.datetime.format("%m/%d %H:%M").to_string()).style(
                         if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
+                            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         },
@@ -157,9 +155,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 let mut cells = vec![
                     Cell::from(minute.datetime.format("%m-%d %H:%M").to_string()).style(
                         if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
+                            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         },
@@ -184,9 +180,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 let mut cells = vec![
                     Cell::from(minute.datetime.format("%Y-%m-%d %H:%M").to_string()).style(
                         if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
+                            app.theme.hint_key_style().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().add_modifier(Modifier::BOLD)
                         },
@@ -214,7 +208,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         minute.tokens.input,
                         minute.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(app.theme.count_style()),
                     total_tokens_cell(minute.tokens.total(), &app.theme),
                     Cell::from(format_cost(minute.cost)).style(Style::default().fg(Color::Green)),
                 ]);
