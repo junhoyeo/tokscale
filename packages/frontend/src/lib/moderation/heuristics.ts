@@ -158,7 +158,9 @@ export interface UnknowableStats {
   /**
    * Log-scale histogram of per-candidate unattributed tokens over the
    * unknowable set: key n counts candidates with at least
-   * 2**n * UNKNOWABLE_BUCKET_WIDTH unattributed tokens. The flat
+   * 2**n * UNKNOWABLE_BUCKET_WIDTH unattributed tokens. The largest key is
+   * open-ended — a gap beyond it lands there rather than under a key the
+   * allocation never made. The flat
    * unattributedTokens / unknowableTotalTokens pair cannot say whether the
    * missing share is a rounding error or the whole submission — one account
    * missing 99% and nine missing 1% aggregate identically — and whether it
@@ -234,9 +236,18 @@ export function aggregateUnknowableStats(
     );
     stats.unattributedTokens += unattributed;
     stats.unknowableTotalTokens += candidate.totalTokens;
+    // Cap the walk at the largest allocated key: a gap past it still counts
+    // in every bucket up to and including the top one, instead of minting a
+    // key the allocation above never made — `undefined + 1` is NaN, which
+    // JSON.stringify then serializes as null, corrupting the telemetry on
+    // exactly the largest accounts.
+    const cap = Math.min(
+      unattributed,
+      2 ** (UNKNOWABLE_HISTOGRAM_BUCKETS - 1) * UNKNOWABLE_BUCKET_WIDTH
+    );
     for (
       let boundary = UNKNOWABLE_BUCKET_WIDTH;
-      boundary <= unattributed;
+      boundary <= cap;
       boundary *= 2
     ) {
       stats.unattributedHistogram[String(boundary)] += 1;

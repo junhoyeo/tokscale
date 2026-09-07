@@ -501,6 +501,35 @@ describe("aggregateUnknowableStats", () => {
     expect(stats.unattributedTokens).toBe(64 * UNKNOWABLE_BUCKET_WIDTH + 9);
   });
 
+  it("lands a gap past the largest boundary in the top bucket, not on a missing key", () => {
+    // 256M unattributed walks past the largest allocated key (128M). Without
+    // the cap the loop does `undefined + 1` on the never-allocated 256M key,
+    // and the resulting NaN serializes as null — corrupting the emitted
+    // telemetry on exactly the accounts whose gaps matter most.
+    const stats = aggregateUnknowableStats([
+      row({
+        slopModels: ["fake-api"],
+        slopTokens: null,
+        totalTokens: 256 * UNKNOWABLE_BUCKET_WIDTH,
+        attributedTokens: 0,
+      }),
+    ]);
+
+    // Cumulative semantics hold all the way up: the gap crosses every
+    // boundary including the open-ended top one, and no extra key appears.
+    expect(stats.unattributedHistogram).toEqual(
+      Object.fromEntries(
+        [1, 2, 4, 8, 16, 32, 64, 128].map((power) => [
+          String(power * UNKNOWABLE_BUCKET_WIDTH),
+          1,
+        ])
+      )
+    );
+    // What the log line actually carries: every bucket a real number, never
+    // the null that JSON.stringify makes of NaN.
+    expect(JSON.stringify(stats.unattributedHistogram)).not.toContain("null");
+  });
+
   it("clamps a negative gap rather than dragging the sum below zero", () => {
     // Defence against drifted data: the gate guarantees attributed < total
     // on well-formed rows, but a future drift that overshoots must not make
