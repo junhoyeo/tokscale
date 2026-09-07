@@ -87,12 +87,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     } else if has_turn_data {
         vec![
-            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
             "Cost", "Cost/1M",
         ]
     } else {
         vec![
-            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total", "Cost",
+            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total", "Cost",
             "Cost/1M",
         ]
     };
@@ -363,7 +363,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         vec![
             "#", "Model", "Provider", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W",
-            "Cache×", "Total", "Cost",
+            "Cache✕", "Total", "Cost",
         ]
     };
 

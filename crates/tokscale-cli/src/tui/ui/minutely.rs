@@ -67,12 +67,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     } else if has_turn_data {
         vec![
-            "Minute", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×",
+            "Minute", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕",
             "Total", "Cost",
         ]
     } else {
         vec![
-            "Minute", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Minute", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
             "Cost",
         ]
     };

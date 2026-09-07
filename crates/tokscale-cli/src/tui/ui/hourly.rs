@@ -78,12 +78,12 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     } else if has_turn_data {
         vec![
-            "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×",
+            "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕",
             "Total", "Cost", "Cost/1M",
         ]
     } else {
         vec![
-            "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
             "Cost", "Cost/1M",
         ]
     };

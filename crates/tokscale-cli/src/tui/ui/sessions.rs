@@ -166,7 +166,11 @@ impl SessionColumn {
             Self::Output => "Output",
             Self::CacheRead => "Cache R",
             Self::CacheWrite => "Cache W",
-            Self::CacheHit => "Cache×",
+            // U+2715, not U+00D7: the multiplication sign is
+            // East-Asian-Ambiguous and would make the header row stream a
+            // cell wide in a CJK locale; the multiplication X is
+            // East-Asian-Neutral, one cell in both ambients.
+            Self::CacheHit => "Cache✕",
             Self::Total => "Total",
             Self::Cost => "Cost",
             Self::CostPerMillion => "Cost/1M",
@@ -441,7 +445,7 @@ fn admit_and_distribute(available: u16, ctx: &WideCtx) -> WideLayout {
         } else {
             // Stop, don't skip. Trying the next (narrower) group packs more
             // columns in but makes the admitted set non-monotonic in width —
-            // Cache× at W, Duration and no Cache× at W+1 — which is the same
+            // Cache✕ at W, Duration and no Cache✕ at W+1 — which is the same
             // disorientation the ratatui solver produces today.
             break;
         }
@@ -1388,7 +1392,7 @@ mod tests {
 
     /// Widening the terminal never removes a column. `break` in the admission
     /// loop is what buys this: skipping a group that does not fit and trying the
-    /// next, narrower one would show Cache× at W and Duration instead at W+1.
+    /// next, narrower one would show Cache✕ at W and Duration instead at W+1.
     ///
     /// Note what this does **not** cover: it compares header *sets*, so it stays
     /// green through the Session sawtooth (Session is 40 cells at 149 and 20 at
@@ -1786,7 +1790,7 @@ mod tests {
                     "Output",
                     "Cache R",
                     "Cache W",
-                    "Cache×",
+                    "Cache✕",
                     "Total",
                     "Cost/1M",
                     "Duration",
@@ -1924,7 +1928,7 @@ mod tests {
         let body = render_body(&mut app, 70, 12);
         assert!(body.contains("abc-123"), "expected session id\n{body}");
         assert!(
-            !body.contains("Cache×"),
+            !body.contains("Cache✕"),
             "cache hit rate should be dropped in narrow mode\n{body}"
         );
     }

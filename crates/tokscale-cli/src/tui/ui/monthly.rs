@@ -69,12 +69,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     } else if has_turn_data {
         vec![
-            "Month", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Month", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
             "Cost", "Cost/1M",
         ]
     } else {
         vec![
-            "Month", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total", "Cost",
+            "Month", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total", "Cost",
             "Cost/1M",
         ]
     };
@@ -338,12 +338,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     } else if has_turn_data {
         vec![
-            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
             "Cost", "Cost/1M",
         ]
     } else {
         vec![
-            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total", "Cost",
+            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total", "Cost",
             "Cost/1M",
         ]
     };
@@ -624,7 +624,7 @@ mod tests {
         app.data.monthly = vec![month("2026-05", 1000, 1.5)];
         let body = render_body(&mut app, 130, 12);
         assert!(
-            body.contains("Cache×"),
+            body.contains("Cache✕"),
             "expected cache hit rate column\n{body}"
         );
         assert!(
