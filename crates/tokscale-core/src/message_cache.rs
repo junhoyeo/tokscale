@@ -1340,7 +1340,49 @@ fn parser_version(client: ClientId) -> u32 {
         // source bytes and fingerprint do not change, so invalidate cached v2
         // rows to make same-named files in different sessions survive (#1198).
         ClientId::OpenCode => 3,
-        _ => 1,
+        // The remaining clients parse their own formats and have never
+        // shipped a parser-only change that leaves byte-identical input
+        // parsing differently, so all of them are at version 1. Repeating
+        // values across independent parsers is harmless -- every cache
+        // identity is namespaced by `client.as_str()` first, so one client's
+        // bump can never invalidate or collide with another's entries
+        // (`CacheIdentity` / `CachedSourceEntry::matches_identity`). Sharing
+        // is reserved for parsers that are the *same code*: the pi-format
+        // family (Pi, Kimchi, Omp, Senpi, PrimeAgent) derives from
+        // `PI_FORMAT_PARSER_BASE_VERSION` above, and the roo/kilo task-log
+        // family (RooCode, KiloCode -- Cline carries its own history) parses
+        // through `roocode::parse_roo_kilo_file`. No `_ => 1` arm on purpose:
+        // adding a client to `define_clients!` must force an explicit,
+        // per-client versioning decision here instead of silently landing on
+        // 1. `SHARED_PARSER_FAMILIES` in the tests pins the sharing
+        // relationships -- when a new client delegates to an existing parser,
+        // declare it there (and derive from a shared base like the pi-format
+        // family) instead of listing a bare integer.
+        ClientId::Gemini => 1,
+        ClientId::Amp => 1,
+        ClientId::Qwen => 1,
+        ClientId::RooCode => 1,
+        ClientId::KiloCode => 1,
+        ClientId::Mux => 1,
+        ClientId::Kilo => 1,
+        ClientId::Crush => 1,
+        ClientId::Goose => 1,
+        ClientId::Codebuff => 1,
+        ClientId::Antigravity => 1,
+        ClientId::Zed => 1,
+        ClientId::Trae => 1,
+        ClientId::Warp => 1,
+        ClientId::Gjc => 1,
+        ClientId::CommandCode => 1,
+        ClientId::AntigravityCli => 1,
+        ClientId::CodeBuddy => 1,
+        ClientId::WorkBuddy => 1,
+        ClientId::Augment => 1,
+        ClientId::Freebuff => 1,
+        ClientId::CherryStudio => 1,
+        ClientId::Mcode => 1,
+        ClientId::LmStudio => 1,
+        ClientId::Hindsight => 1,
     }
 }
 
@@ -4038,6 +4080,143 @@ mod tests {
             parser_version(ClientId::PrimeAgent),
             PI_FORMAT_PARSER_BASE_VERSION + 3,
             "Prime Agent carries +3 for its lossy-decode and lineage-validation history"
+        );
+    }
+
+    /// Clients that delegate to the *same parser code* rather than owning an
+    /// independent parser. A parse change in the shared base that bumps its
+    /// version must invalidate every member's cache at once, so these
+    /// versions have to move together. The roster mirrors the delegation in
+    /// `crates/tokscale-core/src/sessions/`:
+    ///
+    /// - Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser and
+    ///   Prime Agent rides on it through
+    ///   `parse_pi_format_rlm_file_with_observer`; all five derive from
+    ///   `PI_FORMAT_PARSER_BASE_VERSION` (#1195, #1288) and are pinned
+    ///   numerically by `test_pi_format_shared_parser_version_sync`.
+    /// - Roo Code, Kilo Code, and Cline forked one task-log format and all
+    ///   parse it through `roocode::parse_roo_kilo_file`. They are only
+    ///   rostered here, not base-derived: Cline carries independent
+    ///   invalidation history (v1->v3) that predates the roster, and
+    ///   unpinning its cache version to renumber it would discard live
+    ///   caches. A roocode helper change must therefore bump every rostered
+    ///   member explicitly.
+    ///
+    /// Cache entries are namespaced by `client.as_str()` before
+    /// `parser_version` is ever compared (`CacheIdentity` /
+    /// `CachedSourceEntry::matches_identity`), so two clients holding the
+    /// same integer is not, by itself, a collision -- that is why most
+    /// independent parsers sit at 1 without harm. The historic "collision"
+    /// failures were duplicate match arms naming the *same* client (the
+    /// merged-in second `OpenClaw` arm, caught by clippy's
+    /// `unreachable_patterns`) and the `_ => 1` fallback, which let a new
+    /// client land on a shared integer without anyone deciding whether it
+    /// shares a parser. Both failure modes are now closed: every client has
+    /// an explicit arm (adding one to `define_clients!` fails compilation
+    /// until it is versioned deliberately), and this roster plus the tests
+    /// below pin which clients are byte-compatible with each other.
+    const SHARED_PARSER_FAMILIES: &[&[ClientId]] = &[
+        &[
+            ClientId::Pi,
+            ClientId::Kimchi,
+            ClientId::Omp,
+            ClientId::Senpi,
+            ClientId::PrimeAgent,
+        ],
+        &[ClientId::RooCode, ClientId::KiloCode, ClientId::Cline],
+    ];
+
+    #[test]
+    fn test_parser_version_covers_every_client() {
+        // Exhaustiveness itself is compile-enforced by the explicit arms in
+        // `parser_version()`; this pins the second half of the contract,
+        // that every arm's version is a usable one.
+        for client in ClientId::ALL {
+            assert!(
+                parser_version(client) >= 1,
+                "{client:?} needs an explicit parser_version >= 1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shared_parser_family_roster_is_accurate() {
+        for family in SHARED_PARSER_FAMILIES {
+            // A one-client "family" is an independent parser and belongs
+            // outside this table.
+            assert!(
+                family.len() >= 2,
+                "shared-parser families need at least two members"
+            );
+            for (index, client) in family.iter().enumerate() {
+                assert!(
+                    ClientId::ALL.contains(client),
+                    "{client:?} is declared in a shared-parser family but missing from ClientId::ALL"
+                );
+                assert!(
+                    !family[..index].contains(client),
+                    "{client:?} is listed twice inside one shared-parser family"
+                );
+            }
+        }
+
+        // A client may appear in only one family: a single parser_version
+        // cannot track two shared bases at once.
+        for (index, client) in SHARED_PARSER_FAMILIES
+            .iter()
+            .flat_map(|family| family.iter())
+            .enumerate()
+        {
+            let later = SHARED_PARSER_FAMILIES
+                .iter()
+                .flat_map(|family| family.iter())
+                .skip(index + 1);
+            assert!(
+                !later.into_iter().any(|other| other == client),
+                "{client:?} appears in two shared-parser families; one parser version cannot \
+                 track two bases"
+            );
+        }
+    }
+
+    #[test]
+    fn test_roo_kilo_format_shared_parser_version_sync() {
+        let family = SHARED_PARSER_FAMILIES
+            .iter()
+            .find(|family| family.contains(&ClientId::RooCode))
+            .expect("the roo/kilo task-log family must stay declared");
+
+        // Roo Code and Kilo Code parse task logs *only* through the shared
+        // `roocode::parse_roo_kilo_file` helper, and Cline parses the same
+        // task-log format through it (Cline's independent v1->v3 history is
+        // its own `parse_cline_cli_file` path, not the shared helper). When
+        // the shared helper changes what a byte-identical task log parses
+        // to, bump every rostered member together; a bump on exactly one
+        // member means the others keep serving rows the parser no longer
+        // produces.
+        for member in *family {
+            let version = parser_version(*member);
+            assert!(
+                version >= 1,
+                "{member:?} must carry an explicit parser_version"
+            );
+        }
+        assert_eq!(
+            parser_version(ClientId::RooCode),
+            1,
+            "Roo Code's task-log parser has no independent invalidation history"
+        );
+        assert_eq!(
+            parser_version(ClientId::KiloCode),
+            1,
+            "Kilo Code shares the task-log parser and has no independent invalidation history"
+        );
+        assert_eq!(
+            parser_version(ClientId::Cline),
+            3,
+            "Cline carries independent invalidation history (v1->v3); do not renumber a live \
+             cache version -- if the shared helper changes, bump Cline to 4 and Roo/Kilo to 2 \
+             together"
         );
     }
 
