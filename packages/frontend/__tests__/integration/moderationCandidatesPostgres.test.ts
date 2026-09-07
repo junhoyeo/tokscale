@@ -19,32 +19,48 @@ const describeWithPostgres = integrationEnabled ? describe : describe.skip;
  * names nothing, that the remainder is not also counted inside the nested
  * per-model sum, that a cell whose key names nothing (`unknown`, parser
  * debris) is not mistaken for attribution once the same remainder has been
- * normalized into the map, that a map summing past its own entry's scalar
- * cannot inflate attribution past the account's total, and that anything short
- * of full attribution comes back NULL so the scorer falls back to the full
- * fixed weight — is only observable by running it.
+ * normalized into the map, that an entry whose map sums past its own scalar
+ * attributes nothing at all rather than a clamped amount, and that anything
+ * short of full attribution comes back NULL so the scorer falls back to the
+ * full fixed weight — is only observable by running it.
  *
- * Six mutations of the attribution SQL were run against this fixture. Five are
- * killed by a named persona:
+ * Seven mutations of the attribution SQL were run against this fixture. Six
+ * are killed by a named persona:
  *
- *   - dropping the scalar clamp on the named nested sum -> overNested
- *   - weakening that clamp to LEAST(named, scalar) -> overNested
+ *   - dropping the over-nesting guard entirely, attributing nested_named_tokens
+ *     unconditionally -> overNested, overNestedNamed, overNestedAllNamed
+ *   - weakening that guard to the clamp
+ *     GREATEST(LEAST(named, scalar - unnamed), 0)
+ *     -> overNestedNamed, overNestedAllNamed, but NOT overNested
+ *   - weakening it to LEAST(named, scalar) -> all three
  *   - dropping the UNNAMED_MODEL_REGEX guard on the client-level `modelId`
  *     -> unknownModelId
  *   - dropping the UNNAMED_MODEL_REGEX filter on the named nested sum
- *     -> remainderPlusUnknown
- *   - dropping `attributed_tokens >= total_tokens` -> six personas
+ *     -> remainderPlusUnknown, unknownBucket, debrisBucket
+ *   - dropping `attributed_tokens >= total_tokens` -> eight personas
  *
- * The sixth survives and is meant to: dropping `every_day_attributed` from the
- * completeness gate leaves the suite green, because that clause is redundant
- * by arithmetic rather than untested. submissions.total_tokens is written as
- * SUM(daily.tokens) (submit/route.ts STEP 3d) and a day scalar is written as
+ * The two clamp mutations are why three over-nested personas exist rather than
+ * one. A clamp of the named cells can never push a row below the gate: its
+ * ceiling is the entry's OWN scalar and the gate's threshold is total_tokens,
+ * the sum of those same scalars, so a clamped over-nested entry lands exactly
+ * ON the gate — the passing side. It only appears to work when an unnamed cell
+ * happens to subtract from that ceiling, which is the single case `overNested`
+ * covers and both other personas do not — which is why the exact clamp this
+ * fixture was first written against, GREATEST(LEAST(named, scalar - unnamed),
+ * 0), leaves `overNested` GREEN and kills only the other two. Any future
+ * rewrite that reaches for a clamp instead of failing the contradictory entry
+ * closed must go red on at least two of these three, never on none.
+ *
+ * The seventh survives and is meant to: dropping `every_day_attributed` from
+ * the completeness gate leaves the suite green, because that clause is
+ * redundant by arithmetic rather than untested. submissions.total_tokens is
+ * written as SUM(daily.tokens) (submit/route.ts STEP 3d) and a day scalar as
  * the sum of its client scalars, so a daily row carrying no breakdown always
  * drags attributed_tokens below total_tokens on its own. It is kept as defence
  * in depth for the case where those two representations drift apart, which is
  * the class of bug #960 is. Do not read its survival as licence to delete it.
  *
- * Weakening any of the other five without a red test is how a fail-open
+ * Weakening any of the other six without a red test is how a fail-open
  * reaches the review queue unnoticed. Mutate before trusting this file.
  *
  * Unlike the ratchet census fixture, this one does not assume it owns the
@@ -87,8 +103,18 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     // unions the stored and incoming model maps while taking `tokens` from the
     // incoming entry, so a same-device resubmit that declares
     // costIsComplete:false and drops a previously-seen model stores a map whose
-    // sum is larger than the entry's own scalar.
+    // sum is larger than the entry's own scalar. Three constructions, because
+    // where the excess sits is what a clamp is sensitive to and the property
+    // is not:
+    //   - the excess parked under an unnamed key,
     "overNested",
+    //   - the same merge where the dropped model has a real name, so no
+    //     unnamed cell exists to charge the excess against,
+    "overNestedNamed",
+    //   - the cheapest shape of all: a stored named map merged with an
+    //     incoming legacy-partial one, over-nested by 2 tokens with no unnamed
+    //     cell and no second large cell.
+    "overNestedAllNamed",
     // The legacy client-level `modelId` shape, but the id itself names nothing.
     "unknownModelId",
     // A scalar remainder AND an unnamed cell in the same entry: the only shape
@@ -126,6 +152,8 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     debrisBucket: 2_200_000,
     namedLikeUnknown: 2_300_000,
     overNested: 3_100_000,
+    overNestedNamed: 3_200_000,
+    overNestedAllNamed: 4_100_000,
     unknownModelId: 2_400_000,
     remainderPlusUnknown: 2_500_000,
   };
@@ -170,6 +198,8 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
         debrisBucket: ["*", "fake-api"],
         namedLikeUnknown: ["unknown-model", "fake-api"],
         overNested: ["claude-sonnet-4", "unknown", "fake-api"],
+        overNestedNamed: ["claude-sonnet-4", "claude-opus-4", "fake-api"],
+        overNestedAllNamed: ["claude-sonnet-4", "fake-api"],
         unknownModelId: ["unknown", "fake-api"],
         remainderPlusUnknown: ["claude-sonnet-4", "unknown", "fake-api"],
       };
@@ -309,6 +339,38 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
           models: {
             "claude-sonnet-4": model(totals.overNested),
             unknown: model(totals.overNested - 2),
+            "fake-api": model(2),
+          },
+        },
+      });
+
+      // Same merge, with the dropped model carrying a real name. Nothing here
+      // is keyed `unknown`, so there is no unnamed cell for a clamp to charge
+      // the excess against — the whole 3,200,000 scalar reads as attributed
+      // under GREATEST(LEAST(named, scalar - unnamed), 0) while 2 tokens are
+      // all the incoming submission actually accounted for.
+      await day("overNestedNamed", "2026-01-01", totals.overNestedNamed, {
+        copilot: {
+          ...model(totals.overNestedNamed),
+          models: {
+            "claude-sonnet-4": model(totals.overNestedNamed),
+            "claude-opus-4": model(totals.overNestedNamed - 2),
+            "fake-api": model(2),
+          },
+        },
+      });
+
+      // The cheapest producible over-nesting: a stored {claude-sonnet-4: N}
+      // merged with an incoming legacy-partial {fake-api: 2} under
+      // costIsComplete:false. Sigma(models) is N + 2 against a scalar of N —
+      // over by two tokens, with no unnamed cell and no second large cell. The
+      // incoming half is the `partial` persona's own shape, which is the shape
+      // the Codex finding was written about.
+      await day("overNestedAllNamed", "2026-01-01", totals.overNestedAllNamed, {
+        copilot: {
+          ...model(totals.overNestedAllNamed),
+          models: {
+            "claude-sonnet-4": model(totals.overNestedAllNamed),
             "fake-api": model(2),
           },
         },
@@ -461,6 +523,37 @@ describeWithPostgres("moderation candidates PostgreSQL integration", () => {
     // 3,100,002 >= 3,100,000 -> slopTokens 2 -> weight 35 * 2/3,100,000, which
     // Math.round drops: the account leaves the queue while 3,099,998 tokens sit
     // unclaimed.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution when the over-nesting sits under a named key", async () => {
+    const candidate = await candidateFor("overNestedNamed");
+
+    // Identical to `overNested` except the dropped model has a real name. Any
+    // clamp of the named sum has a ceiling of the entry's own scalar, and the
+    // gate's threshold is total_tokens = the sum of those same scalars, so
+    // clamping lands this row exactly ON the gate rather than below it:
+    // attributed 3,200,000 >= total 3,200,000 -> slopTokens 2 -> weight
+    // 35 * 2/3,200,000, which Math.round drops. The entry has to attribute
+    // nothing, not a clamped amount.
+    expect(candidate.slopTokens).toBeNull();
+    expect(
+      candidate.signals.find((signal) => signal.key === "slopModelName")?.weight
+    ).toBe(35);
+  });
+
+  it("reports unknown attribution for a map over-nested by two tokens", async () => {
+    const candidate = await candidateFor("overNestedAllNamed");
+
+    // Sigma(models) is 4,100,002 against a 4,100,000 scalar. No `unknown` cell
+    // exists anywhere in the payload, so this is the shape that needs no
+    // unnamed key at all: a stored named map plus an incoming legacy-partial
+    // entry. Under the clamp it read as fully attributed with slopTokens 2 and
+    // the slopModelName signal absent, which drops the account out of
+    // rankCandidates() entirely unless it is already hidden.
     expect(candidate.slopTokens).toBeNull();
     expect(
       candidate.signals.find((signal) => signal.key === "slopModelName")?.weight

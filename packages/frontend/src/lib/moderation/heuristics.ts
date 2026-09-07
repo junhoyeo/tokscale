@@ -42,10 +42,11 @@ export interface CandidateRow {
    * breakdown, a per-model map that leaves a remainder no `modelId` claims, a
    * client-level `modelId` that names nothing, tokens parked under a map key
    * that names nothing (see `UNNAMED_MODEL_REGEX`), a map whose own sum
-   * outruns the entry's scalar so the named cells cannot all be paid for, or
-   * daily rows that do not cover the stored total. Null means the share is
-   * unknown, not that it is small: the signal then keeps its full fixed weight
-   * instead of being scaled by a share computed from partial attribution.
+   * outruns the entry's scalar so the entry contradicts itself and attributes
+   * nothing at all, or daily rows that do not cover the stored total. Null
+   * means the share is unknown, not that it is small: the signal then keeps
+   * its full fixed weight instead of being scaled by a share computed from
+   * partial attribution.
    */
   slopTokens: number | null;
 }

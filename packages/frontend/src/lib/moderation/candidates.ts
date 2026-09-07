@@ -116,29 +116,40 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     -- same tokens get counted twice), while attribution is what the map
     -- credits to a model (so it must skip the cells that name nothing).
     --
-    -- The map is not guaranteed to fit inside the entry's own scalar, so the
-    -- named part is clamped by what the scalar has left after the unnamed
-    -- cells. applyCostCompleteness() in lib/db/helpers.ts unions the stored
-    -- and incoming model maps while taking the scalar from the incoming
-    -- entry, so a same-device resubmit declaring costIsComplete:false (#1044)
-    -- that drops a previously-seen model stores a map summing past that
-    -- scalar. Counting the named cells raw then floats attribution past the
-    -- account's total while the unnamed cells still hold real tokens, and the
-    -- completeness gate below waves the row through. Charging the unnamed
-    -- cells against the scalar FIRST is the fail-closed order: it can only
-    -- understate what is attributed, never overstate it. On a well-formed
-    -- entry, whose map fits inside its scalar, the clamp is inert.
+    -- The map is not guaranteed to fit inside the entry's own scalar. When it
+    -- does not, the entry contradicts itself: the scalar says N tokens were
+    -- submitted and the map claims more than N are accounted for, so nothing
+    -- the map holds can be reconciled against the account's total. Such an
+    -- entry therefore attributes NOTHING, which drops the account below the
+    -- completeness gate below and fails it closed at the full fixed weight.
+    --
+    -- applyCostCompleteness() in lib/db/helpers.ts unions the stored and
+    -- incoming model maps while taking the scalar from the incoming entry, so
+    -- a same-device resubmit declaring costIsComplete:false (#1044) that drops
+    -- a previously-seen model stores exactly that divergence.
+    --
+    -- CLAMPING the named sum instead is what let this fail open, and it is the
+    -- mistake to avoid re-introducing. Every clamp of the named cells has a
+    -- ceiling of the entry's OWN scalar, while the gate's threshold is
+    -- total_tokens -- the sum of those same scalars. So a clamped over-nested
+    -- entry does not land below the gate, it lands exactly ON it, which is the
+    -- passing side. GREATEST(LEAST(named, scalar - unnamed), 0) only bit when
+    -- an unnamed cell happened to subtract from that ceiling; with the excess
+    -- under a real model name, or in a map holding no unnamed cell at all
+    -- (stored {claude-sonnet-4: N} merged with an incoming legacy-partial
+    -- {fake-api: 2}), attribution came back equal to the total while only 2
+    -- tokens were backed by the submission that set the scalar.
+    --
+    -- On a well-formed entry, whose map fits inside its scalar, this is inert:
+    -- named <= nested <= scalar, so no clamp was ever doing work there.
     client_attribution AS (
       SELECT
         d.submission_id,
-        GREATEST(
-          LEAST(
-            m.nested_named_tokens,
-            COALESCE((client.value->>'tokens')::numeric, 0)
-              - m.nested_unnamed_tokens
-          ),
-          0
-        ) AS attributed_nested_tokens,
+        CASE
+          WHEN m.nested_tokens > COALESCE((client.value->>'tokens')::numeric, 0)
+            THEN 0
+          ELSE m.nested_named_tokens
+        END AS attributed_nested_tokens,
         m.nested_slop_tokens,
         GREATEST(
           COALESCE((client.value->>'tokens')::numeric, 0) - m.nested_tokens,
@@ -165,11 +176,6 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
           ) AS nested_named_tokens,
           COALESCE(
             SUM(COALESCE((model.value->>'tokens')::numeric, 0))
-              FILTER (WHERE model.key ~* ${UNNAMED_MODEL_REGEX}),
-            0
-          ) AS nested_unnamed_tokens,
-          COALESCE(
-            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
               FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
             0
           ) AS nested_slop_tokens
@@ -189,8 +195,8 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         -- the remainder to the nested sum cannot double count it: the
         -- remainder is by construction what the whole nested sum leaves over,
         -- and only the named part of that sum is counted here. A non-zero
-        -- remainder also implies the clamp above was inert, since a map that
-        -- leaves the scalar something over cannot have outrun it.
+        -- remainder also implies the entry was not over-nested, since a map
+        -- that leaves the scalar something over cannot have outrun it.
         SUM(
           attributed_nested_tokens
           + CASE WHEN remainder_model IS NOT NULL THEN remainder ELSE 0 END
@@ -213,8 +219,8 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         COALESCE(dl.daily_tokens, 0) AS daily_tokens,
         -- A share is only meaningful when every one of this account's tokens
         -- is attributed to a named model. Tokens nobody claims — a scalar
-        -- remainder with no modelId, a cell keyed 'unknown' or '*', or the
-        -- part of a scalar an over-nested map leaves unaccounted — could be
+        -- remainder with no modelId, a cell keyed 'unknown' or '*', or every
+        -- token of an entry whose map outruns its own scalar — could be
         -- all slop, and dividing the attributed part by the full total scales
         -- the weight towards zero, which drops a real fabrication out of the
         -- queue. Incomplete attribution therefore yields NULL, which the
