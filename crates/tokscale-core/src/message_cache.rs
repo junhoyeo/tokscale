@@ -3625,7 +3625,7 @@ mod tests {
         }
     }
 
-    /// Four retirements in a row, each needing its own number. #1285 took v2
+    /// Successive parser changes each need their own version. #1285 took v2
     /// for the compressed-archive decode. #1278 then needed v3, not a reuse of
     /// 2: a warm v2 cache carries neither the dedup keys nor the reasoning
     /// split, so reusing 2 would have left every reader who already scanned
