@@ -6492,6 +6492,7 @@ fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
     for unreadable in [
         r#"{"colorPalette": "green", "scanner": {"#,
         r#"{"colorPalette": 42, "scanner": {"extraScanPaths": {"claude": ["/data"]}}}"#,
+        r#"{"usage":{"disabledProviders":{"copilot":true}}}"#,
     ] {
         let tmp = create_bucket_timezone_fixture_dir();
         let settings_path = settings_json_path(tmp.path());
@@ -6518,25 +6519,29 @@ fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
 /// contents were never recovered.
 #[test]
 fn test_config_set_refuses_to_overwrite_unreadable_settings() {
-    let tmp = create_bucket_timezone_fixture_dir();
-    let settings_path = settings_json_path(tmp.path());
-    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    let unreadable = r#"{"scanner": {"extraScanPaths": "not-a-map"}}"#;
-    fs::write(&settings_path, unreadable).unwrap();
+    for unreadable in [
+        r#"{"scanner": {"extraScanPaths": "not-a-map"}}"#,
+        r#"{"usage":{"disabledProviders":{"copilot":true}}}"#,
+    ] {
+        let tmp = create_bucket_timezone_fixture_dir();
+        let settings_path = settings_json_path(tmp.path());
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(&settings_path, unreadable).unwrap();
 
-    cmd_with_home(tmp.path())
-        .args(["config", "set", "timezone", "Asia/Seoul"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "could not read this machine's tokscale settings",
-        ));
+        cmd_with_home(tmp.path())
+            .args(["config", "set", "timezone", "Asia/Seoul"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "could not read this machine's tokscale settings",
+            ));
 
-    assert_eq!(
-        fs::read_to_string(&settings_path).unwrap(),
-        unreadable,
-        "a refused write must leave the file untouched"
-    );
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            unreadable,
+            "a refused write must leave the file untouched"
+        );
+    }
 }
 
 /// A `bucketTimezone` that does not name a zone the tz database knows is not a

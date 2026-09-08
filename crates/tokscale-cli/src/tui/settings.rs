@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use tokscale_core::scanner::ScannerSettings;
 
@@ -89,7 +89,10 @@ pub struct LightSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSettings {
-    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_disabled_providers_string_array_lossy"
+    )]
     pub disabled_providers: Vec<String>,
 }
 
@@ -248,6 +251,23 @@ where
         .into_iter()
         .flatten()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+/// Lossy deserializer for `usage.disabledProviders`: individual non-string
+/// array members are ignored, but the field itself must be an array. A wrong
+/// top-level shape means the settings file could not be faithfully recovered,
+/// so callers that may save it must keep it untouched.
+fn deserialize_disabled_providers_string_array_lossy<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| value.as_str().map(ToString::to_string))
         .collect())
 }
 
@@ -550,6 +570,10 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<()> {
+        if !Self::load_with_origin().1.is_safe_to_overwrite() {
+            bail!("could not read this machine's tokscale settings, so refusing to replace them");
+        }
+
         let path = Self::config_path()?;
         let content = serde_json::to_string_pretty(self)?;
 
@@ -613,6 +637,32 @@ impl Settings {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn explicit_home_config_path_uses_unix_dot_config_layout() {
@@ -1034,6 +1084,17 @@ mod tests {
     }
 
     #[test]
+    fn usage_disabled_providers_rejects_a_non_array_field() {
+        for invalid in ["null", "true", "42", r#"{"copilot":true}"#, r#""copilot""#] {
+            let json = format!(r#"{{"usage":{{"disabledProviders":{invalid}}}}}"#);
+            assert!(
+                serde_json::from_str::<Settings>(&json).is_err(),
+                "disabledProviders must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn usage_disabled_providers_keeps_valid_string_entries() {
         let parsed: Settings = serde_json::from_str(
             r#"{"usage":{"disabledProviders":["copilot", null, 42, " CODEX "]}}"#,
@@ -1046,5 +1107,52 @@ mod tests {
             serialized["usage"]["disabledProviders"],
             serde_json::json!(["copilot", " CODEX "])
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_with_origin_marks_invalid_disabled_providers_as_unreadable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let path = temp.path().join("settings.json");
+        let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+        fs::write(&path, malformed).unwrap();
+
+        let (settings, origin) = Settings::load_with_origin();
+        assert_eq!(origin, SettingsOrigin::Unreadable);
+        assert_eq!(settings.color_palette, Settings::default().color_palette);
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_refuses_to_replace_unreadable_settings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let path = temp.path().join("settings.json");
+        let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+        fs::write(&path, malformed).unwrap();
+
+        let save_error = Settings::load().save().unwrap_err();
+        assert!(save_error.to_string().contains("refusing to replace them"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_initializes_missing_settings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let mut settings = Settings::default();
+        settings.color_palette = "green".to_string();
+        settings.save().unwrap();
+
+        let saved: Settings =
+            serde_json::from_str(&fs::read_to_string(temp.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.color_palette, "green");
     }
 }
