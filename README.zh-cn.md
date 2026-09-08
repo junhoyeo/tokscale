@@ -1510,6 +1510,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | 解析 Auggie CLI 会话 JSON 快照（`*.json`）；关联键为顶层 `sessionId` |
 | Synthetic | 从其他来源重归属 | 从其他来源重归属 | 检测 `hf:` 模型前缀 + `synthetic` provider |
 | Hindsight | `$HINDSIGHT_HOME/usage/`（回退：`~/.hindsight/usage/`） | `%HINDSIGHT_HOME%\usage\`（回退：`%USERPROFILE%\.hindsight\usage\`） | 通过 `tokscale hindsight sync` 进行 API 同步；Hindsight 本身不保留本地会话日志，数据从 LLM 追踪 API 同步到仅追加的 JSONL 缓存中 |
+| Meept | `~/.meept/metrics.db` | `%USERPROFILE%\.meept\metrics.db` | 以只读方式解析逐调用的 `llm_calls` 行（从不写入）；需要 meept schema v2（session_id / reasoning_tokens / cache_creation_tokens 列）；错误行不含用量数据，已被排除 |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 

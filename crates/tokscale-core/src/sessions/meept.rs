@@ -87,39 +87,47 @@ fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeeptUsageRow> 
 }
 
 /// Meept writes `timestamp` as ISO-8601 UTC via SQLite's
-/// `strftime('%Y-%m-%dT%H:%M:%SZ','now')` default. Parse the fixed-width
-/// prefix; on any unexpected shape fall back to the epoch so the row still
-/// aggregates under "unknown time" rather than being dropped.
+/// `strftime('%Y-%m-%dT%H:%M:%SZ','now')` default. Parse the full value
+/// fallibly; on any unexpected shape fall back to the epoch so the row still
+/// aggregates under "unknown time" rather than being dropped (or silently
+/// re-dated by clamping).
 fn parse_meept_timestamp(timestamp: &str) -> i64 {
     let trimmed = timestamp.trim();
-    // Length check keeps chars() indexing safe: "YYYY-MM-DDTHH:MM:SS" is 19.
-    if trimmed.len() >= 19 {
+    // char-bounded, not byte-bounded: a malformed value with multi-byte
+    // characters passes `len() >= 19` with fewer than 19 chars, and the
+    // slicing below must never panic. Fallible parse of the whole prefix —
+    // no unwrap_or/clamp repair that would report a wrong-but-valid instant.
+    if trimmed.chars().count() >= 19 {
         let chars: Vec<char> = trimmed.chars().collect();
-        let year: i32 = chars[0..4].iter().collect::<String>().parse().unwrap_or(0);
-        let month: u32 = chars[5..7].iter().collect::<String>().parse().unwrap_or(1);
-        let day: u32 = chars[8..10].iter().collect::<String>().parse().unwrap_or(1);
-        let hour: u32 = chars[11..13]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
-        let minute: u32 = chars[14..16]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
-        let second: u32 = chars[17..19]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
-        if let Some(date) =
-            chrono::NaiveDate::from_ymd_opt(year.max(1), month.clamp(1, 12), day.clamp(1, 31))
-        {
-            if let Some(datetime) =
-                date.and_hms_opt(hour.clamp(0, 23), minute.clamp(0, 59), second.clamp(0, 59))
-            {
-                return datetime.and_utc().timestamp_millis();
+        let parse_field = |range: std::ops::Range<usize>| -> Option<i64> {
+            chars[range].iter().collect::<String>().parse().ok()
+        };
+        if let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+            parse_field(0..4),
+            parse_field(5..7),
+            parse_field(8..10),
+            parse_field(11..13),
+            parse_field(14..16),
+            parse_field(17..19),
+        ) {
+            // Reject rather than clamp: month 13 or hour 99 means the value
+            // is not what meept writes, and shifting it to a nearby valid
+            // instant would misdate real usage.
+            let in_range = (1..=12).contains(&month)
+                && (1..=31).contains(&day)
+                && hour <= 23
+                && minute <= 59
+                && second <= 59;
+            if in_range {
+                if let Some(date) =
+                    chrono::NaiveDate::from_ymd_opt(year.max(1) as i32, month as u32, day as u32)
+                {
+                    if let Some(datetime) =
+                        date.and_hms_opt(hour as u32, minute as u32, second as u32)
+                    {
+                        return datetime.and_utc().timestamp_millis();
+                    }
+                }
             }
         }
     }
@@ -212,7 +220,10 @@ fn parse_meept_sqlite_on(conn: &Connection, db_path: &Path) -> Vec<UnifiedMessag
             Ok(())
         },
     );
-    if !scan.ran() {
+    // Require a COMPLETE scan: an Incomplete result is a prefix of the rows,
+    // indistinguishable from a small database, so converting it to messages
+    // would report silently undercounted totals.
+    if !scan.completed() {
         return Vec::new();
     }
 
@@ -437,6 +448,13 @@ mod tests {
         );
         assert_eq!(parse_meept_timestamp("garbage"), 0);
         assert_eq!(parse_meept_timestamp(""), 0);
+        // Multi-byte characters pass a byte-length check with fewer than 19
+        // chars; the parser must fall back to 0, never panic on slicing.
+        assert_eq!(parse_meept_timestamp("日本語のタイムスタンプです"), 0);
+        // Out-of-range fields are rejected (epoch fallback), not clamped
+        // into a nearby valid instant that would misdate real usage.
+        assert_eq!(parse_meept_timestamp("2026-13-40T25:99:99Z"), 0);
+        assert_eq!(parse_meept_timestamp("2026-00-00T00:00:00Z"), 0);
     }
 
     #[test]

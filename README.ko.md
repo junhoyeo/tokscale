@@ -1511,6 +1511,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Auggie CLI 세션 JSON 스냅샷(`*.json`) 파싱; 조인 키는 최상위 `sessionId` |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 | Hindsight | `$HINDSIGHT_HOME/usage/` (폴백: `~/.hindsight/usage/`) | `%HINDSIGHT_HOME%\usage\` (폴백: `%USERPROFILE%\.hindsight\usage\`) | `tokscale hindsight sync`를 통한 API 동기화; Hindsight 자체는 로컬 세션 로그를 남기지 않으므로 LLM 추적 API에서 추가 전용 JSONL 캐시로 동기화 |
+| Meept | `~/.meept/metrics.db` | `%USERPROFILE%\.meept\metrics.db` | 호출별 `llm_calls` 행을 읽기 전용으로 파싱(절대 쓰지 않음); meept 스키마 v2 필요(session_id / reasoning_tokens / cache_creation_tokens 열); 오류 행은 사용량이 없으므로 제외됨 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
 

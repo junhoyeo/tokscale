@@ -66,9 +66,9 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'U' },
     // Hindsight: uppercase 'H' stays mnemonic while lowercase 'h' belongs to Crush.
     ClientUi { hotkey: 'H' },
-    // Meept: lowercase 'm' belongs to Mux; uppercase 'M' (MiMo Code) is taken,
-    // so 'W' stands in ("tokscale ingest Watcher" of meept usage — the only
-    // unused letter left that is not a global binding).
+    // Meept: lowercase 'm' belongs to Mux and uppercase 'M' to MiMo Code;
+    // 'W' is the next unused letter that does not collide with a global
+    // binding (only lowercase 's' is one).
     ClientUi { hotkey: 'W' },
 ];
 

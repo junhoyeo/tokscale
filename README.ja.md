@@ -1510,6 +1510,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Auggie CLI のセッション JSON スナップショット（`*.json`）を解析。結合キーはトップレベルの `sessionId` |
 | Synthetic | 他ソースから再帰属 | 他ソースから再帰属 | `hf:`モデル + `synthetic`プロバイダを検出 |
 | Hindsight | `$HINDSIGHT_HOME/usage/`（フォールバック: `~/.hindsight/usage/`） | `%HINDSIGHT_HOME%\usage\`（フォールバック: `%USERPROFILE%\.hindsight\usage\`） | `tokscale hindsight sync` による API 同期；Hindsight 自体はローカルセッションログを保持しないため、LLM トレース API から追記専用 JSONL キャッシュに同期 |
+| Meept | `~/.meept/metrics.db` | `%USERPROFILE%\.meept\metrics.db` | 呼び出しごとの `llm_calls` 行を読み取り専用でパース（書き込みは行わない）。meept スキーマ v2 が必要（session_id / reasoning_tokens / cache_creation_tokens 列）。エラー行は使用量を持たないため除外される |
 
 > **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 

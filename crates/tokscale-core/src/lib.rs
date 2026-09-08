@@ -3198,15 +3198,23 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
     // Meept: per-call usage rows in the metrics SQLite database. Cost is not
     // persisted per row, so pricing resolves from the model id like the other
-    // unparsed-cost clients.
+    // unparsed-cost clients. Routed through the SQLite source cache so a warm
+    // scan skips re-reading the database when nothing changed.
     if let Some(db_path) = &scan_result.meept_db {
-        let meept_messages: Vec<UnifiedMessage> = sessions::meept::parse_meept_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
-            })
-            .collect();
+        let CachedParseOutcome {
+            messages: meept_messages,
+            cache_entry,
+            ..
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::Meept),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::meept::parse_meept_sqlite,
+        );
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
         all_messages.extend(meept_messages);
     }
 
