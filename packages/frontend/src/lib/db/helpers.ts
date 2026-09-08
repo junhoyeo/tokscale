@@ -418,8 +418,10 @@ function addClientCostFloor(
   extra: number
 ): void {
   if (extra <= 0) return;
+  // Use ordinal string order: localeCompare follows the host's collation,
+  // which could move a rounding residual to another model on replay.
   const models = Object.entries(cell.models ?? {})
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([, model]) => model);
   if (models.length === 0) {
     cell.cost = quantizeCost((cell.cost || 0) + extra);

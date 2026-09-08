@@ -259,6 +259,28 @@ describe("reapplyReplaceLayoutCostFloors", () => {
     expect(cell.cost).toBeCloseTo(0.0002, 10);
   });
 
+  it("assigns rounding residuals by model ID order regardless of host locale", () => {
+    const cell = incompleteClient(1, 1, 1);
+    const model = cell.models["model-0"];
+    cell.models = Object.fromEntries(
+      ["ä-model", "z-model", "a-model"].map((id) => [id, { ...model }]),
+    );
+    cell.tokens = 3;
+    cell.messages = 3;
+
+    reapplyReplaceLayoutCostFloors(
+      [{ sourceBreakdown: { droid: cell } }],
+      new Map([["droid", 0.0001]]),
+      new Set(["droid"]),
+    );
+
+    // Locale collation can put ä before z; ordinal ordering always puts it
+    // last, so the same model receives the undistributed 0.0001 on any host.
+    expect(cell.models["a-model"].cost).toBe(0);
+    expect(cell.models["z-model"].cost).toBe(0);
+    expect(cell.models["ä-model"].cost).toBe(0.0001);
+  });
+
   it("spreads a pre-rewrite cost floor onto days that had no stored cell", () => {
     const first = incompleteClient(120_000, 6, 1);
     const second = incompleteClient(120_000, 6, 1);

@@ -1096,8 +1096,9 @@ export async function POST(request: Request) {
 
       // Keep rounding residuals on the same dates when a new row becomes an
       // UPDATE on replay, regardless of the incoming contribution order.
+      // ISO date strings sort chronologically without host-locale collation.
       const mergedRows = [...toInsert, ...toUpdate].sort((a, b) =>
-        a.date.localeCompare(b.date)
+        a.date < b.date ? -1 : a.date > b.date ? 1 : 0
       );
       reapplyReplaceLayoutCostFloors(
         mergedRows,
