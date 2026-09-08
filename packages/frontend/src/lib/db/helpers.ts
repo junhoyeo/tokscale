@@ -418,19 +418,24 @@ function addClientCostFloor(
   extra: number
 ): void {
   if (extra <= 0) return;
-  const models = Object.values(cell.models ?? {});
+  const models = Object.entries(cell.models ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, model]) => model);
   if (models.length === 0) {
     cell.cost = quantizeCost((cell.cost || 0) + extra);
   } else {
     const tokenTotal = models.reduce((sum, model) => sum + (model.tokens || 0), 0);
     let assigned = 0;
     for (let i = 0; i < models.length; i++) {
-      const share =
+      const remaining = quantizeCost(extra - assigned);
+      const share = Math.min(
+        remaining,
         i === models.length - 1
-          ? quantizeCost(extra - assigned)
+          ? remaining
           : tokenTotal > 0
             ? quantizeCost((extra * (models[i].tokens || 0)) / tokenTotal)
-            : quantizeCost(extra / models.length);
+            : quantizeCost(extra / models.length)
+      );
       models[i].cost = quantizeCost((models[i].cost || 0) + share);
       assigned = quantizeCost(assigned + share);
     }
@@ -445,9 +450,11 @@ function addClientCostFloor(
 }
 
 /**
- * Same-day cost floors cannot follow tokens that a snapshot layout moves onto
- * a day with no previously stored cell. Re-apply the pre-rewrite client total
- * across the new cells so an unpriced re-date cannot drop lifetime cost.
+ * Reconcile exact replacement cells against the pre-rewrite client lifetime
+ * cost. Same-day/model floors would duplicate spend when usage moves between
+ * dates; only the lifetime deficit may be added to the incoming layout.
+ * Complete days retain their exact prices; only incomplete cells can absorb
+ * the deficit. Callers must preserve the incoming per-cell completeness tags.
  */
 export function reapplyReplaceLayoutCostFloors(
   rows: Array<{ sourceBreakdown: Record<string, ClientBreakdownData> }>,
@@ -465,16 +472,24 @@ export function reapplyReplaceLayoutCostFloors(
     const current = cells.reduce((sum, cell) => sum + (cell.cost || 0), 0);
     const deficit = quantizeCost(floor - current);
     if (deficit <= 0) continue;
-    const tokenTotal = cells.reduce((sum, cell) => sum + (cell.tokens || 0), 0);
+    const incompleteCells = cells.filter(
+      (cell) => cell.provenance?.costIsComplete === false
+    );
+    const tokenTotal = incompleteCells.reduce((sum, cell) => sum + (cell.tokens || 0), 0);
     let assigned = 0;
-    for (let i = 0; i < cells.length; i++) {
-      const share =
-        i === cells.length - 1
-          ? quantizeCost(deficit - assigned)
+    for (let i = 0; i < incompleteCells.length; i++) {
+      // Rounded proportional shares can exhaust the deficit before the last
+      // cell. Cap each allocation so the remainder never goes negative.
+      const remaining = quantizeCost(deficit - assigned);
+      const share = Math.min(
+        remaining,
+        i === incompleteCells.length - 1
+          ? remaining
           : tokenTotal > 0
-            ? quantizeCost((deficit * cells[i].tokens) / tokenTotal)
-            : quantizeCost(deficit / cells.length);
-      addClientCostFloor(cells[i], share);
+            ? quantizeCost((deficit * incompleteCells[i].tokens) / tokenTotal)
+            : quantizeCost(deficit / incompleteCells.length)
+      );
+      addClientCostFloor(incompleteCells[i], share);
       assigned = quantizeCost(assigned + share);
     }
   }

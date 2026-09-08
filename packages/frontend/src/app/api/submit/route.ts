@@ -96,9 +96,13 @@ function applyReplaceLayouts(
     if (!isReplacePlan(plan) || !plan.layoutDays) continue;
     const next = ownValue(plan.layoutDays, date);
     if (next) {
+      // A replacement is the authoritative token/model layout. Old same-day
+      // models may now belong to another date, so carrying their fields or
+      // cost floors forward would count them twice. Restore any incomplete
+      // cost deficit once across the client's lifetime after all cells exist.
       merged[client] = applyCostCompleteness(
         next,
-        ownValue(merged, client),
+        undefined,
         incomingCostIsComplete
       );
     } else {
@@ -889,6 +893,7 @@ export async function POST(request: Request) {
 
       const toUpdate: Array<{
         id: string;
+        date: string;
         tokens: number;
         cost: string;
         inputTokens: number;
@@ -903,7 +908,11 @@ export async function POST(request: Request) {
 
       for (const incomingDay of daysToProcess.values()) {
         if (incomingDay.totals?.costIsComplete === false) {
-          for (const client of replaceClients) incompleteReplaceClients.add(client);
+          for (const client of replaceClients) {
+            if (ownValue(parserPlans.get(client)?.layoutDays ?? {}, incomingDay.date)) {
+              incompleteReplaceClients.add(client);
+            }
+          }
         }
         const incomingClientBreakdown = foldIncomingClientContributions(
           incomingDay.clients
@@ -1038,6 +1047,7 @@ export async function POST(request: Request) {
 
           toUpdate.push({
             id: existingDay.id,
+            date: incomingDay.date,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
@@ -1084,12 +1094,17 @@ export async function POST(request: Request) {
         }
       }
 
+      // Keep rounding residuals on the same dates when a new row becomes an
+      // UPDATE on replay, regardless of the incoming contribution order.
+      const mergedRows = [...toInsert, ...toUpdate].sort((a, b) =>
+        a.date.localeCompare(b.date)
+      );
       reapplyReplaceLayoutCostFloors(
-        [...toInsert, ...toUpdate],
+        mergedRows,
         replaceCostFloors,
         incompleteReplaceClients
       );
-      for (const row of [...toInsert, ...toUpdate]) {
+      for (const row of mergedRows) {
         const dayTotals = recalculateDayTotals(row.sourceBreakdown);
         row.tokens = dayTotals.tokens;
         row.cost = dayTotals.cost.toFixed(4);

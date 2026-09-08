@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SUPPORTED_VERSIONED_PARSERS } from "../../src/lib/db/parserHighWater";
+import type { ClientBreakdownData } from "../../src/lib/db/helpers";
 
 // End-to-end regression for the Antigravity CLI re-attribution.
 //
@@ -158,14 +159,7 @@ function collectStrings(
   }
 }
 
-type StoredBreakdown = Record<
-  string,
-  {
-    tokens: number;
-    cost?: number;
-    provenance?: { costIsComplete?: boolean };
-  }
->;
+type StoredBreakdown = Record<string, ClientBreakdownData>;
 
 type PersistedDay = {
   id: string;
@@ -687,6 +681,225 @@ describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
 });
 
 describe("POST /api/submit droid snapshot layout", () => {
+  function snapshotBody(
+    days: Array<{
+      date: string;
+      costIsComplete: boolean;
+      models: Array<{ modelId: string; tokens: number; cost: number; messages: number }>;
+    }>,
+  ) {
+    const body = submissionBody("droid", []);
+    const dates = days.map(({ date }) => date).sort();
+    return {
+      ...body,
+      meta: { ...body.meta, dateRange: { start: dates[0], end: dates[dates.length - 1] } },
+      contributions: days.map((day) => ({
+        date: day.date,
+        totals: { costIsComplete: day.costIsComplete },
+        clients: day.models.map((model) => ({
+          client: "droid",
+          modelId: model.modelId,
+          tokens: { input: model.tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          cost: model.cost,
+          messages: model.messages,
+        })),
+      })),
+    };
+  }
+
+  async function submitSnapshot(store: Store, body: ReturnType<typeof snapshotBody>) {
+    installTx(store);
+    mockSubmit(body);
+    const response = await post(body);
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  function expectSnapshotLayout(store: Store, body: ReturnType<typeof snapshotBody>) {
+    for (const day of body.contributions) {
+      const cell = store.days.find((stored) => stored.date === day.date)!.sourceBreakdown.droid;
+      expect(Object.keys(cell.models).sort()).toEqual(day.clients.map(({ modelId }) => modelId).sort());
+      for (const client of day.clients) {
+        expect(cell.models[client.modelId]).toMatchObject({
+          tokens: client.tokens.input,
+          input: client.tokens.input,
+          messages: client.messages,
+        });
+      }
+      const models = Object.values(cell.models);
+      expect(cell.tokens).toBe(models.reduce((sum, model) => sum + model.tokens, 0));
+      expect(cell.messages).toBe(models.reduce((sum, model) => sum + model.messages, 0));
+      expect(cell.cost).toBeCloseTo(models.reduce((sum, model) => sum + model.cost, 0), 8);
+    }
+  }
+
+  const originalSnapshot = () => snapshotBody([{
+    date: "2026-08-07",
+    costIsComplete: false,
+    models: [
+      { modelId: "gemini-3-pro", tokens: 100_000, cost: 100, messages: 2 },
+      { modelId: "unknown", tokens: 2, cost: 0, messages: 2 },
+    ],
+  }]);
+
+  it.each([false, true])("reconciles overlapping partially priced days once per lifetime (legacy=%s)", async (legacy) => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    if (legacy) {
+      store.device.parserVersions = {};
+      store.device.parserStates = {};
+    }
+    const rewritten = snapshotBody([
+      { date: "2026-08-07", costIsComplete: false, models: [
+        { modelId: "gemini-3-pro", tokens: 40_000, cost: 40, messages: 1 },
+        { modelId: "unknown", tokens: 1, cost: 0, messages: 1 },
+      ] },
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { modelId: "gemini-3-pro", tokens: 60_000, cost: 60, messages: 1 },
+        { modelId: "unknown", tokens: 1, cost: 0, messages: 1 },
+      ] },
+    ]);
+    for (let replay = 0; replay < 3; replay++) {
+      const json = await submitSnapshot(store, rewritten);
+      expectSnapshotLayout(store, rewritten);
+      expect(storedTokens(store)).toBe(100_002);
+      expect(storedCost(store)).toBe(100);
+      expect(json.metrics.totalCost).toBe(100);
+      expect(store.days.every(({ sourceBreakdown }) => sourceBreakdown.droid.provenance?.costIsComplete === false)).toBe(true);
+    }
+  });
+
+  it("removes moved models from an incomplete source day without duplicating their cost", async () => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    const rewritten = snapshotBody([
+      { date: "2026-08-07", costIsComplete: false, models: [
+        { modelId: "unknown", tokens: 2, cost: 0, messages: 2 },
+      ] },
+      { date: "2026-08-08", costIsComplete: true, models: [
+        { modelId: "gemini-3-pro", tokens: 100_000, cost: 100, messages: 2 },
+      ] },
+    ]);
+    for (let replay = 0; replay < 2; replay++) {
+      await submitSnapshot(store, rewritten);
+      expectSnapshotLayout(store, rewritten);
+      expect(storedCost(store)).toBe(100);
+    }
+  });
+
+  it("keeps only the lifetime deficit across replays and clears it when pricing recovers", async () => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    const rewritten = snapshotBody([
+      { date: "2026-08-07", costIsComplete: false, models: [
+        { modelId: "gemini-3-pro", tokens: 40_000, cost: 10, messages: 1 },
+        { modelId: "unknown", tokens: 1, cost: 0, messages: 1 },
+      ] },
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { modelId: "gemini-3-pro", tokens: 60_000, cost: 20, messages: 1 },
+        { modelId: "unknown", tokens: 1, cost: 0, messages: 1 },
+      ] },
+    ]);
+    await submitSnapshot(store, rewritten);
+    expect(storedCost(store)).toBeCloseTo(100, 8);
+    expectSnapshotLayout(store, rewritten);
+    const beforeReplay = structuredClone(store.days);
+    await submitSnapshot(store, rewritten);
+    expect(store.days).toEqual(beforeReplay);
+
+    // A complete resubmit supplies the authoritative price and may correct
+    // a prior floor downward, including cost inflated by the old merge.
+    for (const day of rewritten.contributions) day.totals.costIsComplete = true;
+    await submitSnapshot(store, rewritten);
+    expect(storedCost(store)).toBe(30);
+    expectSnapshotLayout(store, rewritten);
+    expect(store.days.every(({ sourceBreakdown }) => sourceBreakdown.droid.provenance?.costIsComplete !== false)).toBe(true);
+  });
+
+  it("keeps rounding residuals on the same dates and models after new rows become updates", async () => {
+    const store = newStore();
+    const models = ["z-model", "a-model", "m-model", "b-model"].map((modelId) => ({
+      modelId, tokens: 1, cost: 0, messages: 1,
+    }));
+    const original = snapshotBody([{
+      date: "2026-08-07", costIsComplete: false,
+      models: models.map((model, index) => ({ ...model, cost: index === 0 ? 0.0014 : 0 })),
+    }]);
+    await submitSnapshot(store, original);
+    const rewritten = snapshotBody(["2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10"].map((date) => ({
+      date, costIsComplete: false, models,
+    })));
+    await submitSnapshot(store, rewritten);
+    expect(storedCost(store)).toBeCloseTo(0.0014, 10);
+    expectSnapshotLayout(store, rewritten);
+    const beforeReplay = structuredClone(store.days);
+    await submitSnapshot(store, rewritten);
+    expect(store.days).toEqual(beforeReplay);
+    rewritten.contributions.reverse();
+    for (const day of rewritten.contributions) day.clients.reverse();
+    await submitSnapshot(store, rewritten);
+    expect(store.days).toEqual(beforeReplay);
+    expectSnapshotLayout(store, rewritten);
+  });
+
+  it("allocates a lifetime deficit only to incomplete Droid days", async () => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    const rewritten = snapshotBody([
+      { date: "2026-08-07", costIsComplete: false, models: [
+        { modelId: "unknown", tokens: 2, cost: 0, messages: 2 },
+      ] },
+      { date: "2026-08-08", costIsComplete: true, models: [
+        { modelId: "gemini-3-pro", tokens: 100_000, cost: 60, messages: 2 },
+      ] },
+    ]);
+    for (let replay = 0; replay < 3; replay++) {
+      await submitSnapshot(store, rewritten);
+      expectSnapshotLayout(store, rewritten);
+      expect(storedCost(store)).toBe(100);
+      const incomplete = store.days.find(({ date }) => date === "2026-08-07")!.sourceBreakdown.droid;
+      const complete = store.days.find(({ date }) => date === "2026-08-08")!.sourceBreakdown.droid;
+      expect(incomplete.cost).toBe(40);
+      expect(incomplete.provenance?.costIsComplete).toBe(false);
+      expect(complete.cost).toBe(60);
+      expect(complete.models["gemini-3-pro"].cost).toBe(60);
+      expect(complete.provenance?.costIsComplete).not.toBe(false);
+    }
+  });
+
+  it("repairs previously retained model tokens and lets complete pricing correct inflated spend", async () => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    // Model the already-persisted shape produced by the old day-floor merge.
+    const oldCell = store.days[0].sourceBreakdown.droid;
+    oldCell.models["moved-model"] = { ...oldCell.models["gemini-3-pro"], cost: 60 };
+    oldCell.cost = 160;
+
+    const incomplete = originalSnapshot();
+    await submitSnapshot(store, incomplete);
+    expectSnapshotLayout(store, incomplete);
+    expect(storedCost(store)).toBe(160);
+    const complete = originalSnapshot();
+    complete.contributions[0].totals.costIsComplete = true;
+    await submitSnapshot(store, complete);
+    expectSnapshotLayout(store, complete);
+    expect(storedCost(store)).toBe(100);
+  });
+
+  it("freezes an incomplete partial rescan after a replacement", async () => {
+    const store = newStore();
+    await submitSnapshot(store, originalSnapshot());
+    await submitSnapshot(store, originalSnapshot());
+    const beforePartial = structuredClone(store.days);
+    const partial = snapshotBody([{
+      date: "2026-08-09", costIsComplete: false,
+      models: [{ modelId: "gemini-3-pro", tokens: 200_000, cost: 20, messages: 5 }],
+    }]);
+    partial.scanScope.fullHistory = false;
+    await submitSnapshot(store, partial);
+    expect(store.days).toEqual(beforePartial);
+  });
+
   it("replaces stored Droid days when a full snapshot re-dates the same lifetime", async () => {
     const { store, firstJson, secondJson } = await submitOldThenNew("droid");
 
@@ -741,7 +954,8 @@ describe("POST /api/submit droid snapshot layout", () => {
 
     const startDay = store.days.find((day) => day.date === "2026-08-07");
     expect(startDay?.sourceBreakdown.droid.tokens).toBe(40_000);
-    expect(Number(startDay?.sourceBreakdown.droid.cost)).toBe(240);
+    expect(Number(startDay?.sourceBreakdown.droid.cost)).toBe(40);
+    expect(storedCost(store)).toBe(240);
     expect(startDay?.sourceBreakdown.droid.provenance?.costIsComplete).toBe(
       false,
     );
@@ -838,6 +1052,31 @@ function droidAndClaudeBody(
 }
 
 describe("POST /api/submit droid snapshot layout sibling clients", () => {
+  it("does not floor complete Droid pricing because another client's day is incomplete", async () => {
+    const store = newStore();
+    const first = droidAndClaudeBody([
+      { date: "2026-08-07", droid: 100_000 },
+      { date: "2026-08-08", claude: 1_000 },
+    ]);
+    installTx(store);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    const corrected = droidAndClaudeBody([
+      { date: "2026-08-07", droid: 100_000 },
+      { date: "2026-08-08", claude: 1_000 },
+    ]);
+    corrected.contributions[0].clients[0].cost = 50;
+    Object.assign(corrected.contributions[1], { totals: { costIsComplete: false } });
+    installTx(store);
+    mockSubmit(corrected);
+    expect((await post(corrected)).status).toBe(200);
+    const droid = store.days.find(({ date }) => date === "2026-08-07")!.sourceBreakdown.droid;
+    expect(droid.cost).toBe(50);
+    expect(droid.provenance?.costIsComplete).not.toBe(false);
+    expect(store.days.find(({ date }) => date === "2026-08-08")!.sourceBreakdown.claude.cost).toBe(1);
+  });
+
   it("does not report a sibling client as disappeared from a day the snapshot only emptied of Droid", async () => {
     const store = newStore();
 

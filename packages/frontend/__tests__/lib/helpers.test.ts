@@ -226,9 +226,42 @@ describe("applyCostCompleteness", () => {
 });
 
 describe("reapplyReplaceLayoutCostFloors", () => {
+  function incompleteClient(tokens: number, messages: number, modelCount: number): ClientBreakdownData {
+    return {
+      ...makeClient(tokens, messages, modelCount),
+      provenance: { schemaVersion: 1, messageCount: messages, modelCount, costIsComplete: false },
+    };
+  }
+
+  it("does not overspend a rounded deficit across days", () => {
+    const rows = Array.from({ length: 4 }, () => ({
+      sourceBreakdown: { droid: incompleteClient(1, 1, 1) },
+    }));
+    reapplyReplaceLayoutCostFloors(rows, new Map([["droid", 0.0002]]), new Set(["droid"]));
+    expect(rows.reduce((sum, row) => sum + row.sourceBreakdown.droid.cost, 0)).toBeCloseTo(0.0002, 10);
+    expect(rows.every(({ sourceBreakdown }) => sourceBreakdown.droid.cost >= 0)).toBe(true);
+    const beforeReplay = structuredClone(rows);
+    reapplyReplaceLayoutCostFloors(rows, new Map([["droid", 0.0002]]), new Set(["droid"]));
+    expect(rows).toEqual(beforeReplay);
+  });
+
+  it("never subtracts a rounded remainder from the last model", () => {
+    const cell = incompleteClient(1, 1, 4);
+    cell.tokens = 4;
+    cell.messages = 4;
+    reapplyReplaceLayoutCostFloors(
+      [{ sourceBreakdown: { droid: cell } }],
+      new Map([["droid", 0.0002]]),
+      new Set(["droid"]),
+    );
+    expect(Object.values(cell.models).every(({ cost }) => cost >= 0)).toBe(true);
+    expect(Object.values(cell.models).reduce((sum, model) => sum + model.cost, 0)).toBeCloseTo(0.0002, 10);
+    expect(cell.cost).toBeCloseTo(0.0002, 10);
+  });
+
   it("spreads a pre-rewrite cost floor onto days that had no stored cell", () => {
-    const first = makeClient(120_000, 6, 1) as ClientBreakdownData;
-    const second = makeClient(120_000, 6, 1) as ClientBreakdownData;
+    const first = incompleteClient(120_000, 6, 1);
+    const second = incompleteClient(120_000, 6, 1);
     const rows = [{ sourceBreakdown: { droid: first } }, { sourceBreakdown: { droid: second } }];
 
     reapplyReplaceLayoutCostFloors(
@@ -243,7 +276,7 @@ describe("reapplyReplaceLayoutCostFloors", () => {
   });
 
   it("splits a cell's cost floor across models by token share", () => {
-    const cell = makeClient(100_000, 4, 2) as ClientBreakdownData;
+    const cell = incompleteClient(100_000, 4, 2);
     cell.models["model-0"].tokens = 75_000;
     cell.models["model-1"].tokens = 25_000;
     cell.tokens = 100_000;
