@@ -606,6 +606,41 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     ).toBe(260_000);
   });
 
+  it("reports the deficit when the store ages history out from under the high-water", async () => {
+    const store = newStore();
+    installTx(store);
+    const first = submissionBody("antigravity-cli", SESSION_START_DATING);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    // The CLI keeps a rolling conversation store, so weeks later a full scan
+    // no longer reaches the credited session at all: it reports 90,000
+    // genuinely new tokens against a 240,000 credited lifetime.
+    installTx(store);
+    const aged = submissionBody("antigravity-cli", [
+      { date: "2026-09-01", tokens: 90_000, messages: 5 },
+    ]);
+    mockSubmit(aged);
+    const response = await post(aged);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    // The bound holds, which is the point of the registry entry: a snapshot
+    // below the credited lifetime is indistinguishable from a re-attribution.
+    expect(json.metrics.totalTokens).toBe(240_000);
+    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
+
+    // What must not happen silently. Without the warning this response is
+    // identical to one that stored everything.
+    expect(
+      json.warnings.some(
+        (warning: string) =>
+          warning.includes("Added no Antigravity CLI usage") &&
+          warning.includes("150,000"),
+      ),
+    ).toBe(true);
+  });
+
   it("still inflates for a client that is legitimately not registered", async () => {
     // Claude's parser does not re-attribute submitted history, so it is not in
     // SUPPORTED_VERSIONED_PARSERS and takes the plain day-by-day merge path.

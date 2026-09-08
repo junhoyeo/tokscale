@@ -127,6 +127,13 @@ export interface ParserHighWaterPlan {
   /** Absolute cells when `mode` is `replace`; omitted otherwise. */
   layoutDays?: Record<string, ClientBreakdownData>;
   nextState?: ParserClientHighWaterState;
+  /**
+   * Lifetime tokens the credited ledger holds beyond what this snapshot
+   * reports. Positive means no growth was allocatable and none can be until
+   * the parser reports at least this much more, which is indistinguishable
+   * from a re-attribution and so is never credited.
+   */
+  highWaterDeficit?: number;
 }
 
 function copyModels(
@@ -813,9 +820,13 @@ export function planParserHighWaterSubmission(args: {
     incomingAggregate
   );
 
+  const highWaterDeficit = positive(
+    previousAggregate.tokens - incomingAggregate.tokens
+  );
   return {
     mode: "incremental",
     increments,
+    ...(highWaterDeficit > 0 ? { highWaterDeficit } : {}),
     nextState: stateAfterCreditedIncrements(
       supportedVersion,
       previousCreditedDays,

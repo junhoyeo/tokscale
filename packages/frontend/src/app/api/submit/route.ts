@@ -847,6 +847,17 @@ export async function POST(request: Request) {
             `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
           );
         }
+        if (plan.highWaterDeficit) {
+          // Without this the submit is indistinguishable from a successful
+          // one: the client is listed as scanned, the request returns 200, and
+          // nothing says the device has been contributing zero for this client
+          // since its scan fell below the credited high-water.
+          warnings.push(
+            `Added no ${label} usage because this scan reports ${plan.highWaterDeficit.toLocaleString(
+              "en-US"
+            )} fewer lifetime tokens than this device has already been credited. Local history that is deleted or aged out of the client's own store stays credited, so nothing is added until the scan exceeds the stored high-water again.`
+          );
+        }
       }
       const plannedIncrementClients = [...parserPlans].filter(
         ([, plan]) =>
