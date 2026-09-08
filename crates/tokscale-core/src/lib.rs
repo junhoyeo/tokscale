@@ -12490,6 +12490,125 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_openclaw_cli_auth_codex_rollouts_are_owned_once_across_parse_lanes() {
+        // Older OpenClaw versions used a per-profile Codex CLI auth home and
+        // stamped `codex_exec`/`exec` instead of OpenClaw on its rollouts.
+        // The agent-owned path, not that metadata, must decide ownership.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+
+        let codex_home = home.join(".openclaw/agents/main/agent/cli-auth/codex/default");
+        let sessions = codex_home.join("sessions/2026/08/30");
+        let archived_sessions = codex_home.join("archived_sessions/2026/08/30");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&archived_sessions).unwrap();
+        let rollout = sessions.join(format!(
+            "rollout-2026-08-30T10-00-00-{OPENCLAW_CODEX_THREAD}.jsonl"
+        ));
+        let rollout_body = openclaw_codex_rollout_with_turns(
+            OPENCLAW_CODEX_THREAD,
+            "codex_exec",
+            &[("turn-1", OPENCLAW_CODEX_TURN_1)],
+        )
+        .replace(r#""source":"cli""#, r#""source":"exec""#);
+        std::fs::write(&rollout, &rollout_body).unwrap();
+        // Codex archives can duplicate a live rollout. The shared OpenClaw
+        // dedup must keep one copy after both locations are classified alike.
+        std::fs::write(
+            archived_sessions.join(rollout.file_name().unwrap()),
+            &rollout_body,
+        )
+        .unwrap();
+        std::fs::write(codex_home.join("history.jsonl"), "not a rollout\n").unwrap();
+
+        let mut env = crate::paths::test_env::EnvGuard::capture(&[
+            "CODEX_HOME",
+            "TOKSCALE_EXTRA_DIRS",
+            "TOKSCALE_HEADLESS_DIR",
+        ]);
+        env.remove("CODEX_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
+        env.remove("TOKSCALE_HEADLESS_DIR");
+
+        let both = ["codex".to_string(), "openclaw".to_string()];
+        let expected = vec![
+            (
+                "openclaw".to_string(),
+                OPENCLAW_CODEX_THREAD.to_string(),
+                300,
+                700,
+                50,
+            ),
+            (
+                "openclaw".to_string(),
+                OPENCLAW_CODEX_THREAD.to_string(),
+                400,
+                800,
+                300,
+            ),
+        ];
+        // With the default Codex home, this can only reach the parser through
+        // OpenClaw's agents-root walk; it must not depend on CODEX_HOME overlap.
+        let default_home = parse_all_messages_with_pricing_with_cache_policy(
+            home.to_str().unwrap(),
+            &both,
+            None,
+            true,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&default_home), expected);
+
+        env.set("CODEX_HOME", &codex_home);
+        let cold = parse_all_messages_with_pricing_with_cache_policy(
+            home.to_str().unwrap(),
+            &both,
+            None,
+            true,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&cold), expected);
+        let warm = parse_all_messages_with_pricing_with_cache_policy(
+            home.to_str().unwrap(),
+            &both,
+            None,
+            true,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+        );
+        assert_eq!(openclaw_usage_by_client_session(&warm), expected);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: true,
+            clients: Some(both.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 2);
+        assert_eq!(parsed.counts.get(ClientId::Codex), 0);
+
+        // With OpenClaw absent, a user-selected CODEX_HOME remains Codex's.
+        let codex_only = parse_all_messages_with_pricing_with_cache_policy(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+            true,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+        );
+        assert_eq!(codex_only.len(), 2);
+        assert!(codex_only.iter().all(|message| message.client == "codex"));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_synthetic_request_keeps_codex_usage_a_synthetic_gateway_served() {
         // `--client synthetic` keeps whatever any client routed through a
         // synthetic gateway; the flush filter is where that is decided, and

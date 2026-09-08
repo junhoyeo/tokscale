@@ -1257,7 +1257,11 @@ fn parser_version(client: ClientId) -> u32 {
         // archived spelling. The doctor never writes to those files again, so
         // their fingerprints stay valid and a warm v4 entry would keep serving
         // `archive-tier.<id>` sessions without the parser ever running.
-        ClientId::OpenClaw => 5,
+        // v5->v6 (#1298): legacy per-agent `cli-auth/codex/<profile>` homes
+        // are Codex rollouts OpenClaw owns, rather than OpenClaw transcripts.
+        // Their bytes are unchanged, so v5's cached empty transcript result
+        // must not survive the new path classification.
+        ClientId::OpenClaw => 6,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3630,10 +3634,12 @@ mod tests {
     /// source cache, so only the version can retire TUI aggregates that
     /// still include them. #1299 needs v5: the doctor's `archive-tier.`
     /// import archives never change on disk, so a v4 entry that named their
-    /// sessions by the archived spelling is served warm forever.
+    /// sessions by the archived spelling is served warm forever. #1298 needs
+    /// v6 because legacy CLI-auth Codex rollout bytes were cached as empty
+    /// OpenClaw transcripts before their path classification changed.
     #[test]
-    fn test_openclaw_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 5);
+    fn test_openclaw_parser_version_invalidates_v5_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 6);
     }
 
     #[test]
@@ -3974,8 +3980,58 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 5);
+        assert_eq!(cached.parser_version, 6);
         assert_eq!(cached.messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_v5_empty_shards_are_rejected_before_cli_auth_reclassification() {
+        // Legacy CLI-auth Codex rollout bytes never change after their former
+        // OpenClaw-transcript parse cached them as empty, so v6 must retire the
+        // unchanged v5 shard before the location-based parser can read them.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join(
+            "agents/main/agent/cli-auth/codex/default/sessions/2026/08/30/rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl",
+        );
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            br#"{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"0192f3a4-5b6c-7d8e-9f01-23456789abcd","originator":"codex_exec","source":"exec"}}"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let stale_identity = CacheIdentity {
+            parser_version: 5,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let cache = SourceMessageCache::load();
+        assert!(
+            cache.get(identity, &source).is_none(),
+            "a v5 empty transcript entry must not mask a legacy CLI-auth rollout"
+        );
+        assert_eq!(SourceFingerprint::from_path(&source).unwrap(), fingerprint);
     }
 
     #[test]
