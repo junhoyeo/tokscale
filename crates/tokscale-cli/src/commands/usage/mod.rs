@@ -351,6 +351,7 @@ fn load_cache_at(path: &std::path::Path) -> Option<Vec<UsageOutput>> {
 #[cfg_attr(test, allow(dead_code))]
 pub fn load_cache() -> Option<Vec<UsageOutput>> {
     load_cache_at(&cache_path()?)
+        .map(|outputs| filter_disabled_outputs(outputs, &disabled_provider_ids()))
 }
 
 // ── Public API ──
@@ -370,19 +371,31 @@ impl Fetch {
     }
 }
 
-type UsageProvider = (&'static str, fn() -> bool, Fetch);
+type UsageProvider = (&'static str, &'static str, fn() -> bool, Fetch);
 
 fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
     vec![
         (
+            "claude",
             "Claude",
             claude::has_credentials,
             Fetch::Single(claude::fetch),
         ),
-        ("Codex", codex::has_credentials, codex_fetch),
-        ("Z.ai", zai::has_credentials, Fetch::Single(zai::fetch)),
-        ("Amp", amp::has_credentials, Fetch::Single(amp::fetch)),
+        ("codex", "Codex", codex::has_credentials, codex_fetch),
         (
+            "zai",
+            "Z.ai",
+            zai::has_credentials,
+            Fetch::Single(zai::fetch),
+        ),
+        (
+            "amp",
+            "Amp",
+            amp::has_credentials,
+            Fetch::Single(amp::fetch),
+        ),
+        (
+            "antigravity",
             "Antigravity",
             antigravity::has_credentials,
             // One output per model group: Antigravity meters Gemini models and
@@ -390,38 +403,82 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
             Fetch::Multi(antigravity::fetch_all),
         ),
         (
+            "copilot",
             "Copilot",
             copilot::has_credentials,
             Fetch::Single(copilot::fetch),
         ),
         (
+            "grok",
             "Grok Build",
             grok::has_credentials,
             Fetch::Single(grok::fetch),
         ),
-        ("Kimi", kimi::has_credentials, Fetch::Single(kimi::fetch)),
         (
+            "kimi",
+            "Kimi",
+            kimi::has_credentials,
+            Fetch::Single(kimi::fetch),
+        ),
+        (
+            "minimax",
             "MiniMax",
             minimax::has_credentials,
             Fetch::Single(minimax::fetch),
         ),
         (
+            "minimax-token-plan",
             "MiniMax Token Plan",
             minimax_tokenplan::has_credentials,
             Fetch::Multi(minimax_tokenplan::fetch_all),
         ),
-        ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
         (
+            "warp",
+            "Warp/Oz",
+            warp::has_credentials,
+            Fetch::Single(warp::fetch),
+        ),
+        (
+            "sakana",
             "Sakana",
             sakana::has_credentials,
             Fetch::Single(sakana::fetch),
         ),
         (
+            "opencode-go",
             "OpenCode Go",
             opencode_go::has_credentials,
             Fetch::Multi(opencode_go::fetch_all),
         ),
     ]
+}
+
+fn disabled_provider_ids() -> std::collections::HashSet<String> {
+    crate::tui::settings::Settings::load()
+        .usage
+        .disabled_providers
+        .into_iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+fn filter_disabled_outputs(
+    outputs: impl IntoIterator<Item = UsageOutput>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<UsageOutput> {
+    outputs
+        .into_iter()
+        .filter(|output| {
+            provider_id_for_label(&output.provider).is_none_or(|id| !disabled.contains(id))
+        })
+        .collect()
+}
+
+fn provider_id_for_label(label: &str) -> Option<&'static str> {
+    usage_providers(Fetch::Multi(codex::fetch_all))
+        .into_iter()
+        .find_map(|(id, provider, _, _)| (provider == label).then_some(id))
 }
 
 fn fetch_provider_report(
@@ -443,13 +500,31 @@ pub fn fetch_all_report_with_intent(intent: UsageFetchIntent) -> UsageFetchRepor
 }
 
 fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFetchReport {
+    let disabled = disabled_provider_ids();
+    fetch_all_report_from_providers(
+        usage_providers(Fetch::Multi(codex::fetch_all)),
+        &disabled,
+        codex_fetch,
+    )
+}
+
+fn fetch_all_report_from_providers(
+    providers: Vec<UsageProvider>,
+    disabled: &std::collections::HashSet<String>,
+    codex_fetch: fn() -> UsageFetchReport,
+) -> UsageFetchReport {
     let mut active: Vec<UsageProvider> = Vec::new();
     // Observability (#947): when a provider is filtered out for lack of
     // credentials, log what was probed so a missing quota card can be traced
     // to credential detection rather than the fetch path.
-    for (provider, has, fetch) in usage_providers(Fetch::Multi(codex::fetch_all)) {
+    for (id, provider, has, fetch) in providers {
+        // This check is deliberately before `has()`: probing some providers
+        // imports auth state, which users explicitly opted out of touching.
+        if disabled.contains(id) {
+            continue;
+        }
         if has() {
-            active.push((provider, has, fetch));
+            active.push((id, provider, has, fetch));
         } else {
             tracing::debug!(
                 provider,
@@ -470,7 +545,7 @@ fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFe
     std::thread::scope(|scope| {
         let handles = active
             .into_iter()
-            .map(|(provider, _, fetch)| {
+            .map(|(_, provider, _, fetch)| {
                 let handle = if provider == "Codex" {
                     scope.spawn(codex_fetch)
                 } else {
@@ -493,6 +568,10 @@ fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFe
                 )),
             }
         }
+        report.outputs = filter_disabled_outputs(report.outputs, disabled);
+        report.diagnostics.retain(|diagnostic| {
+            provider_id_for_label(&diagnostic.provider).is_none_or(|id| !disabled.contains(id))
+        });
         report
     })
 }
@@ -608,7 +687,39 @@ pub fn run(json: bool, _light: bool, debug: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    static COUNTERS: OnceLock<Mutex<(usize, usize)>> = OnceLock::new();
+
+    fn counters() -> &'static Mutex<(usize, usize)> {
+        COUNTERS.get_or_init(|| Mutex::new((0, 0)))
+    }
+
+    fn counted_has_credentials() -> bool {
+        counters().lock().unwrap().0 += 1;
+        true
+    }
+
+    fn counted_fetch() -> Result<UsageOutput> {
+        counters().lock().unwrap().1 += 1;
+        Ok(sample_output("Copilot"))
+    }
+
+    fn empty_codex_fetch() -> UsageFetchReport {
+        UsageFetchReport::default()
+    }
+
+    fn copilot_report_fetch() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: vec![sample_output("Copilot")],
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Copilot",
+                None,
+                "stale diagnostic",
+            )],
+        }
+    }
 
     #[test]
     fn subscription_cache_public_helpers_are_noop_in_tests() {
@@ -633,6 +744,73 @@ mod tests {
         assert!(expected.exists());
         clear_cache_at(&expected);
         assert!(!expected.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disabled_provider_skips_credential_probe_and_fetch() {
+        *counters().lock().unwrap() = (0, 0);
+        let disabled = std::collections::HashSet::from(["copilot".to_string()]);
+
+        let report = fetch_all_report_from_providers(
+            vec![(
+                "copilot",
+                "Copilot",
+                counted_has_credentials,
+                Fetch::Single(counted_fetch),
+            )],
+            &disabled,
+            empty_codex_fetch,
+        );
+
+        assert!(report.outputs.is_empty());
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(*counters().lock().unwrap(), (0, 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn enabled_provider_still_probes_and_fetches() {
+        *counters().lock().unwrap() = (0, 0);
+
+        let report = fetch_all_report_from_providers(
+            vec![(
+                "copilot",
+                "Copilot",
+                counted_has_credentials,
+                Fetch::Single(counted_fetch),
+            )],
+            &std::collections::HashSet::new(),
+            empty_codex_fetch,
+        );
+
+        assert_eq!(report.outputs.len(), 1);
+        assert_eq!(*counters().lock().unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn disabled_providers_filter_cached_cards() {
+        let disabled = std::collections::HashSet::from(["copilot".to_string()]);
+        let outputs = filter_disabled_outputs(
+            vec![sample_output("Copilot"), sample_output("Codex")],
+            &disabled,
+        );
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].provider, "Codex");
+    }
+
+    #[test]
+    fn disabled_providers_filter_fetch_diagnostics() {
+        let disabled = std::collections::HashSet::from(["copilot".to_string()]);
+        let report = fetch_all_report_from_providers(
+            vec![("codex", "Codex", || true, Fetch::Multi(|| Ok(Vec::new())))],
+            &disabled,
+            copilot_report_fetch,
+        );
+
+        assert!(report.outputs.is_empty());
+        assert!(report.diagnostics.is_empty());
     }
 
     #[test]

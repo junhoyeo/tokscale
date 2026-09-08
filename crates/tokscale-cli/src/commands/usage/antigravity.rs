@@ -698,9 +698,9 @@ mod tests {
     /// every other provider and read the developer's real credentials, so these
     /// tests stop at the one entry.
     fn registered_antigravity_provider() -> (fn() -> bool, Fetch) {
-        let (_, has_credentials, fetch) = usage_providers(Fetch::Multi(fetch_all))
+        let (_, _, has_credentials, fetch) = usage_providers(Fetch::Multi(fetch_all))
             .into_iter()
-            .find(|(provider, _, _)| *provider == PROVIDER)
+            .find(|(_, provider, _, _)| *provider == PROVIDER)
             .expect("Antigravity is a registered usage provider");
         (has_credentials, fetch)
     }

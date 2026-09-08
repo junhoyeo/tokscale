@@ -82,6 +82,17 @@ pub struct LightSettings {
     pub write_cache: bool,
 }
 
+/// Subscription-usage providers hidden from both `tokscale usage` and the TUI.
+///
+/// Values are stable provider ids rather than display labels so a copy of the
+/// settings file continues to work when a provider's branding changes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSettings {
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    pub disabled_providers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutosubmitSettings {
@@ -192,6 +203,10 @@ pub struct Settings {
     pub default_clients: Vec<String>,
     #[serde(default)]
     pub light: LightSettings,
+    /// Subscription-usage providers to skip before credential discovery or
+    /// network access. Unknown ids are ignored by the usage provider registry.
+    #[serde(default)]
+    pub usage: UsageSettings,
     /// Opt-in toggle for the per-minute breakdown tab. Default is `false`
     /// to keep the tab strip focused on the daily/hourly views most users
     /// want and to skip the minute-bucket aggregation cost in DataLoader
@@ -263,6 +278,7 @@ impl Default for Settings {
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
             light: LightSettings::default(),
+            usage: UsageSettings::default(),
             minutely_tab_enabled: false,
             autosubmit: AutosubmitSettings::default(),
             model_aliases: tokscale_core::ModelAliasMap::default(),
@@ -1008,6 +1024,27 @@ mod tests {
         assert_eq!(
             round_trip["minutelyTabEnabled"],
             serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn usage_disabled_providers_defaults_for_legacy_settings() {
+        let parsed: Settings = serde_json::from_str(r#"{"colorPalette":"blue"}"#).unwrap();
+        assert!(parsed.usage.disabled_providers.is_empty());
+    }
+
+    #[test]
+    fn usage_disabled_providers_keeps_valid_string_entries() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"usage":{"disabledProviders":["copilot", null, 42, " CODEX "]}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.usage.disabled_providers, ["copilot", " CODEX "]);
+
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            serialized["usage"]["disabledProviders"],
+            serde_json::json!(["copilot", " CODEX "])
         );
     }
 }
