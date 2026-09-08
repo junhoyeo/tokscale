@@ -823,6 +823,14 @@ export async function POST(request: Request) {
                 client
               ),
           fullHistory: data.scanScope?.fullHistory === true,
+          retentionFloor: isBackfill
+            ? undefined
+            : ownValue(
+                data.scanScope?.retentionFloors as
+                  | Record<string, string>
+                  | undefined,
+                client
+              ),
           existingLegacyDays: existingClientDays,
           incomingDays: foldParserClientSnapshot(data.contributions, client),
           state: ownValue(deviceParserStates, client),

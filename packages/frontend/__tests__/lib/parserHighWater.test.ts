@@ -1527,3 +1527,73 @@ describe("droid parser high-water", () => {
     expect(plan.increments).toEqual({});
   });
 });
+
+describe("store retention floor", () => {
+  function floored(
+    state: ParserClientHighWaterState,
+    incomingDays: Record<string, ClientBreakdownData>,
+    retentionFloor?: string
+  ) {
+    return planParserHighWaterSubmission({
+      client: "copilot",
+      incomingVersion: 2,
+      fullHistory: true,
+      retentionFloor,
+      existingLegacyDays: {},
+      incomingDays,
+      state,
+    });
+  }
+
+  const credited = baseline(
+    {},
+    snapshot(contribution("2026-07-01", 100), contribution("2026-07-02", 200))
+  ).nextState!;
+
+  it("credits growth the parser can still see once older days age out of its store", () => {
+    const plan = floored(
+      credited,
+      snapshot(contribution("2026-08-01", 50)),
+      "2026-08-01"
+    );
+
+    expect(plan.mode).toBe("incremental");
+    expect(plan.increments["2026-08-01"].tokens).toBe(50);
+    expect(plan.highWaterDeficit).toBeUndefined();
+  });
+
+  it("adds nothing and reports the deficit without a floor", () => {
+    const plan = floored(credited, snapshot(contribution("2026-08-01", 50)));
+
+    expect(plan.mode).toBe("incremental");
+    expectCreditedNothing(plan);
+    expect(plan.highWaterDeficit).toBe(250);
+  });
+
+  it("keeps counting days the floor does not clear", () => {
+    // Only 2026-07-01 falls below the floor, so 200 of the 300 credited
+    // tokens still bound the 250 the snapshot reports.
+    const plan = floored(
+      credited,
+      snapshot(contribution("2026-07-02", 200), contribution("2026-08-01", 50)),
+      "2026-07-02"
+    );
+
+    expect(plan.increments["2026-08-01"].tokens).toBe(50);
+    expect(plan.increments["2026-07-02"]).toBeUndefined();
+  });
+
+  it("cannot re-credit a forgiven day the snapshot still reports", () => {
+    // A floor is only a claim about the store's reach. Per-cell capacity is
+    // read from the full credited ledger regardless, so the day it forgave
+    // has no room left even when the budget reopens.
+    const plan = floored(
+      credited,
+      snapshot(contribution("2026-07-01", 100), contribution("2026-07-02", 200)),
+      "2026-08-01"
+    );
+
+    expectCreditedNothing(plan);
+    expect(plan.nextState?.aggregate.tokens).toBe(300);
+  });
+});

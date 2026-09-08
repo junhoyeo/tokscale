@@ -321,6 +321,34 @@ function aggregateSnapshot(
   return aggregate;
 }
 
+/**
+ * Credited/observed cells the client's own store can still reach.
+ *
+ * `retentionFloor` is the earliest session start surviving in that store, so a
+ * cell older than it describes usage the parser can no longer report at all.
+ * Keeping such cells in the budget baseline makes the lifetime bound
+ * unsatisfiable forever once a rolling store ages history out.
+ */
+function daysAtOrAfter(
+  days: Record<string, ClientBreakdownData>,
+  retentionFloor: string
+): Record<string, ClientBreakdownData> {
+  const reachable = createSafeRecord<ClientBreakdownData>();
+  for (const [date, day] of Object.entries(days)) {
+    if (date >= retentionFloor) reachable[date] = day;
+  }
+  return reachable;
+}
+
+function budgetBaseline(
+  days: Record<string, ClientBreakdownData>,
+  unfloored: ParserAggregateHighWater,
+  retentionFloor: string | undefined
+): ParserAggregateHighWater {
+  if (retentionFloor == null) return unfloored;
+  return aggregateSnapshot(daysAtOrAfter(days, retentionFloor));
+}
+
 const PARSER_HIGH_WATER_STATE_VERSION = 2;
 
 function normalizeStateDays(
@@ -455,13 +483,27 @@ function allocateIncrements(
   previousObservedDays: Record<string, ClientBreakdownData>,
   incomingDays: Record<string, ClientBreakdownData>,
   previousAggregate: ParserAggregateHighWater,
-  incomingAggregate: ParserAggregateHighWater
+  incomingAggregate: ParserAggregateHighWater,
+  retentionFloor?: string
 ): Record<string, ClientBreakdownData> {
-  let tokenBudget = positive(incomingAggregate.tokens - previousAggregate.tokens);
-  let messageBudget = positive(
-    incomingAggregate.messages - previousAggregate.messages
+  const creditedBudgetAggregate = budgetBaseline(
+    previousCreditedDays,
+    previousAggregate,
+    retentionFloor
   );
-  const previousObservedAggregate = aggregateSnapshot(previousObservedDays);
+  let tokenBudget = positive(
+    incomingAggregate.tokens - creditedBudgetAggregate.tokens
+  );
+  let messageBudget = positive(
+    incomingAggregate.messages - creditedBudgetAggregate.messages
+  );
+  // Per-cell capacity below still reads the FULL credited ledger, so a
+  // forgiven day that the parser somehow re-reports cannot be credited twice.
+  const previousObservedAggregate = aggregateSnapshot(
+    retentionFloor == null
+      ? previousObservedDays
+      : daysAtOrAfter(previousObservedDays, retentionFloor)
+  );
   const inclusiveInputBudget = positive(
     incomingAggregate.inputIncludingCacheRead -
       previousObservedAggregate.inputIncludingCacheRead
@@ -685,6 +727,16 @@ function validState(
  * actually written advance the credited ledger, so growth cannot be lost.
  * Date/model reshuffles and deleted local history never erase stored rows.
  *
+ * A parser that reports a `retentionFloor` narrows the lifetime baseline to
+ * the credited cells its store can still reach. Without it a client with a
+ * rolling store stops contributing permanently the moment its window falls
+ * below the credited lifetime: every later scan reports less than is already
+ * stored, so the bound allows nothing. Cells below the floor keep their stored
+ * rows and their per-cell caps; they only stop counting against the budget.
+ * The floor is derived from session start times still on disk, which a
+ * re-attribution cannot move, so it does not reopen the budget for the
+ * re-dating this bound exists to contain.
+ *
  * SNAPSHOT_LAYOUT_CLIENTS are the deliberate exception to both absolutes
  * above: once a full snapshot's aggregate covers the credited one, the stored
  * layout is replaced outright so the web graph matches the TUI, which also
@@ -695,6 +747,12 @@ export function planParserHighWaterSubmission(args: {
   client: string;
   incomingVersion?: number;
   fullHistory: boolean;
+  /**
+   * Earliest `YYYY-MM-DD` the client's own store still reaches, as reported by
+   * the parser from the store's contents. Absent keeps the unbounded lifetime
+   * baseline, which is what every CLI that does not report a floor gets.
+   */
+  retentionFloor?: string;
   existingLegacyDays: Record<string, ClientBreakdownData>;
   incomingDays: Record<string, ClientBreakdownData>;
   state?: ParserClientHighWaterState;
@@ -764,7 +822,8 @@ export function planParserHighWaterSubmission(args: {
           args.existingLegacyDays,
           args.incomingDays,
           legacyAggregate,
-          incomingAggregate
+          incomingAggregate,
+          args.retentionFloor
         )
       : createSafeRecord<ClientBreakdownData>();
     const nextState = hasLegacy
@@ -817,11 +876,13 @@ export function planParserHighWaterSubmission(args: {
     previousObservedDays,
     args.incomingDays,
     previousAggregate,
-    incomingAggregate
+    incomingAggregate,
+    args.retentionFloor
   );
 
   const highWaterDeficit = positive(
-    previousAggregate.tokens - incomingAggregate.tokens
+    budgetBaseline(previousCreditedDays, previousAggregate, args.retentionFloor)
+      .tokens - incomingAggregate.tokens
   );
   return {
     mode: "incremental",

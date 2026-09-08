@@ -397,6 +397,7 @@ function installTx(store: Store) {
 function submissionBody(
   client: string,
   days: Array<{ date: string; tokens: number; messages: number }>,
+  retentionFloor?: string,
 ) {
   const dates = days.map((day) => day.date).sort();
   return {
@@ -408,7 +409,13 @@ function submissionBody(
     },
     // The CLI declares generation 1 for every client but Copilot, so a real
     // Antigravity CLI submit carries exactly this.
-    scanScope: { parserVersions: { [client]: 1 }, fullHistory: true },
+    scanScope: {
+      parserVersions: { [client]: 1 },
+      fullHistory: true,
+      ...(retentionFloor
+        ? { retentionFloors: { [client]: retentionFloor } }
+        : {}),
+    },
     summary: { clients: [client] },
     years: [],
     contributions: days.map((day) => ({
@@ -639,6 +646,63 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
           warning.includes("150,000"),
       ),
     ).toBe(true);
+  });
+
+  it("credits the new window when the reported retention floor clears the stored days", async () => {
+    const store = newStore();
+    installTx(store);
+    const first = submissionBody("antigravity-cli", SESSION_START_DATING);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    // Same aged-out scan as above, except the parser now reports how far back
+    // its own store still reaches. The 2026-08-07 session is no longer on
+    // disk, so it cannot be what these 90,000 tokens were moved from.
+    installTx(store);
+    const aged = submissionBody(
+      "antigravity-cli",
+      [{ date: "2026-09-01", tokens: 90_000, messages: 5 }],
+      "2026-09-01",
+    );
+    mockSubmit(aged);
+    const response = await post(aged);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(330_000);
+    expect(store.days.map((day) => day.date)).toEqual([
+      "2026-08-07",
+      "2026-09-01",
+    ]);
+    expect(
+      (json.warnings ?? []).some((warning: string) =>
+        warning.includes("Added no Antigravity CLI usage"),
+      ),
+    ).toBe(false);
+  });
+
+  it("credits nothing when a re-attribution happens under a retention floor", async () => {
+    const store = newStore();
+    installTx(store);
+    const first = submissionBody("antigravity-cli", SESSION_START_DATING);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    // The floor is derived from session start times still on disk, so a
+    // re-dated session keeps its own start: the floor does not advance past
+    // the credited day and the lifetime bound still sees all 240,000.
+    installTx(store);
+    const rescan = submissionBody(
+      "antigravity-cli",
+      PER_GENERATION_DATING,
+      "2026-08-07",
+    );
+    mockSubmit(rescan);
+    const response = await post(rescan);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(240_000);
   });
 
   it("still inflates for a client that is legitimately not registered", async () => {

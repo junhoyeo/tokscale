@@ -230,6 +230,11 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   scanScope: z.object({
     parserVersions: z.record(SourceSchema, NonNegativeIntegerSchema.min(1)),
     fullHistory: z.boolean(),
+    // Earliest date each parser's own store still reaches. Clients whose store
+    // never prunes omit it; the high-water bound then stays unbounded.
+    retentionFloors: z
+      .record(SourceSchema, z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+      .optional(),
   }).optional(),
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
