@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 use tokscale_core::bucket_tz::BucketTimezone;
 
-use crate::tui::settings::Settings;
+use crate::tui::settings::{Settings, SettingsOrigin};
 
 /// The settings `tokscale config` can address.
 ///
@@ -39,7 +39,7 @@ pub fn run_get(key: &str) -> Result<()> {
 
 pub fn run_set(key: &str, value: &str) -> Result<()> {
     let key = normalize_key(key)?;
-    let mut settings = load_for_write()?;
+    let (mut settings, origin) = load_for_write()?;
 
     match key {
         "timezone" => {
@@ -55,7 +55,7 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
             }
             reject_timezone_rekey(previous.as_deref(), &resolved)?;
             settings.scanner.bucket_timezone = Some(resolved.clone());
-            settings.save()?;
+            settings.save_with_origin(origin)?;
 
             println!("{} timezone = {}", "set".green().bold(), resolved.bold());
             match previous {
@@ -79,13 +79,13 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
 
 pub fn run_unset(key: &str) -> Result<()> {
     let key = normalize_key(key)?;
-    let mut settings = load_for_write()?;
+    let (mut settings, origin) = load_for_write()?;
 
     match key {
         "timezone" => {
             reject_timezone_unset(settings.scanner.bucket_timezone.as_deref())?;
             let previous = settings.scanner.bucket_timezone.take();
-            settings.save()?;
+            settings.save_with_origin(origin)?;
 
             match previous {
                 Some(previous) => println!("{} timezone (was {previous})", "unset".green().bold()),
@@ -120,7 +120,7 @@ pub fn run_list() -> Result<()> {
 /// config and UI preferences to fix one field. `tokscale config` is a
 /// deliberate, interactive command, so it says so and stops instead of guessing
 /// which is worse.
-fn load_for_write() -> Result<Settings> {
+fn load_for_write() -> Result<(Settings, SettingsOrigin)> {
     let (settings, origin) = Settings::load_with_origin();
     if !origin.is_safe_to_overwrite() {
         // Deliberately does not name settings.json: this also fires when the
@@ -132,7 +132,7 @@ fn load_for_write() -> Result<Settings> {
              is readable and writable, and that settings.json in it is valid JSON."
         );
     }
-    Ok(settings)
+    Ok((settings, origin))
 }
 
 fn normalize_key(key: &str) -> Result<&'static str> {

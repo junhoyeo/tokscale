@@ -391,7 +391,7 @@ pub fn pin_bucket_timezone_if_unset(home_dir: &Option<String>) {
     };
 
     settings.scanner.bucket_timezone = Some(zone);
-    if let Err(error) = settings.save() {
+    if let Err(error) = settings.save_with_origin(origin) {
         tracing::debug!(%error, "failed to persist scanner.bucketTimezone");
     }
 }
@@ -570,7 +570,16 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<()> {
-        if !Self::load_with_origin().1.is_safe_to_overwrite() {
+        self.save_with_origin(Self::load_with_origin().1)
+    }
+
+    /// Save settings after a caller that loaded them has checked their origin.
+    ///
+    /// Callers that do not already hold an origin should use [`Self::save`],
+    /// which loads one immediately before writing. The safety guard remains
+    /// here so a supplied unreadable origin can never replace unknown settings.
+    pub(crate) fn save_with_origin(&self, origin: SettingsOrigin) -> Result<()> {
+        if !origin.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
         }
 
@@ -1142,13 +1151,49 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn save_with_origin_refuses_to_replace_unreadable_settings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let path = temp.path().join("settings.json");
+        let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+        fs::write(&path, malformed).unwrap();
+
+        let (settings, origin) = Settings::load_with_origin();
+        let save_error = settings.save_with_origin(origin).unwrap_err();
+        assert!(save_error.to_string().contains("refusing to replace them"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn save_initializes_missing_settings() {
         let temp = tempfile::TempDir::new().unwrap();
         let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
 
-        let mut settings = Settings::default();
-        settings.color_palette = "green".to_string();
+        let settings = Settings {
+            color_palette: "green".to_string(),
+            ..Settings::default()
+        };
         settings.save().unwrap();
+
+        let saved: Settings =
+            serde_json::from_str(&fs::read_to_string(temp.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.color_palette, "green");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_with_origin_initializes_missing_settings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let settings = Settings {
+            color_palette: "green".to_string(),
+            ..Settings::default()
+        };
+        settings.save_with_origin(SettingsOrigin::Absent).unwrap();
 
         let saved: Settings =
             serde_json::from_str(&fs::read_to_string(temp.path().join("settings.json")).unwrap())
