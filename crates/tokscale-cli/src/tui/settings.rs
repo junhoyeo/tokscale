@@ -668,6 +668,9 @@ impl Settings {
     pub(crate) fn update_and_save(update: impl FnOnce(&mut serde_json::Value)) -> Result<()> {
         let (_, origin) = Self::load_with_origin();
         let mut settings = origin.settings_json()?;
+        if !settings.is_object() {
+            bail!("settings.json must contain a JSON object; refusing to replace it");
+        }
         update(&mut settings);
         Self::save_json_with_origin(&settings, origin)
     }

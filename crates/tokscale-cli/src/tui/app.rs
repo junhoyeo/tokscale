@@ -4434,24 +4434,25 @@ mod tests {
         }
 
         let path = crate::paths::get_config_dir().join("settings.json");
-        for event in [key(KeyCode::Char('p')), key(KeyCode::Char('L'))] {
-            fs::write(&path, b"{}").unwrap();
-            let mut app = make_app();
-            let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
-            fs::write(&path, malformed).unwrap();
+        for malformed in [r#"{"usage":{"disabledProviders":{"copilot":true}}}"#, "[]"] {
+            for event in [key(KeyCode::Char('p')), key(KeyCode::Char('L'))] {
+                fs::write(&path, b"{}").unwrap();
+                let mut app = make_app();
+                fs::write(&path, malformed).unwrap();
 
-            app.handle_key_event(event);
+                app.handle_key_event(event);
 
-            assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
-            assert!(app
-                .status_message
-                .as_deref()
-                .unwrap()
-                .contains("save failed"));
-            if event.code == KeyCode::Char('p') {
-                assert_eq!(app.theme.name, ThemeName::Blue.next());
-            } else {
-                assert!(app.settings.tui_light_mode);
+                assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+                assert!(app
+                    .status_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("save failed"));
+                if event.code == KeyCode::Char('p') {
+                    assert_eq!(app.theme.name, ThemeName::Blue.next());
+                } else {
+                    assert!(app.settings.tui_light_mode);
+                }
             }
         }
     }
