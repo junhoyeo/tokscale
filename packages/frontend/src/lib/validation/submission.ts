@@ -29,6 +29,16 @@ const TOKEN_ABSOLUTE_TOLERANCE = 100;
 const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const NonNegativeNumberSchema = z.number().finite().min(0);
 
+// Floors participate in lexical day comparisons, so a date-shaped string
+// that UTC would normalize into a different day must not reach the planner.
+const RetentionFloorSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+  (value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  },
+  { message: "Invalid calendar date" },
+);
+
 const TokenBreakdownSchema = z.object({
   input: NonNegativeIntegerSchema,
   output: NonNegativeIntegerSchema,
@@ -233,7 +243,7 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
     // Earliest date each parser's own store still reaches. Clients whose store
     // never prunes omit it; the high-water bound then stays unbounded.
     retentionFloors: z
-      .record(SourceSchema, z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+      .record(SourceSchema, RetentionFloorSchema)
       .optional(),
   }).optional(),
   summary: DataSummarySchema,

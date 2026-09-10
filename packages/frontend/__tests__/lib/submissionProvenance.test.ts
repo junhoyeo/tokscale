@@ -103,6 +103,34 @@ describe("submission provenance", () => {
 
 
 describe("submission scan scope", () => {
+  it.each(["2025-02-31", "2025-02-29", "2026-04-31", "2026-13-01", "2026-00-01", "2026-01-00", "2026-1-01"])(
+    "rejects impossible retention floor %s", (floor) => {
+      const body = buildSubmission();
+      body.scanScope = {
+        parserVersions: { codex: 1 },
+        fullHistory: true,
+        retentionFloors: { codex: floor },
+      };
+      const result = validateSubmission(body);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual(expect.arrayContaining([
+        expect.stringContaining("scanScope.retentionFloors.codex"),
+      ]));
+    },
+  );
+
+  it.each(["2024-02-29", "2026-05-11"])("preserves valid calendar floor %s", (floor) => {
+    const body = buildSubmission();
+    body.scanScope = {
+      parserVersions: { codex: 1 },
+      fullHistory: true,
+      retentionFloors: { codex: floor },
+    };
+    const result = validateSubmission(body);
+    expect(result.errors).toEqual([]);
+    expect(result.data?.scanScope?.retentionFloors).toEqual({ codex: floor });
+  });
+
   it("accepts parser identity separately from full-history eligibility", () => {
     const full = buildSubmission();
     full.scanScope = { parserVersions: { codex: 1 }, fullHistory: true };

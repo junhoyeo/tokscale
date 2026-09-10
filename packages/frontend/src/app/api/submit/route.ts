@@ -856,14 +856,12 @@ export async function POST(request: Request) {
           );
         }
         if (plan.highWaterDeficit) {
-          // Without this the submit is indistinguishable from a successful
-          // one: the client is listed as scanned, the request returns 200, and
-          // nothing says the device has been contributing zero for this client
-          // since its scan fell below the credited high-water.
+          // This deficit bounds tokens only. Message growth has an independent
+          // budget and may still be credited, so do not claim all usage froze.
           warnings.push(
-            `Added no ${label} usage because this scan reports ${plan.highWaterDeficit.toLocaleString(
+            `Added no ${label} tokens because this scan reports ${plan.highWaterDeficit.toLocaleString(
               "en-US"
-            )} fewer lifetime tokens than this device has already been credited. Local history that is deleted or aged out of the client's own store stays credited, so nothing is added until the scan exceeds the stored high-water again.`
+            )} fewer tokens than this device's credited baseline. Stored history is preserved. No tokens are added until the scan exceeds that baseline; new messages may still be credited.`
           );
         }
       }

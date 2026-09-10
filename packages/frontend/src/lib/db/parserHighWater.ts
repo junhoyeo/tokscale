@@ -128,10 +128,9 @@ export interface ParserHighWaterPlan {
   layoutDays?: Record<string, ClientBreakdownData>;
   nextState?: ParserClientHighWaterState;
   /**
-   * Lifetime tokens the credited ledger holds beyond what this snapshot
-   * reports. Positive means no growth was allocatable and none can be until
-   * the parser reports at least this much more, which is indistinguishable
-   * from a re-attribution and so is never credited.
+   * Tokens the credited baseline (within the optional retention window)
+   * holds beyond this snapshot. Positive means no token growth is allocatable;
+   * messages have an independent budget and can still advance.
    */
   highWaterDeficit?: number;
 }
@@ -790,6 +789,15 @@ export function planParserHighWaterSubmission(args: {
     };
   }
 
+  // A floor claims no usage before it is still reachable. A snapshot that
+  // includes an older cell contradicts that claim: keeping those tokens in
+  // the incoming total while removing them from the baseline funds duplicate
+  // credit on a moved date. Keep the lifetime bound for that whole snapshot.
+  const reportedFloor = args.retentionFloor;
+  const retentionFloor = reportedFloor != null &&
+    Object.keys(args.incomingDays).every((date) => date >= reportedFloor)
+    ? reportedFloor
+    : undefined;
   const incomingAggregate = aggregateSnapshot(args.incomingDays);
   if (args.state && !validState(args.state, supportedVersion)) {
     return { mode: "freeze", increments: {} };
@@ -823,7 +831,7 @@ export function planParserHighWaterSubmission(args: {
           args.incomingDays,
           legacyAggregate,
           incomingAggregate,
-          args.retentionFloor
+          retentionFloor
         )
       : createSafeRecord<ClientBreakdownData>();
     const nextState = hasLegacy
@@ -877,11 +885,11 @@ export function planParserHighWaterSubmission(args: {
     args.incomingDays,
     previousAggregate,
     incomingAggregate,
-    args.retentionFloor
+    retentionFloor
   );
 
   const highWaterDeficit = positive(
-    budgetBaseline(previousCreditedDays, previousAggregate, args.retentionFloor)
+    budgetBaseline(previousCreditedDays, previousAggregate, retentionFloor)
       .tokens - incomingAggregate.tokens
   );
   return {

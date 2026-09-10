@@ -1596,4 +1596,63 @@ describe("store retention floor", () => {
     expectCreditedNothing(plan);
     expect(plan.nextState?.aggregate.tokens).toBe(300);
   });
+
+  it("does not use a below-floor replay to credit a moved cell twice", () => {
+    const plan = floored(
+      credited,
+      snapshot(contribution("2026-07-01", 100), contribution("2026-08-01", 200)),
+      "2026-07-02"
+    );
+    expectCreditedNothing(plan);
+    expect(plan.nextState?.aggregate.tokens).toBe(300);
+  });
+
+  it("falls back to the lifetime bound when a legacy snapshot contradicts its floor", () => {
+    const plan = planParserHighWaterSubmission({
+      client: "copilot",
+      incomingVersion: 2,
+      fullHistory: true,
+      retentionFloor: "2026-07-02",
+      existingLegacyDays: credited.days,
+      incomingDays: snapshot(contribution("2026-07-01", 100), contribution("2026-08-01", 200)),
+    });
+    expect(plan.mode).toBe("baseline-legacy");
+    expectCreditedNothing(plan);
+    expect(plan.nextState?.aggregate.tokens).toBe(300);
+  });
+
+  it("credits each retained window once as the floor advances", () => {
+    const first = floored(credited, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
+    const replay = floored(first.nextState!, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
+    expectCreditedNothing(replay);
+
+    const advanced = floored(replay.nextState!, snapshot(contribution("2026-09-01", 20)), "2026-09-01");
+    expect(advanced.increments["2026-09-01"].tokens).toBe(20);
+    expect(advanced.nextState?.aggregate.tokens).toBe(370);
+    expect(advanced.nextState?.days["2026-07-01"].tokens).toBe(100);
+    expect(advanced.nextState?.days["2026-08-01"].tokens).toBe(50);
+    expectCreditedNothing(floored(advanced.nextState!, snapshot(contribution("2026-09-01", 20)), "2026-09-01"));
+  });
+
+  it("does not count restored history as growth when the floor retreats or disappears", () => {
+    const first = floored(credited, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
+    const restored = snapshot(
+      contribution("2026-07-01", 100), contribution("2026-07-02", 200), contribution("2026-08-01", 50)
+    );
+    for (const floor of ["2026-07-01", undefined]) {
+      const plan = floored(first.nextState!, restored, floor);
+      expectCreditedNothing(plan);
+      expect(plan.nextState?.aggregate.tokens).toBe(350);
+    }
+  });
+
+  it("does not let a retention floor unfreeze a partial snapshot", () => {
+    const plan = planParserHighWaterSubmission({
+      client: "copilot", incomingVersion: 2, fullHistory: false,
+      retentionFloor: "2026-09-01", existingLegacyDays: {},
+      incomingDays: snapshot(contribution("2026-09-01", 50)), state: credited,
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.increments).toEqual({});
+  });
 });

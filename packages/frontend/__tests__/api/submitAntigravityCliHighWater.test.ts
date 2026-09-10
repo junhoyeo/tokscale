@@ -642,7 +642,7 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     expect(
       json.warnings.some(
         (warning: string) =>
-          warning.includes("Added no Antigravity CLI usage") &&
+          warning.includes("Added no Antigravity CLI tokens") &&
           warning.includes("150,000"),
       ),
     ).toBe(true);
@@ -676,9 +676,34 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     ]);
     expect(
       (json.warnings ?? []).some((warning: string) =>
-        warning.includes("Added no Antigravity CLI usage"),
+        warning.includes("Added no Antigravity CLI tokens"),
       ),
     ).toBe(false);
+  });
+
+  it("warns about token deficit while retaining newly credited messages", async () => {
+    const store = newStore();
+    const first = submissionBody("antigravity-cli", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    const smaller = submissionBody("antigravity-cli", [
+      { date: "2026-09-01", tokens: 90_000, messages: 20 },
+    ], "2026-08-07");
+    installTx(store);
+    mockSubmit(smaller);
+    const response = await post(smaller);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    const added = store.days.find((day) => day.date === "2026-09-01")!.sourceBreakdown["antigravity-cli"];
+    expect(added.tokens).toBe(0);
+    expect(added.messages).toBe(8);
+    expect(json.metrics.totalTokens).toBe(240_000);
+    expect(json.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("150,000"),
+    ]));
+    expect(json.warnings.some((warning: string) => warning.includes("Added no Antigravity CLI usage"))).toBe(false);
   });
 
   it("credits nothing when a re-attribution happens under a retention floor", async () => {
@@ -703,6 +728,30 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     const json = await response.json();
 
     expect(json.metrics.totalTokens).toBe(240_000);
+  });
+
+  it("ignores a retention floor contradicted by an older incoming day", async () => {
+    const store = newStore();
+    const first = submissionBody("antigravity-cli", [
+      { date: "2026-08-07", tokens: 100_000, messages: 5 },
+      { date: "2026-08-08", tokens: 200_000, messages: 5 },
+    ]);
+    installTx(store);
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+
+    const moved = submissionBody("antigravity-cli", [
+      { date: "2026-08-07", tokens: 100_000, messages: 5 },
+      { date: "2026-09-01", tokens: 200_000, messages: 5 },
+    ], "2026-08-08");
+    for (let replay = 0; replay < 2; replay++) {
+      installTx(store);
+      mockSubmit(moved);
+      const response = await post(moved);
+      expect(response.status).toBe(200);
+      expect((await response.json()).metrics.totalTokens).toBe(300_000);
+      expect(store.days.map(({ date }) => date)).toEqual(["2026-08-07", "2026-08-08"]);
+    }
   });
 
   it("still inflates for a client that is legitimately not registered", async () => {
