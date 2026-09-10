@@ -648,16 +648,15 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     ).toBe(true);
   });
 
-  it("credits the new window when the reported retention floor clears the stored days", async () => {
+  it("keeps the lifetime bound when an unverified retention floor clears the stored days", async () => {
     const store = newStore();
     installTx(store);
     const first = submissionBody("antigravity-cli", SESSION_START_DATING);
     mockSubmit(first);
     expect((await post(first)).status).toBe(200);
 
-    // Same aged-out scan as above, except the parser now reports how far back
-    // its own store still reaches. The 2026-08-07 session is no longer on
-    // disk, so it cannot be what these 90,000 tokens were moved from.
+    // A client-controlled floor cannot establish that the old session was
+    // actually pruned rather than moved to this newly dated cell.
     installTx(store);
     const aged = submissionBody(
       "antigravity-cli",
@@ -669,16 +668,14 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     expect(response.status).toBe(200);
     const json = await response.json();
 
-    expect(json.metrics.totalTokens).toBe(330_000);
-    expect(store.days.map((day) => day.date)).toEqual([
-      "2026-08-07",
-      "2026-09-01",
-    ]);
+    expect(json.metrics.totalTokens).toBe(240_000);
+    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
     expect(
       (json.warnings ?? []).some((warning: string) =>
-        warning.includes("Added no Antigravity CLI tokens"),
+        warning.includes("Added no Antigravity CLI tokens") &&
+        warning.includes("150,000"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("warns about token deficit while retaining newly credited messages", async () => {

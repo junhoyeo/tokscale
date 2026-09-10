@@ -1528,7 +1528,7 @@ describe("droid parser high-water", () => {
   });
 });
 
-describe("store retention floor", () => {
+describe("unverified retention floor", () => {
   function floored(
     state: ParserClientHighWaterState,
     incomingDays: Record<string, ClientBreakdownData>,
@@ -1550,7 +1550,19 @@ describe("store retention floor", () => {
     snapshot(contribution("2026-07-01", 100), contribution("2026-07-02", 200))
   ).nextState!;
 
-  it("credits growth the parser can still see once older days age out of its store", () => {
+  it("keeps the lifetime bound when an unverified floor advances with a re-dated snapshot", () => {
+    const plan = floored(
+      credited,
+      snapshot(contribution("2026-08-01", 300)),
+      "2026-08-01"
+    );
+
+    expect(plan.mode).toBe("incremental");
+    expectCreditedNothing(plan);
+    expect(plan.nextState?.aggregate.tokens).toBe(300);
+  });
+
+  it("does not let an unverified floor erase a token deficit", () => {
     const plan = floored(
       credited,
       snapshot(contribution("2026-08-01", 50)),
@@ -1558,35 +1570,22 @@ describe("store retention floor", () => {
     );
 
     expect(plan.mode).toBe("incremental");
-    expect(plan.increments["2026-08-01"].tokens).toBe(50);
-    expect(plan.highWaterDeficit).toBeUndefined();
-  });
-
-  it("adds nothing and reports the deficit without a floor", () => {
-    const plan = floored(credited, snapshot(contribution("2026-08-01", 50)));
-
-    expect(plan.mode).toBe("incremental");
     expectCreditedNothing(plan);
     expect(plan.highWaterDeficit).toBe(250);
   });
 
-  it("keeps counting days the floor does not clear", () => {
-    // Only 2026-07-01 falls below the floor, so 200 of the 300 credited
-    // tokens still bound the 250 the snapshot reports.
+  it("does not let a floor remove a subset of credited days from the baseline", () => {
     const plan = floored(
       credited,
       snapshot(contribution("2026-07-02", 200), contribution("2026-08-01", 50)),
       "2026-07-02"
     );
 
-    expect(plan.increments["2026-08-01"].tokens).toBe(50);
-    expect(plan.increments["2026-07-02"]).toBeUndefined();
+    expectCreditedNothing(plan);
+    expect(plan.nextState?.aggregate.tokens).toBe(300);
   });
 
-  it("cannot re-credit a forgiven day the snapshot still reports", () => {
-    // A floor is only a claim about the store's reach. Per-cell capacity is
-    // read from the full credited ledger regardless, so the day it forgave
-    // has no room left even when the budget reopens.
+  it("does not re-credit a known day under an unverified floor", () => {
     const plan = floored(
       credited,
       snapshot(contribution("2026-07-01", 100), contribution("2026-07-02", 200)),
@@ -1597,7 +1596,7 @@ describe("store retention floor", () => {
     expect(plan.nextState?.aggregate.tokens).toBe(300);
   });
 
-  it("does not use a below-floor replay to credit a moved cell twice", () => {
+  it("keeps the lifetime bound for a re-dated snapshot with an unverified floor", () => {
     const plan = floored(
       credited,
       snapshot(contribution("2026-07-01", 100), contribution("2026-08-01", 200)),
@@ -1607,7 +1606,7 @@ describe("store retention floor", () => {
     expect(plan.nextState?.aggregate.tokens).toBe(300);
   });
 
-  it("falls back to the lifetime bound when a legacy snapshot contradicts its floor", () => {
+  it("keeps the lifetime bound at a legacy transition with an unverified floor", () => {
     const plan = planParserHighWaterSubmission({
       client: "copilot",
       incomingVersion: 2,
@@ -1621,32 +1620,7 @@ describe("store retention floor", () => {
     expect(plan.nextState?.aggregate.tokens).toBe(300);
   });
 
-  it("credits each retained window once as the floor advances", () => {
-    const first = floored(credited, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
-    const replay = floored(first.nextState!, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
-    expectCreditedNothing(replay);
-
-    const advanced = floored(replay.nextState!, snapshot(contribution("2026-09-01", 20)), "2026-09-01");
-    expect(advanced.increments["2026-09-01"].tokens).toBe(20);
-    expect(advanced.nextState?.aggregate.tokens).toBe(370);
-    expect(advanced.nextState?.days["2026-07-01"].tokens).toBe(100);
-    expect(advanced.nextState?.days["2026-08-01"].tokens).toBe(50);
-    expectCreditedNothing(floored(advanced.nextState!, snapshot(contribution("2026-09-01", 20)), "2026-09-01"));
-  });
-
-  it("does not count restored history as growth when the floor retreats or disappears", () => {
-    const first = floored(credited, snapshot(contribution("2026-08-01", 50)), "2026-08-01");
-    const restored = snapshot(
-      contribution("2026-07-01", 100), contribution("2026-07-02", 200), contribution("2026-08-01", 50)
-    );
-    for (const floor of ["2026-07-01", undefined]) {
-      const plan = floored(first.nextState!, restored, floor);
-      expectCreditedNothing(plan);
-      expect(plan.nextState?.aggregate.tokens).toBe(350);
-    }
-  });
-
-  it("does not let a retention floor unfreeze a partial snapshot", () => {
+  it("does not let an unverified floor unfreeze a partial snapshot", () => {
     const plan = planParserHighWaterSubmission({
       client: "copilot", incomingVersion: 2, fullHistory: false,
       retentionFloor: "2026-09-01", existingLegacyDays: {},

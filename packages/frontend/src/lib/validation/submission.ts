@@ -29,8 +29,8 @@ const TOKEN_ABSOLUTE_TOLERANCE = 100;
 const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const NonNegativeNumberSchema = z.number().finite().min(0);
 
-// Floors participate in lexical day comparisons, so a date-shaped string
-// that UTC would normalize into a different day must not reach the planner.
+// Keep the protocol field calendar-safe even while the allocator deliberately
+// treats its client-reported value as unverified metadata.
 const RetentionFloorSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
   (value) => {
     const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -240,8 +240,8 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   scanScope: z.object({
     parserVersions: z.record(SourceSchema, NonNegativeIntegerSchema.min(1)),
     fullHistory: z.boolean(),
-    // Earliest date each parser's own store still reaches. Clients whose store
-    // never prunes omit it; the high-water bound then stays unbounded.
+    // Retained protocol metadata. The high-water cannot yet use it as proof
+    // that local history was pruned.
     retentionFloors: z
       .record(SourceSchema, RetentionFloorSchema)
       .optional(),
