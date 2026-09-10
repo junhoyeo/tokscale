@@ -1898,7 +1898,7 @@ impl App {
         };
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
-        if let Err(e) = self.settings.save() {
+        if let Err(e) = Settings::update_and_save(|settings| settings.set_theme(new_theme)) {
             self.set_status(&format!(
                 "Theme: {} (save failed: {})",
                 new_theme.as_str(),
@@ -1910,6 +1910,7 @@ impl App {
     }
     fn toggle_light_mode(&mut self) {
         self.settings.tui_light_mode = !self.settings.tui_light_mode;
+        let light_mode = self.settings.tui_light_mode;
         let name = self.theme.name;
         self.theme = if self.settings.tui_light_mode {
             Theme::from_name_for_current_terminal_light(name)
@@ -1922,7 +1923,7 @@ impl App {
         } else {
             "off"
         };
-        if let Err(e) = self.settings.save() {
+        if let Err(e) = Settings::update_and_save(|settings| settings.tui_light_mode = light_mode) {
             self.set_status(&format!("Light mode: {} (save failed: {})", state, e));
         } else {
             self.set_status(&format!("Light mode: {}", state));
@@ -2078,7 +2079,9 @@ impl App {
             self.last_auto_refresh = Instant::now();
         }
         self.settings.auto_refresh_enabled = self.auto_refresh;
-        let save_result = self.settings.save();
+        let save_result = Settings::update_and_save(|settings| {
+            settings.auto_refresh_enabled = self.auto_refresh;
+        });
         let msg = if self.auto_refresh {
             format!(
                 "Auto-refresh ON ({}s)",
@@ -2099,7 +2102,7 @@ impl App {
         let new_ms = ms.saturating_add(10_000).min(300_000);
         self.auto_refresh_interval = Duration::from_millis(new_ms);
         self.settings.auto_refresh_ms = new_ms;
-        let save_result = self.settings.save();
+        let save_result = Settings::update_and_save(|settings| settings.auto_refresh_ms = new_ms);
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
             self.set_status(&format!("{} (save failed: {})", msg, e));
@@ -2113,7 +2116,7 @@ impl App {
         let new_ms = ms.saturating_sub(10_000).max(30_000);
         self.auto_refresh_interval = Duration::from_millis(new_ms);
         self.settings.auto_refresh_ms = new_ms;
-        let save_result = self.settings.save();
+        let save_result = Settings::update_and_save(|settings| settings.auto_refresh_ms = new_ms);
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
             self.set_status(&format!("{} (save failed: {})", msg, e));
@@ -4287,6 +4290,154 @@ mod tests {
             app.handle_key_event(key(KeyCode::Char('p')));
         }
         assert_eq!(app.theme.name, initial_theme);
+    }
+
+    // Other app tests also save settings without taking the serial-test lock.
+    // Give these disk-backed tests their own process instead of changing the
+    // config directory underneath those tests.
+    fn settings_test_runs_in_child(test_name: &str) -> bool {
+        const MARKER: &str = "TOKSCALE_TUI_SETTINGS_TEST";
+        if env::var(MARKER).as_deref() == Ok(test_name) {
+            return true;
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("tui::app::tests::{test_name}"),
+                "--nocapture",
+            ])
+            .env(MARKER, test_name)
+            .env("TOKSCALE_CONFIG_DIR", temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        false
+    }
+
+    #[test]
+    fn tui_settings_changes_preserve_external_edits() {
+        if !settings_test_runs_in_child("tui_settings_changes_preserve_external_edits") {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        let initial = Settings {
+            auto_refresh_enabled: true,
+            ..Settings::default()
+        };
+        let cases = [
+            (
+                key(KeyCode::Char('p')),
+                "colorPalette",
+                serde_json::json!(initial.theme_name().next().as_str()),
+            ),
+            (
+                key(KeyCode::Char('L')),
+                "tuiLightMode",
+                serde_json::json!(true),
+            ),
+            (
+                key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                "autoRefreshEnabled",
+                serde_json::json!(false),
+            ),
+            (
+                key(KeyCode::Char('+')),
+                "autoRefreshMs",
+                serde_json::json!(70_000),
+            ),
+            (
+                key(KeyCode::Char('-')),
+                "autoRefreshMs",
+                serde_json::json!(50_000),
+            ),
+        ];
+
+        for (event, field, value) in cases {
+            fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+            let mut app = make_app();
+            assert!(app.settings.usage.disabled_providers.is_empty());
+
+            let mut expected = serde_json::to_value(&initial).unwrap();
+            expected["usage"]["disabledProviders"] = serde_json::json!(["copilot"]);
+            expected["colorPalette"] = serde_json::json!("halloween");
+            expected["tuiLightMode"] = serde_json::json!(true);
+            expected["autoRefreshEnabled"] = serde_json::json!(false);
+            expected["autoRefreshMs"] = serde_json::json!(120_000);
+            expected["defaultClients"] = serde_json::json!(["claude"]);
+            expected["autosubmit"]["enabled"] = serde_json::json!(true);
+            expected[field] = serde_json::to_value(&initial).unwrap()[field].clone();
+            fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+
+            app.handle_key_event(event);
+
+            expected[field] = value.clone();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved, expected, "unexpected settings after {event:?}");
+            assert_eq!(serde_json::to_value(&app.settings).unwrap()[field], value);
+            assert!(!app
+                .status_message
+                .as_deref()
+                .unwrap()
+                .contains("save failed"));
+        }
+    }
+
+    #[test]
+    fn tui_settings_changes_preserve_malformed_external_edits() {
+        if !settings_test_runs_in_child("tui_settings_changes_preserve_malformed_external_edits") {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        for event in [key(KeyCode::Char('p')), key(KeyCode::Char('L'))] {
+            fs::write(&path, b"{}").unwrap();
+            let mut app = make_app();
+            let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+            fs::write(&path, malformed).unwrap();
+
+            app.handle_key_event(event);
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+            assert!(app
+                .status_message
+                .as_deref()
+                .unwrap()
+                .contains("save failed"));
+            if event.code == KeyCode::Char('p') {
+                assert_eq!(app.theme.name, ThemeName::Blue.next());
+            } else {
+                assert!(app.settings.tui_light_mode);
+            }
+        }
+    }
+
+    #[test]
+    fn tui_settings_save_rejects_edits_during_update() {
+        if !settings_test_runs_in_child("tui_settings_save_rejects_edits_during_update") {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
+        let replacement = r#"{"usage":{"disabledProviders":["copilot"]}}"#;
+        let error = Settings::update_and_save(|settings| {
+            settings.tui_light_mode = true;
+            fs::write(&path, replacement).unwrap();
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed since it was loaded"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
     }
 
     // ── handle_key_event: export ────────────────────────────────────

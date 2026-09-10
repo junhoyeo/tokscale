@@ -63,7 +63,7 @@ impl SettingsOrigin {
         self
     }
 
-    /// Whether a `save()` after this load would preserve the user's data.
+    /// Whether the settings loaded with this origin are complete enough to save.
     ///
     /// False when loading produced defaults rather than complete settings,
     /// where saving would overwrite settings we could not read.
@@ -632,16 +632,27 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Replace the complete settings file with this value.
+    ///
+    /// This cannot detect edits made before this call. Long-lived callers
+    /// changing individual fields should use [`Self::update_and_save`].
     pub fn save(&self) -> Result<()> {
         self.save_with_origin(Self::load_with_origin().1)
     }
 
-    /// Save settings after a caller that loaded them has checked their origin.
+    /// Load the latest settings, change only the requested fields, and save
+    /// using the origin from that same load so intervening edits are rejected.
+    pub(crate) fn update_and_save(update: impl FnOnce(&mut Self)) -> Result<()> {
+        let (mut settings, origin) = Self::load_with_origin();
+        update(&mut settings);
+        settings.save_with_origin(origin)
+    }
+
+    /// Save settings using the origin returned when those settings were loaded.
     ///
-    /// Callers that do not already hold an origin should use [`Self::save`],
-    /// which loads one immediately before writing. The safety guard remains
-    /// here so a supplied unreadable or stale origin can never replace unknown
-    /// settings.
+    /// Keep the settings and origin from the same load together. Callers
+    /// updating individual fields without an origin should use
+    /// [`Self::update_and_save`] to preserve unrelated edits.
     pub(crate) fn save_with_origin(&self, origin: SettingsOrigin) -> Result<()> {
         if !origin.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
