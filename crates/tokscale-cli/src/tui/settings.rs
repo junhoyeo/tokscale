@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokscale_core::scanner::ScannerSettings;
 
@@ -20,32 +21,84 @@ pub const DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 24 * 60;
 pub const MIN_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 15;
 pub const MAX_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
 
-/// Where the value [`Settings::load_with_origin`] returned came from.
+/// An opaque snapshot of the settings files read by
+/// [`Settings::load_with_origin`].
 ///
-/// Only [`SettingsOrigin::Unreadable`] carries a real obligation: the returned
-/// `Settings` is `Settings::default()` and has nothing to do with what is on
-/// disk, so writing it back replaces every setting the user had with a default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsOrigin {
-    /// No settings file exists. Defaults *are* the file's contents, so writing
-    /// one loses nothing.
-    Absent,
-    /// A settings file was read and parsed. The returned value is what it says.
-    Parsed,
-    /// A settings file exists but its contents could not be recovered — invalid
-    /// JSON, a field with an incompatible type, or an I/O error that is not
-    /// "no such file". Whatever the user had is still on disk and still
-    /// unknown to us.
+/// A caller can save only when loading produced complete settings, and only if
+/// the files that informed that load are unchanged immediately before the
+/// atomic replace. This avoids parsing JSON twice in load-then-save paths
+/// without allowing a stale caller to replace a changed or malformed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsOrigin {
+    primary_path: Option<PathBuf>,
+    primary_snapshot: SettingsFileSnapshot,
+    legacy_snapshot: Option<(PathBuf, SettingsFileSnapshot)>,
+    safe_to_overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingsFileSnapshot {
+    Missing,
+    Present(String),
     Unreadable,
 }
 
 impl SettingsOrigin {
+    fn from_raw(
+        primary_path: Option<PathBuf>,
+        primary: &RawSettings,
+        legacy: Option<(&Path, &RawSettings)>,
+    ) -> Self {
+        Self {
+            primary_path,
+            primary_snapshot: SettingsFileSnapshot::from_raw(primary),
+            legacy_snapshot: legacy
+                .map(|(path, raw)| (path.to_path_buf(), SettingsFileSnapshot::from_raw(raw))),
+            safe_to_overwrite: false,
+        }
+    }
+
+    fn writable(mut self) -> Self {
+        self.safe_to_overwrite = true;
+        self
+    }
+
     /// Whether a `save()` after this load would preserve the user's data.
     ///
-    /// False only for [`SettingsOrigin::Unreadable`], where saving would
-    /// overwrite settings we could not read with defaults we invented.
-    pub fn is_safe_to_overwrite(self) -> bool {
-        !matches!(self, Self::Unreadable)
+    /// False when loading produced defaults rather than complete settings,
+    /// where saving would overwrite settings we could not read.
+    pub fn is_safe_to_overwrite(&self) -> bool {
+        self.safe_to_overwrite
+    }
+
+    fn verify_unchanged(&self) -> Result<&Path> {
+        let path = self
+            .primary_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve the tokscale settings location"))?;
+        if SettingsFileSnapshot::from_raw(&Settings::read_config_file(path))
+            != self.primary_snapshot
+        {
+            bail!("settings.json changed since it was loaded; refusing to replace it");
+        }
+        if let Some((legacy_path, legacy_snapshot)) = &self.legacy_snapshot {
+            if SettingsFileSnapshot::from_raw(&Settings::read_config_file(legacy_path))
+                != *legacy_snapshot
+            {
+                bail!("settings.json changed since it was loaded; refusing to replace it");
+            }
+        }
+        Ok(path)
+    }
+}
+
+impl SettingsFileSnapshot {
+    fn from_raw(raw: &RawSettings) -> Self {
+        match raw {
+            RawSettings::Missing => Self::Missing,
+            RawSettings::Present(content) => Self::Present(content.clone()),
+            RawSettings::Unreadable => Self::Unreadable,
+        }
     }
 }
 
@@ -486,11 +539,14 @@ impl Settings {
     /// able to tell those two cases apart, so it can decline instead of
     /// replacing data it never saw.
     pub fn load_with_origin() -> (Self, SettingsOrigin) {
-        let primary = match Self::config_path() {
-            Ok(path) => Self::read_config_file(&path),
+        let (primary_path, primary) = match Self::config_path() {
+            Ok(path) => {
+                let raw = Self::read_config_file(&path);
+                (Some(path), raw)
+            }
             // Cannot even resolve where settings live. Not "absent": a save
             // would fail the same way, so do not report this as writable.
-            Err(_) => RawSettings::Unreadable,
+            Err(_) => (None, RawSettings::Unreadable),
         };
 
         // Transparent macOS fallback: pre-fix releases wrote settings.json under
@@ -506,11 +562,20 @@ impl Settings {
         // only when it is missing — that is what it did before this function
         // reported an origin, and narrowing it would lose the legacy file to a
         // permissions error on the new path.
-        let legacy = match primary {
+        let legacy_path = match primary {
             RawSettings::Present(_) => None,
             _ if crate::paths::is_config_dir_overridden() => None,
-            _ => Self::legacy_macos_path().map(|legacy| Self::read_config_file(&legacy)),
+            _ => Self::legacy_macos_path(),
         };
+        let legacy = legacy_path.as_deref().map(Self::read_config_file);
+
+        // Snapshot the primary rather than the selected `raw`: a valid legacy
+        // macOS fallback is deliberately saved to a still-missing primary path.
+        let origin = SettingsOrigin::from_raw(
+            primary_path,
+            &primary,
+            legacy_path.as_deref().zip(legacy.as_ref()),
+        );
 
         // `save()` writes to the primary path whatever was read, so an
         // unreadable primary stays unreadable even when the legacy file
@@ -532,14 +597,12 @@ impl Settings {
         };
 
         match raw {
-            RawSettings::Missing => (Self::default(), SettingsOrigin::Absent),
-            RawSettings::Unreadable => (Self::default(), SettingsOrigin::Unreadable),
+            RawSettings::Missing => (Self::default(), origin.writable()),
+            RawSettings::Unreadable => (Self::default(), origin),
             RawSettings::Present(content) => match serde_json::from_str::<Settings>(&content) {
-                Ok(settings) if primary_was_unreadable => {
-                    (settings.normalize(), SettingsOrigin::Unreadable)
-                }
-                Ok(settings) => (settings.normalize(), SettingsOrigin::Parsed),
-                Err(_) => (Self::default(), SettingsOrigin::Unreadable),
+                Ok(settings) if primary_was_unreadable => (settings.normalize(), origin),
+                Ok(settings) => (settings.normalize(), origin.writable()),
+                Err(_) => (Self::default(), origin),
             },
         }
     }
@@ -577,13 +640,28 @@ impl Settings {
     ///
     /// Callers that do not already hold an origin should use [`Self::save`],
     /// which loads one immediately before writing. The safety guard remains
-    /// here so a supplied unreadable origin can never replace unknown settings.
+    /// here so a supplied unreadable or stale origin can never replace unknown
+    /// settings.
     pub(crate) fn save_with_origin(&self, origin: SettingsOrigin) -> Result<()> {
         if !origin.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
         }
 
-        let path = Self::config_path()?;
+        let path = origin
+            .primary_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve the tokscale settings location"))?;
+        // Coordinate Tokscale writers across the final comparison and rename.
+        // A non-cooperating editor can still race an atomic rename, but any edit
+        // present at this final check is rejected rather than overwritten.
+        let lock_path = path.with_file_name(".settings.lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        let path = origin.verify_unchanged()?;
         let content = serde_json::to_string_pretty(self)?;
 
         // Atomic write: write to temp file, sync, then rename
@@ -603,7 +681,7 @@ impl Settings {
             use std::io::Write;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
-            tokscale_core::fs_atomic::replace_file(&temp_path, &path)?;
+            tokscale_core::fs_atomic::replace_file(&temp_path, path)?;
             Ok(())
         })();
 
@@ -1129,7 +1207,7 @@ mod tests {
         fs::write(&path, malformed).unwrap();
 
         let (settings, origin) = Settings::load_with_origin();
-        assert_eq!(origin, SettingsOrigin::Unreadable);
+        assert!(!origin.is_safe_to_overwrite());
         assert_eq!(settings.color_palette, Settings::default().color_palette);
         assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
     }
@@ -1189,15 +1267,74 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
 
+        let (_, origin) = Settings::load_with_origin();
         let settings = Settings {
             color_palette: "green".to_string(),
             ..Settings::default()
         };
-        settings.save_with_origin(SettingsOrigin::Absent).unwrap();
+        settings.save_with_origin(origin).unwrap();
 
         let saved: Settings =
             serde_json::from_str(&fs::read_to_string(temp.path().join("settings.json")).unwrap())
                 .unwrap();
         assert_eq!(saved.color_palette, "green");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_with_origin_refuses_to_replace_settings_changed_after_load() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
+        let (settings, origin) = Settings::load_with_origin();
+
+        let replacement = r#"{"colorPalette":"halloween"}"#;
+        fs::write(&path, replacement).unwrap();
+
+        let save_error = settings.save_with_origin(origin).unwrap_err();
+        assert!(save_error
+            .to_string()
+            .contains("changed since it was loaded"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_with_origin_refuses_to_replace_malformed_settings_created_after_load() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let (settings, origin) = Settings::load_with_origin();
+        let path = temp.path().join("settings.json");
+        let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+        fs::write(&path, malformed).unwrap();
+
+        let save_error = settings.save_with_origin(origin).unwrap_err();
+        assert!(save_error
+            .to_string()
+            .contains("changed since it was loaded"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_with_origin_refuses_to_replace_settings_made_malformed_after_load() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
+        let (settings, origin) = Settings::load_with_origin();
+
+        let malformed = r#"{"usage":{"disabledProviders":{"copilot":true}}}"#;
+        fs::write(&path, malformed).unwrap();
+
+        let save_error = settings.save_with_origin(origin).unwrap_err();
+        assert!(save_error
+            .to_string()
+            .contains("changed since it was loaded"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
     }
 }

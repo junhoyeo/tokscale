@@ -435,16 +435,16 @@ pub fn load_run_config(
 }
 
 pub fn record_run_success(now_ms: i64) -> Result<()> {
-    let mut settings = crate::tui::settings::Settings::load();
+    let (mut settings, origin) = crate::tui::settings::Settings::load_with_origin();
     settings.autosubmit.last_run_at_ms = Some(now_ms);
     settings.autosubmit.last_error = None;
-    settings.save()
+    settings.save_with_origin(origin)
 }
 
 pub fn record_run_error(error: &str) -> Result<()> {
-    let mut settings = crate::tui::settings::Settings::load();
+    let (mut settings, origin) = crate::tui::settings::Settings::load_with_origin();
     settings.autosubmit.last_error = Some(error.to_string());
-    settings.save()
+    settings.save_with_origin(origin)
 }
 
 /// Today, in the zone this device buckets day keys into.
