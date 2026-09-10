@@ -24,10 +24,9 @@ pub const MAX_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
 /// An opaque snapshot of the settings files read by
 /// [`Settings::load_with_origin`].
 ///
-/// A caller can save only when loading produced complete settings, and only if
-/// the files that informed that load are unchanged immediately before the
-/// atomic replace. This avoids parsing JSON twice in load-then-save paths
-/// without allowing a stale caller to replace a changed or malformed file.
+/// Saving requires complete settings and checks the source files immediately
+/// before replacement. Tokscale writers coordinate through a sibling lock;
+/// external editors that ignore it can still race the final check and rename.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsOrigin {
     primary_path: Option<PathBuf>,
@@ -701,7 +700,6 @@ impl Settings {
             .write(true)
             .open(lock_path)?;
         lock.lock_exclusive()?;
-        let path = origin.verify_unchanged()?;
         let content = serde_json::to_string_pretty(settings)?;
 
         // Atomic write: write to temp file, sync, then rename
@@ -721,6 +719,9 @@ impl Settings {
             use std::io::Write;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
+            // Check after staging and syncing: edits made during those slower
+            // operations must leave the destination untouched as well.
+            origin.verify_unchanged()?;
             tokscale_core::fs_atomic::replace_file(&temp_path, path)?;
             Ok(())
         })();
