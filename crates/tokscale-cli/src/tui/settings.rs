@@ -71,6 +71,29 @@ impl SettingsOrigin {
         self.safe_to_overwrite
     }
 
+    fn settings_json(&self) -> Result<serde_json::Value> {
+        if !self.is_safe_to_overwrite() {
+            bail!("could not read this machine's tokscale settings, so refusing to replace them");
+        }
+        let snapshot = match &self.primary_snapshot {
+            SettingsFileSnapshot::Missing => self
+                .legacy_snapshot
+                .as_ref()
+                .map(|(_, snapshot)| snapshot)
+                .unwrap_or(&self.primary_snapshot),
+            snapshot => snapshot,
+        };
+        match snapshot {
+            SettingsFileSnapshot::Present(content) => Ok(serde_json::from_str(content)?),
+            SettingsFileSnapshot::Missing => Ok(serde_json::json!({})),
+            SettingsFileSnapshot::Unreadable => {
+                bail!(
+                    "could not read this machine's tokscale settings, so refusing to replace them"
+                )
+            }
+        }
+    }
+
     fn verify_unchanged(&self) -> Result<&Path> {
         let path = self
             .primary_path
@@ -640,12 +663,14 @@ impl Settings {
         self.save_with_origin(Self::load_with_origin().1)
     }
 
-    /// Load the latest settings, change only the requested fields, and save
-    /// using the origin from that same load so intervening edits are rejected.
-    pub(crate) fn update_and_save(update: impl FnOnce(&mut Self)) -> Result<()> {
-        let (mut settings, origin) = Self::load_with_origin();
+    /// Validate the latest settings, then patch their original JSON so unknown
+    /// fields and unmodified values survive without normalization. Callers must
+    /// assign only the preference being changed, using its JSON field name.
+    pub(crate) fn update_and_save(update: impl FnOnce(&mut serde_json::Value)) -> Result<()> {
+        let (_, origin) = Self::load_with_origin();
+        let mut settings = origin.settings_json()?;
         update(&mut settings);
-        settings.save_with_origin(origin)
+        Self::save_json_with_origin(&settings, origin)
     }
 
     /// Save settings using the origin returned when those settings were loaded.
@@ -654,6 +679,10 @@ impl Settings {
     /// updating individual fields without an origin should use
     /// [`Self::update_and_save`] to preserve unrelated edits.
     pub(crate) fn save_with_origin(&self, origin: SettingsOrigin) -> Result<()> {
+        Self::save_json_with_origin(&serde_json::to_value(self)?, origin)
+    }
+
+    fn save_json_with_origin(settings: &serde_json::Value, origin: SettingsOrigin) -> Result<()> {
         if !origin.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
         }
@@ -673,7 +702,7 @@ impl Settings {
             .open(lock_path)?;
         lock.lock_exclusive()?;
         let path = origin.verify_unchanged()?;
-        let content = serde_json::to_string_pretty(self)?;
+        let content = serde_json::to_string_pretty(settings)?;
 
         // Atomic write: write to temp file, sync, then rename
         // Matches the pattern used in tui/cache.rs and pricing/cache.rs
@@ -760,6 +789,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn settings_json_preserves_unknown_legacy_members() {
+        let legacy = RawSettings::Present(
+            r#"{"colorPalette":"green","future":{"nested":true}}"#.to_string(),
+        );
+        let origin = SettingsOrigin::from_raw(
+            Some(PathBuf::from("settings.json")),
+            &RawSettings::Missing,
+            Some((Path::new("legacy/settings.json"), &legacy)),
+        )
+        .writable();
+
+        assert_eq!(
+            origin.settings_json().unwrap(),
+            serde_json::json!({"colorPalette": "green", "future": {"nested": true}})
+        );
     }
 
     #[test]
