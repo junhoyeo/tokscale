@@ -58,6 +58,11 @@ pub const OPENCLAW_INCOGNITO_AGENT_DB_FILENAME: &str = "incognito-openclaw-agent
 /// `<agents root>/<agentId>/agent/codex-home/sessions/**/rollout-*.jsonl`.
 pub const OPENCLAW_CODEX_HOME_DIRNAME: &str = "codex-home";
 
+/// Legacy OpenClaw CLI authentication homes live under an agent as
+/// `agent/cli-auth/codex/<profile>/`. Their Codex session trees are owned by
+/// that agent even though old rollouts identify their originator as `codex_exec`.
+const OPENCLAW_CLI_AUTH_DIRNAME: &str = "cli-auth";
+
 /// Directory `openclaw doctor` moves legacy JSONL into once the SQLite store
 /// exists, beside the agent's `sessions/`: `<agentId>/session-sqlite-import-
 /// archive/<archive key>.<original basename>.imported-<ts>`. A transcript it
@@ -137,7 +142,7 @@ pub(crate) fn codex_mirror_turn_from_dedup_key(dedup_key: &str) -> Option<CodexM
 pub(crate) enum OpenClawJsonlKind {
     /// A session transcript or published archive: the OpenClaw event format.
     Transcript,
-    /// A Codex rollout inside the agent's `codex-home`: Codex's own format,
+    /// A Codex rollout inside an agent-owned Codex home: Codex's own format,
     /// recording the turns OpenClaw drove through Codex app-server.
     CodexRollout,
     /// Anything else Codex keeps in that home (`history.jsonl`, logs). Not
@@ -146,12 +151,26 @@ pub(crate) enum OpenClawJsonlKind {
 }
 
 /// Classify a JSONL path the OpenClaw scan produced. The agents root is walked
-/// whole, so the per-agent `codex-home` comes along with the transcripts.
+/// whole, so agent-owned Codex homes come along with the transcripts.
 pub(crate) fn classify_openclaw_jsonl(path: &Path) -> OpenClawJsonlKind {
     let components: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
     for index in 1..components.len() {
         if components[index] == OPENCLAW_CODEX_HOME_DIRNAME && components[index - 1] == "agent" {
             return match components.get(index + 1).and_then(|c| c.to_str()) {
+                Some("sessions") | Some("archived_sessions") => OpenClawJsonlKind::CodexRollout,
+                _ => OpenClawJsonlKind::CodexHomeOther,
+            };
+        }
+        // Do not match a generic `cli-auth` session: the `codex/<profile>`
+        // components make this a Codex home OpenClaw owns, rather than an
+        // OpenClaw transcript whose session happened to use those names.
+        if components[index] == OPENCLAW_CLI_AUTH_DIRNAME
+            && components[index - 1] == "agent"
+            && components
+                .get(index + 1)
+                .is_some_and(|component| *component == "codex")
+        {
+            return match components.get(index + 3).and_then(|c| c.to_str()) {
                 Some("sessions") | Some("archived_sessions") => OpenClawJsonlKind::CodexRollout,
                 _ => OpenClawJsonlKind::CodexHomeOther,
             };
@@ -2122,13 +2141,32 @@ mod tests {
             ),
             CodexRollout
         );
+        for session_root in ["sessions", "archived_sessions"] {
+            assert_eq!(
+                classify_openclaw_jsonl(&root.join(format!(
+                    "main/agent/cli-auth/codex/default/{session_root}/2026/08/30/rollout-2026-08-30T10-00-00-0192f3a4-5b6c-7d8e-9f01-23456789abcd.jsonl"
+                ))),
+                CodexRollout,
+                "legacy cli-auth Codex {session_root} must be OpenClaw-owned"
+            );
+        }
         assert_eq!(
             classify_openclaw_jsonl(&root.join("main/agent/codex-home/history.jsonl")),
+            CodexHomeOther
+        );
+        assert_eq!(
+            classify_openclaw_jsonl(&root.join("main/agent/cli-auth/codex/default/history.jsonl")),
             CodexHomeOther
         );
         // A session that happens to be named like the directory is still a transcript.
         assert_eq!(
             classify_openclaw_jsonl(&root.join("main/sessions/codex-home/sessions/x.jsonl")),
+            Transcript
+        );
+        assert_eq!(
+            classify_openclaw_jsonl(
+                &root.join("main/agent/cli-auth/other/default/sessions/x.jsonl")
+            ),
             Transcript
         );
     }

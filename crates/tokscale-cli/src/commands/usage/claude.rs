@@ -1,7 +1,15 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    fs, io,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use anyhow::Result;
-use serde::Deserialize;
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
@@ -9,8 +17,9 @@ use super::{UsageMetric, UsageOutput};
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
-// Unix-epoch second; 0 = no cooldown.
-static COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
+const COOLDOWN_DIR: &str = "claude-cooldowns";
+const COOLDOWN_VERSION: u8 = 1;
+static IN_MEMORY_COOLDOWNS: OnceLock<Mutex<HashMap<PathBuf, PersistedCooldown>>> = OnceLock::new();
 
 /// Longest cooldown a `Retry-After` header can impose. A misbehaving proxy
 /// that emits milliseconds instead of seconds (or a far-future date) must not
@@ -24,9 +33,202 @@ fn now_epoch_secs() -> u64 {
         .as_secs()
 }
 
-fn set_cooldown(retry_after_secs: u64) {
-    let deadline = now_epoch_secs().saturating_add(retry_after_secs);
-    COOLDOWN_UNTIL.store(deadline, Ordering::Release);
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedCooldown {
+    version: u8,
+    issued_at: u64,
+    expires_at: u64,
+}
+
+fn cooldown_key(token: &str) -> String {
+    // The token itself is never persisted; this only namespaces a cache file
+    // so one Claude account cannot apply its Retry-After to another account.
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn cooldown_path_in(cache_dir: &Path, key: &str) -> PathBuf {
+    cache_dir.join(COOLDOWN_DIR).join(format!("{key}.json"))
+}
+
+fn in_memory_cooldowns() -> &'static Mutex<HashMap<PathBuf, PersistedCooldown>> {
+    IN_MEMORY_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn valid_cooldown(record: &PersistedCooldown, now: u64) -> Option<u64> {
+    // Issuance time lets a clock moved backwards fail open instead of turning
+    // an old record into a newly extended lockout. The duration cap also makes
+    // manually corrupted or far-future records harmless.
+    if record.version != COOLDOWN_VERSION
+        || record.issued_at > now
+        || record.expires_at <= now
+        || record.expires_at < record.issued_at
+        || record.expires_at - record.issued_at > MAX_RETRY_AFTER_SECS
+    {
+        return None;
+    }
+    Some(record.expires_at - now)
+}
+
+fn read_cooldown(path: &Path, now: u64) -> Option<u64> {
+    let contents = fs::read_to_string(path).ok()?;
+    let record = serde_json::from_str::<PersistedCooldown>(&contents).ok()?;
+    valid_cooldown(&record, now)
+}
+
+fn staging_path(path: &Path) -> PathBuf {
+    path.with_extension("tmp")
+}
+
+fn remove_own_staging_files(path: &Path) {
+    let temporary = staging_path(path);
+    let _ = fs::remove_file(temporary);
+
+    // Older versions used a random suffix. Only reclaim files whose name is
+    // derived from this exact account's committed filename, while holding the
+    // same per-account lock, so another account's active staging file survives.
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let is_legacy_staging = entry_name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".tmp"))
+            .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok());
+        if is_legacy_staging {
+            let _ = fs::remove_file(entry_path);
+        }
+    }
+}
+
+fn write_cooldown_with_now<F>(
+    path: &Path,
+    record: &PersistedCooldown,
+    now: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> u64,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cooldown path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let lock_path = path.with_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    // Contention is bounded: preserve the longer cross-process cooldown when
+    // possible, but never let a stuck cache lock hang an interactive refresh.
+    let mut locked = false;
+    for _ in 0..10 {
+        if lock.try_lock_exclusive().is_ok() {
+            locked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !locked {
+        return Ok(());
+    }
+    let lock_now = now();
+
+    // A later 429 wins. Validate against the time the lock was obtained rather
+    // than the handler's earlier timestamp: a delayed older handler must not
+    // discard a newer record which was issued after that handler began.
+    let existing = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedCooldown>(&s).ok());
+    if valid_cooldown(record, lock_now).is_none() {
+        let _ = lock.unlock();
+        return Ok(());
+    }
+    let selected = existing
+        .filter(|current| {
+            valid_cooldown(current, lock_now).is_some() && current.expires_at > record.expires_at
+        })
+        .unwrap_or(PersistedCooldown {
+            version: record.version,
+            issued_at: record.issued_at,
+            expires_at: record.expires_at,
+        });
+    let data = serde_json::to_vec(&selected).map_err(io::Error::other)?;
+    remove_own_staging_files(path);
+    let temporary = staging_path(path);
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        tokscale_core::fs_atomic::replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    let _ = lock.unlock();
+    result
+}
+
+#[cfg(test)]
+fn write_cooldown_at(
+    path: &Path,
+    record: &PersistedCooldown,
+    lock_now: u64,
+) -> std::io::Result<()> {
+    write_cooldown_with_now(path, record, || lock_now)
+}
+
+fn set_cooldown(path: &Path, retry_after_secs: u64, now: u64) {
+    set_cooldown_with_now(path, retry_after_secs, now, now_epoch_secs);
+}
+
+fn set_cooldown_with_now<F>(path: &Path, retry_after_secs: u64, now: u64, current_now: F)
+where
+    F: Fn() -> u64,
+{
+    let deadline = now.saturating_add(retry_after_secs.min(MAX_RETRY_AFTER_SECS));
+    let record = PersistedCooldown {
+        version: COOLDOWN_VERSION,
+        issued_at: now,
+        expires_at: deadline,
+    };
+    // Keep the current TUI process protected even when the cache root is
+    // inaccessible. This map is scoped by the hashed account file path.
+    if let Ok(mut cooldowns) = in_memory_cooldowns().lock() {
+        let memory_now = current_now();
+        cooldowns.retain(|_, current| valid_cooldown(current, memory_now).is_some());
+        if valid_cooldown(&record, memory_now).is_none() {
+            return;
+        }
+        cooldowns
+            .entry(path.to_path_buf())
+            .and_modify(|current| {
+                if current.expires_at < record.expires_at {
+                    *current = record.clone();
+                }
+            })
+            .or_insert_with(|| record.clone());
+    }
+    let _ = write_cooldown_with_now(path, &record, current_now);
+}
+
+#[cfg(test)]
+fn set_cooldown_at(path: &Path, retry_after_secs: u64, now: u64, current_now: u64) {
+    set_cooldown_with_now(path, retry_after_secs, now, || current_now);
 }
 
 /// RFC 9110 allows `Retry-After` as delta-seconds or as an HTTP-date; a date
@@ -41,23 +243,23 @@ fn parse_retry_after(value: &str) -> Option<u64> {
     Some(secs.min(MAX_RETRY_AFTER_SECS))
 }
 
-fn cooldown_remaining() -> Option<u64> {
-    let deadline = COOLDOWN_UNTIL.load(Ordering::Acquire);
-    if deadline == 0 {
-        return None;
+fn cooldown_remaining(path: &Path, now: u64) -> Option<u64> {
+    let disk = read_cooldown(path, now);
+    if let Ok(mut cooldowns) = in_memory_cooldowns().lock() {
+        cooldowns.retain(|_, current| valid_cooldown(current, now).is_some());
+        let memory = cooldowns
+            .get(path)
+            .and_then(|record| valid_cooldown(record, now));
+        if let Some(remaining) = memory.into_iter().chain(disk).max() {
+            return Some(remaining);
+        }
     }
-    let now = now_epoch_secs();
-    if now >= deadline {
-        COOLDOWN_UNTIL.store(0, Ordering::Release);
-        None
-    } else {
-        Some(deadline - now)
-    }
+    disk
 }
 
 #[cfg(test)]
 fn clear_cooldown() {
-    COOLDOWN_UNTIL.store(0, Ordering::Release);
+    in_memory_cooldowns().lock().unwrap().clear();
 }
 
 // `~/.claude/.credentials.json` belongs to Claude Code, and this module is a
@@ -203,6 +405,7 @@ async fn fetch_usage(
     client: &reqwest::Client,
     usage_url: &str,
     token: &str,
+    cooldown_file: &Path,
 ) -> Result<UsageResponse> {
     let resp = client
         .get(usage_url)
@@ -226,7 +429,7 @@ async fn fetch_usage(
             .and_then(|v| v.to_str().ok())
             .and_then(parse_retry_after)
             .unwrap_or(5);
-        set_cooldown(wait);
+        set_cooldown(cooldown_file, wait, now_epoch_secs());
         anyhow::bail!("Claude usage rate-limited (HTTP 429), cooling down for {wait}s");
     }
     if !status.is_success() {
@@ -399,10 +602,14 @@ fn usage_metrics(resp: &UsageResponse) -> Vec<UsageMetric> {
 /// this orchestration, so it is the layer the tests must enter; [`fetch`] is one
 /// call with the production values and holds no logic that could diverge.
 fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput> {
-    if let Some(remaining) = cooldown_remaining() {
-        anyhow::bail!("Claude usage rate-limited — retry in {remaining}s.");
-    }
+    fetch_blocking_in(usage_url, read, &crate::paths::get_cache_dir())
+}
 
+fn fetch_blocking_in(
+    usage_url: &str,
+    read: CredentialReader,
+    cache_dir: &Path,
+) -> Result<UsageOutput> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -415,6 +622,10 @@ fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput
             .access_token
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No Claude access token."))?;
+        let cooldown_file = cooldown_path_in(cache_dir, &cooldown_key(access_token));
+        if let Some(remaining) = cooldown_remaining(&cooldown_file, now_epoch_secs()) {
+            anyhow::bail!("Claude usage rate-limited — retry in {remaining}s.");
+        }
         let plan = oauth.subscription_type.as_ref().map(|s| {
             let tier = oauth
                 .rate_limit_tier
@@ -427,7 +638,7 @@ fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput
         });
 
         let client = tokscale_core::http::client();
-        let resp = fetch_usage(&client, usage_url, access_token).await?;
+        let resp = fetch_usage(&client, usage_url, access_token, &cooldown_file).await?;
 
         let metrics = usage_metrics(&resp);
 
@@ -1199,33 +1410,81 @@ mod tests {
     #[serial_test::serial]
     fn cooldown_is_inactive_by_default() {
         clear_cooldown();
-        assert!(cooldown_remaining().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        assert!(cooldown_remaining(&temp.path().join("missing.json"), 1_000).is_none());
     }
 
     #[test]
     #[serial_test::serial]
-    fn set_cooldown_activates_and_expires() {
+    fn persisted_cooldown_activates_and_expires_without_sleeping() {
         clear_cooldown();
-        set_cooldown(1);
-        assert!(cooldown_remaining().is_some());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert!(cooldown_remaining().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown_at(&path, 60, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_010), Some(50));
+        clear_cooldown(); // simulates a new tokscale process
+        assert_eq!(cooldown_remaining(&path, 1_010), Some(50));
+        assert!(cooldown_remaining(&path, 1_060).is_none());
     }
 
     #[test]
     #[serial_test::serial]
     fn cooldown_blocks_fetch_blocking() {
         clear_cooldown();
-        set_cooldown(60);
-        let (usage_url, _log) = spawn_usage_server(200);
-        let result = fetch_blocking(&usage_url, keychain_credentials);
+        let temp = tempfile::tempdir().unwrap();
+        let path = cooldown_path_in(temp.path(), &cooldown_key("stale-access-token"));
+        set_cooldown(&path, 60, now_epoch_secs());
+        let (usage_url, log) = spawn_usage_server(200);
+        let result = fetch_blocking_in(&usage_url, keychain_credentials, temp.path());
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("rate-limited"),
-            "expected cooldown error, got: {err}"
+        assert!(result.unwrap_err().to_string().contains("rate-limited"));
+        assert!(log.lock().unwrap().is_empty(), "cooldown must prevent HTTP");
+        clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rate_limit_persists_across_process_state() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let (usage_url, log) = spawn_usage_server(429);
+        let first = fetch_blocking_in(&usage_url, keychain_credentials, temp.path());
+        assert!(first.unwrap_err().to_string().contains("HTTP 429"));
+        clear_cooldown(); // Simulates an independent tokscale invocation.
+        let second = fetch_blocking_in(&usage_url, keychain_credentials, temp.path());
+        assert!(second.unwrap_err().to_string().contains("rate-limited"));
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "persistent cooldown made no second request"
         );
         clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn persisted_cooldown_is_visible_to_child_process() {
+        const CHILD_PATH: &str = "TOKSCALE_CLAUDE_COOLDOWN_CHILD_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            assert!(cooldown_remaining(Path::new(&path), now_epoch_secs()).is_some());
+            return;
+        }
+
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown(&path, 60, now_epoch_secs());
+        clear_cooldown();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::usage::claude::tests::persisted_cooldown_is_visible_to_child_process",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .status()
+            .expect("launch child test process");
+        assert!(status.success(), "child process did not observe cooldown");
     }
 
     /// A proxy that emits `Retry-After` in milliseconds -- or any absurdly
@@ -1248,9 +1507,338 @@ mod tests {
     #[serial_test::serial]
     fn set_cooldown_saturates_instead_of_overflowing() {
         clear_cooldown();
-        set_cooldown(u64::MAX);
-        assert!(cooldown_remaining().is_some());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown_at(&path, u64::MAX, u64::MAX - 10, u64::MAX - 10);
+        assert_eq!(cooldown_remaining(&path, u64::MAX - 1), Some(1));
         clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn malformed_expired_future_and_backward_clock_records_fail_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        fs::write(&path, "not json").unwrap();
+        assert!(cooldown_remaining(&path, 1_000).is_none());
+
+        for record in [
+            PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 900,
+                expires_at: 999,
+            },
+            PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_001,
+                expires_at: 1_020,
+            },
+            PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_000 + MAX_RETRY_AFTER_SECS + 1,
+            },
+        ] {
+            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            clear_cooldown();
+            assert!(cooldown_remaining(&path, 1_000).is_none(), "{record:?}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn in_memory_cooldown_fails_open_after_clock_rollback() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown_at(&path, 60, 1_000, 1_000);
+        assert!(cooldown_remaining(&path, 999).is_none());
+        clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn longer_disk_cooldown_wins_over_shorter_memory_cooldown() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown_at(&path, 30, 1_000, 1_000);
+        fs::write(
+            &path,
+            serde_json::to_vec(&PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_090,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cooldown_still_blocks_http_when_cache_cannot_be_written() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_cache = temp.path().join("not-a-directory");
+        fs::write(&blocked_cache, "file blocks cache creation").unwrap();
+        let (usage_url, log) = spawn_usage_server(429);
+        let first = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
+        assert!(first.unwrap_err().to_string().contains("HTTP 429"));
+        let second = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
+        assert!(second.unwrap_err().to_string().contains("retry in"));
+        assert_eq!(log.lock().unwrap().len(), 1);
+        clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cooldown_is_scoped_to_access_token_and_cache_root() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let path = cooldown_path_in(temp.path(), &cooldown_key("token-one"));
+        let other_token = cooldown_path_in(temp.path(), &cooldown_key("token-two"));
+        let other_profile = cooldown_path_in(other_root.path(), &cooldown_key("token-one"));
+        set_cooldown_at(&path, 60, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(60));
+        assert!(cooldown_remaining(&other_token, 1_000).is_none());
+        assert!(cooldown_remaining(&other_profile, 1_000).is_none());
+        let serialized = fs::read_to_string(&path).unwrap();
+        assert!(!serialized.contains("token-one"));
+        assert!(!path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("token-one"));
+        clear_cooldown();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn valid_retry_after_replaces_malformed_and_future_records() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        for contents in [
+            "not json".as_bytes(),
+            &serde_json::to_vec(&PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_000 + MAX_RETRY_AFTER_SECS + 1,
+            })
+            .unwrap(),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            set_cooldown_at(&path, 60, 1_000, 1_000);
+            clear_cooldown();
+            assert_eq!(cooldown_remaining(&path, 1_000), Some(60));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn shorter_update_does_not_shorten_active_cooldown() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        set_cooldown_at(&path, 30, 1_000, 1_000);
+        set_cooldown_at(&path, 90, 1_000, 1_000);
+        set_cooldown_at(&path, 10, 1_000, 1_000);
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn delayed_older_writer_preserves_newer_active_cooldown() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        let newer = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_010,
+            expires_at: 1_100,
+        };
+        let older = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_000,
+            expires_at: 1_030,
+        };
+
+        write_cooldown_at(&path, &newer, 1_010).unwrap();
+        write_cooldown_with_now(&path, &older, || {
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.with_extension("lock"))
+                .unwrap();
+            assert!(
+                lock.try_lock_exclusive().is_err(),
+                "clock sampled after lock acquisition"
+            );
+            1_020
+        })
+        .unwrap();
+        assert_eq!(read_cooldown(&path, 1_020), Some(80));
+
+        set_cooldown_at(&path, 90, 1_010, 1_010);
+        set_cooldown_at(&path, 30, 1_000, 1_020);
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_020), Some(80));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn writer_replaces_malformed_and_future_records_at_lock_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        let replacement = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_020,
+            expires_at: 1_080,
+        };
+
+        for contents in [
+            "not json".as_bytes(),
+            &serde_json::to_vec(&PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_021,
+                expires_at: 1_080,
+            })
+            .unwrap(),
+        ] {
+            fs::write(&path, contents).unwrap();
+            write_cooldown_at(&path, &replacement, 1_020).unwrap();
+            assert_eq!(read_cooldown(&path, 1_020), Some(60));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn delayed_writer_does_not_persist_record_invalid_at_lock_time() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        let active = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_020,
+            expires_at: 1_080,
+        };
+        let stale = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_000,
+            expires_at: 1_030,
+        };
+        write_cooldown_at(&path, &active, 1_020).unwrap();
+        write_cooldown_at(&path, &stale, 1_040).unwrap();
+        assert_eq!(read_cooldown(&path, 1_040), Some(40));
+
+        set_cooldown_at(&path, 60, 1_050, 1_040);
+        set_cooldown_at(&path, 30, 1_000, 1_040);
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_040), Some(40));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn writer_reclaims_own_orphaned_staging_files_without_touching_other_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("account-one.json");
+        let other_path = temp.path().join("account-two.json");
+        let own_orphan = staging_path(&path);
+        let legacy_own_orphan = path.with_extension("00000000-0000-0000-0000-000000000001.tmp");
+        let own_non_staging = path.with_extension("manual.tmp");
+        let other_active = other_path.with_extension("00000000-0000-0000-0000-000000000002.tmp");
+        fs::write(&own_orphan, "interrupted writer").unwrap();
+        fs::write(&legacy_own_orphan, "interrupted legacy writer").unwrap();
+        fs::write(&own_non_staging, "not our staging format").unwrap();
+        fs::write(&other_active, "another account is writing").unwrap();
+
+        let record = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_000,
+            expires_at: 1_060,
+        };
+        write_cooldown_at(&path, &record, 1_000).unwrap();
+
+        assert_eq!(read_cooldown(&path, 1_000), Some(60));
+        assert!(!own_orphan.exists());
+        assert!(!legacy_own_orphan.exists());
+        assert_eq!(
+            fs::read_to_string(own_non_staging).unwrap(),
+            "not our staging format"
+        );
+        assert_eq!(
+            fs::read_to_string(other_active).unwrap(),
+            "another account is writing"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn contended_writer_leaves_committed_and_staging_files_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        let committed = PersistedCooldown {
+            version: COOLDOWN_VERSION,
+            issued_at: 1_000,
+            expires_at: 1_060,
+        };
+        fs::write(&path, serde_json::to_vec(&committed).unwrap()).unwrap();
+        let staging = staging_path(&path);
+        let legacy = path.with_extension("00000000-0000-0000-0000-000000000003.tmp");
+        fs::write(&staging, "active writer").unwrap();
+        fs::write(&legacy, "active legacy writer").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        write_cooldown_at(
+            &path,
+            &PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_090,
+            },
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&staging).unwrap(), "active writer");
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "active legacy writer");
+        assert_eq!(read_cooldown(&path, 1_000), Some(60));
+        lock.unlock().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_writers_preserve_the_later_cooldown() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cooldown.json");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for wait in [30, 90] {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                set_cooldown_at(&path, wait, 1_000, 1_000);
+            }));
+        }
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
     }
 
     /// RFC 9110 also allows `Retry-After` as an HTTP-date. That form must
