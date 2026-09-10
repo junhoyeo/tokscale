@@ -35,7 +35,8 @@ indicatif = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# Patch TUI preferences without reserializing unrelated JSON values or numbers.
+serde_json = { workspace = true, features = ["raw_value"] }
 toml = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -5,6 +6,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tokscale_core::scanner::ScannerSettings;
 
 use super::themes::ThemeName;
@@ -70,7 +72,7 @@ impl SettingsOrigin {
         self.safe_to_overwrite
     }
 
-    fn settings_json(&self) -> Result<serde_json::Value> {
+    fn settings_json(&self) -> Result<BTreeMap<String, Box<RawValue>>> {
         if !self.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
         }
@@ -84,7 +86,7 @@ impl SettingsOrigin {
         };
         match snapshot {
             SettingsFileSnapshot::Present(content) => Ok(serde_json::from_str(content)?),
-            SettingsFileSnapshot::Missing => Ok(serde_json::json!({})),
+            SettingsFileSnapshot::Missing => Ok(BTreeMap::new()),
             SettingsFileSnapshot::Unreadable => {
                 bail!(
                     "could not read this machine's tokscale settings, so refusing to replace them"
@@ -662,16 +664,12 @@ impl Settings {
         self.save_with_origin(Self::load_with_origin().1)
     }
 
-    /// Validate the latest settings, then patch their original JSON so unknown
-    /// fields and unmodified values survive without normalization. Callers must
-    /// assign only the preference being changed, using its JSON field name.
-    pub(crate) fn update_and_save(update: impl FnOnce(&mut serde_json::Value)) -> Result<()> {
+    /// Validate the latest settings, then replace one top-level preference.
+    /// Unmodified values retain their original JSON, including number precision.
+    pub(crate) fn update_and_save(field: &str, value: impl Serialize) -> Result<()> {
         let (_, origin) = Self::load_with_origin();
         let mut settings = origin.settings_json()?;
-        if !settings.is_object() {
-            bail!("settings.json must contain a JSON object; refusing to replace it");
-        }
-        update(&mut settings);
+        settings.insert(field.to_string(), serde_json::value::to_raw_value(&value)?);
         Self::save_json_with_origin(&settings, origin)
     }
 
@@ -681,10 +679,10 @@ impl Settings {
     /// updating individual fields without an origin should use
     /// [`Self::update_and_save`] to preserve unrelated edits.
     pub(crate) fn save_with_origin(&self, origin: SettingsOrigin) -> Result<()> {
-        Self::save_json_with_origin(&serde_json::to_value(self)?, origin)
+        Self::save_json_with_origin(self, origin)
     }
 
-    fn save_json_with_origin(settings: &serde_json::Value, origin: SettingsOrigin) -> Result<()> {
+    fn save_json_with_origin(settings: &impl Serialize, origin: SettingsOrigin) -> Result<()> {
         if !origin.is_safe_to_overwrite() {
             bail!("could not read this machine's tokscale settings, so refusing to replace them");
         }
@@ -796,6 +794,28 @@ mod tests {
     }
 
     #[test]
+    fn saving_patched_json_rejects_edits_since_load() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
+        let origin =
+            SettingsOrigin::from_raw(Some(path.clone()), &Settings::read_config_file(&path), None)
+                .writable();
+        let mut settings = origin.settings_json().unwrap();
+        settings.insert(
+            "tuiLightMode".into(),
+            serde_json::value::to_raw_value(&true).unwrap(),
+        );
+        let replacement = r#"{"usage":{"disabledProviders":["copilot"]}}"#;
+        fs::write(&path, replacement).unwrap();
+
+        let error = Settings::save_json_with_origin(&settings, origin).unwrap_err();
+
+        assert!(error.to_string().contains("changed since it was loaded"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
+    }
+
+    #[test]
     fn settings_json_preserves_unknown_legacy_members() {
         let legacy = RawSettings::Present(
             r#"{"colorPalette":"green","future":{"nested":true}}"#.to_string(),
@@ -808,7 +828,7 @@ mod tests {
         .writable();
 
         assert_eq!(
-            origin.settings_json().unwrap(),
+            serde_json::to_value(origin.settings_json().unwrap()).unwrap(),
             serde_json::json!({"colorPalette": "green", "future": {"nested": true}})
         );
     }

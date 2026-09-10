@@ -1898,9 +1898,7 @@ impl App {
         };
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
-        if let Err(e) = Settings::update_and_save(|settings| {
-            settings["colorPalette"] = new_theme.as_str().into();
-        }) {
+        if let Err(e) = Settings::update_and_save("colorPalette", new_theme.as_str()) {
             self.set_status(&format!(
                 "Theme: {} (save failed: {})",
                 new_theme.as_str(),
@@ -1925,9 +1923,7 @@ impl App {
         } else {
             "off"
         };
-        if let Err(e) = Settings::update_and_save(|settings| {
-            settings["tuiLightMode"] = light_mode.into();
-        }) {
+        if let Err(e) = Settings::update_and_save("tuiLightMode", light_mode) {
             self.set_status(&format!("Light mode: {} (save failed: {})", state, e));
         } else {
             self.set_status(&format!("Light mode: {}", state));
@@ -2083,9 +2079,7 @@ impl App {
             self.last_auto_refresh = Instant::now();
         }
         self.settings.auto_refresh_enabled = self.auto_refresh;
-        let save_result = Settings::update_and_save(|settings| {
-            settings["autoRefreshEnabled"] = self.auto_refresh.into();
-        });
+        let save_result = Settings::update_and_save("autoRefreshEnabled", self.auto_refresh);
         let msg = if self.auto_refresh {
             format!(
                 "Auto-refresh ON ({}s)",
@@ -2106,9 +2100,7 @@ impl App {
         let new_ms = ms.saturating_add(10_000).min(300_000);
         self.auto_refresh_interval = Duration::from_millis(new_ms);
         self.settings.auto_refresh_ms = new_ms;
-        let save_result = Settings::update_and_save(|settings| {
-            settings["autoRefreshMs"] = new_ms.into();
-        });
+        let save_result = Settings::update_and_save("autoRefreshMs", new_ms);
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
             self.set_status(&format!("{} (save failed: {})", msg, e));
@@ -2122,9 +2114,7 @@ impl App {
         let new_ms = ms.saturating_sub(10_000).max(30_000);
         self.auto_refresh_interval = Duration::from_millis(new_ms);
         self.settings.auto_refresh_ms = new_ms;
-        let save_result = Settings::update_and_save(|settings| {
-            settings["autoRefreshMs"] = new_ms.into();
-        });
+        let save_result = Settings::update_and_save("autoRefreshMs", new_ms);
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
             self.set_status(&format!("{} (save failed: {})", msg, e));
@@ -4405,6 +4395,38 @@ mod tests {
     }
 
     #[test]
+    fn tui_settings_changes_preserve_unknown_number_precision() {
+        if !settings_test_runs_in_child("tui_settings_changes_preserve_unknown_number_precision") {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        let mut app = make_app();
+        for number in [
+            "18446744073709551617",
+            "0.12345678901234567890123456789",
+            "1e400",
+        ] {
+            let nested = format!(r#"{{ "values" : [ {number} ] }}"#);
+            fs::write(
+                &path,
+                format!(r#"{{"futureNumber":{number},"futureObject":{nested}}}"#),
+            )
+            .unwrap();
+            app.handle_key_event(key(KeyCode::Char('p')));
+            let saved = fs::read_to_string(&path).unwrap();
+            assert!(saved.contains(number), "number changed in {saved}");
+            assert!(saved.contains(&nested), "nested JSON changed in {saved}");
+            assert!(saved.contains(app.theme.name.as_str()));
+            assert!(!app
+                .status_message
+                .as_deref()
+                .unwrap()
+                .contains("save failed"));
+        }
+    }
+
+    #[test]
     fn tui_settings_changes_preserve_sparse_external_edits() {
         if !settings_test_runs_in_child("tui_settings_changes_preserve_sparse_external_edits") {
             return;
@@ -4455,25 +4477,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn tui_settings_save_rejects_edits_during_update() {
-        if !settings_test_runs_in_child("tui_settings_save_rejects_edits_during_update") {
-            return;
-        }
-
-        let path = crate::paths::get_config_dir().join("settings.json");
-        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
-        let replacement = r#"{"usage":{"disabledProviders":["copilot"]}}"#;
-        let error = Settings::update_and_save(|settings| {
-            settings["tuiLightMode"] = true.into();
-            fs::write(&path, replacement).unwrap();
-        })
-        .unwrap_err();
-
-        assert!(error.to_string().contains("changed since it was loaded"));
-        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
     }
 
     // ── handle_key_event: export ────────────────────────────────────
