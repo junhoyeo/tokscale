@@ -10068,6 +10068,64 @@ mod tests {
         }
     }
 
+    /// Regression for the PR #1323 review question: when two Pi session files
+    /// carry the same `responseId` with CONFLICTING usage (a fork copy that
+    /// drifted), the surviving copy must be the first one in scan-path order,
+    /// deterministically — not an arbitrary one. The scanner sorts paths
+    /// (`scanner.rs` "Sort for deterministic ordering"), rayon
+    /// `par_iter().flat_map().collect()` preserves that order (doc-tested
+    /// upstream; `ListReducer` appends right after left), and the dedup filter
+    /// runs sequentially over the result. This test would flake if any of
+    /// those three legs were unordered.
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_pi_conflicting_fork_copies_first_wins() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let sessions_dir = source_home
+            .path()
+            .join(".pi/agent/sessions/--fixture--");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let record = |session: &str, input: i64, output: i64| {
+            let total = input + output;
+            format!(
+                r#"{{"type":"session","id":"{session}","timestamp":"2026-09-06T12:00:00.000Z","cwd":"/tmp/demo"}}"#,
+            ) + "\n"
+                + &format!(
+                    r#"{{"type":"message","id":"entry-fork-copy","parentId":"{session}","timestamp":"2026-09-06T12:00:00.000Z","message":{{"role":"assistant","provider":"openai-codex","model":"gpt-6-astra","responseId":"resp-demo-fork","usage":{{"input":{input},"output":{output},"cacheRead":0,"cacheWrite":0,"totalTokens":{total}}}}}}}"#
+                )
+                + "\n"
+        };
+        // Sorted scan order: session-a.jsonl (input 100) before
+        // session-b.jsonl (input 999, conflicting usage, same responseId).
+        std::fs::write(sessions_dir.join("session-a.jsonl"), record("session-a", 100, 20))
+            .unwrap();
+        std::fs::write(sessions_dir.join("session-b.jsonl"), record("session-b", 999, 999))
+            .unwrap();
+
+        // Repeat to smoke out any order nondeterminism in the parallel
+        // parse + flatten: every run must keep session-a's copy.
+        for _ in 0..25 {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec!["pi".to_string()]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+
+            assert_eq!(parsed.counts.get(ClientId::Pi), 1);
+            assert_eq!(parsed.messages.len(), 1);
+            assert_eq!(parsed.messages[0].input, 100);
+            assert_eq!(parsed.messages[0].output, 20);
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_local_clients_kimi_deduplicates_repeated_status_updates() {
