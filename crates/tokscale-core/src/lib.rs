@@ -10084,9 +10084,7 @@ mod tests {
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
 
-        let sessions_dir = source_home
-            .path()
-            .join(".pi/agent/sessions/--fixture--");
+        let sessions_dir = source_home.path().join(".pi/agent/sessions/--fixture--");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let record = |session: &str, input: i64, output: i64| {
             let total = input + output;
@@ -10100,10 +10098,16 @@ mod tests {
         };
         // Sorted scan order: session-a.jsonl (input 100) before
         // session-b.jsonl (input 999, conflicting usage, same responseId).
-        std::fs::write(sessions_dir.join("session-a.jsonl"), record("session-a", 100, 20))
-            .unwrap();
-        std::fs::write(sessions_dir.join("session-b.jsonl"), record("session-b", 999, 999))
-            .unwrap();
+        std::fs::write(
+            sessions_dir.join("session-a.jsonl"),
+            record("session-a", 100, 20),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions_dir.join("session-b.jsonl"),
+            record("session-b", 999, 999),
+        )
+        .unwrap();
 
         // Repeat to smoke out any order nondeterminism in the parallel
         // parse + flatten: every run must keep session-a's copy.
