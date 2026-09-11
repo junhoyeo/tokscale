@@ -1115,12 +1115,14 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1: Pi subagent sessions now derive agent attribution from
             // session_info names; version-1 caches carry those messages
             // without agent metadata.
-            (ClientId::Pi, 1),
+            (ClientId::Pi, 2),
             // +1: Kimchi's Pi-compatible messages now carry stable
             // namespaced deduplication keys.
             (ClientId::Kimchi, 1),
-            (ClientId::Omp, 0),
-            (ClientId::Senpi, 0),
+            // +1: Standard Pi/OMP/Senpi parser now emits cross-session
+            // namespaced dedup keys (same behavior as Kimchi/Prime).
+            (ClientId::Omp, 1),
+            (ClientId::Senpi, 1),
             // +3 for Prime Agent's independent history. v1->v2 strips a
             // leading BOM and recovers records containing undecodable
             // bytes; its accounting scan also continues past those records
@@ -4240,10 +4242,10 @@ mod tests {
             (
                 "pi-format",
                 &[
-                    (ClientId::Pi, 1),
+                    (ClientId::Pi, 2),
                     (ClientId::Kimchi, 1),
-                    (ClientId::Omp, 0),
-                    (ClientId::Senpi, 0),
+                    (ClientId::Omp, 1),
+                    (ClientId::Senpi, 1),
                     (ClientId::PrimeAgent, 3),
                 ],
             ),

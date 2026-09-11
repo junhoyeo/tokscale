@@ -2652,7 +2652,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    parse_cached_lane(
+    // Pi branch/fork copies prior assistant records into a new session file
+    // (#1306). The parser stamps cross-session keys (`responseId` preferred);
+    // this lane drops the copies — first-wins in scan order, same key survives
+    // warm cache hits.
+    parse_cached_lane_deduped(
         &scan_result,
         &mut source_cache,
         pricing,
@@ -2733,7 +2737,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    parse_cached_lane(
+    // Senpi and Omp share the Pi record format and its fork-copy behavior
+    // (#1306); dedup the same way as the Pi lane.
+    parse_cached_lane_deduped(
         &scan_result,
         &mut source_cache,
         pricing,
@@ -2742,7 +2748,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::senpi::parse_senpi_file,
     );
 
-    parse_cached_lane(
+    parse_cached_lane_deduped(
         &scan_result,
         &mut source_cache,
         pricing,
@@ -5594,15 +5600,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
 
-    let pi_msgs: Vec<ParsedMessage> = scan_result
+    // Pi branch/fork copies prior assistant records into a new session file
+    // (#1306); the parser stamps cross-session keys, drop the copies here too
+    // so the export/submission totals match the live scan.
+    let pi_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Pi)
         .par_iter()
-        .flat_map(|path| {
-            sessions::pi::parse_pi_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::pi::parse_pi_file(path))
+        .collect();
+    let mut pi_seen: HashSet<String> = HashSet::new();
+    let pi_msgs: Vec<ParsedMessage> = pi_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut pi_seen, message))
+        .map(|message| unified_to_parsed(&message))
         .collect();
     let pi_count = pi_msgs.len() as i32;
     counts.set(ClientId::Pi, pi_count);
@@ -5665,29 +5675,31 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Reasonix, reasonix_count);
     messages.extend(reasonix_msgs);
 
-    let senpi_msgs: Vec<ParsedMessage> = scan_result
+    let senpi_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Senpi)
         .par_iter()
-        .flat_map(|path| {
-            sessions::senpi::parse_senpi_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::senpi::parse_senpi_file(path))
+        .collect();
+    let mut senpi_seen: HashSet<String> = HashSet::new();
+    let senpi_msgs: Vec<ParsedMessage> = senpi_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut senpi_seen, message))
+        .map(|message| unified_to_parsed(&message))
         .collect();
     let senpi_count = senpi_msgs.len() as i32;
     counts.set(ClientId::Senpi, senpi_count);
     messages.extend(senpi_msgs);
 
-    let omp_msgs: Vec<ParsedMessage> = scan_result
+    let omp_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Omp)
         .par_iter()
-        .flat_map(|path| {
-            sessions::omp::parse_omp_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::omp::parse_omp_file(path))
+        .collect();
+    let mut omp_seen: HashSet<String> = HashSet::new();
+    let omp_msgs: Vec<ParsedMessage> = omp_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut omp_seen, message))
+        .map(|message| unified_to_parsed(&message))
         .collect();
     let omp_count = omp_msgs.len() as i32;
     counts.set(ClientId::Omp, omp_count);
