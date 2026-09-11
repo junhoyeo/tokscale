@@ -23,14 +23,22 @@ credited to the requested models or the served one — only the split moves.
 That is the point: a comparator that checks token buckets alone cannot see
 stale model attribution, or the pricing derived from it, survive a migration.
 `expected.json` therefore records a per-model breakdown, and
-`scripts/check-dsh-cache-migration.sh` compares on it.
+`dsh_predecessor_caches_are_rejected_and_rebuilt_by_the_production_scan`
+(in `crates/tokscale-core/src/message_cache.rs`) compares on it.
 
 `current` is what a served-model parser reports; `predecessors.3` is what the
 requested-model parser shipped as 4.14.0 reports.
 
-The same root runs a second time against the last published release, where the
-released binary and this build normally share a parser version and the released
-rows are therefore served rather than reparsed. That is the only leg in the gate
-whose warm scan can disagree with a cold one over a *future* missing bump, and
-this is the only fixture whose graded figure an attribution change moves — so
-the pair is what stops a served-model change from shipping without one.
+The test seeds this root's transcripts into a cache written under parser
+identity 3 — the one 4.14.0 cached under — and then runs the production scan.
+Serving those rows reports `predecessors.3`; rejecting them and reparsing
+reports `current`. Because only the split moves, this is the fixture that
+stops an attribution change from shipping unnoticed, and it keeps doing so for
+a *future* change: `current` is frozen here, so a semantics change that does
+not bump the parser identity lands as a diff against it rather than moving
+both halves of a same-version round trip together.
+
+`predecessors` is a frozen record of what a published binary reported, and its
+key is pinned in the test rather than derived from the running parser version.
+Rewriting `current` to match changed behaviour without a bump is re-recording
+a baseline, not updating a snapshot.

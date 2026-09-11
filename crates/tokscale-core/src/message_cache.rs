@@ -4044,26 +4044,220 @@ mod tests {
         assert_eq!(parser_version(ClientId::Dsh), 5);
     }
 
+    /// Names the row that only a served cache can put in a report. No DSH
+    /// transcript in this repo produces it, so its presence is proof the scan
+    /// read the cache and its absence is proof the scan parsed the source.
+    const DSH_CACHE_MARKER: &str = "cache-only-marker";
+
+    fn cache_only_marker_row() -> UnifiedMessage {
+        UnifiedMessage::new(
+            "dsh",
+            format!("{DSH_CACHE_MARKER}-model"),
+            format!("{DSH_CACHE_MARKER}-provider"),
+            format!("{DSH_CACHE_MARKER}-session"),
+            1,
+            crate::TokenBreakdown {
+                input: 12345,
+                output: 678,
+                cache_read: 90,
+                cache_write: 9,
+                reasoning: 0,
+            },
+            0.0,
+        )
+    }
+
+    fn report_carries_the_cache_marker(messages: &[UnifiedMessage]) -> bool {
+        messages.iter().any(|message| {
+            message.model_id.contains(DSH_CACHE_MARKER)
+                || message.provider_id.contains(DSH_CACHE_MARKER)
+                || message.session_id.contains(DSH_CACHE_MARKER)
+        })
+    }
+
+    /// The checked-in DSH fixtures, under `crates/tokscale-core/tests/fixtures`.
+    /// Each holds a `sessions/` tree and an `expected.json` recording what the
+    /// current parser reports and what the released predecessor reported.
+    fn dsh_fixture_dir(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn dsh_fixture_expectations(name: &str) -> serde_json::Value {
+        let path = dsh_fixture_dir(name).join("expected.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display())),
+        )
+        .unwrap_or_else(|error| panic!("{} is not valid JSON: {error}", path.display()))
+    }
+
+    /// Copies a fixture's `sessions/` tree to `<source_home>/.dsh/sessions`,
+    /// the root `ClientId::Dsh` resolves to for a scan that does not read
+    /// environment roots, and returns every transcript it installed.
+    fn install_dsh_fixture(source_home: &Path, name: &str) -> Vec<PathBuf> {
+        let fixture_sessions = dsh_fixture_dir(name).join("sessions");
+        let installed_root = source_home.join(".dsh").join("sessions");
+        let mut transcripts = Vec::new();
+        for entry in walkdir::WalkDir::new(&fixture_sessions) {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!("{} is unreadable: {error}", fixture_sessions.display())
+            });
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&fixture_sessions)
+                .expect("the walk stays under the fixture");
+            let installed = installed_root.join(relative);
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            std::fs::copy(entry.path(), &installed).unwrap();
+            transcripts.push(installed);
+        }
+        transcripts.sort();
+        assert!(
+            !transcripts.is_empty(),
+            "fixture {name} installed no transcripts"
+        );
+        transcripts
+    }
+
+    /// One DSH transcript where the production scan looks for it.
+    fn write_dsh_transcript(source_home: &Path, session_id: &str, body: &[u8]) -> PathBuf {
+        let dir = source_home
+            .join(".dsh")
+            .join("sessions")
+            .join("--test--")
+            .join(session_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Runs the production DSH lane the way `tokscale --json` does: one cached
+    /// scan, no pricing service, no environment-provided scan roots.
+    fn scan_dsh(source_home: &Path) -> Vec<UnifiedMessage> {
+        crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.to_str().expect("UTF-8 fixture path"),
+            &["dsh".to_owned()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        )
+    }
+
+    /// A scan's answer in the shape `expected.json` records: totals summed over
+    /// the report entries, and one row per `client/provider/model`. Going
+    /// through the real aggregation keeps the fixture graded on the figures a
+    /// user reads rather than on a sum this test invented.
+    fn dsh_report_json(messages: &[UnifiedMessage]) -> serde_json::Value {
+        let entries =
+            crate::aggregate_model_usage_entries(messages.to_vec(), &crate::GroupBy::ClientModel);
+        let (input, output, cache_read, cache_write) = crate::model_report_token_totals(&entries);
+        let mut models = serde_json::Map::new();
+        for entry in &entries {
+            models.insert(
+                format!("{}/{}/{}", entry.client, entry.provider, entry.model),
+                serde_json::json!({
+                    "input": entry.input,
+                    "output": entry.output,
+                    "cacheRead": entry.cache_read,
+                    "cacheWrite": entry.cache_write,
+                    "reasoning": entry.reasoning,
+                    "messageCount": entry.message_count,
+                }),
+            );
+        }
+        serde_json::json!({
+            "totals": {
+                "totalInput": input,
+                "totalOutput": output,
+                "totalCacheRead": cache_read,
+                "totalCacheWrite": cache_write,
+                "totalMessages": entries.iter().map(|entry| entry.message_count).sum::<i32>(),
+            },
+            "models": models,
+        })
+    }
+
+    /// Writes one marker entry per transcript into shards whose *envelope*
+    /// carries `parser_version`, the identity a released build wrote them under.
+    ///
+    /// Going through `write_shard_with_limit` instead of the cache API is the
+    /// whole point. `save_if_dirty` stamps every shard it writes with
+    /// `CacheIdentity::current_for_namespace`, so a stale entry seeded that way
+    /// lands on disk inside a current-identity envelope and only the per-entry
+    /// checks can reject it. A predecessor's real cache is rejected one level
+    /// earlier — `read_shard_with_limit` compares the envelope before it
+    /// decodes anything — and that earlier level is what an upgrading user
+    /// actually hits.
+    fn seed_dsh_cache_at_version(transcripts: &[PathBuf], parser_version: u32) {
+        let identity = CacheIdentity::for_client(ClientId::Dsh);
+        let seeded_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version,
+        };
+        let mut by_shard: HashMap<CacheShardKey, Vec<CachedSourceEntry>> = HashMap::new();
+        for path in transcripts {
+            let entry = CachedSourceEntry::new(
+                seeded_identity,
+                path,
+                SourceFingerprint::from_path(path).expect("an installed transcript fingerprints"),
+                vec![cache_only_marker_row()],
+                Vec::new(),
+                None,
+            );
+            by_shard
+                .entry(CacheKey::from_entry(&entry).shard())
+                .or_default()
+                .push(entry);
+        }
+        let shard_root = cache_shard_dir().expect("a sandboxed shard directory");
+        for (shard_key, entries) in &by_shard {
+            let path = shard_path(&shard_root, shard_key);
+            ensure_cache_dir(path.parent().unwrap()).unwrap();
+            write_shard_with_limit(&path, seeded_identity, entries, MAX_CACHE_SHARD_BYTES).unwrap();
+            // Assert the precondition rather than assume it. A seeding helper
+            // that quietly wrote a current-identity shard would leave the scan
+            // below with nothing to reject, and the test would pass by never
+            // running the migration it claims to cover.
+            assert!(
+                matches!(read_shard(&path, identity), ShardReadStatus::Stale),
+                "a shard seeded at parser version {parser_version} must read as stale \
+                 under the running identity"
+            );
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn dsh_v3_shards_are_reparsed_with_the_concrete_served_model() {
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
-        let source = write_temp_file(
+        let source_home = TempDir::new().unwrap();
+        let source = write_dsh_transcript(
+            source_home.path(),
+            "session-served",
             br#"{"type":"session","id":"session-served","createdAt":1,"cwd":"/work"}
 {"type":"assistant/message","seq":42,"time":1787122684043,"data":{"turn":1,"message":{"id":"m-served","source":{"kind":"model","provider":"zai-coding-cn","model":"glm-5.2","replayState":{"response":{"responseModel":"glm-5.3"}}}},"usage":{"inputTokens":8425,"outputTokens":207,"cacheReadTokens":576}}}
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
         assert_eq!(current_identity.parser_version, 5);
+        // Pinned at 3, the identity 4.14.0 cached under, rather than derived
+        // from the running version: this is the row that release left on disk.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
             parser_version: 3,
         };
-        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
         let stale_entry = CachedSourceEntry::new(
             stale_identity,
-            source.path(),
+            &source,
             fingerprint.clone(),
             vec![UnifiedMessage::new(
                 current_identity.namespace,
@@ -4083,7 +4277,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        let stale_path = cache_shard_path(current_identity, source.path());
+        let stale_path = cache_shard_path(current_identity, &source);
         ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
         write_shard_with_limit(
             &stale_path,
@@ -4093,31 +4287,37 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = SourceMessageCache::load();
-        assert!(cache.get(current_identity, source.path()).is_none());
+        // The scan performs the repair. Parsing and re-inserting here instead
+        // would prove the test can rebuild a cache, not that the application
+        // does -- which is the whole claim under test.
+        let scanned = scan_dsh(source_home.path());
+        assert_eq!(scanned.len(), 1);
         assert_eq!(
-            SourceFingerprint::from_path(source.path()).unwrap(),
-            fingerprint
+            scanned[0].model_id, "glm-5.3",
+            "usage must land on the model the provider served, not the one requested"
+        );
+        assert_ne!(scanned[0].tokens.input, 999);
+        assert_eq!(
+            SourceFingerprint::from_path(&source).unwrap(),
+            fingerprint,
+            "parser-version invalidation must not require a source rewrite"
         );
 
-        let rebuilt = crate::sessions::dsh::parse_dsh_file(source.path());
-        assert_eq!(rebuilt.len(), 1);
-        assert_eq!(rebuilt[0].model_id, "glm-5.3");
-        assert_ne!(rebuilt[0].tokens.input, 999);
-        cache.insert(CachedSourceEntry::new(
-            current_identity,
-            source.path(),
-            fingerprint,
-            rebuilt.clone(),
-            Vec::new(),
-            None,
-        ));
-        cache.save_if_dirty();
-
-        let warm = SourceMessageCache::load();
-        let cached = warm.get(current_identity, source.path()).unwrap();
+        let persisted = SourceMessageCache::load();
+        let cached = persisted
+            .get(current_identity, &source)
+            .expect("the scan must persist the entry it reparsed");
         assert_eq!(cached.parser_version, 5);
-        assert_eq!(cached.messages, rebuilt);
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].model_id, "glm-5.3");
+
+        let warm = scan_dsh(source_home.path());
+        assert_eq!(
+            dsh_report_json(&warm),
+            dsh_report_json(&scanned),
+            "the warm scan must agree with the cold one that rebuilt the cache"
+        );
+        assert_eq!(warm[0].model_id, "glm-5.3");
     }
 
     #[test]
@@ -4125,18 +4325,22 @@ mod tests {
     fn dsh_v4_shards_are_reparsed_with_global_compaction_identity() {
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
-        let source = write_temp_file(
+        let source_home = TempDir::new().unwrap();
+        let source = write_dsh_transcript(
+            source_home.path(),
+            "session-summary",
             br#"{"type":"session","id":"session-summary","createdAt":1,"cwd":"/work"}
 {"type":"compaction/summary","seq":4,"time":1786669450002,"data":{"compactionId":"compact-global","message":{"source":{"provider":"p","model":"m"}},"usage":{"inputTokens":10,"outputTokens":20}}}
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
         assert_eq!(current_identity.parser_version, 5);
+        // Pinned at 4, the identity 4.15.0 cached under; see the v3 test.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
             parser_version: 4,
         };
-        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
         let mut stale_message = UnifiedMessage::new(
             current_identity.namespace,
             "m",
@@ -4156,13 +4360,13 @@ mod tests {
             Some("dsh:summary:seq:4:1786669450002:p:m:10:20:0:0:0".to_string());
         let stale_entry = CachedSourceEntry::new(
             stale_identity,
-            source.path(),
+            &source,
             fingerprint.clone(),
             vec![stale_message],
             Vec::new(),
             None,
         );
-        let stale_path = cache_shard_path(current_identity, source.path());
+        let stale_path = cache_shard_path(current_identity, &source);
         ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
         write_shard_with_limit(
             &stale_path,
@@ -4172,32 +4376,176 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = SourceMessageCache::load();
-        assert!(
-            cache.get(current_identity, source.path()).is_none(),
+        let scanned = scan_dsh(source_home.path());
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(
+            scanned[0].dedup_key.as_deref(),
+            Some("dsh:summary:cmp:compact-global:1786669450002:p:m:10:20:0:0:0"),
             "a released v4 seq-keyed row must not survive the parser change"
         );
-
-        let rebuilt = crate::sessions::dsh::parse_dsh_file(source.path());
-        assert_eq!(rebuilt.len(), 1);
         assert_eq!(
-            rebuilt[0].dedup_key.as_deref(),
-            Some("dsh:summary:cmp:compact-global:1786669450002:p:m:10:20:0:0:0")
-        );
-        cache.insert(CachedSourceEntry::new(
-            current_identity,
-            source.path(),
+            SourceFingerprint::from_path(&source).unwrap(),
             fingerprint,
-            rebuilt.clone(),
-            Vec::new(),
-            None,
-        ));
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let persisted = SourceMessageCache::load();
+        let cached = persisted
+            .get(current_identity, &source)
+            .expect("the scan must persist the entry it reparsed");
+        assert_eq!(cached.parser_version, 5);
+        assert_eq!(cached.messages, scanned);
+
+        let warm = scan_dsh(source_home.path());
+        assert_eq!(warm, scanned);
+    }
+
+    /// The comparison the released-binary gate existed for, run in process.
+    ///
+    /// Each fixture's `expected.json` freezes two figures: what the current
+    /// parser reports, and what a published predecessor reported (4.14.0 for
+    /// served-model attribution, 4.15.0 for compactionId keying). The
+    /// predecessor's half is evidence about an implementation this tree no
+    /// longer contains, which is what made it worth recording -- a scan that
+    /// served a predecessor's cache rows would report the predecessor's figure,
+    /// and the two differ in exactly the way each fixture was built to expose.
+    ///
+    /// Seeding the rows is the part that used to need the second binary on
+    /// disk. What it cannot reproduce is that binary's per-file row layout, so
+    /// the seeded rows are markers instead: a report carrying one is a report
+    /// served from a retired cache, which is the failure being graded.
+    ///
+    /// This is also the assertion that fails on the *next* DSH parser change
+    /// shipped without a version bump. Both halves of a same-version round trip
+    /// would move together and stay green; `expected.json` does not move unless
+    /// someone edits it, so a semantics change lands as a diff against the
+    /// frozen figure. Refreshing that figure is the deliberate act of
+    /// re-recording a baseline, not a snapshot update.
+    #[test]
+    #[serial_test::serial]
+    fn dsh_predecessor_caches_are_rejected_and_rebuilt_by_the_production_scan() {
+        // Pinned, not derived from the running version: these are the two
+        // identities DSH actually shipped. A bump to 6 must leave them at 3 and
+        // 4 rather than silently following it and grading nothing.
+        for (fixture, predecessor_version) in [("dsh-served-model", 3u32), ("dsh-seq-key", 4)] {
+            let temp_home = TempDir::new().unwrap();
+            let _cache_env = sandbox_cache_env(temp_home.path());
+            let source_home = TempDir::new().unwrap();
+            let transcripts = install_dsh_fixture(source_home.path(), fixture);
+            let expected = dsh_fixture_expectations(fixture);
+            let current_identity = CacheIdentity::for_client(ClientId::Dsh);
+
+            let pinned_key = predecessor_version.to_string();
+            assert!(
+                current_identity.parser_version > predecessor_version,
+                "{fixture}: the pinned predecessor must stay behind the running parser"
+            );
+            let recorded: Vec<&String> = expected["predecessors"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(
+                recorded,
+                vec![&pinned_key],
+                "{fixture}: expected.json must record exactly the pinned predecessor"
+            );
+            assert_ne!(
+                expected["predecessors"][pinned_key.as_str()],
+                expected["current"],
+                "{fixture}: a baseline that reports what the current parser reports cannot \
+                 grade the change it was recorded for"
+            );
+
+            seed_dsh_cache_at_version(&transcripts, predecessor_version);
+
+            let rebuilt = scan_dsh(source_home.path());
+            assert_eq!(
+                dsh_report_json(&rebuilt),
+                expected["current"],
+                "{fixture}: a cache the predecessor wrote must be reparsed, not served"
+            );
+            assert!(
+                !report_carries_the_cache_marker(&rebuilt),
+                "{fixture}: a row from the retired cache reached the report"
+            );
+
+            // The repair has to land on disk, not just in this scan's memory:
+            // an upgrading user runs the binary once and the next run is warm.
+            let persisted = SourceMessageCache::load();
+            for path in &transcripts {
+                let entry = persisted
+                    .get(current_identity, path)
+                    .unwrap_or_else(|| panic!("{fixture}: {} was not re-cached", path.display()));
+                assert_eq!(
+                    entry.parser_version, current_identity.parser_version,
+                    "{fixture}: the rebuilt entry must carry the running identity"
+                );
+                assert!(!report_carries_the_cache_marker(&entry.messages));
+            }
+
+            let warm = scan_dsh(source_home.path());
+            assert_eq!(
+                dsh_report_json(&warm),
+                expected["current"],
+                "{fixture}: the warm scan after a migration must agree with the cold one"
+            );
+        }
+    }
+
+    /// The half of the gate the predecessor test cannot cover: a cache this
+    /// build wrote, under the identity this build runs, must be *served*.
+    /// Rejecting a retired identity and discarding every valid entry look
+    /// identical from a report alone, and the second is a full reparse on every
+    /// run.
+    ///
+    /// Inferring this from a binary's stdout took the shell gate a canary
+    /// transcript planted outside the fingerprint's sample windows and edited
+    /// in place after the release cached it. In process the cached rows are
+    /// directly editable, so the proof is a row no transcript contains.
+    #[test]
+    #[serial_test::serial]
+    fn dsh_cache_rows_are_served_while_the_parser_identity_matches() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let transcripts = install_dsh_fixture(source_home.path(), "dsh-seq-key");
+        let identity = CacheIdentity::for_client(ClientId::Dsh);
+
+        let cold = scan_dsh(source_home.path());
+        assert!(!cold.is_empty(), "the fixture must parse");
+        assert!(!report_carries_the_cache_marker(&cold));
+
+        // Same identity, same fingerprints, different payloads: the only route
+        // into the next report is the cache.
+        let mut cache = SourceMessageCache::load();
+        for path in &transcripts {
+            let entry = cache
+                .get(identity, path)
+                .unwrap_or_else(|| panic!("{} was not cached by the cold scan", path.display()));
+            cache.insert(CachedSourceEntry::new(
+                identity,
+                path,
+                entry.fingerprint.clone(),
+                vec![cache_only_marker_row()],
+                Vec::new(),
+                None,
+            ));
+        }
         cache.save_if_dirty();
 
-        let warm = SourceMessageCache::load();
-        let cached = warm.get(current_identity, source.path()).unwrap();
-        assert_eq!(cached.parser_version, 5);
-        assert_eq!(cached.messages, rebuilt);
+        let warm = scan_dsh(source_home.path());
+        assert!(
+            report_carries_the_cache_marker(&warm),
+            "a cache written under the running parser identity must be served, not reparsed"
+        );
+        assert_eq!(
+            warm.iter()
+                .filter(|message| message.session_id.contains(DSH_CACHE_MARKER))
+                .count(),
+            transcripts.len(),
+            "every cached transcript must be served from the cache"
+        );
     }
 
     #[test]
@@ -5606,6 +5954,49 @@ mod tests {
             read_shard(&legacy_path, identity),
             ShardReadStatus::Loaded(entries)
                 if entries.len() == 1 && entries[0].prime_accounting.is_none()
+        ));
+    }
+
+    /// A shard whose envelope is intact but whose payload no longer decodes is
+    /// `Invalid`, not a migration that quietly produced nothing. The
+    /// released-binary gate failed the job on the decoder's stderr warning for
+    /// the same reason: a legacy branch that stops decoding has to discard
+    /// loudly rather than report an empty cache as a successful read.
+    ///
+    /// This is the branch the parser-identity check hides. `read_shard_with_limit`
+    /// compares the identity before it looks at the format, so a predecessor's
+    /// shard is already `Stale` and never reaches a decoder -- only a shard
+    /// written under the running identity with an older `CACHE_FORMAT_VERSION`
+    /// does.
+    #[test]
+    #[serial_test::serial]
+    fn a_legacy_format_shard_whose_payload_will_not_decode_is_invalid() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let identity = CacheIdentity::for_client(ClientId::Dsh);
+        let key = CacheShardKey {
+            namespace: identity.namespace.to_string(),
+            index: 0,
+        };
+        let path = shard_path(&cache_shard_dir().unwrap(), &key);
+        ensure_cache_dir(path.parent().unwrap()).unwrap();
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CACHE_FORMAT_VERSION_V6,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: b"an entry layout that does not deserialize".to_vec(),
+        };
+        {
+            let mut writer = BufWriter::new(File::create(&path).unwrap());
+            bincode::options()
+                .serialize_into(&mut writer, &envelope)
+                .unwrap();
+            writer.flush().unwrap();
+        }
+
+        assert!(matches!(
+            read_shard(&path, identity),
+            ShardReadStatus::Invalid(_)
         ));
     }
 

@@ -19,21 +19,29 @@ what a `compactionId`-keyed parser reports (both legs right);
 `predecessors.4` is what the `seq`-keyed parser shipped as 4.15.0 reports (leg
 B right, one of leg A's two calls dropped, 3,415 tokens).
 
-Consumed by `scripts/check-dsh-cache-migration.sh`, which runs a pinned 4.15.0
-and the current build over this root, cold and warm, and fails when a cache
-4.15.0 wrote is served by this build rather than reparsed. The same root runs
-a second time against the last published release. Only that run's leg A goes
-ungraded — a release that moves has no baseline to hold it to. Its warm leg is
-still compared against a cold scan, and because the last release and this
-build normally share a parser version, that comparison is the one that fails
-when the *next* bump is missing: the released rows are served there rather
-than reparsed. This fixture reports a single model, so what it can see is a
-change that moves a token total; `dsh-served-model` runs the same leg for
-changes that move only attribution.
+Consumed by two tests in `crates/tokscale-core/src/message_cache.rs`.
+`dsh_predecessor_caches_are_rejected_and_rebuilt_by_the_production_scan` seeds
+this root's transcripts into a cache written under parser identity 4 — the one
+4.15.0 cached under — and runs the production scan over it. The scan has to
+reject those rows, re-cache them under the running identity, and report
+`current`; serving them reports `predecessors.4`, and the test asserts the two
+figures differ so a baseline that stopped being able to fail says so.
+`dsh_cache_rows_are_served_while_the_parser_identity_matches` runs the same
+root the other way: a cache written under the *running* identity must be
+served, which is what separates that rejection from a cache that discards
+every entry and reparses. This fixture reports a single model, so what it can
+see is a change that moves a token total; `dsh-served-model` covers changes
+that move only attribution.
 
 The transcripts and their totals are built by `build_fixture.py` in
 [token-accounting-conformance/tokscale-dsh-seq-key-check](https://github.com/lizhuojunx86/token-accounting-conformance/tree/main/tokscale-dsh-seq-key-check),
 which derives them by arithmetic before writing anything; they are not tuned
-to any binary. `expected.json`'s layout is this repo's — the gate reads
+to any binary. `expected.json`'s layout is this repo's — the tests read
 `current` and `predecessors`, and a per-model split the generator does not
 emit.
+
+`predecessors` is a frozen record of what a published binary reported, and
+its key is pinned in the test rather than derived from the running parser
+version. Bumping DSH's parser identity again means adding the new
+predecessor's figure here; rewriting `current` to match changed behaviour
+without a bump is re-recording a baseline, not updating a snapshot.
