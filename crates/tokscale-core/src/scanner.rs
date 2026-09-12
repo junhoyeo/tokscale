@@ -625,8 +625,19 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 // `compression: none` writes the same rows to a plain
                 // `session.jsonl` in the same directory — so both spellings
                 // are session logs and the parser sniffs the frame magic.
+                // Current DSH versions the on-disk format in the file name
+                // (`session.v<N>.jsonl[.zstd]`), so accept those too.
                 "dsh-session-log" => {
-                    file_name == "session.jsonl.zstd" || file_name == "session.jsonl"
+                    let base = file_name.strip_suffix(".zstd").unwrap_or(file_name);
+                    base == "session.jsonl"
+                        || base
+                            .strip_prefix("session.v")
+                            .and_then(|rest| rest.strip_suffix(".jsonl"))
+                            .map(|version| {
+                                !version.is_empty()
+                                    && version.bytes().all(|b| b.is_ascii_digit())
+                            })
+                            .unwrap_or(false)
                 }
                 "wire.jsonl" => file_name == "wire.jsonl",
                 // fx (vercel-labs/fx): one `usage-v2.json` per session
@@ -3399,9 +3410,26 @@ mod tests {
         fs::create_dir_all(&plain_dir).unwrap();
         File::create(plain_dir.join("session.jsonl")).unwrap();
 
-        // Non-matching siblings must be excluded: other zstd files and any
-        // differently named file in the tree.
+        // Current DSH versions the on-disk format in the file name
+        // (`session.v<N>.jsonl[.zstd]`).
+        let versioned_dir = path
+            .join("sessions")
+            .join("--E-Code-proj--")
+            .join("session-ghi-789");
+        fs::create_dir_all(&versioned_dir).unwrap();
+        File::create(versioned_dir.join("session.v3.jsonl.zstd")).unwrap();
+
+        let versioned_plain_dir = path
+            .join("sessions")
+            .join("--E-Code-proj--")
+            .join("session-jkl-012");
+        fs::create_dir_all(&versioned_plain_dir).unwrap();
+        File::create(versioned_plain_dir.join("session.v3.jsonl")).unwrap();
+
+        // Non-matching siblings must be excluded: other zstd files, a
+        // non-numeric version segment, and any differently named file.
         File::create(path.join("sessions").join("other.jsonl.zstd")).unwrap();
+        File::create(path.join("sessions").join("session.vX.jsonl.zstd")).unwrap();
         File::create(path.join("sessions").join("unrelated.txt")).unwrap();
 
         let files = scan_directory(path.to_str().unwrap(), "dsh-session-log");
@@ -3409,8 +3437,17 @@ mod tests {
             .iter()
             .filter_map(|file| file.file_name().and_then(|name| name.to_str()))
             .collect();
-        // Byte-lexical path order: `session-abc-123` sorts before `session-def-456`.
-        assert_eq!(names, vec!["session.jsonl.zstd", "session.jsonl"]);
+        // Byte-lexical path order: session-abc-123 < session-def-456 <
+        // session-ghi-789 < session-jkl-012.
+        assert_eq!(
+            names,
+            vec![
+                "session.jsonl.zstd",
+                "session.jsonl",
+                "session.v3.jsonl.zstd",
+                "session.v3.jsonl",
+            ]
+        );
     }
 
     #[test]
