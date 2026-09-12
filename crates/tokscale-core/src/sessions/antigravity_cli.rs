@@ -79,6 +79,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         .to_string();
 
     let meta = read_trajectory_meta(&conn, path);
+    let step_timestamps = read_step_timestamps(&conn, path);
 
     // Buffered rather than streamed so a row missing its own `#19` can borrow
     // attribution from anywhere in the conversation, not just from rows that
@@ -86,34 +87,37 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     //
     // Quiet: a database without `gen_metadata` is not an Antigravity CLI
     // database at all, so there is nothing to warn about.
-    let mut blobs: Vec<Vec<u8>> = Vec::new();
+    let mut rows: Vec<(Option<i64>, Vec<u8>)> = Vec::new();
     sqlite_for_each_row_on(
         &conn,
         path,
-        "SELECT data FROM gen_metadata ORDER BY idx",
+        "SELECT idx, data FROM gen_metadata ORDER BY idx",
         None,
         &mut |row| {
-            blobs.push(row.get::<_, Vec<u8>>(0)?);
+            let idx = row.get::<_, Option<i64>>(0)?;
+            let data: Vec<u8> = row.get(1)?;
+            rows.push((idx, data));
             Ok(())
         },
     );
-    let session_models = SessionModels::from_blobs(&blobs);
+    let session_models = SessionModels::from_blobs(rows.iter().map(|(_, blob)| blob.as_slice()));
+    let ctx = GenContext {
+        session_id: &session_id,
+        session_timestamp: meta.fallback_ms,
+        session_anchor: meta.created_ms,
+        session_models: &session_models,
+        step_timestamps: &step_timestamps,
+    };
 
     let mut messages = Vec::new();
     let mut seen_response_ids: HashSet<String> = HashSet::new();
-    for blob in &blobs {
+    for (gen_idx, blob) in &rows {
         // `fallback_ms` is the per-row timestamp fallback; each row prefers its
         // own per-generation wall-clock stamp (see `parse_gen_metadata`).
         // `created_ms` travels separately because only a genuinely decoded
         // session created-at may anchor the inferred 1.1.18 reading.
-        if let Some(mut message) = parse_gen_metadata(
-            blob,
-            &session_id,
-            meta.fallback_ms,
-            meta.created_ms,
-            &session_models,
-            &mut seen_response_ids,
-        ) {
+        if let Some(mut message) = parse_gen_metadata(blob, &ctx, &mut seen_response_ids, *gen_idx)
+        {
             if meta.workspace_key.is_some() {
                 message.set_workspace(meta.workspace_key.clone(), meta.workspace_label.clone());
             }
@@ -155,7 +159,7 @@ struct SessionModels {
 }
 
 impl SessionModels {
-    fn from_blobs(blobs: &[Vec<u8>]) -> Self {
+    fn from_blobs<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Self {
         let mut by_display: HashMap<&str, Option<&str>> = HashMap::new();
         let mut distinct: HashSet<&str> = HashSet::new();
         let mut unresolved_labels: Vec<&str> = Vec::new();
@@ -273,32 +277,22 @@ fn display_label_to_model_id(label: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_gen_metadata(
-    blob: &[u8],
-    session_id: &str,
+struct GenContext<'a> {
+    session_id: &'a str,
     session_timestamp: i64,
     session_anchor: Option<i64>,
-    session_models: &SessionModels,
+    session_models: &'a SessionModels,
+    step_timestamps: &'a StepTimestamps,
+}
+
+fn parse_gen_metadata(
+    blob: &[u8],
+    ctx: &GenContext<'_>,
     seen_response_ids: &mut HashSet<String>,
+    gen_idx: Option<i64>,
 ) -> Option<UnifiedMessage> {
     let chat_model = message_field(blob, 1)?;
     let usage = message_field(chat_model, 4)?;
-
-    // Per-generation wall-clock time for this turn, so each turn is dated when
-    // it actually happened rather than at conversation start. Falls back to
-    // `session_timestamp` when `chatModel.#9` is absent or no candidate field
-    // in it decodes to a believable time (older databases, malformed rows, or a
-    // `#9` layout this module does not recognise).
-    //
-    // `session_anchor` is the created-at actually decoded from
-    // `trajectory_metadata_blob`, and it alone bounds the inferred 1.1.18
-    // reading, so a turn can only be re-dated to somewhere inside its own
-    // session's lifetime. It is deliberately not `session_timestamp`: that one
-    // degrades to the file mtime, which dates the last write to the database
-    // rather than the start of the conversation and so vouches for nothing.
-    let timestamp = message_field(chat_model, 9)
-        .and_then(|gen| generation_timestamp_ms(gen, session_anchor))
-        .unwrap_or(session_timestamp);
 
     // input = fixed system prompt (#1) + newly-processed input (#2). The
     // constant #1 is, to the best of our reverse-engineering, the agent's fixed
@@ -326,10 +320,26 @@ fn parse_gen_metadata(
         }
     }
 
+    // Per-generation wall-clock time for this turn:
+    // 1. In pre-1.1.18 databases, `chatModel.#9.#4` carried an explicit timestamp.
+    // 2. In modern agy versions (1.1.18+), `#9.#10` carries prompt cache metadata,
+    //    so `generation_timestamp_ms` returns None. Look up the matching turn in `steps.metadata`
+    //    by responseId (`dedup_key`) or generation index.
+    // 3. Falls back to `session_timestamp` when no candidate decodes.
+    let timestamp = message_field(chat_model, 9)
+        .and_then(|gen| generation_timestamp_ms(gen, ctx.session_anchor))
+        .or_else(|| {
+            dedup_key
+                .as_deref()
+                .and_then(|id| ctx.step_timestamps.by_response_id.get(id).copied())
+        })
+        .or_else(|| gen_idx.and_then(|idx| ctx.step_timestamps.by_gen_idx.get(&idx).copied()))
+        .unwrap_or(ctx.session_timestamp);
+
     let response_model = non_empty_string_field(chat_model, 19);
     let model_raw = response_model
         .filter(|m| !is_antigravity_routing_label(m))
-        .or_else(|| session_models.recover(chat_model))
+        .or_else(|| ctx.session_models.recover(chat_model))
         .or_else(|| {
             // Routing labels carry no model identity of their own, but the
             // sibling `#21` display label names the tier. Recover the concrete
@@ -350,7 +360,7 @@ fn parse_gen_metadata(
         "antigravity-cli",
         model_id,
         provider_id,
-        session_id,
+        ctx.session_id,
         timestamp,
         TokenBreakdown {
             input,
@@ -426,6 +436,59 @@ fn read_trajectory_meta(conn: &Connection, path: &Path) -> TrajectoryMeta {
 
 fn session_created_ms(blob: &[u8]) -> Option<i64> {
     proto_timestamp_ms(message_field(blob, 2)?)
+}
+
+/// Per-turn timestamps recovered from the `steps` table.
+#[derive(Default)]
+struct StepTimestamps {
+    /// `responseId` -> epoch timestamp in milliseconds.
+    by_response_id: HashMap<String, i64>,
+    /// 0-indexed generation index -> epoch timestamp in milliseconds.
+    by_gen_idx: HashMap<i64, i64>,
+}
+
+/// Read per-step generation timestamps from the `steps` table.
+///
+/// Antigravity CLI records generation turns in the `steps` table:
+/// - `step_type = 15` (PLANNER_RESPONSE / model turn)
+/// - `metadata.#1` is a protobuf Timestamp ({#1: seconds, #2: nanos})
+/// - `metadata.#9.#11` carries the exact same `responseId` string as `gen_metadata.chatModel.usage.#11`
+/// - `metadata.#20.#3` carries the 0-indexed generation index matching `gen_metadata.idx`
+///
+/// In modern agy versions (1.1.18+), `chatModel.#9` in `gen_metadata` no longer carries
+/// a turn timestamp (it holds cache metadata instead). Looking up by `responseId`
+/// (or generation index) restores the genuine per-turn execution time.
+fn read_step_timestamps(conn: &Connection, path: &Path) -> StepTimestamps {
+    let mut timestamps = StepTimestamps::default();
+    sqlite_for_each_row_on(
+        conn,
+        path,
+        "SELECT metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL",
+        None,
+        &mut |row| {
+            let blob: Vec<u8> = row.get(0)?;
+            if let Some(ts_ms) = message_field(&blob, 1).and_then(proto_timestamp_ms) {
+                if ts_ms > 0 {
+                    if let Some(resp_id) = message_field(&blob, 9).and_then(|m| string_field(m, 11))
+                    {
+                        let resp_id = resp_id.trim();
+                        if !resp_id.is_empty() {
+                            timestamps.by_response_id.insert(resp_id.to_string(), ts_ms);
+                        }
+                    }
+                    if let Some(meta20) = message_field(&blob, 20) {
+                        if let Some(gen_idx) = varint_field(meta20, 3) {
+                            if let Ok(gen_idx_i64) = i64::try_from(gen_idx) {
+                                timestamps.by_gen_idx.insert(gen_idx_i64, ts_ms);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        },
+    );
+    timestamps
 }
 
 /// Per-generation wall-clock time from the `chatModel.#9` sub-message.
@@ -999,16 +1062,18 @@ mod tests {
     /// never yielded a created-at while the row fallback is still positive.
     fn gen9_timestamp_anchored(gen9: &[u8], session_fallback: i64, anchor: Option<i64>) -> i64 {
         let mut seen = HashSet::new();
-        parse_gen_metadata(
-            &build_row_with_gen9(gen9, "resp"),
-            "s",
-            session_fallback,
-            anchor,
-            &SessionModels::default(),
-            &mut seen,
-        )
-        .expect("row parses")
-        .timestamp
+        let models = SessionModels::default();
+        let step_timestamps = StepTimestamps::default();
+        let ctx = GenContext {
+            session_id: "s",
+            session_timestamp: session_fallback,
+            session_anchor: anchor,
+            session_models: &models,
+            step_timestamps: &step_timestamps,
+        };
+        parse_gen_metadata(&build_row_with_gen9(gen9, "resp"), &ctx, &mut seen, None)
+            .expect("row parses")
+            .timestamp
     }
 
     /// Parse one row with no conversation-level attribution available, i.e. as
@@ -1020,14 +1085,16 @@ mod tests {
         session_timestamp: i64,
         seen_response_ids: &mut HashSet<String>,
     ) -> Option<UnifiedMessage> {
-        parse_gen_metadata(
-            blob,
+        let models = SessionModels::default();
+        let step_timestamps = StepTimestamps::default();
+        let ctx = GenContext {
             session_id,
             session_timestamp,
-            Some(session_timestamp),
-            &SessionModels::default(),
-            seen_response_ids,
-        )
+            session_anchor: Some(session_timestamp),
+            session_models: &models,
+            step_timestamps: &step_timestamps,
+        };
+        parse_gen_metadata(blob, &ctx, seen_response_ids, None)
     }
 
     fn build_gen_metadata() -> Vec<u8> {
@@ -2541,5 +2608,149 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gemini-3.5-flash-high");
         assert_eq!(messages[0].provider_id, "google");
+    }
+
+    #[test]
+    fn steps_table_dates_modern_agy_turns_by_response_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steps-timestamp.db");
+
+        let session_created_ms = 1_781_502_653_000_i64;
+        let turn1_seconds = 1_789_200_000_i64; // later date
+        let turn2_seconds = 1_789_217_157_i64; // today
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gen_metadata (idx integer, data blob, size integer);
+             CREATE TABLE trajectory_metadata_blob (id text, data blob);
+             CREATE TABLE steps (idx integer, step_type integer, metadata blob);",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+            params![build_trajectory_meta()],
+        )
+        .unwrap();
+
+        // In modern agy, gen_metadata.#9 carries cache metadata (no decodable timestamp).
+        let cache_metadata = enc_len(10, b"cache metadata payload that is not a timestamp");
+        let row1 = build_row_with_gen9(&cache_metadata, "resp-step-1");
+        let row2 = build_row_with_gen9(&cache_metadata, "resp-step-2");
+
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            params![row1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (1, ?1, 0)",
+            params![row2],
+        )
+        .unwrap();
+
+        // Build steps metadata protobuf:
+        // #1 = Timestamp { #1: seconds, #2: nanos }
+        // #9 = chatModel { #11: responseId }
+        let build_step_meta = |seconds: i64, resp_id: &str| {
+            let mut ts = Vec::new();
+            ts.extend(enc_varint(1, seconds as u64));
+            ts.extend(enc_varint(2, 0));
+
+            let mut gen = Vec::new();
+            gen.extend(enc_len(11, resp_id.as_bytes()));
+
+            let mut meta = Vec::new();
+            meta.extend(enc_len(1, &ts));
+            meta.extend(enc_len(9, &gen));
+            meta
+        };
+
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, metadata) VALUES (1, 15, ?1)",
+            params![build_step_meta(turn1_seconds, "resp-step-1")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, metadata) VALUES (2, 15, ?1)",
+            params![build_step_meta(turn2_seconds, "resp-step-2")],
+        )
+        .unwrap();
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, turn1_seconds * 1_000);
+        assert_eq!(messages[1].timestamp, turn2_seconds * 1_000);
+        assert!(messages.iter().all(|m| m.timestamp != session_created_ms));
+    }
+
+    #[test]
+    fn steps_table_dates_modern_agy_turns_by_gen_idx_with_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steps-gap-timestamp.db");
+
+        let session_created_ms = 1_781_502_653_000_i64;
+        let turn1_seconds = 1_789_200_000_i64;
+        let turn2_seconds = 1_789_217_157_i64;
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gen_metadata (idx integer, data blob, size integer);
+             CREATE TABLE trajectory_metadata_blob (id text, data blob);
+             CREATE TABLE steps (idx integer, step_type integer, metadata blob);",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+            params![build_trajectory_meta()],
+        )
+        .unwrap();
+
+        let cache_metadata = enc_len(10, b"cache metadata payload that is not a timestamp");
+        let row1 = build_row_with_gen9(&cache_metadata, "");
+        let row2 = build_row_with_gen9(&cache_metadata, "");
+
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (3, ?1, 0)",
+            params![row1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (7, ?1, 0)",
+            params![row2],
+        )
+        .unwrap();
+
+        let build_step_meta_by_idx = |seconds: i64, gen_idx: u64| {
+            let mut ts = Vec::new();
+            ts.extend(enc_varint(1, seconds as u64));
+            ts.extend(enc_varint(2, 0));
+
+            let mut meta20 = Vec::new();
+            meta20.extend(enc_varint(3, gen_idx));
+
+            let mut meta = Vec::new();
+            meta.extend(enc_len(1, &ts));
+            meta.extend(enc_len(20, &meta20));
+            meta
+        };
+
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, metadata) VALUES (1, 15, ?1)",
+            params![build_step_meta_by_idx(turn1_seconds, 3)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, metadata) VALUES (2, 15, ?1)",
+            params![build_step_meta_by_idx(turn2_seconds, 7)],
+        )
+        .unwrap();
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, turn1_seconds * 1_000);
+        assert_eq!(messages[1].timestamp, turn2_seconds * 1_000);
+        assert!(messages.iter().all(|m| m.timestamp != session_created_ms));
     }
 }
