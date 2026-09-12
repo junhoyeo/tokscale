@@ -104,6 +104,10 @@ pub struct ScanResult {
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
+    /// Meept metrics database (`~/.meept/metrics.db`), populated when the
+    /// resolved path exists so the parse layer can dispatch to the SQLite
+    /// parser instead of the generic file walk.
+    pub meept_db: Option<PathBuf>,
     pub goose_db: Option<PathBuf>,
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
@@ -138,6 +142,7 @@ impl Default for ScanResult {
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
+            meept_db: None,
             goose_db: None,
             zed_db: None,
             kiro_db: None,
@@ -1938,6 +1943,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::DevinCli
                 | ClientId::Grok
                 | ClientId::PrimeAgent
+                | ClientId::Meept
         ) {
             continue;
         }
@@ -2398,6 +2404,15 @@ fn scan_all_clients_with_env_strategy_inner(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
+    if enabled.contains(&ClientId::Meept) {
+        let meept_db_path = ClientId::Meept
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        if std::path::Path::new(&meept_db_path).exists() {
+            result.meept_db = Some(PathBuf::from(meept_db_path));
         }
     }
 

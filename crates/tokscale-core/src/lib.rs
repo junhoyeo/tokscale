@@ -3202,6 +3202,28 @@ fn parse_all_messages_streaming<S: MessageSink>(
         );
     }
 
+    // Meept: per-call usage rows in the metrics SQLite database. Cost is not
+    // persisted per row, so pricing resolves from the model id like the other
+    // unparsed-cost clients. Routed through the SQLite source cache so a warm
+    // scan skips re-reading the database when nothing changed.
+    if let Some(db_path) = &scan_result.meept_db {
+        let CachedParseOutcome {
+            messages: meept_messages,
+            cache_entry,
+            ..
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::Meept),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::meept::parse_meept_sqlite,
+        );
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+        all_messages.extend(meept_messages);
+    }
+
     if let Some(db_path) = &scan_result.goose_db {
         let goose_messages: Vec<UnifiedMessage> = sessions::goose::parse_goose_sqlite(db_path)
             .into_iter()
@@ -6046,6 +6068,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let count = summed_parsed_message_count(&hermes_msgs);
         counts.set(ClientId::Hermes, count);
         messages.extend(hermes_msgs);
+    }
+
+    if let Some(db_path) = &scan_result.meept_db {
+        let meept_msgs: Vec<ParsedMessage> = sessions::meept::parse_meept_sqlite(db_path)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
+        let count = summed_parsed_message_count(&meept_msgs);
+        counts.set(ClientId::Meept, count);
+        messages.extend(meept_msgs);
     }
 
     if let Some(db_path) = &scan_result.goose_db {

@@ -1461,6 +1461,10 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
+        // Meept's llm_calls parser is versioned from the start (v1) so later
+        // parser changes have an obvious local counter to bump, like every
+        // other client here.
+        ClientId::Meept => 1,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating

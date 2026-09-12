@@ -66,6 +66,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'U' },
     // Hindsight: uppercase 'H' stays mnemonic while lowercase 'h' belongs to Crush.
     ClientUi { hotkey: 'H' },
+    // Meept: lowercase 'm' belongs to Mux and uppercase 'M' to MiMo Code;
+    // 'W' is the next unused letter that does not collide with a global
+    // binding (only lowercase 's' is one).
+    ClientUi { hotkey: 'W' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
