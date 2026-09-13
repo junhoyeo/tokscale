@@ -4250,8 +4250,8 @@ fn capitalize_client(client: &str) -> String {
 
 fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     use tokscale_core::{
-        built_in_extra_scan_paths_for, extra_scan_paths_for, parse_local_clients, ClientId,
-        LocalParseOptions,
+        built_in_extra_scan_paths_for, extra_scan_paths_for, parse_local_clients,
+        sessions::codex::CODEX_HEADLESS_AGENT, ClientId, LocalParseOptions,
     };
 
     let explicit_home_dir = home_dir;
@@ -4484,8 +4484,10 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                                 .messages
                                 .iter()
                                 .filter(|message| {
-                                    message.agent.as_deref() == Some("headless")
-                                        && message.client == client.as_str()
+                                    matches!(
+                                        message.agent.as_deref(),
+                                        Some("headless" | CODEX_HEADLESS_AGENT)
+                                    ) && message.client == client.as_str()
                                 })
                                 .count() as i32,
                         )

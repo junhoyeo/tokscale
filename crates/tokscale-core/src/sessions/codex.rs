@@ -22,6 +22,24 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
+/// Agents-tab bucket for a regular interactive Codex thread. Codex stamps each
+/// spawned thread with a random `agent_nickname` (a scientist/philosopher
+/// name), which is a per-session alias rather than a role, so the parser
+/// collapses them to a single name instead of letting every thread become its
+/// own Agents row.
+pub const CODEX_DEFAULT_AGENT: &str = "Codex";
+/// Agents-tab bucket for threads Codex started itself: any `source.subagent`
+/// variant, e.g. the `thread_spawn` workers of Ultra mode's orchestrated team.
+/// Guardian reviews have their own bucket.
+pub const CODEX_SUBAGENT_AGENT: &str = "Codex Subagent";
+/// Agents-tab bucket for guardian review threads. Codex tags the same
+/// `source.subagent.other: "guardian"` thread `thread_source: "guardian_review"`
+/// in newer builds (seen from 0.150) but `"subagent"` in older ones; both land
+/// here so the row does not split by Codex version.
+pub const CODEX_GUARDIAN_AGENT: &str = "Codex Guardian";
+/// Agents-tab bucket for `codex exec` headless runs.
+pub const CODEX_HEADLESS_AGENT: &str = "Codex Headless";
+
 /// Codex entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
 pub struct CodexEntry {
@@ -66,8 +84,6 @@ pub struct CodexPayload {
     pub cwd: Option<String>,
     /// Provider identity from session_meta (e.g. "openai", "azure")
     pub model_provider: Option<String>,
-    /// Agent name from session_meta
-    pub agent_nickname: Option<String>,
     /// Free-text body of an `event_msg` `user_message` payload. Used to detect
     /// human turn boundaries: real human input is plain text, whereas
     /// system-injected context (`<environment_context>`, `<system-reminder>`,
@@ -229,6 +245,17 @@ pub(crate) struct CodexParseState {
     pub last_accepted_token_timestamp_ms: Option<i64>,
     pub previous_totals: Option<CodexTotals>,
     pub session_is_headless: bool,
+    /// Set when session_meta marks a thread Codex started itself (any
+    /// `source.subagent` variant, or `thread_source: "subagent"`), as opposed
+    /// to a human-initiated fork (`thread_source: "user"`). Guardian reviews
+    /// set `session_is_guardian` instead.
+    #[serde(default)]
+    pub session_is_subagent: bool,
+    /// Set when session_meta marks a guardian review thread. Never cleared, so
+    /// a later session_meta in the same rollout cannot move its usage back
+    /// into the interactive bucket.
+    #[serde(default)]
+    pub session_is_guardian: bool,
     pub session_id_from_meta: Option<String>,
     pub session_forked_from_id: Option<String>,
     pub forked_child_session_id: Option<String>,
@@ -586,9 +613,30 @@ fn parse_codex_reader<R: BufRead>(
                     if let Some(ref provider) = payload.model_provider {
                         state.session_provider = Some(provider.clone());
                     }
-                    if let Some(ref nickname) = payload.agent_nickname {
-                        state.session_agent = Some(nickname.clone());
+                    if codex_thread_is_guardian(
+                        payload.thread_source.as_deref(),
+                        payload.source.as_ref(),
+                    ) {
+                        state.session_is_guardian = true;
+                    } else if codex_thread_is_subagent(
+                        payload.thread_source.as_deref(),
+                        payload.source.as_ref(),
+                    ) {
+                        state.session_is_subagent = true;
                     }
+                    // Codex's per-thread `agent_nickname` is a random alias
+                    // (Popper, Dirac, …), not a role; bucket by thread kind
+                    // instead so the Agents tab stays aggregateable.
+                    state.session_agent = Some(
+                        if state.session_is_guardian {
+                            CODEX_GUARDIAN_AGENT
+                        } else if state.session_is_subagent {
+                            CODEX_SUBAGENT_AGENT
+                        } else {
+                            CODEX_DEFAULT_AGENT
+                        }
+                        .to_string(),
+                    );
                     if let Some(ref cwd) = payload.cwd {
                         let (workspace_key, workspace_label) = codex_workspace_from_cwd(cwd);
                         state.session_workspace_key = workspace_key;
@@ -746,7 +794,7 @@ fn parse_codex_reader<R: BufRead>(
                     );
 
                     let agent = if state.session_is_headless {
-                        Some("headless".to_string())
+                        Some(CODEX_HEADLESS_AGENT.to_string())
                     } else {
                         state.session_agent.clone()
                     };
@@ -919,6 +967,22 @@ fn parse_codex_reader<R: BufRead>(
 
 fn codex_source_is_exec(source: Option<&Value>) -> bool {
     source.and_then(Value::as_str) == Some("exec")
+}
+
+fn codex_thread_is_guardian(thread_source: Option<&str>, source: Option<&Value>) -> bool {
+    thread_source == Some("guardian_review")
+        || source
+            .and_then(|source| source.get("subagent"))
+            .and_then(|subagent| subagent.get("other"))
+            .and_then(Value::as_str)
+            == Some("guardian")
+}
+
+/// Any `source.subagent` variant counts, not only the `thread_spawn` shape
+/// `forked_from_id_from_source` reads, so a subagent kind the parser does not
+/// model still stays out of the interactive bucket.
+fn codex_thread_is_subagent(thread_source: Option<&str>, source: Option<&Value>) -> bool {
+    thread_source == Some("subagent") || source.and_then(|source| source.get("subagent")).is_some()
 }
 
 fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
@@ -1298,7 +1362,7 @@ fn parse_codex_headless_line(
         .or_else(|| inferred_provider_from_model(&model))
         .unwrap_or("openai");
     let agent = if session_is_headless {
-        Some("headless".to_string())
+        Some(CODEX_HEADLESS_AGENT.to_string())
     } else {
         session_agent.clone()
     };
@@ -1865,7 +1929,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_HEADLESS_AGENT));
     }
 
     #[test]
@@ -2512,7 +2576,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure");
-        assert_eq!(messages[0].agent.as_deref(), Some("my-agent"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_DEFAULT_AGENT));
     }
 
     #[test]
@@ -2530,12 +2594,65 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].agent.as_deref(), Some("worker"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_SUBAGENT_AGENT));
         assert_eq!(
             messages[0].workspace_key.as_deref(),
             Some("/Users/alice/codex-fork")
         );
         assert!(messages[0].dedup_key.is_some());
+    }
+
+    fn single_turn_agent(session_meta_lines: &str) -> Option<String> {
+        let file = create_test_file(&format!(
+            "{session_meta_lines}\n{}\n{}\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        messages[0].agent.clone()
+    }
+
+    #[test]
+    fn test_guardian_review_thread_gets_guardian_agent() {
+        let agent = single_turn_agent(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"guardian-thread","parent_thread_id":"parent-thread","source":{"subagent":{"other":"guardian"}},"thread_source":"guardian_review","model_provider":"openai","cwd":"/repo"}}"#,
+        );
+
+        assert_eq!(agent.as_deref(), Some(CODEX_GUARDIAN_AGENT));
+    }
+
+    #[test]
+    fn test_guardian_thread_tagged_subagent_gets_guardian_agent() {
+        // Older Codex builds tagged the same guardian thread
+        // `thread_source: "subagent"`; it must not land in the subagent row.
+        let agent = single_turn_agent(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"guardian-thread","parent_thread_id":"parent-thread","source":{"subagent":{"other":"guardian"}},"thread_source":"subagent","model_provider":"openai","cwd":"/repo"}}"#,
+        );
+
+        assert_eq!(agent.as_deref(), Some(CODEX_GUARDIAN_AGENT));
+    }
+
+    #[test]
+    fn test_non_spawn_subagent_source_gets_subagent_agent() {
+        let agent = single_turn_agent(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"review-thread","source":{"subagent":"review"},"model_provider":"openai","cwd":"/repo"}}"#,
+        );
+
+        assert_eq!(agent.as_deref(), Some(CODEX_SUBAGENT_AGENT));
+    }
+
+    #[test]
+    fn test_later_session_meta_keeps_guardian_agent() {
+        let agent = single_turn_agent(concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"guardian-thread","source":{"subagent":{"other":"guardian"}},"thread_source":"guardian_review","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:00.500Z","type":"session_meta","payload":{"id":"parent-thread","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+        ));
+
+        assert_eq!(agent.as_deref(), Some(CODEX_GUARDIAN_AGENT));
     }
 
     #[test]
@@ -2562,7 +2679,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].agent.as_deref(), Some("worker"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_SUBAGENT_AGENT));
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/repo-child"));
         assert_eq!(messages[0].tokens.input, 500);
         assert_eq!(messages[0].tokens.cache_read, 1000);
@@ -3159,7 +3276,7 @@ mod tests {
 
     #[test]
     fn test_headless_fallback_uses_session_provider_and_agent() {
-        // session_meta sets provider to "azure" and agent to "my-bot",
+        // session_meta sets provider to "azure" and the default agent bucket,
         // then a line falls through to headless parsing (no structured entry_type)
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"model_provider":"azure","agent_nickname":"my-bot"}}"#;
         let line2 = r#"{"type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":100,"output_tokens":50}}"#;
@@ -3170,7 +3287,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure");
-        assert_eq!(messages[0].agent.as_deref(), Some("my-bot"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_DEFAULT_AGENT));
     }
 
     #[test]
@@ -3311,7 +3428,7 @@ mod tests {
             messages[0].is_turn_start,
             "an exec one-shot with a human prompt counts as one turn"
         );
-        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some(CODEX_HEADLESS_AGENT));
     }
 
     #[test]

@@ -5007,7 +5007,14 @@ fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
 
 fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     if is_headless && message.agent.is_none() {
-        message.agent = Some("headless".to_string());
+        message.agent = Some(
+            if message.client == "codex" {
+                sessions::codex::CODEX_HEADLESS_AGENT
+            } else {
+                "headless"
+            }
+            .to_string(),
+        );
     }
 }
 

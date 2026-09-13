@@ -1281,7 +1281,13 @@ fn parser_version(client: ClientId) -> u32 {
         // the openclaw lane matches OpenClaw's per-turn mirror rows against;
         // an entry without it would let a mirror row count beside the
         // rollout's own record of the same turn.
-        ClientId::Codex => 8,
+        // v8->v9: agent attribution no longer carries the per-thread random
+        // `agent_nickname`; messages bucket into "Codex" / "Codex Subagent" /
+        // "Codex Guardian" / "Codex Headless", and the cached parse state gained
+        // `session_is_subagent` and `session_is_guardian`. A v8 entry would keep
+        // replaying one Agents row per nickname (or no agent at all), and its
+        // parse state predates the new layout.
+        ClientId::Codex => 9,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -3514,10 +3520,13 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
-        // bucket, and v7->v8 retags rollouts OpenClaw originated as openclaw.
+        // bucket, v7->v8 retags rollouts OpenClaw originated as openclaw, and
+        // v8->v9 buckets agent attribution into "Codex" / "Codex Subagent" /
+        // "Codex Guardian" / "Codex Headless" instead of the per-thread random
+        // nickname.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 8);
+        assert_eq!(parser_version(ClientId::Codex), 9);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
