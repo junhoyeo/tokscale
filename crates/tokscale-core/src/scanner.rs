@@ -4152,14 +4152,12 @@ mod tests {
     #[test]
     #[serial]
     fn test_headless_roots_treat_empty_env_override_as_unset() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "") };
+        let mut env = EnvGuard::capture(&["TOKSCALE_HEADLESS_DIR"]);
+        env.set("TOKSCALE_HEADLESS_DIR", "");
 
         let roots = headless_roots("/tmp/home");
         assert_eq!(roots, headless_roots_with_env_strategy("/tmp/home", false));
         assert!(roots.iter().all(|root| !root.as_os_str().is_empty()));
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
     }
 
     #[test]
