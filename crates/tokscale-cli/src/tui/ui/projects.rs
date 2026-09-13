@@ -3,10 +3,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, display_width, fit_workspace_label_to_width, format_cost,
-    format_tokens, get_compact_client_display_name, prefix_to_width, total_tokens_cell,
-    truncate_text, truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
-    MIDDLE_ELLIPSIS,
+    ambient_stable_scrollbar, display_width, fit_workspace_label_to_width, format_cache_hit_rate,
+    format_cost, format_tokens, get_compact_client_display_name, prefix_to_width, truncate_text,
+    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -17,6 +16,12 @@ use crate::tui::data::{ProjectUsage, SessionModel};
 /// and truncation budgets cannot drift apart: each method is an exhaustive
 /// `match` with no `_` arm, so adding a variant fails to compile until every
 /// one of them has an answer for it.
+///
+/// The layout is budget-driven like the Sessions tab: a column is admitted at
+/// its natural width or not shown at all, in [`WIDE_PRIORITY`] group order.
+/// The previous all-or-nothing design asked for 150 columns and otherwise fell
+/// back to a four-column compact table, so a terminal anywhere between 60 and
+/// 151 columns showed Project/Sessions/Total/Cost and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectColumn {
     Rank,
@@ -28,13 +33,17 @@ enum ProjectColumn {
     Output,
     CacheRead,
     CacheWrite,
+    CacheHit,
     Total,
     Cost,
     LastActive,
 }
 
-/// Every variant in display order; the single source of the column set.
-const WIDE_ORDER: [ProjectColumn; 12] = [
+/// Every variant, exactly once. Checked against `WIDE_ORDER` and
+/// `WIDE_PRIORITY` by `every_column_is_ordered_and_prioritized`, because the
+/// compiler never looks at those two arrays.
+#[cfg(test)]
+const ALL: [ProjectColumn; 13] = [
     ProjectColumn::Rank,
     ProjectColumn::Project,
     ProjectColumn::Sessions,
@@ -44,11 +53,66 @@ const WIDE_ORDER: [ProjectColumn; 12] = [
     ProjectColumn::Output,
     ProjectColumn::CacheRead,
     ProjectColumn::CacheWrite,
+    ProjectColumn::CacheHit,
     ProjectColumn::Total,
     ProjectColumn::Cost,
     ProjectColumn::LastActive,
 ];
+
+/// Left-to-right display order. Cosmetic: reshuffling it never changes what
+/// fits, only where it sits.
+const WIDE_ORDER: [ProjectColumn; 13] = [
+    ProjectColumn::Rank,
+    ProjectColumn::Project,
+    ProjectColumn::Sessions,
+    ProjectColumn::Sources,
+    ProjectColumn::Models,
+    ProjectColumn::Input,
+    ProjectColumn::Output,
+    ProjectColumn::CacheRead,
+    ProjectColumn::CacheWrite,
+    ProjectColumn::CacheHit,
+    ProjectColumn::Total,
+    ProjectColumn::Cost,
+    ProjectColumn::LastActive,
+];
+
+/// Admission order: earlier groups are admitted first and dropped last. Each
+/// group is all-or-nothing — `Input` without `Output` invites a reader to take
+/// Input for a total, and `Cache R` without `Cache W` is the same trap.
+///
+/// The core is the column set the old compact layout showed, kept atomic so
+/// admission can never stop *inside* it: the wide layout always shows at least
+/// those four. After that, groups are ranked by how directly they line the tab
+/// up with the other token tables — the Input/Output/Cache breakdown first,
+/// then the columns that make a project findable and comparable.
+const WIDE_PRIORITY: [&[ProjectColumn]; 8] = [
+    &[
+        ProjectColumn::Project,
+        ProjectColumn::Sessions,
+        ProjectColumn::Total,
+        ProjectColumn::Cost,
+    ],
+    &[ProjectColumn::Rank],
+    &[ProjectColumn::Input, ProjectColumn::Output],
+    &[ProjectColumn::CacheRead, ProjectColumn::CacheWrite],
+    &[ProjectColumn::CacheHit],
+    &[ProjectColumn::LastActive],
+    &[ProjectColumn::Models],
+    &[ProjectColumn::Sources],
+];
+
 const COLUMN_SPACING: u16 = 1;
+
+/// Produced by admission, consumed by rendering. Every width that depends on
+/// the chosen set lives here and nowhere else.
+struct WideLayout {
+    chosen: Vec<ProjectColumn>,
+    /// What `Project`'s cell fits its label to. Project is the sole `Min`
+    /// column, so ratatui hands it every cell of slack; this has to match that
+    /// or the label is clipped without an ellipsis.
+    project_width: u16,
+}
 
 impl ProjectColumn {
     fn header(self) -> &'static str {
@@ -60,39 +124,50 @@ impl ProjectColumn {
             Self::Models => "Models",
             Self::Input => "Input",
             Self::Output => "Output",
-            Self::CacheRead => "Cache Read",
-            Self::CacheWrite => "Cache Write",
+            Self::CacheRead => "Cache R",
+            Self::CacheWrite => "Cache W",
+            // U+2715, not U+00D7: the multiplication sign is
+            // East-Asian-Ambiguous and would make the header row stream a
+            // cell wide in a CJK locale; the multiplication X is
+            // East-Asian-Neutral, one cell in both ambients.
+            Self::CacheHit => "Cache✕",
             Self::Total => "Total",
             Self::Cost => "Cost",
             Self::LastActive => "Last Active",
         }
     }
 
-    /// Cells this column asks the solver for. Project is the sole flexible
-    /// (`Min`) column and absorbs whatever slack or shrinkage the row has left;
-    /// every other column is a fixed `Length` at its natural width.
-    fn constraint(self) -> Constraint {
-        if self == Self::Project {
-            Constraint::Min(self.min_width())
-        } else {
-            Constraint::Length(self.min_width())
-        }
-    }
-
-    fn min_width(self) -> u16 {
+    /// Cells this column needs to render its widest realistic value, and the
+    /// only width input to admission. `Constraint`s are *derived* from this
+    /// rather than written beside it: a second literal is exactly the
+    /// budget-versus-layout divergence this design exists to kill.
+    fn natural(self) -> u16 {
         match self {
             Self::Project | Self::Models => 18,
             Self::Rank => 4,
             Self::Sessions => 8,
             Self::Sources => 14,
-            Self::Input | Self::Output | Self::CacheRead | Self::Total | Self::Cost => 10,
-            Self::CacheWrite => 11,
+            Self::Input | Self::Output | Self::CacheRead | Self::CacheWrite | Self::Total => 10,
+            Self::CacheHit => 8,
+            Self::Cost => 10,
             Self::LastActive => 16,
         }
     }
 
+    /// The constraint a column is laid out with, derived from `natural()`.
+    /// Project is the sole flexible (`Min`) column and absorbs whatever slack
+    /// admission leaves behind.
+    fn constraint(self) -> Constraint {
+        if self == Self::Project {
+            Constraint::Min(self.natural())
+        } else {
+            Constraint::Length(self.natural())
+        }
+    }
+
     /// The sort this column is the target of, so the indicator is placed by
-    /// identity rather than by a computed index.
+    /// identity rather than by a computed index. When the sorted column is not
+    /// admitted nothing matches and no arrow is drawn.
     fn sort_field(self) -> Option<SortField> {
         match self {
             Self::Total => Some(SortField::Tokens),
@@ -106,95 +181,113 @@ impl ProjectColumn {
             | Self::Input
             | Self::Output
             | Self::CacheRead
-            | Self::CacheWrite => None,
+            | Self::CacheWrite
+            | Self::CacheHit => None,
         }
     }
 
-    fn cell(self, rank: usize, p: &ProjectUsage, app: &App, granted: &[u16]) -> Cell<'static> {
+    fn cell(self, rank: usize, p: &ProjectUsage, app: &App, layout: &WideLayout) -> Cell<'static> {
         match self {
-            Self::Rank => Cell::from(self.fit(rank.to_string(), granted))
+            Self::Rank => Cell::from(self.fit(rank.to_string()))
                 .style(Style::default().fg(app.theme.muted)),
             // Not a plain head cut: a workspace label is identified by the ends
             // of each of its segments, and cutting the tail leaves the prefix
-            // every row shares. Truncated to the width the solver granted this
-            // very column, never to the requested width.
+            // every row shares. Fitted to the width admission resolved for this
+            // column, never to the requested width.
             Self::Project => Cell::from(fit_workspace_label_to_width(
                 &p.label,
-                self.granted_width(granted),
+                layout.project_width as usize,
             ))
             .style(
                 Style::default()
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Self::Sessions => Cell::from(self.fit(p.session_count.to_string(), granted)),
-            Self::Sources => Cell::from(self.fit(sources_label(p), granted))
+            Self::Sessions => Cell::from(self.fit(p.session_count.to_string())),
+            Self::Sources => Cell::from(self.fit(sources_label(p)))
                 .style(Style::default().fg(app.theme.muted)),
-            Self::Models => build_models_cell(&p.models, self.granted_width(granted), app),
-            Self::Input => Cell::from(self.fit(format_tokens(p.tokens.input), granted))
+            Self::Models => build_models_cell(&p.models, self.natural() as usize, app),
+            Self::Input => Cell::from(self.fit(format_tokens(p.tokens.input)))
                 .style(app.theme.metric_input_style()),
-            Self::Output => Cell::from(self.fit(format_tokens(p.tokens.output), granted))
+            Self::Output => Cell::from(self.fit(format_tokens(p.tokens.output)))
                 .style(app.theme.metric_output_style()),
-            Self::CacheRead => Cell::from(self.fit(format_tokens(p.tokens.cache_read), granted))
+            Self::CacheRead => Cell::from(self.fit(format_tokens(p.tokens.cache_read)))
                 .style(app.theme.metric_cache_read_style()),
-            Self::CacheWrite => Cell::from(self.fit(format_tokens(p.tokens.cache_write), granted))
+            Self::CacheWrite => Cell::from(self.fit(format_tokens(p.tokens.cache_write)))
                 .style(app.theme.metric_cache_write_style()),
-            Self::Total => Cell::from(self.fit(format_tokens(p.tokens.total()), granted))
+            Self::CacheHit => Cell::from(self.fit(format_cache_hit_rate(
+                p.tokens.cache_read,
+                p.tokens.input,
+                p.tokens.cache_write,
+            )))
+            .style(app.theme.count_style()),
+            Self::Total => Cell::from(self.fit(format_tokens(p.tokens.total())))
                 .style(app.theme.metric_total_style()),
-            Self::Cost => Cell::from(self.fit(format_cost(p.cost), granted))
+            Self::Cost => Cell::from(self.fit(format_cost(p.cost)))
                 .style(Style::default().fg(Color::Green)),
             Self::LastActive => Cell::from(
                 self.fit(
                     ms_to_local_naive(p.last_active_ms)
                         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "\u{2014}".to_string()),
-                    granted,
                 ),
             )
             .style(Style::default().fg(app.theme.muted)),
         }
     }
 
-    /// Position in the display order, for indexing into the solved widths.
-    fn index(self) -> usize {
-        WIDE_ORDER.iter().position(|c| *c == self).unwrap_or(0)
-    }
-
-    /// Cells the solver granted this column out of the already-solved `widths`.
-    /// A `Length` is a request, not a guarantee, and `Min` floats, so text is
-    /// cut to what the column actually got rather than to what it asked for.
-    fn granted_width(self, widths: &[u16]) -> usize {
-        widths.get(self.index()).copied().unwrap_or(0) as usize
-    }
-
-    /// Clamp a fixed-width column's text to its granted width. A no-op at
-    /// widths where the request was satisfied; past that a clipped number would
-    /// read as a plausible wrong value, so the cut keeps an ellipsis.
-    fn fit(self, text: String, granted: &[u16]) -> String {
-        truncate_to_width(&text, self.granted_width(granted))
+    /// Clamp a fixed-width column's text to its natural width. A no-op on
+    /// every value the column was sized for — `natural()` is the widest
+    /// *realistic* one — but past that a clipped number would read as a
+    /// plausible wrong value, so the cut keeps an ellipsis. Project and Models
+    /// clamp against their own resolved widths at their call sites instead.
+    fn fit(self, text: String) -> String {
+        truncate_to_width(&text, self.natural() as usize)
     }
 }
 
-/// The wide layout's column constraints.
-fn wide_constraints() -> Vec<Constraint> {
-    WIDE_ORDER.iter().map(|c| c.constraint()).collect()
+/// Position in the display order. Total rather than `unwrap()`: a column
+/// missing from `WIDE_ORDER` sorts last instead of panicking inside the draw
+/// loop, which would leave the terminal in raw mode. The permutation test is
+/// what actually catches it.
+fn order_index(c: ProjectColumn) -> usize {
+    WIDE_ORDER.iter().position(|o| *o == c).unwrap_or(usize::MAX)
 }
 
-fn wide_min_width() -> u16 {
-    WIDE_ORDER.iter().map(|c| c.min_width()).sum::<u16>()
-        + COLUMN_SPACING * WIDE_ORDER.len().saturating_sub(1) as u16
+/// Cells a column set occupies: the widths themselves plus one separator
+/// between every pair. Measured against `inner`, which already has the block
+/// borders removed.
+fn required(set: &[ProjectColumn]) -> u16 {
+    let widths: u16 = set.iter().map(|c| c.natural()).sum();
+    widths + COLUMN_SPACING * set.len().saturating_sub(1) as u16
 }
 
-/// Widths the solver grants each wide column at `total` cells. Ratatui's table
-/// solves the same constraint set with one cell of `column_spacing` between
-/// columns, so this mirrors that layout exactly.
-fn wide_table_widths(total: u16) -> Vec<u16> {
-    Layout::horizontal(wide_constraints())
-        .spacing(COLUMN_SPACING)
-        .split(Rect::new(0, 0, total, 1))
-        .iter()
-        .map(|area| area.width)
-        .collect()
+/// Admit whole priority groups while they fit, then hand the slack to Project.
+/// Stop at the first group that does not fit rather than skipping to a
+/// narrower one, so the admitted set stays monotonic in width.
+fn admit_and_distribute(available: u16) -> WideLayout {
+    let mut chosen: Vec<ProjectColumn> = Vec::new();
+    for group in WIDE_PRIORITY {
+        let mut next = chosen.clone();
+        next.extend(group);
+        if required(&next) <= available {
+            chosen = next;
+        } else {
+            break;
+        }
+    }
+    chosen.sort_by_key(|c| order_index(*c));
+
+    let project_width = if chosen.contains(&ProjectColumn::Project) {
+        ProjectColumn::Project.natural() + available.saturating_sub(required(&chosen))
+    } else {
+        ProjectColumn::Project.natural()
+    };
+
+    WideLayout {
+        chosen,
+        project_width,
+    }
 }
 
 /// Distinct clients in first-seen order, compact-named and comma-joined.
@@ -254,10 +347,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    let wide = inner.width >= wide_min_width();
+    // The wide layout is budget-driven: a column is admitted at its natural
+    // width or it is not shown. The core group is atomic, so an `inner`
+    // narrower than its budget admits nothing at all; the very-narrow fallback
+    // below is percentage-based and renders something at any width.
+    let wide = (!is_very_narrow)
+        .then(|| admit_and_distribute(inner.width))
+        .filter(|layout| !layout.chosen.is_empty());
 
-    let header_cells: Vec<String> = if wide {
-        WIDE_ORDER
+    let header_cells: Vec<String> = if let Some(layout) = &wide {
+        // Headers carry the sort arrow, so this is one derivation and not two.
+        layout
+            .chosen
             .iter()
             .map(|c| {
                 let indicator = c.sort_field().map(sort_indicator).unwrap_or("");
@@ -265,25 +366,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             })
             .collect()
     } else {
-        let labels: &[&str] = if is_very_narrow {
-            &["Project", "Cost"]
-        } else {
-            &["Project", "Sessions", "Total", "Cost"]
-        };
-        // The narrow layouts keep hand-picked indices, and `usize::MAX` stands
-        // for "this sort has no column here".
-        let (total_idx, cost_idx) = if is_very_narrow {
-            (usize::MAX, 1)
-        } else {
-            (2, 3)
-        };
-        labels
+        ["Project", "Cost"]
             .iter()
             .enumerate()
             .map(|(i, h)| {
-                let indicator = if i == total_idx {
-                    sort_indicator(SortField::Tokens)
-                } else if i == cost_idx {
+                let indicator = if i == 1 {
                     sort_indicator(SortField::Cost)
                 } else {
                     ""
@@ -309,14 +396,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Solve the wide layout once per render, not once per cell: the widths
-    // depend only on `inner.width`.
-    let wide_widths = if wide {
-        wide_table_widths(inner.width)
-    } else {
-        Vec::new()
-    };
-
     let rows: Vec<Row> = projects[start..end]
         .iter()
         .enumerate()
@@ -325,29 +404,19 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let cells: Vec<Cell> = if wide {
-                WIDE_ORDER
+            let cells: Vec<Cell> = if let Some(layout) = &wide {
+                layout
+                    .chosen
                     .iter()
-                    .map(|c| c.cell(idx + 1, usage, app, &wide_widths))
+                    .map(|c| c.cell(idx + 1, usage, app, layout))
                     .collect()
-            } else if is_very_narrow {
+            } else {
                 vec![
                     Cell::from(truncate_text(&usage.label, 20)).style(
                         Style::default()
                             .fg(theme_accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(format_cost(usage.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else {
-                vec![
-                    Cell::from(truncate_text(&usage.label, 24)).style(
-                        Style::default()
-                            .fg(theme_accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(usage.session_count.to_string()),
-                    total_tokens_cell(usage.tokens.total(), &app.theme),
                     Cell::from(format_cost(usage.cost)).style(Style::default().fg(Color::Green)),
                 ]
             };
@@ -364,17 +433,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths: Vec<Constraint> = if wide {
-        wide_constraints()
-    } else if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
+    let widths: Vec<Constraint> = if let Some(layout) = &wide {
+        layout.chosen.iter().map(|c| c.constraint()).collect()
     } else {
-        vec![
-            Constraint::Percentage(40),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(25),
-        ]
+        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
     };
 
     let table = Table::new(rows, widths)
@@ -476,6 +538,33 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use unicode_width::UnicodeWidthStr;
 
+    /// Inner width (`area` minus the two border cells) at which each priority
+    /// group first fits. **Literals, never derived from `admit_and_distribute`**:
+    /// a test that recomputes the formula it is testing cannot fail. Amending
+    /// `WIDE_PRIORITY` or `natural()` moves these numbers, and the diff then
+    /// names which threshold moved and by how much.
+    const THRESHOLDS: [(u16, &[ProjectColumn]); 8] = [
+        (
+            49,
+            &[
+                ProjectColumn::Project,
+                ProjectColumn::Sessions,
+                ProjectColumn::Total,
+                ProjectColumn::Cost,
+            ],
+        ),
+        (54, &[ProjectColumn::Rank]),
+        (76, &[ProjectColumn::Input, ProjectColumn::Output]),
+        (
+            98,
+            &[ProjectColumn::CacheRead, ProjectColumn::CacheWrite],
+        ),
+        (107, &[ProjectColumn::CacheHit]),
+        (124, &[ProjectColumn::LastActive]),
+        (143, &[ProjectColumn::Models]),
+        (158, &[ProjectColumn::Sources]),
+    ];
+
     fn project(label: &str, cost: f64, last_ms: i64) -> ProjectUsage {
         ProjectUsage {
             group_key: label.to_string(),
@@ -543,12 +632,146 @@ mod tests {
             .join("\n")
     }
 
+    fn header_line(app: &mut App, width: u16) -> String {
+        render_body(app, width, 6)
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // ---- the descriptor arrays -------------------------------------------
+
+    /// The exhaustive `match`es cover the descriptor methods and stop there:
+    /// `WIDE_ORDER` and `WIDE_PRIORITY` are hand-maintained arrays that compile
+    /// fine while missing a variant. Absent from `WIDE_PRIORITY` a column is
+    /// never admitted at any width and silently never renders; absent from
+    /// `WIDE_ORDER` its cells sort behind every admitted column.
+    #[test]
+    fn every_column_is_ordered_and_prioritized() {
+        let mut order = WIDE_ORDER.to_vec();
+        let mut priority: Vec<ProjectColumn> = WIDE_PRIORITY.concat();
+        let mut all = ALL.to_vec();
+        for v in [&mut order, &mut priority, &mut all] {
+            v.sort_by_key(|c| *c as usize);
+        }
+        assert_eq!(order, all, "WIDE_ORDER is not a permutation of ALL");
+        assert_eq!(priority, all, "WIDE_PRIORITY is not a permutation of ALL");
+    }
+
+    // ---- the budget -------------------------------------------------------
+
+    #[test]
+    fn group_thresholds_are_where_the_review_put_them() {
+        for (threshold, group) in THRESHOLDS {
+            let at = admit_and_distribute(threshold).chosen;
+            for column in group {
+                assert!(
+                    at.contains(column),
+                    "{column:?} should be admitted at an inner width of {threshold}, got {at:?}"
+                );
+            }
+            let below = admit_and_distribute(threshold - 1).chosen;
+            for column in group {
+                assert!(
+                    !below.contains(column),
+                    "{column:?} should not be admitted at an inner width of {}, got {below:?}",
+                    threshold - 1
+                );
+            }
+        }
+    }
+
+    /// The admitted set never costs more cells than the terminal has.
+    #[test]
+    fn the_admitted_set_always_fits_the_terminal() {
+        for available in 0u16..=240 {
+            let chosen = admit_and_distribute(available).chosen;
+            assert!(
+                required(&chosen) <= available,
+                "admitted set overflows at inner width {available}: {chosen:?}"
+            );
+        }
+    }
+
+    /// Widening the terminal never removes a column.
+    #[test]
+    fn admitted_columns_are_monotonic_in_width() {
+        let mut previous: Vec<ProjectColumn> = Vec::new();
+        for available in 0u16..=240 {
+            let current = admit_and_distribute(available).chosen;
+            for column in &previous {
+                assert!(
+                    current.contains(column),
+                    "{column:?} disappeared going from {} to {available} inner columns",
+                    available - 1
+                );
+            }
+            previous = current;
+        }
+    }
+
+    /// The point of the change: the Input/Output/Cache breakdown shows on
+    /// ordinary terminals instead of waiting for 152 columns. Thresholds are
+    /// terminal widths, so the assertions run through an actual render.
+    #[test]
+    fn token_breakdown_columns_render_once_they_fit() {
+        let cases: [(u16, &[&str], &[&str]); 6] = [
+            (60, &["Sessions", "Total", "Cost ▾"], &["Input", "Cache R"]),
+            // Inner 75: one cell short of the Input/Output group.
+            (77, &["Sessions"], &["Input", "Output"]),
+            (78, &["Input", "Output"], &["Cache R", "Cache W"]),
+            (100, &["Cache R", "Cache W"], &["Cache✕", "Last Active"]),
+            (109, &["Cache✕"], &["Last Active", "Models"]),
+            (126, &["Last Active"], &["Models", "Sources"]),
+        ];
+        for (width, present, absent) in cases {
+            let mut app = make_app(width);
+            app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
+            let header = header_line(&mut app, width);
+            for label in present {
+                assert!(
+                    header.contains(label),
+                    "{label:?} missing at width {width}\n{header}"
+                );
+            }
+            for label in absent {
+                assert!(
+                    !header.contains(label),
+                    "{label:?} showed at width {width}\n{header}"
+                );
+            }
+        }
+    }
+
+    /// A column that is not admitted leaves nothing behind — no stub header
+    /// and, more importantly, no half of a number.
+    #[test]
+    fn unadmitted_columns_leave_no_trace() {
+        for width in 60u16..160 {
+            let mut app = make_app(width);
+            app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
+            let header = header_line(&mut app, width);
+            let admitted = admit_and_distribute(width - 2).chosen;
+            for column in ALL {
+                if admitted.contains(&column) {
+                    continue;
+                }
+                assert!(
+                    !header.contains(column.header()),
+                    "{column:?} header showed at width {width}\n{header}"
+                );
+            }
+        }
+    }
+
+    // ---- full layout ------------------------------------------------------
+
     #[test]
     fn wide_header_lists_every_column() {
         let mut app = make_app(200);
         app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
-        let body = render_body(&mut app, 200, 6);
-        let header = body.lines().nth(1).unwrap_or_default();
+        let header = header_line(&mut app, 200);
         for c in WIDE_ORDER {
             assert!(
                 header.contains(c.header()),
@@ -566,28 +789,79 @@ mod tests {
         let body = render_body(&mut app, 200, 6);
         let row = body.lines().nth(2).unwrap_or_default();
         for expected in [
-            "tokscale", "3", "1.2M", "234K", "45.7M", "2.3M", "49.5M", "$12.35",
+            "tokscale", "3", "1.2M", "234K", "45.7M", "2.3M", "12.8x", "49.5M", "$12.35",
         ] {
             assert!(row.contains(expected), "row is missing {expected:?}: {row}");
         }
     }
 
     #[test]
+    fn full_layout_fits_at_its_minimum_width() {
+        // Inner 158 is exactly the sum of every natural width plus spacing.
+        let mut app = make_app(160);
+        let last_ms = 1_736_000_000_000;
+        app.data.projects = vec![project("tokscale", 12.3456, last_ms)];
+        let body = render_body(&mut app, 160, 6);
+        let header = body.lines().nth(1).unwrap();
+        let row = body.lines().nth(2).unwrap();
+        for column in WIDE_ORDER {
+            assert!(header.contains(column.header()), "{header}");
+        }
+        let last_active = ms_to_local_naive(last_ms)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        for value in ["234K", "45.7M", "2.3M", "12.8x", "49.5M", "$12.35", &last_active] {
+            assert!(row.contains(value), "{row}");
+        }
+    }
+
+    #[test]
     fn project_column_truncates_to_granted_width_not_requested() {
-        // At any width, the label cell must be cut to what the solver actually
+        // At any width, the label cell must be cut to what admission actually
         // granted the Project column — cutting to the request clips with no
-        // ellipsis when the solver shrinks the column.
+        // ellipsis when the column shrinks.
         for total in 60u16..=240 {
-            let granted = wide_table_widths(total);
-            let project_width = ProjectColumn::Project.granted_width(&granted);
-            let label = "a/very/long/workspace/label/that/keeps/going";
-            let fitted = fit_workspace_label_to_width(label, project_width);
+            let layout = admit_and_distribute(total - 2);
+            let fitted =
+                fit_workspace_label_to_width("a/very/long/workspace/label/that/keeps/going",
+                    layout.project_width as usize);
             assert!(
-                display_width(&fitted) <= project_width,
-                "at {total} cols the label exceeds its granted {project_width} cells"
+                display_width(&fitted) <= layout.project_width as usize,
+                "at {total} cols the label exceeds its granted {} cells",
+                layout.project_width
             );
         }
     }
+
+    #[test]
+    fn sort_indicator_is_legible_exactly_when_its_column_is_admitted() {
+        for (field, column) in [
+            (SortField::Cost, ProjectColumn::Cost),
+            (SortField::Tokens, ProjectColumn::Total),
+            (SortField::Date, ProjectColumn::LastActive),
+        ] {
+            for width in 60u16..=200 {
+                let mut app = make_app(width);
+                app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
+                app.sort_field = field;
+                let header = header_line(&mut app, width);
+                if admit_and_distribute(width - 2).chosen.contains(&column) {
+                    assert!(
+                        header.contains(&format!("{} ▾", column.header())),
+                        "{field:?} ▾ clipped at width {width}\n{header}"
+                    );
+                } else {
+                    assert!(
+                        !header.contains('▾'),
+                        "{field:?} drew ▾ with its column unadmitted at width {width}\n{header}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- narrow fallback ---------------------------------------------------
 
     #[test]
     fn narrow_and_very_narrow_layouts_render() {
@@ -605,42 +879,13 @@ mod tests {
     }
 
     #[test]
-    fn compact_layout_preserves_totals_until_all_wide_columns_fit() {
-        let mut app = make_app(200);
-        app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
-        for width in [80, 100, 120, 140, 151] {
-            let body = render_body(&mut app, width, 6);
-            let header = body.lines().nth(1).unwrap();
-            let row = body.lines().nth(2).unwrap();
-            for label in ["Project", "Sessions", "Total", "Cost ▾"] {
-                assert!(header.contains(label), "at {width} columns: {header}");
-            }
-            assert!(!header.contains("Models"), "at {width} columns: {header}");
-            for value in ["tokscale", "49.5M", "$12.35"] {
-                assert!(row.contains(value), "at {width} columns: {row}");
-            }
-        }
+    fn empty_state_renders_hint() {
+        let mut app = make_app(120);
+        let body = render_body(&mut app, 120, 6);
+        assert!(body.contains("No project usage data found"));
     }
 
-    #[test]
-    fn wide_layout_fits_at_its_minimum_width() {
-        let mut app = make_app(152);
-        let last_ms = 1_736_000_000_000;
-        app.data.projects = vec![project("tokscale", 12.3456, last_ms)];
-        let body = render_body(&mut app, 152, 6);
-        let header = body.lines().nth(1).unwrap();
-        let row = body.lines().nth(2).unwrap();
-        for column in WIDE_ORDER {
-            assert!(header.contains(column.header()), "{header}");
-        }
-        let last_active = ms_to_local_naive(last_ms)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M")
-            .to_string();
-        for value in ["234K", "45.7M", "2.3M", "49.5M", "$12.35", &last_active] {
-            assert!(row.contains(value), "{row}");
-        }
-    }
+    // ---- the Models cell ---------------------------------------------------
 
     fn render_models(names: &[&str], width: u16) -> String {
         let app = make_app(200);
@@ -700,12 +945,5 @@ mod tests {
         }
         assert_eq!(render_models(&["a", "🇺🇸x"], 5), "a, ⋯");
         assert_eq!(render_models(&["a", "🇺🇸x"], 6), "a, 🇺🇸x");
-    }
-
-    #[test]
-    fn empty_state_renders_hint() {
-        let mut app = make_app(120);
-        let body = render_body(&mut app, 120, 6);
-        assert!(body.contains("No project usage data found"));
     }
 }
