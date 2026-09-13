@@ -1364,9 +1364,10 @@ fn parser_version(client: ClientId) -> u32 {
         // Workspace indexes are applied after the cache read and do not
         // change the persisted parser output.
         // v4->v5: kimi-code messages now carry `duration_ms` derived from the
-        // preceding llm.request timestamp. Untouched wire files keep valid
-        // fingerprints, so a warm v4 entry would keep replaying rows with no
-        // duration sample and the ms/1K column would stay empty for them.
+        // preceding llm.request timestamp and, when paired, are anchored at that
+        // request's start. Untouched wire files keep valid fingerprints, so a
+        // warm v4 entry would keep replaying rows with no duration sample and
+        // the ms/1K column would stay empty for them.
         ClientId::Kimi => 5,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV

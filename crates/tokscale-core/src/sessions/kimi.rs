@@ -7,7 +7,8 @@
 //!
 //! `~/.kimi-code/sessions/[WORKSPACE]/[SESSION]/agents/[AGENT]/wire.jsonl`
 //!   Token data comes from usage.record lines; a record's response duration is
-//!   derived from the timestamp of the llm.request that precedes it.
+//!   derived from the timestamp of the llm.request that precedes it, and a
+//!   paired record is anchored at that request's start.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -408,7 +409,17 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
         // instant for a value that is simply corrupt; the mtime fallback says
         // "unknown" instead.
         let wire_time_ms = wire_line.time.filter(|ms| *ms > 0);
-        let timestamp_ms = wire_time_ms.unwrap_or(fallback_timestamp);
+        // Pair against the wire time only: the mtime fallback can sit long
+        // after the response landed and would inflate the duration.
+        let duration_ms = duration_between_ms(request_time_ms, wire_time_ms);
+        // A paired call is anchored at its request start with the duration
+        // running forward to the response, the start-anchored contract
+        // sessionize reads (`end = timestamp + duration_ms`); an unpaired
+        // record keeps its own time, or the mtime fallback.
+        let timestamp_ms = duration_ms
+            .and(request_time_ms)
+            .or(wire_time_ms)
+            .unwrap_or(fallback_timestamp);
 
         let mut message = UnifiedMessage::new(
             "kimi",
@@ -419,9 +430,7 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             tokens,
             0.0,
         );
-        // Pair against the wire time only: the mtime fallback can sit long
-        // after the response landed and would inflate the duration.
-        message.duration_ms = duration_between_ms(request_time_ms, wire_time_ms);
+        message.duration_ms = duration_ms;
         messages.push(message);
     });
 
@@ -1049,6 +1058,12 @@ not valid json at all
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].duration_ms, Some(8612));
         assert_eq!(messages[1].duration_ms, Some(12300));
+        // Anchored at each request's start, so `timestamp + duration_ms` lands
+        // on the record's own time and the span sessionize derives is the call.
+        assert_eq!(messages[0].timestamp, 1780319377000);
+        assert_eq!(messages[1].timestamp, 1780319385700);
+        assert_eq!(messages[0].timestamp + 8612, 1780319385612);
+        assert_eq!(messages[1].timestamp + 12300, 1780319398000);
     }
 
     #[test]
@@ -1065,6 +1080,9 @@ not valid json at all
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].duration_ms, Some(1000));
         assert_eq!(messages[1].duration_ms, None);
+        assert_eq!(messages[0].timestamp, 1780319377000);
+        // The unpaired record keeps its own time.
+        assert_eq!(messages[1].timestamp, 1780319379000);
     }
 
     #[test]
@@ -1081,6 +1099,7 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].duration_ms, None);
+        assert_eq!(messages[0].timestamp, 1780319379000);
     }
 
     #[test]
@@ -1096,6 +1115,7 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].duration_ms, Some(1000));
+        assert_eq!(messages[0].timestamp, 1780319377000);
     }
 
     #[test]
@@ -1124,6 +1144,8 @@ not valid json at all
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].duration_ms, None);
         assert_eq!(messages[1].duration_ms, None);
+        // Unpaired records keep their own time, not their request's.
+        assert_eq!(messages[1].timestamp, 1780319377000);
     }
 
     #[test]
@@ -1134,11 +1156,13 @@ not valid json at all
         let content = r#"{"type":"llm.request","model":"kimi-code/kimi-for-coding","time":1780319377000}
 {"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":-1}"#;
         let (_dir, fake_path) = create_kimi_code_test_file(content);
+        let mtime = file_modified_timestamp_ms(&fake_path);
 
         let messages = parse_kimi_code_file(&fake_path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].duration_ms, None);
+        assert_eq!(messages[0].timestamp, mtime);
     }
 
     #[test]
