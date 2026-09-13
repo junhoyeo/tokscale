@@ -340,7 +340,12 @@ pub fn prime_agent_session_roots_with_env_strategy(
 
 pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     if use_env_roots {
-        if let Ok(path) = std::env::var("TOKSCALE_HEADLESS_DIR") {
+        // An empty override would be a root every path starts with, and joining
+        // it would resolve client directories against the working directory, so
+        // treat it as unset like the other directory overrides.
+        if let Some(path) =
+            std::env::var_os("TOKSCALE_HEADLESS_DIR").filter(|path| !path.is_empty())
+        {
             return vec![PathBuf::from(path)];
         }
     }
@@ -4140,6 +4145,19 @@ mod tests {
 
         let roots = headless_roots("/tmp/home");
         assert_eq!(roots, vec![PathBuf::from("/custom/headless")]);
+
+        restore_env("TOKSCALE_HEADLESS_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_headless_roots_treat_empty_env_override_as_unset() {
+        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
+        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "") };
+
+        let roots = headless_roots("/tmp/home");
+        assert_eq!(roots, headless_roots_with_env_strategy("/tmp/home", false));
+        assert!(roots.iter().all(|root| !root.as_os_str().is_empty()));
 
         restore_env("TOKSCALE_HEADLESS_DIR", previous);
     }
