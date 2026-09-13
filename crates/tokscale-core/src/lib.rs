@@ -5006,15 +5006,16 @@ fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
 }
 
 fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
-    if is_headless && message.agent.is_none() {
-        message.agent = Some(
-            if message.client == "codex" {
-                sessions::codex::CODEX_HEADLESS_AGENT
-            } else {
-                "headless"
-            }
-            .to_string(),
-        );
+    if !is_headless {
+        return;
+    }
+    if message.client == "codex" {
+        // A capture under the headless root is a `codex exec` run even when its
+        // `session_meta` omits `source: "exec"` and the parser bucketed it as
+        // an interactive or subagent thread, so the path wins.
+        message.agent = Some(sessions::codex::CODEX_HEADLESS_AGENT.to_string());
+    } else if message.agent.is_none() {
+        message.agent = Some("headless".to_string());
     }
 }
 
@@ -19048,5 +19049,73 @@ mod tests {
             &dated("2026-01-01"),
             &truncated
         ));
+    }
+
+    #[test]
+    fn test_headless_root_overrides_codex_session_meta_agent() {
+        // A headless capture whose `session_meta` omits `source: "exec"` is
+        // bucketed as an interactive thread by the parser; the headless root
+        // must still label it as a `codex exec` run.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("codex").join("run.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"capture","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let mut messages = sessions::codex::parse_codex_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some(sessions::codex::CODEX_DEFAULT_AGENT)
+        );
+
+        let is_headless = super::is_headless_path(&path, &[root.path().to_path_buf()]);
+        super::apply_headless_agent(&mut messages[0], is_headless);
+
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some(sessions::codex::CODEX_HEADLESS_AGENT)
+        );
+    }
+
+    #[test]
+    fn test_headless_root_only_fills_missing_agents_for_other_clients() {
+        let message = |client: &str, agent: Option<&str>| {
+            UnifiedMessage::new_with_agent(
+                client,
+                "model",
+                "provider",
+                "session",
+                0,
+                TokenBreakdown::default(),
+                0.0,
+                agent.map(str::to_string),
+            )
+        };
+
+        let mut labeled = message("mcode", Some("planner"));
+        super::apply_headless_agent(&mut labeled, true);
+        assert_eq!(labeled.agent.as_deref(), Some("planner"));
+
+        let mut unlabeled = message("mcode", None);
+        super::apply_headless_agent(&mut unlabeled, true);
+        assert_eq!(unlabeled.agent.as_deref(), Some("headless"));
+
+        let mut outside_root = message("codex", Some(sessions::codex::CODEX_DEFAULT_AGENT));
+        super::apply_headless_agent(&mut outside_root, false);
+        assert_eq!(
+            outside_root.agent.as_deref(),
+            Some(sessions::codex::CODEX_DEFAULT_AGENT)
+        );
     }
 }
