@@ -384,6 +384,11 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             return;
         }
 
+        // A turn-scoped record answers the latest llm.request even when it
+        // reports zero tokens, so take the pending start before that skip: a
+        // later record without its own request must not pair against it.
+        let request_time_ms = pending_request_time_ms.take();
+
         // Skip entries with zero tokens
         let Some(tokens) = wire_line.usage.as_ref().and_then(TokenUsage::to_breakdown) else {
             return;
@@ -415,10 +420,8 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             0.0,
         );
         // Pair against the wire time only: the mtime fallback can sit long
-        // after the response landed and would inflate the duration. Consume
-        // the pending start so a second usage.record without an intervening
-        // llm.request can't reuse it.
-        message.duration_ms = duration_between_ms(pending_request_time_ms.take(), wire_time_ms);
+        // after the response landed and would inflate the duration.
+        message.duration_ms = duration_between_ms(request_time_ms, wire_time_ms);
         messages.push(message);
     });
 
@@ -1062,6 +1065,37 @@ not valid json at all
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].duration_ms, Some(1000));
         assert_eq!(messages[1].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_kimi_code_zero_token_record_consumes_request_start() {
+        // A zero-token turn record still answers the request before it, so a
+        // later record without its own llm.request must not pair against that
+        // stale start.
+        let content = r#"{"type":"llm.request","model":"kimi-code/kimi-for-coding","time":1780319377000}
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":0,"output":0,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319378000}
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319379000}"#;
+        let (_dir, fake_path) = create_kimi_code_test_file(content);
+
+        let messages = parse_kimi_code_file(&fake_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_kimi_code_session_record_keeps_request_start() {
+        // Session-scoped bookkeeping between a request and its response is not
+        // that response, so it leaves the pending start for the turn record.
+        let content = r#"{"type":"llm.request","model":"kimi-code/kimi-for-coding","time":1780319377000}
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":999,"output":999,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"session","time":1780319377500}
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319378000}"#;
+        let (_dir, fake_path) = create_kimi_code_test_file(content);
+
+        let messages = parse_kimi_code_file(&fake_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, Some(1000));
     }
 
     #[test]
