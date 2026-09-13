@@ -188,8 +188,9 @@ impl ProjectColumn {
 
     fn cell(self, rank: usize, p: &ProjectUsage, app: &App, layout: &WideLayout) -> Cell<'static> {
         match self {
-            Self::Rank => Cell::from(self.fit(rank.to_string()))
-                .style(Style::default().fg(app.theme.muted)),
+            Self::Rank => {
+                Cell::from(self.fit(rank.to_string())).style(Style::default().fg(app.theme.muted))
+            }
             // Not a plain head cut: a workspace label is identified by the ends
             // of each of its segments, and cutting the tail leaves the prefix
             // every row shares. Fitted to the width admission resolved for this
@@ -204,8 +205,9 @@ impl ProjectColumn {
                     .add_modifier(Modifier::BOLD),
             ),
             Self::Sessions => Cell::from(self.fit(p.session_count.to_string())),
-            Self::Sources => Cell::from(self.fit(sources_label(p)))
-                .style(Style::default().fg(app.theme.muted)),
+            Self::Sources => {
+                Cell::from(self.fit(sources_label(p))).style(Style::default().fg(app.theme.muted))
+            }
             Self::Models => build_models_cell(&p.models, self.natural() as usize, app),
             Self::Input => Cell::from(self.fit(format_tokens(p.tokens.input)))
                 .style(app.theme.metric_input_style()),
@@ -223,8 +225,9 @@ impl ProjectColumn {
             .style(app.theme.count_style()),
             Self::Total => Cell::from(self.fit(format_tokens(p.tokens.total())))
                 .style(app.theme.metric_total_style()),
-            Self::Cost => Cell::from(self.fit(format_cost(p.cost)))
-                .style(Style::default().fg(Color::Green)),
+            Self::Cost => {
+                Cell::from(self.fit(format_cost(p.cost))).style(Style::default().fg(Color::Green))
+            }
             Self::LastActive => Cell::from(
                 self.fit(
                     ms_to_local_naive(p.last_active_ms)
@@ -251,7 +254,10 @@ impl ProjectColumn {
 /// loop, which would leave the terminal in raw mode. The permutation test is
 /// what actually catches it.
 fn order_index(c: ProjectColumn) -> usize {
-    WIDE_ORDER.iter().position(|o| *o == c).unwrap_or(usize::MAX)
+    WIDE_ORDER
+        .iter()
+        .position(|o| *o == c)
+        .unwrap_or(usize::MAX)
 }
 
 /// Cells a column set occupies: the widths themselves plus one separator
@@ -555,10 +561,7 @@ mod tests {
         ),
         (54, &[ProjectColumn::Rank]),
         (76, &[ProjectColumn::Input, ProjectColumn::Output]),
-        (
-            98,
-            &[ProjectColumn::CacheRead, ProjectColumn::CacheWrite],
-        ),
+        (98, &[ProjectColumn::CacheRead, ProjectColumn::CacheWrite]),
         (107, &[ProjectColumn::CacheHit]),
         (124, &[ProjectColumn::LastActive]),
         (143, &[ProjectColumn::Models]),
@@ -811,7 +814,15 @@ mod tests {
             .unwrap()
             .format("%Y-%m-%d %H:%M")
             .to_string();
-        for value in ["234K", "45.7M", "2.3M", "12.8x", "49.5M", "$12.35", &last_active] {
+        for value in [
+            "234K",
+            "45.7M",
+            "2.3M",
+            "12.8x",
+            "49.5M",
+            "$12.35",
+            &last_active,
+        ] {
             assert!(row.contains(value), "{row}");
         }
     }
@@ -823,9 +834,10 @@ mod tests {
         // ellipsis when the column shrinks.
         for total in 60u16..=240 {
             let layout = admit_and_distribute(total - 2);
-            let fitted =
-                fit_workspace_label_to_width("a/very/long/workspace/label/that/keeps/going",
-                    layout.project_width as usize);
+            let fitted = fit_workspace_label_to_width(
+                "a/very/long/workspace/label/that/keeps/going",
+                layout.project_width as usize,
+            );
             assert!(
                 display_width(&fitted) <= layout.project_width as usize,
                 "at {total} cols the label exceeds its granted {} cells",
