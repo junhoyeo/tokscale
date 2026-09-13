@@ -1363,7 +1363,11 @@ fn parser_version(client: ClientId) -> u32 {
         // anchoring the message in a pre-epoch bucket.
         // Workspace indexes are applied after the cache read and do not
         // change the persisted parser output.
-        ClientId::Kimi => 4,
+        // v4->v5: kimi-code messages now carry `duration_ms` derived from the
+        // preceding llm.request timestamp. Untouched wire files keep valid
+        // fingerprints, so a warm v4 entry would keep replaying rows with no
+        // duration sample and the ms/1K column would stay empty for them.
+        ClientId::Kimi => 5,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
         // `Cost` (including explicit zero) is retained as provider-reported so
@@ -3549,13 +3553,13 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v3_entries() {
-        assert_eq!(parser_version(ClientId::Kimi), 4);
+    fn test_kimi_parser_version_invalidates_v4_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 5);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_kimi_v4_cache_reused_with_current_workspace_metadata() {
+    fn test_kimi_v5_cache_reused_with_current_workspace_metadata() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -3580,7 +3584,7 @@ mod tests {
         cached_messages[0].session_id = "cache-hit-marker".to_string();
         let identity = CacheIdentity {
             namespace: "kimi",
-            parser_version: 4,
+            parser_version: 5,
         };
         let fingerprint = SourceFingerprint::from_kimi_path(&wire_path).unwrap();
         let mut cache = SourceMessageCache::default();
