@@ -200,28 +200,68 @@ fn quotes_same_base_price(candidate: &ModelPricing, listed: &ModelPricing) -> bo
 /// Submission validation treats a populated bucket with no rate as
 /// unpriceable, so every Codex session — which always carries cached tokens —
 /// aborted the whole submission (#1013).
+///
+/// One author can serve the same model from several endpoints that differ only
+/// by service tier — `openai` against `openai/flex` and `openai/fast`,
+/// `google-vertex/global` against `.../flex` and `.../priority` — and all of
+/// them report the same `provider_name`. Taking the first match therefore made
+/// the stored price depend on OpenRouter's response ordering, which currently
+/// returns the discounted Flex tier first and so halved every rate for 26
+/// models. Flex is a real price but not the one that ran: it has to be opted
+/// into per request, and Codex records `"service_tier":"priority"` or
+/// `"default"`, never `flex`. The listed price on `/models` is the standard
+/// tier, so it breaks the tie between endpoints of one author. `tag` is
+/// deliberately not used here: tier naming is not uniform across authors, so
+/// it would need per-author rules where the listed price needs none.
 fn select_endpoint_pricing(
     endpoints: &[Endpoint],
     author_name: &str,
     listed: Option<&ModelPricing>,
 ) -> Option<ModelPricing> {
-    if let Some(author) = endpoints.iter().find(|e| e.provider_name == author_name) {
-        return endpoint_pricing(author);
+    let author_endpoints: Vec<&Endpoint> = endpoints
+        .iter()
+        .filter(|e| e.provider_name == author_name)
+        .collect();
+
+    if let Some(first) = author_endpoints.first() {
+        if let Some(listed) = listed {
+            let standard_tier = fewest_unpriceable_buckets(
+                author_endpoints
+                    .iter()
+                    .copied()
+                    .filter_map(endpoint_pricing)
+                    .filter(|pricing| quotes_same_base_price(pricing, listed)),
+            );
+            // The first match stands only when no author endpoint quotes the
+            // listed price, so a model whose author price legitimately differs
+            // from the listed one is left exactly as it was.
+            if standard_tier.is_some() {
+                return standard_tier;
+            }
+        }
+        return endpoint_pricing(first);
     }
 
     let listed = listed?;
-    let matching: Vec<ModelPricing> = endpoints
-        .iter()
-        .filter_map(endpoint_pricing)
-        .filter(|pricing| quotes_same_base_price(pricing, listed))
-        .collect();
+    fewest_unpriceable_buckets(
+        endpoints
+            .iter()
+            .filter_map(endpoint_pricing)
+            .filter(|pricing| quotes_same_base_price(pricing, listed)),
+    )
+}
 
-    // Cache read and cache write are independent fields, so the endpoint
-    // publishing the most of them is the one that leaves the fewest buckets
-    // unpriceable. On an equal count, retain cache-read pricing: it is the
-    // bucket required by Codex usage and must not be lost to an earlier
-    // write-only endpoint.
-    matching.into_iter().reduce(|best, candidate| {
+/// Reduce equally-priced candidates to the one that leaves the fewest token
+/// buckets unpriceable.
+///
+/// Cache read and cache write are independent fields, so the endpoint
+/// publishing the most of them wins. On an equal count, retain cache-read
+/// pricing: it is the bucket required by Codex usage and must not be lost to
+/// an earlier write-only endpoint.
+fn fewest_unpriceable_buckets(
+    candidates: impl Iterator<Item = ModelPricing>,
+) -> Option<ModelPricing> {
+    candidates.reduce(|best, candidate| {
         if published_cache_rates(&candidate) > published_cache_rates(&best)
             || (published_cache_rates(&candidate) == published_cache_rates(&best)
                 && candidate.cache_read_input_token_cost.is_some()
@@ -503,6 +543,81 @@ mod tests {
 
         assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
         assert_eq!(pricing.cache_creation_input_token_cost, None);
+    }
+
+    // OpenRouter serves `openai/gpt-6-astra` from three `OpenAI` endpoints that
+    // differ only by service tier, and returns the discounted `openai/flex` one
+    // first. Selecting by `provider_name` alone therefore stored $5/$25 for a
+    // model whose standard rate — and whose `/models` listed price — is
+    // $10/$50, halving every reported cost for it.
+    #[test]
+    fn a_discounted_tier_does_not_outrank_the_standard_author_endpoint() {
+        let endpoints = vec![
+            endpoint("OpenAI", "0.000005", "0.000025", Some("0.0000005")),
+            endpoint("Azure", "0.00001", "0.00005", Some("0.000001")),
+            endpoint("OpenAI", "0.00001", "0.00005", Some("0.000001")),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1e-5, 5e-5))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(1e-5));
+        assert_eq!(pricing.output_cost_per_token, Some(5e-5));
+        assert_eq!(pricing.cache_read_input_token_cost, Some(1e-6));
+    }
+
+    // The error is not one-directional: `openai/fast` is 2x the standard rate,
+    // so the same ordering dependency overcharges if OpenRouter ever returns
+    // that tier first.
+    #[test]
+    fn a_premium_tier_does_not_outrank_the_standard_author_endpoint() {
+        let endpoints = vec![
+            endpoint("OpenAI", "0.00002", "0.0001", Some("0.000002")),
+            endpoint("OpenAI", "0.00001", "0.00005", Some("0.000001")),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1e-5, 5e-5))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(1e-5));
+        assert_eq!(pricing.output_cost_per_token, Some(5e-5));
+    }
+
+    // Tiering is not an OpenAI shape. Google serves `gemini-3.6-flash` from
+    // `google-vertex/global/flex` before `google-vertex/global`, both as
+    // `Google`, and no 272k LiteLLM preference shields Gemini the way it
+    // currently shields some OpenAI models.
+    #[test]
+    fn the_tier_rule_is_not_specific_to_one_author() {
+        let endpoints = vec![
+            endpoint("Google", "0.000000375", "0.000001875", Some("0.0000000375")),
+            endpoint("Google AI Studio", "0.00000075", "0.00000375", None),
+            endpoint("Google", "0.00000075", "0.00000375", Some("0.000000075")),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "Google", Some(&listed(7.5e-7, 3.75e-6))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(7.5e-7));
+        assert_eq!(pricing.output_cost_per_token, Some(3.75e-6));
+        assert_eq!(pricing.cache_read_input_token_cost, Some(7.5e-8));
+    }
+
+    // Z.AI quantization tiers (`z-ai/fp4`, `z-ai/fp8`) quote prices that match
+    // no listed price, and the listed price there is a reseller's. Those models
+    // must keep resolving exactly as before, so the tier rule stays additive.
+    #[test]
+    fn author_endpoint_still_wins_when_none_quotes_the_listed_price() {
+        let endpoints = vec![
+            endpoint("Z.AI", "0.0000006", "0.0000022", None),
+            endpoint("Z.AI", "0.0000008", "0.0000029", None),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "Z.AI", Some(&listed(4e-7, 2e-6))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(6e-7));
+        assert_eq!(pricing.output_cost_per_token, Some(2.2e-6));
     }
 
     #[tokio::test]
