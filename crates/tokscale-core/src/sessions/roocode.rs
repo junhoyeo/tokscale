@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// happens; `message_cache::parser_version()` derives each member's version
 /// from it (base plus a per-client offset that preserves independent history)
 /// so no member can be left serving stale cache entries.
-pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 1;
+pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 struct UiMessageEntry {
@@ -28,6 +28,24 @@ struct UiMessageEntry {
     say: Option<String>,
     text: Option<String>,
     ts: Option<Value>,
+    #[serde(rename = "modelInfo")]
+    model_info: Option<UiModelInfo>,
+}
+
+/// Per-message model identity, written by current Cline on every
+/// `ui_messages.json` entry as `modelInfo`.
+///
+/// Cline 4.x no longer writes the `<model>` tag inside
+/// `<environment_details>` blocks nor the `apiProtocol` field of the
+/// `api_req_started` payload, so those file-level heuristics resolve
+/// `unknown/unknown` for every current task. When an entry carries
+/// `modelInfo`, it is the authoritative identity for that message; older
+/// Roo-style records keep the legacy heuristics (#1321).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiModelInfo {
+    provider_id: Option<String>,
+    model_id: Option<String>,
 }
 
 pub fn parse_roocode_file(path: &Path) -> Vec<UnifiedMessage> {
@@ -71,11 +89,28 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             None => continue,
         };
 
-        let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
+        // `modelInfo` is per-message and states the model that actually
+        // answered this request; the file-level `<model>`-tag heuristic
+        // labels every row in a task with the last tag it saw, so the
+        // per-entry identity wins whenever it is present.
+        let model = entry
+            .model_info
+            .as_ref()
+            .and_then(|info| info.model_id.clone())
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| model_id.clone());
+        let provider = entry
+            .model_info
+            .as_ref()
+            .and_then(|info| info.provider_id.clone())
+            .map(|provider| provider.trim().to_string())
+            .filter(|provider| !provider.is_empty())
+            .unwrap_or_else(|| provider_from_api_protocol(payload.api_protocol.as_deref()));
 
         messages.push(UnifiedMessage::new_with_agent(
             source,
-            model_id.clone(),
+            model,
             provider,
             session_id.clone(),
             timestamp,
@@ -294,6 +329,106 @@ after"#;
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].cost, 0.12);
         assert_eq!(messages[0].agent.as_deref(), Some("architect"));
+    }
+
+    /// Cline 4.x writes neither the `<model>` tag nor `apiProtocol`; it states
+    /// model identity per message through `modelInfo` (#1321). Without the
+    /// per-message preference every such task resolved to `unknown/unknown`
+    /// and priced at $0.
+    #[test]
+    fn test_parse_roocode_prefers_model_info_over_legacy_fields() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "ts": 1789022952376,
+    "type": "say",
+    "say": "task",
+    "text": "666",
+    "modelInfo": {"providerId": "anthropic", "modelId": "claude-sonnet-5", "mode": "act"}
+  },
+  {
+    "ts": 1789022955199,
+    "type": "say",
+    "say": "api_req_started",
+    "text": "{\"request\":\"<task>666</task>\",\"tokensIn\":3638,\"tokensOut\":409,\"cacheWrites\":0,\"cacheReads\":0,\"cost\":0.011366}",
+    "modelInfo": {"providerId": "anthropic", "modelId": "claude-sonnet-5", "mode": "act"}
+  }
+]"#;
+        // A history file exists but carries no <model> tag, matching current
+        // Cline: the environment_details block is present, the model is not.
+        let history = r#"before
+<environment_details>
+<slug>act</slug>
+</environment_details>
+after"#;
+        let path = setup_task(&dir, "task-cline4", ui_messages, Some(history));
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-5");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 3638);
+        assert_eq!(messages[0].tokens.output, 409);
+        assert_eq!(messages[0].cost, 0.011366);
+    }
+
+    /// A task that switched models mid-task: the per-message `modelInfo`
+    /// labels each row with the model that answered it, where the file-level
+    /// heuristic stamped every row with the last `<model>` tag.
+    #[test]
+    fn test_parse_roocode_model_info_labels_each_message() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.1,\"tokensIn\":10,\"tokensOut\":1,\"apiProtocol\":\"openai\"}",
+    "modelInfo": {"providerId": "openai", "modelId": "gpt-5.1"}
+  },
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:05:00Z",
+    "text": "{\"cost\":0.2,\"tokensIn\":20,\"tokensOut\":2,\"apiProtocol\":\"openai\"}",
+    "modelInfo": {"providerId": "anthropic", "modelId": "claude-sonnet-5"}
+  }
+]"#;
+        let path = setup_task(&dir, "task-switch", ui_messages, None);
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "gpt-5.1");
+        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[1].model_id, "claude-sonnet-5");
+        assert_eq!(messages[1].provider_id, "anthropic");
+    }
+
+    /// Blank `modelInfo` fields must not blank out a working legacy
+    /// resolution; empty strings fall through to the file-level heuristic.
+    #[test]
+    fn test_parse_roocode_blank_model_info_falls_back_to_legacy() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.12,\"tokensIn\":100,\"tokensOut\":50,\"apiProtocol\":\"anthropic\"}",
+    "modelInfo": {"providerId": "", "modelId": "  "}
+  }
+]"#;
+        let history = r#"
+<environment_details>
+<model>claude-sonnet-4</model>
+</environment_details>
+"#;
+        let path = setup_task(&dir, "task-blank", ui_messages, Some(history));
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 
     #[test]
