@@ -495,13 +495,25 @@ fn cli_log_path() -> Option<PathBuf> {
     )
 }
 
-/// Bytes of `cli.log` read when looking for logged ports.
+/// Bytes of `cli.log`'s end read when looking for logged ports.
 ///
 /// The log is appended across every CLI run and nothing rotates it, so reading
-/// it whole grows without bound on a long-lived install. Only the most recent
-/// entries matter here -- the tail is where the current port is -- so reading
-/// the end is both bounded and the answer this function actually wants.
+/// it whole grows without bound on a long-lived install. For an append-style
+/// log the most recent entries matter here -- the tail is where the current
+/// port is -- so reading the end is both bounded and the answer this function
+/// actually wants.
 const CLI_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Bytes of `cli.log`'s start read when looking for logged ports.
+///
+/// Current `antigravity-cli` (`agy`) gives each session its own log file and
+/// symlinks `cli.log` to the newest one, and the server's listening port is
+/// logged once, within the first few lines (#1326). A busy session outgrows
+/// [`CLI_LOG_TAIL_BYTES`] without the port ever moving, and a tail-only read
+/// then misses it entirely, so the head is read as a second window. The two
+/// windows are complementary: the head carries a per-session log's startup
+/// lines, the tail carries an append-style log's newest lines.
+const CLI_LOG_HEAD_BYTES: u64 = 64 * 1024;
 
 /// Read the last `max_bytes` of a file, or the whole file when it is smaller.
 ///
@@ -520,17 +532,45 @@ fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Read the first `max_bytes` of a file, or the whole file when it is smaller.
+///
+/// The trailing line the cap can cut in half is handled the same way
+/// [`read_tail`]'s leading partial line is: the port parse requires a whole
+/// `listening on random port at NNNN for HTTP` match, and a candidate that
+/// fails the probe is dropped in microseconds.
+fn read_head(path: &Path, max_bytes: u64) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes).read_to_end(&mut bytes).ok()?;
+    // Lossy for symmetry with `read_tail`; the parse ignores what it mangles.
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Ports the CLI logged, most recent first.
+///
+/// Append-style logs state the current port last, per-session logs state
+/// theirs once at the top (#1326), so candidates from the tail window come
+/// first and the head window's follow -- each window's entries reversed to
+/// newest-first. A port number seen in both windows (any log smaller than
+/// both ceilings) is kept once.
 fn ports_from_cli_log() -> Vec<u16> {
     let Some(path) = cli_log_path() else {
         return Vec::new();
     };
-    let Some(text) = read_tail(&path, CLI_LOG_TAIL_BYTES) else {
-        return Vec::new();
-    };
-    let mut ports = parse_logged_ports(&text);
-    // The log is appended across runs, so the last entry is the current one.
-    ports.reverse();
+    let mut ports: Vec<u16> = Vec::new();
+    for text in [
+        read_tail(&path, CLI_LOG_TAIL_BYTES),
+        read_head(&path, CLI_LOG_HEAD_BYTES),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for port in parse_logged_ports(&text).into_iter().rev() {
+            if !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+    }
     ports.truncate(4);
     ports
 }
@@ -1159,6 +1199,88 @@ mod tests {
 
         let tail = read_tail(file.path(), CLI_LOG_TAIL_BYTES).expect("the log is readable");
         assert_eq!(parse_logged_ports(&tail), vec![5001, 5002]);
+    }
+
+    /// `agy` gives each session its own log and states the server's port once,
+    /// within the first few lines (#1326). The head window has to keep it when
+    /// the session outgrows the tail window.
+    #[test]
+    fn reads_the_start_of_an_oversized_per_session_log() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "I0911 13:29:29 server.go:608] Language server listening on random port at 33645 for HTTPS (gRPC)"
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "I0911 13:29:29 server.go:616] Language server listening on random port at 3417 for HTTP"
+        )
+        .unwrap();
+        let filler = "noise from a long interactive session\n".repeat(20000);
+        write!(file, "{filler}").unwrap();
+        file.flush().unwrap();
+
+        let head = read_head(file.path(), 512).expect("the log is readable");
+        assert!(
+            head.len() as u64 <= 512,
+            "read {} bytes past the 512 byte ceiling",
+            head.len()
+        );
+        // The HTTPS line is deliberately present: only the HTTP port counts.
+        assert_eq!(
+            parse_logged_ports(&head),
+            vec![3417],
+            "the startup port must survive the truncation"
+        );
+    }
+
+    /// A per-session log whose interactive traffic pushes the startup lines out
+    /// of the tail window is the whole of #1326: the port never moves, yet a
+    /// tail-only read reported no candidates and quota discovery gave up.
+    #[test]
+    #[serial]
+    fn per_session_log_ports_survive_past_the_tail_window() {
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        let home = TempDir::new().unwrap();
+        let log_dir = home.path().join(".gemini").join("antigravity-cli");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let head = "I0911 13:29:29.239017 server.go:608] Language server listening on random port at 33645 for HTTPS (gRPC)\n                    I0911 13:29:29.239356 server.go:616] Language server listening on random port at 3417 for HTTP\n";
+        // ~432 KiB, past the 256 KiB tail window.
+        let filler = "streamed chunk, diff, and tool output from a long session\n".repeat(12000);
+        std::fs::write(log_dir.join("cli.log"), format!("{head}{filler}")).unwrap();
+        for key in HOME_ENV_KEYS {
+            env.set(key, home.path());
+        }
+
+        assert_eq!(ports_from_cli_log(), vec![3417]);
+    }
+
+    /// When both windows carry port lines -- an append-style log long enough
+    /// that the head holds a dead run and the tail holds the current one --
+    /// the tail's candidates stay ahead of the head's.
+    #[test]
+    #[serial]
+    fn tail_window_ports_are_tried_before_head_window_ports() {
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        let home = TempDir::new().unwrap();
+        let log_dir = home.path().join(".gemini").join("antigravity-cli");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let filler = "noise from an earlier run\n".repeat(16384); // ~512 KiB
+        std::fs::write(
+            log_dir.join("cli.log"),
+            format!(
+                "listening on random port at 5001 for HTTP\n{filler}listening on random port at 41234 for HTTP\n"
+            ),
+        )
+        .unwrap();
+        for key in HOME_ENV_KEYS {
+            env.set(key, home.path());
+        }
+
+        assert_eq!(ports_from_cli_log(), vec![41234, 5001]);
     }
 
     #[test]
