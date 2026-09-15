@@ -2069,6 +2069,24 @@ fn scan_all_clients_with_env_strategy_inner(
             PathBuf::from(home_dir).join(".workbuddy/projects"),
             "*.jsonl",
         );
+        // WorkBuddy 5.5 ("WorkBuddy AI") moved sessions and `workbuddy.db` to
+        // `~/.workbuddy-ai` (#1334). The legacy tree stays scanned above and
+        // through the client's own root so upgraded installs keep counting the
+        // sessions that never moved.
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::WorkBuddy,
+            PathBuf::from(home_dir).join(".workbuddy-ai/projects"),
+            "*.jsonl",
+        );
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::WorkBuddy,
+            PathBuf::from(home_dir).join(".workbuddy-ai"),
+            "workbuddy.db",
+        );
     }
 
     // Extra scan directories are part of the caller's environment, so they are
@@ -3723,6 +3741,36 @@ mod tests {
 
         let files = result.get(ClientId::WorkBuddy);
         assert_eq!(files.as_slice(), std::slice::from_ref(&session));
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_workbuddy_ai_project_jsonl() {
+        let dir = TempDir::new().unwrap();
+        // WorkBuddy 5.5 ("WorkBuddy AI") keeps sessions and `workbuddy.db`
+        // under `~/.workbuddy-ai` (#1334); the legacy `~/.workbuddy` tree is
+        // still scanned, so both trees contribute on upgraded installs.
+        let new_project_dir = dir.path().join(".workbuddy-ai/projects/project-a");
+        fs::create_dir_all(&new_project_dir).unwrap();
+        let session = new_project_dir.join("session.jsonl");
+        File::create(&session).unwrap();
+        File::create(dir.path().join(".workbuddy-ai/workbuddy.db")).unwrap();
+
+        let legacy_project_dir = dir.path().join(".workbuddy/projects/project-b");
+        fs::create_dir_all(&legacy_project_dir).unwrap();
+        let legacy_session = legacy_project_dir.join("older.jsonl");
+        File::create(&legacy_session).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["workbuddy".to_string()],
+            false,
+        );
+
+        let files = result.get(ClientId::WorkBuddy);
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&session));
+        assert!(files.contains(&legacy_session));
+        assert!(files.contains(&dir.path().join(".workbuddy-ai/workbuddy.db")));
     }
 
     #[test]
