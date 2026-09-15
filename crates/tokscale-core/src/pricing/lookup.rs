@@ -1204,8 +1204,15 @@ impl PricingLookup {
         if let Some(result) = self.exact_match_openrouter_for_provider(model_id, provider_id) {
             return Some(result);
         }
-        normalize_version_separator(model_id).and_then(|version_normalized| {
-            self.exact_match_openrouter_for_provider(&version_normalized, provider_id)
+        if let Some(version_normalized) = normalize_version_separator(model_id) {
+            if let Some(result) =
+                self.exact_match_openrouter_for_provider(&version_normalized, provider_id)
+            {
+                return Some(result.with_normalization());
+            }
+        }
+        normalize_model_name(model_id).and_then(|normalized| {
+            self.exact_match_openrouter_for_provider(&normalized, provider_id)
                 .map(LookupResult::with_normalization)
         })
     }
