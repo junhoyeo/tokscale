@@ -70,7 +70,7 @@
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff と同じ `~/.config/manicode/` を共有（同一ランタイム）；トークン使用量はトランスクリプトから推定（ローカル使用量なし；`FREEBUFF_DATA_DIR` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` |
-| <img width="48px" src="https://github.com/can1357.png" alt="Oh My Pi" /> | [Oh My Pi](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
+| <img width="48px" src="https://omp.sh/favicon-180x180.png" alt="Oh My Pi" /> | [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR` でオーバーライド可能) |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（`KIMCHI_CODING_AGENT_DIR` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（`REASONIX_STATE_HOME` または `REASONIX_HOME` でオーバーライド可能） |
@@ -102,12 +102,12 @@
 | <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/cli/db/db.sqlite`（v2 使用量データベース）および `~/.zcode/projects/**/*.jsonl`（従来の記録） |
 | <img width="48px" src="https://github.com/alibaba.png" alt="OpenCodeReview" /> | [OpenCodeReview](https://github.com/alibaba/open-code-review) | `~/.opencodereview/sessions/**/*.jsonl` |
 | <img width="48px" src="https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png" alt="CodeBuddy" /> | [CodeBuddy](https://www.codebuddy.cn/docs/cli/overview)（CLI・IDE・VS Code プラグイン） | `~/.codebuddy/projects/**/*.jsonl` + 拡張機能ログ |
-| <img width="48px" src="https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` + SQLite フォールバック |
+| <img width="48px" src="https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl`（5.5+ は `~/.workbuddy-ai/` もスキャン） + SQLite フォールバック |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin CLI" /> | [Devin CLI](https://devin.ai/) | `~/.local/share/devin/cli/sessions.db`（SQLite） |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin Desktop" /> | [Devin Desktop](https://devin.ai/) | ACP イベント：macOS `~/Library/Application Support/Devin/User/acp-events/`、Linux `~/.config/Devin/User/acp-events/`、Windows `%APPDATA%\Devin\User\acp-events\` |
 | <img width="48px" src="https://github.com/augmentcode.png" alt="Augment Code" /> | [Augment Code](https://www.augmentcode.com/)（Auggie CLI） | `~/.augment/sessions/*.json` |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:`モデルや`synthetic`プロバイダを検出して他ソースから再帰属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） |
-| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（非圧縮で書き出された場合は `session.jsonl`、`DSH_HOME` で上書き可） |
+| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（非圧縮で書き出された場合は `session.jsonl`、バージョン付きの `session.v<N>.jsonl[.zstd]` 表記も読み取り、`DSH_HOME` で上書き可） |
 | <img width="48px" src=".github/assets/client-fx.png" alt="Fx" /> | [fx](https://github.com/vercel-labs/fx) | `~/.fx/sessions/<sessionId>/usage-v2.json` (セッション単位の集計) |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
@@ -178,7 +178,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 ## 機能
 
 - **インタラクティブTUIモード** - Ratatuiによる美しいターミナルUI（デフォルトモード）
-  - 6つのインタラクティブビュー：概要、モデル、日別、時間別、統計、エージェント（オプションの Minutely ビューを `minutelyTabEnabled` でオプトイン可能）
+  - 10のインタラクティブビュー：概要、Usage、モデル、日別、時間別、月別、セッション、プロジェクト、統計、エージェント（オプションの Minutely ビューを `minutelyTabEnabled` でオプトイン可能）
   - キーボード＆マウスナビゲーション
   - 設定可能なカラーテーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
@@ -287,7 +287,7 @@ tokscale models --json > report.json   # ファイルに保存
 
 インタラクティブTUIモードは以下を提供します：
 
-- **8つのビュー**: 概要（チャート + トップモデル）、Usage（サブスクリプションクォータ）、モデル、日別、時間別、統計（貢献グラフ）、エージェント。分単位の Minutely ビューはデフォルトで非表示で、`settings.json` の `minutelyTabEnabled` で有効化できます — [設定](#設定)を参照
+- **10つのビュー**: 概要（チャート + トップモデル）、Usage（サブスクリプションクォータ）、モデル、日別、時間別、月別、セッション、プロジェクト（ワークスペース別ロールアップ）、統計（貢献グラフ）、エージェント。プロジェクトでは、Codex Desktop の通常のチャットディレクトリ（`Documents/Codex/YYYY-MM-DD/<chat>`）はセッション数・トークン・コストを保持したまま **Codex Chat** に統合され、Git リポジトリを含むディレクトリは分離されたままになります。分単位の Minutely ビューはデフォルトで非表示で、`settings.json` の `minutelyTabEnabled` で有効化できます — [設定](#設定)を参照
 - **キーボードナビゲーション**:
   - `←/→/Tab/BackTab`: ビュー切り替え
   - `↑/↓` または `Home/End`: リスト操作
@@ -909,6 +909,9 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
   "colorPalette": "blue",
   "includeUnusedModels": false,
   "defaultClients": ["opencode", "claude"],
+  "usage": {
+    "disabledProviders": ["copilot"]
+  },
   "scanner": {
     "extraScanPaths": {
       "codex": [
@@ -932,6 +935,7 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | ネイティブサブプロセス処理の最大時間（5000-3600000ms） |
 | `defaultClients` | string[] | `[]` | `--client/-c` フラグを渡さない場合に適用されるクライアントフィルター。`--client` と同じ ID を受け付けます（例: `["opencode", "claude", "synthetic"]`）。未知の ID は無視されます。CLI フラグが指定されるとこのリストは完全に無視されます — マージはしません。 |
+| `usage.disabledProviders` | string[] | `[]` | 認証情報の検出やネットワークアクセスの前にスキップするサブスクリプション usage プロバイダー。有効な ID（大文字小文字を区別しない、前後の空白は無視）: `claude`, `codex`, `zai`, `amp`, `antigravity`, `copilot`, `grok`, `kimi`, `minimax`, `minimax-token-plan`, `warp`, `sakana`, `opencode-go`。未知の ID は無視されます。無効化されたプロバイダーはキャッシュされた TUI カードや診断からも隠されます。変更は次回の `tokscale usage` 実行または TUI の起動/リフレッシュから適用されます。 |
 | `light.writeCache` | boolean | `false` | `true` のとき、`tokscale --light` はレンダリング直後に TUI キャッシュを原子的に上書きします。CLI フラグ `--write-cache` / `--no-write-cache` が実行ごとに優先されます。 |
 | `minutelyTabEnabled` | boolean | `false` | TUI に分単位の Minutely タブを表示し、データ読み込み時に分単位の集計を実行します。分単位の粒度はほとんどのユーザーにとってニッチな診断ビューであり、大規模データセットでは分単位のバケット処理に無視できないコストがかかるため、既定では無効になっています。 |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale のデフォルトのホームルート以外にあるセッション向けの、クライアントごとの追加スキャンルート |
@@ -1503,7 +1507,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | ZCode | `~/.zcode/cli/db/db.sqlite` および `~/.zcode/projects/` | `%USERPROFILE%\.zcode\cli\db\db.sqlite` および `%USERPROFILE%\.zcode\projects\` | v2 SQLite モデル使用量と従来の `*.jsonl` セッショントランスクリプトを解析；Z.ai の GLM モデル向け ADE |
 | OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | `*.jsonl` セッショントランスクリプトを解析；Alibaba の AI コードレビューツール |
 | CodeBuddy | `~/.codebuddy/projects/` + 拡張機能ログ | `%USERPROFILE%\.codebuddy\projects\` + CodeBuddy / VS Code 拡張機能ログ | CodeBuddy CLI・IDE・VS Code プラグインのトークン使用量を解析 |
-| WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | WorkBuddy のトークン使用量を解析し、集約 SQLite データベースをフォールバックとして使用 |
+| WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db`（5.5+ は `~/.workbuddy-ai/`） | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db`（5.5+ は `%USERPROFILE%\.workbuddy-ai\`） | WorkBuddy のトークン使用量を解析し、集約 SQLite データベースをフォールバックとして使用 |
 | Devin CLI | `~/.local/share/devin/cli/sessions.db` | `%USERPROFILE%\.local\share\devin\cli\sessions.db` | 信頼できるローカル SQLite 使用量データベースを読み取る |
 | Devin Desktop | Linux: `~/.config/Devin/User/acp-events/`; macOS: `~/Library/Application Support/Devin/User/acp-events/` | `%APPDATA%\Devin\User\acp-events\` | ACP 使用量イベントを解析し、CLI データベースが存在する場合は一致するセッションタイトルを解決する |
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Auggie CLI のセッション JSON スナップショット（`*.json`）を解析。結合キーはトップレベルの `sessionId` |
@@ -1735,7 +1739,7 @@ Augment Code / Auggie CLI はチャットセッションごとに 1 つの JSON 
 
 場所: `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`（現行の OpenClaw）および `~/.openclaw/agents/<agentId>/sessions/*.jsonl*`（レガシーのトランスクリプト、公開済みアーカイブ、`*.jsonl.pre-doctor-*.bak` などの doctor バックアップ。レガシーパスもスキャン: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`）
 
-現行の OpenClaw（2026.x）はライブトランスクリプトをエージェントごとの SQLite データベースに保存します。Tokscale は各エージェントデータベースを読み取り専用で開き（Gateway 実行中の WAL モードでも安全）、`transcript_events` テーブルを読み、`usage` ブロックを持つ assistant イベントを集計し（モデル出力ではない OpenClaw 自身の記録用行、例: `delivery-mirror` は除外）、イベント自身に model/provider が無い場合は `session_windows` の値にフォールバックします。OpenClaw が Codex app-server ハーネスで実行したターンは、トランスクリプトには最後の model response の usage を持つ最終 assistant メッセージしかミラーされません。そのため Tokscale は OpenClaw が `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（既定のエージェント別 `CODEX_HOME`）に残す Codex rollout も読み、その中のすべての response をミラー先の OpenClaw セッションの下で `openclaw` に帰属させ、該当 thread のミラー行は除外します。OpenClaw がユーザーの Codex ホームを共有する設定（`appServer.homeScope: "user"` または supervision branch）で `~/.codex/sessions` に作られる rollout には `originator: "openclaw"` が記録され、Codex クライアントではなく同じ方法で `openclaw` に帰属します。Codex クライアントがすでに集計している thread（supervision でユーザー自身の Codex ホームから resume したもの）は `codex` のまま、そのミラー行は除外されるため二重集計にはなりません。rollout がどこにも見つからないミラー行はそのまま残ります。`/fork` が新しいセッション id で複製したトランスクリプトと、`openclaw doctor --fix` が SQLite に取り込んだレガシー JSONL は 1 回だけ集計されます。
+現行の OpenClaw（2026.x）はライブトランスクリプトをエージェントごとの SQLite データベースに保存します。Tokscale は各エージェントデータベースを読み取り専用で開き（Gateway 実行中の WAL モードでも安全）、`transcript_events` テーブルを読み、`usage` ブロックを持つ assistant イベントを集計し（モデル出力ではない OpenClaw 自身の記録用行、例: `delivery-mirror` は除外）、イベント自身に model/provider が無い場合は `session_windows` の値にフォールバックします。OpenClaw が Codex app-server ハーネスで実行したターンは、トランスクリプトには最後の model response の usage を持つ最終 assistant メッセージしかミラーされません。そのため Tokscale は OpenClaw が `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（既定のエージェント別 `CODEX_HOME`）に残す Codex rollout も読み、その中のすべての response をミラー先の OpenClaw セッションの下で `openclaw` に帰属させ、該当 thread のミラー行は除外します。OpenClaw がユーザーの Codex ホームを共有する設定（`appServer.homeScope: "user"` または supervision branch）で `~/.codex/sessions` に作られる rollout には `originator: "openclaw"` が記録され、Codex クライアントではなく同じ方法で `openclaw` に帰属します。Codex クライアントがすでに集計している thread（supervision でユーザー自身の Codex ホームから resume したもの）は `codex` のまま、そのミラー行は除外されるため二重集計にはなりません。rollout がどこにも見つからないミラー行はそのまま残ります。`/fork` が新しいセッション id で複製したトランスクリプトと、`openclaw doctor --fix` が SQLite に取り込んだレガシー JSONL は 1 回だけ集計されます。doctor が未参照と判定したレガシー JSONL は決して取り込まれず、`session-sqlite-import-archive/archive-tier.<sessionId>.jsonl.imported-<ts>` へ移動され、そこから元のセッション id で読み取られます。
 
 レガシーインストールはセッションごとに 1 つの JSONL ファイル（`sessions.json` でインデックス）を書き出し、`openclaw doctor --fix` はそれらを SQLite に取り込みつつ元ファイルを残します。両ストアで assistant イベントは自身のイベント id・timestamp・トークン数で識別されるため、JSONL としても残っている移行済みトランスクリプトは 1 回だけ集計されます。
 

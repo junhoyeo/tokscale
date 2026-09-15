@@ -71,7 +71,7 @@
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | 与 Codebuff 共用 `~/.config/manicode/`（同一运行时）；令牌消耗从转录估算（无本地用量；可通过 `FREEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` |
-| <img width="48px" src="https://github.com/can1357.png" alt="Oh My Pi" /> | [Oh My Pi](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
+| <img width="48px" src="https://omp.sh/favicon-180x180.png" alt="Oh My Pi" /> | [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（可通过 `KIMCHI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（可通过 `REASONIX_STATE_HOME` 或 `REASONIX_HOME` 覆盖） |
@@ -103,12 +103,12 @@
 | <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/cli/db/db.sqlite`（v2 用量数据库）和 `~/.zcode/projects/**/*.jsonl`（旧版记录） |
 | <img width="48px" src="https://github.com/alibaba.png" alt="OpenCodeReview" /> | [OpenCodeReview](https://github.com/alibaba/open-code-review) | `~/.opencodereview/sessions/**/*.jsonl` |
 | <img width="48px" src="https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png" alt="CodeBuddy" /> | [CodeBuddy](https://www.codebuddy.cn/docs/cli/overview)（CLI、IDE、VS Code 插件） | `~/.codebuddy/projects/**/*.jsonl` + 扩展日志 |
-| <img width="48px" src="https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` + SQLite 回退 |
+| <img width="48px" src="https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl`（5.5+ 也会扫描 `~/.workbuddy-ai/`） + SQLite 回退 |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin CLI" /> | [Devin CLI](https://devin.ai/) | `~/.local/share/devin/cli/sessions.db`（SQLite） |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin Desktop" /> | [Devin Desktop](https://devin.ai/) | ACP 事件：macOS `~/Library/Application Support/Devin/User/acp-events/`；Linux `~/.config/Devin/User/acp-events/`；Windows `%APPDATA%\Devin\User\acp-events\` |
 | <img width="48px" src="https://github.com/augmentcode.png" alt="Augment Code" /> | [Augment Code](https://www.augmentcode.com/)（Auggie CLI） | `~/.augment/sessions/*.json` |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） |
-| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（未压缩写出时为 `session.jsonl`；可通过 `DSH_HOME` 覆盖） |
+| <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（未压缩写出时为 `session.jsonl`，带版本号的 `session.v<N>.jsonl[.zstd]` 拼写也会读取；可通过 `DSH_HOME` 覆盖） |
 | <img width="48px" src=".github/assets/client-fx.png" alt="Fx" /> | [fx](https://github.com/vercel-labs/fx) | `~/.fx/sessions/<sessionId>/usage-v2.json` (按会话聚合) |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -176,7 +176,7 @@
 ## 功能
 
 - **交互式 TUI 模式** - 由 Ratatui 驱动的精美终端 UI（默认模式）
-  - 6 个交互式视图：概览、模型、每日、每时、统计、代理（可选的 Minutely 视图通过 `minutelyTabEnabled` 启用）
+  - 10 个交互式视图：概览、Usage、模型、每日、每时、每月、会话、项目、统计、代理（可选的 Minutely 视图通过 `minutelyTabEnabled` 启用）
   - 键盘和鼠标导航
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
@@ -284,7 +284,7 @@ tokscale models --json > report.json   # 保存到文件
 
 交互式 TUI 模式提供：
 
-- **8 个视图**：概览（图表 + 热门模型）、Usage（订阅配额）、模型、每日、每时、统计（贡献图）、代理。按分钟视图（Minutely）默认隐藏，可在 `settings.json` 中通过 `minutelyTabEnabled` 启用 —— 参见[配置](#配置)
+- **10 个视图**：概览（图表 + 热门模型）、Usage（订阅配额）、模型、每日、每时、每月、会话、项目（按工作区汇总）、统计（贡献图）、代理。在项目视图中，Codex Desktop 的普通聊天目录（`Documents/Codex/YYYY-MM-DD/<chat>`）会被合并为 **Codex Chat**，并保留其会话数、token 和成本；包含 Git 仓库的目录保持独立。按分钟视图（Minutely）默认隐藏，可在 `settings.json` 中通过 `minutelyTabEnabled` 启用 —— 参见[配置](#配置)
 - **键盘导航**：
   - `←/→/Tab/BackTab`：切换视图
   - `↑/↓` 或 `Home/End`：导航列表
@@ -908,6 +908,9 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
   "colorPalette": "blue",
   "includeUnusedModels": false,
   "defaultClients": ["opencode", "claude"],
+  "usage": {
+    "disabledProviders": ["copilot"]
+  },
   "scanner": {
     "extraScanPaths": {
       "codex": [
@@ -931,6 +934,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `autoRefreshMs` | number | `60000` | 自动刷新间隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | 原生子进程处理最大时间（5000-3600000ms） |
 | `defaultClients` | string[] | `[]` | 未传递 `--client/-c` 选项时应用的客户端筛选。接受与 `--client` 相同的 ID（例如 `["opencode", "claude", "synthetic"]`）。未知 ID 会被静默丢弃。命令行选项会完全覆盖此列表 — 不会合并。 |
+| `usage.disabledProviders` | string[] | `[]` | 在凭据发现或网络访问之前跳过的订阅 usage 提供商。有效 ID（不区分大小写，忽略首尾空白）：`claude`、`codex`、`zai`、`amp`、`antigravity`、`copilot`、`grok`、`kimi`、`minimax`、`minimax-token-plan`、`warp`、`sakana`、`opencode-go`。未知 ID 会被忽略。被禁用的提供商也会从缓存的 TUI 卡片和诊断中隐藏。更改在下次 `tokscale usage` 运行或 TUI 启动/刷新时生效。 |
 | `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
 | `scanner.extraScanPaths` | object | `{}` | 针对 Tokscale 默认 home 根位置之外的会话，为各客户端额外指定的扫描根目录 |
@@ -1503,7 +1507,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | ZCode | `~/.zcode/cli/db/db.sqlite` 和 `~/.zcode/projects/` | `%USERPROFILE%\.zcode\cli\db\db.sqlite` 和 `%USERPROFILE%\.zcode\projects\` | 解析 v2 SQLite 模型用量和旧版 `*.jsonl` 会话记录；Z.ai 的 GLM 模型专用 ADE |
 | OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | 解析 `*.jsonl` 会话记录；阿里巴巴的 AI 代码审查工具 |
 | CodeBuddy | `~/.codebuddy/projects/` + 扩展日志 | `%USERPROFILE%\.codebuddy\projects\` + CodeBuddy / VS Code 扩展日志 | 解析 CodeBuddy CLI、IDE 和 VS Code 插件的 token 用量 |
-| WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | 解析 WorkBuddy token 用量，以聚合 SQLite 数据库作为回退 |
+| WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db`（5.5+ 位于 `~/.workbuddy-ai/`） | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db`（5.5+ 位于 `%USERPROFILE%\.workbuddy-ai\`） | 解析 WorkBuddy token 用量，以聚合 SQLite 数据库作为回退 |
 | Devin CLI | `~/.local/share/devin/cli/sessions.db` | `%USERPROFILE%\.local\share\devin\cli\sessions.db` | 读取权威的本地 SQLite 用量数据库 |
 | Devin Desktop | Linux：`~/.config/Devin/User/acp-events/`；macOS：`~/Library/Application Support/Devin/User/acp-events/` | `%APPDATA%\Devin\User\acp-events\` | 解析 ACP 用量事件；存在 CLI 数据库时会解析匹配的会话标题 |
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | 解析 Auggie CLI 会话 JSON 快照（`*.json`）；关联键为顶层 `sessionId` |
@@ -1773,7 +1777,7 @@ Augment Code / Auggie CLI 为每个聊天会话写入一份 JSON 快照。Toksca
 
 位置：`~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`（当前版本 OpenClaw）以及 `~/.openclaw/agents/<agentId>/sessions/*.jsonl*`（旧版转录、已发布的归档，以及 `*.jsonl.pre-doctor-*.bak` 之类的 doctor 备份；也扫描旧版路径：`~/.clawdbot/`、`~/.moltbot/`、`~/.moldbot/`）
 
-当前版本的 OpenClaw（2026.x）把实时转录保存在按 agent 划分的 SQLite 数据库中。Tokscale 以只读方式打开每个 agent 数据库（Gateway 运行时的 WAL 模式下同样安全），读取 `transcript_events` 表，统计带有 `usage` 块的 assistant 事件（OpenClaw 自身用于记录的行，例如 `delivery-mirror`，不是模型输出，会被排除）；事件本身未标明 model/provider 时回退到 `session_windows` 中的值。对于 OpenClaw 通过 Codex app-server harness 运行的回合，转录只镜像带有最后一次 model response usage 的最终 assistant 消息，因此 Tokscale 还会读取 OpenClaw 保存在 `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（默认的按 agent 划分的 `CODEX_HOME`）下的 Codex rollout，把其中的每一次 response 归属到镜像所在的 OpenClaw 会话下的 `openclaw`，并丢弃这些 thread 的镜像行。OpenClaw 在共享的用户 Codex 主目录（`appServer.homeScope: "user"` 或 supervision branch）中创建的 rollout 带有 `originator: "openclaw"`，同样归属到 `openclaw` 而不是 Codex 客户端。Codex 客户端已经统计的 thread（通过 supervision 从用户自己的 Codex 主目录 resume 的会话）保留在 `codex` 下并丢弃其镜像行，因此不会重复统计；在任何地方都找不到 rollout 的镜像行会原样保留。`/fork` 以新会话 id 复制的转录，以及 `openclaw doctor --fix` 导入 SQLite 的旧版 JSONL，都只统计一次。
+当前版本的 OpenClaw（2026.x）把实时转录保存在按 agent 划分的 SQLite 数据库中。Tokscale 以只读方式打开每个 agent 数据库（Gateway 运行时的 WAL 模式下同样安全），读取 `transcript_events` 表，统计带有 `usage` 块的 assistant 事件（OpenClaw 自身用于记录的行，例如 `delivery-mirror`，不是模型输出，会被排除）；事件本身未标明 model/provider 时回退到 `session_windows` 中的值。对于 OpenClaw 通过 Codex app-server harness 运行的回合，转录只镜像带有最后一次 model response usage 的最终 assistant 消息，因此 Tokscale 还会读取 OpenClaw 保存在 `~/.openclaw/agents/<agentId>/agent/codex-home/sessions/`（默认的按 agent 划分的 `CODEX_HOME`）下的 Codex rollout，把其中的每一次 response 归属到镜像所在的 OpenClaw 会话下的 `openclaw`，并丢弃这些 thread 的镜像行。OpenClaw 在共享的用户 Codex 主目录（`appServer.homeScope: "user"` 或 supervision branch）中创建的 rollout 带有 `originator: "openclaw"`，同样归属到 `openclaw` 而不是 Codex 客户端。Codex 客户端已经统计的 thread（通过 supervision 从用户自己的 Codex 主目录 resume 的会话）保留在 `codex` 下并丢弃其镜像行，因此不会重复统计；在任何地方都找不到 rollout 的镜像行会原样保留。`/fork` 以新会话 id 复制的转录，以及 `openclaw doctor --fix` 导入 SQLite 的旧版 JSONL，都只统计一次。doctor 判定为未被引用的旧版 JSONL 永远不会被导入；它会被移动到 `session-sqlite-import-archive/archive-tier.<sessionId>.jsonl.imported-<ts>`，并在那里以原始会话 id 被读取。
 
 旧版安装为每个会话写入一个 JSONL 文件（由 `sessions.json` 索引），`openclaw doctor --fix` 会把它们导入 SQLite 但保留原文件。两种存储中的 assistant 事件都以自身的事件 id、timestamp 和 token 数作为键，因此仍以 JSONL 形式保留的已迁移转录只会统计一次。
 
