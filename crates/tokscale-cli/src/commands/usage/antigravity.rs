@@ -319,6 +319,12 @@ fn quota_client(round: Duration) -> Result<reqwest::Client> {
         // `usage/mod.rs`'s sequential pre-flight loop rather than in its
         // fan-out.
         .tls_built_in_native_certs(false)
+        // The workspace also compiles in the Mozilla webpki roots (#1343),
+        // which reqwest extends into the store under its own flag. Cheap next
+        // to the native load -- a static-array extend, no disk or keychain --
+        // but this client's premise is "no trust store at all", so both
+        // built-in sets are switched off, not just the expensive one.
+        .tls_built_in_webpki_certs(false)
         // The round is what bounds discovery in practice, since it abandons
         // every request still in flight at its deadline. This is the backstop
         // that keeps a `call_rpc` awaited on its own from being unbounded.
