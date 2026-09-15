@@ -100,13 +100,21 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| model_id.clone());
-        let provider = entry
-            .model_info
-            .as_ref()
-            .and_then(|info| info.provider_id.clone())
-            .map(|provider| provider.trim().to_string())
-            .filter(|provider| !provider.is_empty())
-            .unwrap_or_else(|| provider_from_api_protocol(payload.api_protocol.as_deref()));
+        // Provider is the other way around: a nested `apiProtocol`
+        // ("bedrock/anthropic") carries reseller routing that the bare
+        // `modelInfo.providerId` would flatten to its last segment, so the
+        // legacy field keeps precedence whenever it says anything, and
+        // `modelInfo` fills the silence current Cline leaves (#1321).
+        let provider = match provider_from_api_protocol(payload.api_protocol.as_deref()) {
+            protocol if protocol != "unknown" => protocol,
+            _ => entry
+                .model_info
+                .as_ref()
+                .and_then(|info| info.provider_id.clone())
+                .map(|provider| provider.trim().to_string())
+                .filter(|provider| !provider.is_empty())
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
 
         messages.push(UnifiedMessage::new_with_agent(
             source,
@@ -390,7 +398,7 @@ after"#;
     "type": "say",
     "say": "api_req_started",
     "ts": "2026-02-18T12:05:00Z",
-    "text": "{\"cost\":0.2,\"tokensIn\":20,\"tokensOut\":2,\"apiProtocol\":\"openai\"}",
+    "text": "{\"cost\":0.2,\"tokensIn\":20,\"tokensOut\":2}",
     "modelInfo": {"providerId": "anthropic", "modelId": "claude-sonnet-5"}
   }
 ]"#;
@@ -401,7 +409,31 @@ after"#;
         assert_eq!(messages[0].model_id, "gpt-5.1");
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[1].model_id, "claude-sonnet-5");
+        // The second entry carries no `apiProtocol`, so its `modelInfo`
+        // provider fills in.
         assert_eq!(messages[1].provider_id, "anthropic");
+    }
+
+    /// A nested `apiProtocol` routes through a reseller; the bare
+    /// `modelInfo.providerId` must not flatten it away.
+    #[test]
+    fn test_parse_roocode_nested_api_protocol_outranks_model_info_provider() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.1,\"tokensIn\":10,\"tokensOut\":1,\"apiProtocol\":\"bedrock/anthropic\"}",
+    "modelInfo": {"providerId": "anthropic", "modelId": "claude-sonnet-5"}
+  }
+]"#;
+        let path = setup_task(&dir, "task-nested", ui_messages, None);
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "bedrock/anthropic");
+        assert_eq!(messages[0].model_id, "claude-sonnet-5");
     }
 
     /// Blank `modelInfo` fields must not blank out a working legacy
