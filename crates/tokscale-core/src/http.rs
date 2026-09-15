@@ -24,6 +24,15 @@
 /// selects `TlsBackend::Rustls`, and `tls_built_in_certs_native` defaults to
 /// `true`, so roots still come from the OS trust store via the workspace's
 /// `rustls-tls-native-roots` feature.
+///
+/// The workspace also compiles in the Mozilla webpki roots
+/// (`rustls-tls-webpki-roots`), and reqwest extends the root store with both
+/// sets. This is the #1343 fix: rustls-native-certs honours `SSL_CERT_FILE`
+/// as an *exclusive* replacement for the OS store, so a package-manager
+/// firewall like `sfw` that points it at a file containing only its own MITM
+/// CA used to leave the client unable to validate any host the firewall
+/// passes through untouched. With the webpki roots always present the
+/// injected CA is additive rather than a replacement.
 #[allow(clippy::disallowed_methods)]
 pub fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().use_rustls_tls()

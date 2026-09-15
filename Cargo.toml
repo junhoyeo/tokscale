@@ -60,6 +60,16 @@ libc = "0.2"
 # would silently break anyone behind a corporate MITM proxy or using a private
 # CA. Reading the OS trust store keeps today's behaviour.
 #
+# `rustls-tls-webpki-roots` is enabled IN ADDITION to native roots (#1343).
+# rustls-native-certs treats `SSL_CERT_FILE` as an exclusive override: when a
+# wrapper like Socket Firewall (`sfw`) sets it to a file holding only its own
+# MITM CA, the OS trust store is dropped entirely and every host the wrapper
+# tunnels through untouched (models.dev, raw.githubusercontent.com, ...)
+# fails with `invalid peer certificate: UnknownIssuer`. Compiling the Mozilla
+# webpki roots in as well makes the trust store additive — real certificates
+# keep validating while the injected CA covers the MITM'd hosts — matching
+# how Node treated `NODE_EXTRA_CA_CERTS` back when the CLI ran on Bun.
+#
 # `native-tls` is NOT listed here on purpose. reqwest's `native-tls` feature
 # implies `default-tls`, and `impl Default for TlsBackend` (reqwest
 # src/tls.rs) returns the native-tls backend whenever `default-tls` is on and
@@ -68,7 +78,7 @@ libc = "0.2"
 # because Cargo unifies features across the graph. Only the Cursor client
 # needs native TLS (#1250), so the member crates opt in per target instead —
 # see the `[target.'cfg(...)'.dependencies]` blocks in crates/*/Cargo.toml.
-reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 # For disk caching (XDG paths)
