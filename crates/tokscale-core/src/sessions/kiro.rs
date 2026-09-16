@@ -382,7 +382,11 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                 estimate_tokens(prompt_part + tool_result_chars)
             };
 
-            let input = if real_input > 0 { real_input } else { fresh_input };
+            let input = if real_input > 0 {
+                real_input
+            } else {
+                fresh_input
+            };
 
             let cache_read = if real_cache_read > 0 {
                 real_cache_read
@@ -5494,10 +5498,7 @@ not valid json at all
             m.tokens.cache_read, expected_cache_read,
             "cache_read = max(floor(40.0/100 * 200000) - input, 0)"
         );
-        assert_eq!(
-            m.message_count, 3,
-            "message_count = requestIds.len() = 3"
-        );
+        assert_eq!(m.message_count, 3, "message_count = requestIds.len() = 3");
     }
 
     // =====================================================================
@@ -5994,10 +5995,7 @@ not valid json at all
         assert_eq!(m.provider_id, PROVIDER_ID);
         assert!(m.is_turn_start);
         // Structured per-turn dedup key shape "{session_id}:ide:{index}".
-        assert_eq!(
-            m.dedup_key,
-            Some("sess_flush_preserve:ide:0".to_string())
-        );
+        assert_eq!(m.dedup_key, Some("sess_flush_preserve:ide:0".to_string()));
     }
 
     // --- Invariant 5: Non-Kiro / globalStorage snapshot regression -------
