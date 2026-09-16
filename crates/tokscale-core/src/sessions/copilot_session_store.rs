@@ -3,11 +3,10 @@
 //! Copilot CLI writes per-turn usage to `~/.copilot/session-store.db` table
 //! `assistant_usage_events`. This is a different schema from Desktop `data.db`.
 
-use super::utils::sqlite_for_each_row;
+use super::utils::{parse_timestamp_str, sqlite_for_each_row};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
-use chrono::{DateTime, NaiveDateTime};
 use std::path::Path;
 use tracing::warn;
 
@@ -19,7 +18,7 @@ pub fn parse_copilot_session_store_db(db_path: &Path) -> Vec<UnifiedMessage> {
           e.id, e.session_id, e.turn_index, e.model, e.copilot_usage_model,
           e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,
           e.reasoning_tokens, e.total_nano_aiu, e.duration_ms, e.created_at,
-          s.cwd
+          s.cwd, s.created_at
         FROM assistant_usage_events e
         LEFT JOIN sessions s ON s.id = e.session_id
         WHERE COALESCE(e.input_tokens,0) > 0
@@ -50,6 +49,7 @@ pub fn parse_copilot_session_store_db(db_path: &Path) -> Vec<UnifiedMessage> {
                 duration_ms: row.get(11)?,
                 created_at: row.get(12)?,
                 cwd: row.get(13)?,
+                session_created_at: row.get(14)?,
             };
 
             if let Some(message) = usage_event_to_message(event) {
@@ -76,6 +76,7 @@ struct UsageEvent {
     duration_ms: Option<i64>,
     created_at: Option<String>,
     cwd: Option<String>,
+    session_created_at: Option<String>,
 }
 
 fn usage_event_to_message(event: UsageEvent) -> Option<UnifiedMessage> {
@@ -104,12 +105,19 @@ fn usage_event_to_message(event: UsageEvent) -> Option<UnifiedMessage> {
     let timestamp = event
         .created_at
         .as_deref()
-        .and_then(parse_iso8601_timestamp_ms)
+        .and_then(parse_timestamp_str)
+        .or_else(|| {
+            event
+                .session_created_at
+                .as_deref()
+                .and_then(parse_timestamp_str)
+        })
         .unwrap_or_else(|| {
             warn!(
                 session_id = %event.session_id,
                 event_id = event.event_id,
                 created_at = ?event.created_at,
+                session_created_at = ?event.session_created_at,
                 "Copilot CLI session-store event has unparseable created_at; defaulting to 0"
             );
             0
@@ -155,35 +163,6 @@ fn preferred_model(copilot_usage_model: Option<&str>, model: Option<&str>) -> St
 
 fn first_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn parse_iso8601_timestamp_ms(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.timestamp_millis())
-        .ok()
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-                .ok()
-                .map(|timestamp| timestamp.and_utc().timestamp_millis())
-        })
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
-                .ok()
-                .map(|timestamp| timestamp.and_utc().timestamp_millis())
-        })
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
-                .ok()
-                .map(|timestamp| timestamp.and_utc().timestamp_millis())
-        })
-        .or_else(|| {
-            let numeric = value.parse::<i64>().ok()?;
-            if numeric > 10_000_000_000 {
-                Some(numeric)
-            } else {
-                Some(numeric.saturating_mul(1000))
-            }
-        })
 }
 
 #[cfg(test)]
@@ -268,10 +247,10 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_session(conn: &Connection, id: &str, cwd: &str) {
+    fn insert_session(conn: &Connection, id: &str, cwd: &str, created_at: &str) {
         conn.execute(
             "INSERT INTO sessions (id, cwd, created_at) VALUES (?1, ?2, ?3)",
-            params![id, cwd, "2026-07-01 12:34:56"],
+            params![id, cwd, created_at],
         )
         .unwrap();
     }
@@ -412,7 +391,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("session-store.db");
         let conn = create_session_store_db(&db_path);
-        insert_session(&conn, "session-1", "/Users/dev/tokscale");
+        insert_session(
+            &conn,
+            "session-1",
+            "/Users/dev/tokscale",
+            "2026-07-01 12:34:56",
+        );
         insert_usage_event(
             &conn,
             "session-1",
@@ -436,5 +420,37 @@ mod tests {
             Some("/Users/dev/tokscale")
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("tokscale"));
+    }
+
+    #[test]
+    fn parse_copilot_session_store_db_falls_back_to_session_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("session-store.db");
+        let conn = create_session_store_db(&db_path);
+        insert_session(
+            &conn,
+            "session-1",
+            "/Users/dev/tokscale",
+            "2026-07-01T12:34:56.000Z",
+        );
+        insert_usage_event(
+            &conn,
+            "session-1",
+            Some("gpt-5.4-mini"),
+            None,
+            10,
+            5,
+            0,
+            0,
+            0,
+            1,
+            None,
+            "not-a-timestamp",
+        );
+        drop(conn);
+
+        let messages = parse_copilot_session_store_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_782_909_296_000);
     }
 }
