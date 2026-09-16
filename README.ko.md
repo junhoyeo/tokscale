@@ -61,7 +61,7 @@
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 및 `~/.prime/agent/session-artifacts/` (RLM 하위 세션) |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
-| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) |
+| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/session-store.db` (CLI 사용량 이벤트; OTEL 불필요), `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`), `~/.copilot/data.db` |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 및 `$HERMES_HOME/profiles/*/state.db` (폴백: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (데스크톱 자동 로그인 또는 쿠키 붙여넣기; `~/.cursor` 아님) |
@@ -1473,7 +1473,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | OpenClaw | `~/.openclaw/` (+ 레거시: `.clawdbot`, `.moltbot`, `.moldbot`) | `%USERPROFILE%\.openclaw\` (+ 레거시 경로) | 모든 플랫폼에서 동일한 경로 |
 | Codex CLI | `~/.codex/` | `%USERPROFILE%\.codex\` | `CODEX_HOME` 환경변수로 설정 가능 ([소스](https://github.com/openai/codex)) |
 | Prime Agent | `~/.prime/agent/` | `%USERPROFILE%\.prime\agent\` | 루트 세션 및 RLM 하위 세션; `settings.json`의 `sessionDir`, `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR` 또는 레거시 `PRIME_AGENT_CODING_AGENT_SESSION_DIR`로 설정 가능 |
-| Copilot CLI | `~/.copilot/otel/ ` | `%USERPROFILE%\.copilot\otel\` | OTEL 파일 내보내기 필요; `COPILOT_OTEL_FILE_EXPORTER_PATH`도 자동 수집 |
+| Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 사용량 이벤트는 `session-store.db`에서 수집 (OTEL 불필요); `COPILOT_OTEL_FILE_EXPORTER_PATH`와 Desktop `data.db`도 자동 수집 |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME` 환경변수로 설정 가능 ([소스](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | `GEMINI_CLI_HOME` 환경변수로 설정 가능 |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCode와 동일하게 `xdg-basedir` 사용 |
@@ -1687,9 +1687,9 @@ Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude 
 
 ### Copilot CLI
 
-위치: `~/.copilot/otel/*.jsonl` 또는 `COPILOT_OTEL_FILE_EXPORTER_PATH`에 명시된 경로
+위치: `~/.copilot/session-store.db` (CLI 사용량 이벤트; OTEL 불필요), `~/.copilot/otel/*.jsonl` 또는 `COPILOT_OTEL_FILE_EXPORTER_PATH`에 명시된 경로, Desktop `~/.copilot/data.db`
 
-Copilot 지원은 파일로 내보낸 OpenTelemetry JSONL을 읽습니다. Copilot을 실행하기 전에 활성화하세요:
+Copilot CLI 사용량은 기본적으로 `session-store.db`에서 읽습니다. 파일로 내보낸 OpenTelemetry JSONL도 지원되며, 둘 다 있으면 세션 단위로 OTEL이 우선합니다. Copilot을 실행하기 전에 OTEL을 활성화하세요:
 
 ```bash
 export COPILOT_OTEL_ENABLED=true

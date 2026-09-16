@@ -101,6 +101,8 @@ pub struct ScanResult {
     /// `packages/opencode/src/storage/db.ts` (`getChannelPath`).
     pub opencode_dbs: Vec<PathBuf>,
     pub copilot_desktop_db: Option<PathBuf>,
+    /// Copilot CLI usage database at `~/.copilot/session-store.db`.
+    pub copilot_session_store_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
@@ -135,6 +137,7 @@ impl Default for ScanResult {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_dbs: Vec::new(),
             copilot_desktop_db: None,
+            copilot_session_store_db: None,
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
@@ -2881,6 +2884,11 @@ fn scan_all_clients_with_env_strategy_inner(
         let desktop_db = PathBuf::from(join_native(home_dir, ".copilot/data.db"));
         if desktop_db.is_file() {
             result.copilot_desktop_db = Some(desktop_db);
+        }
+
+        let session_store_db = PathBuf::from(join_native(home_dir, ".copilot/session-store.db"));
+        if session_store_db.is_file() {
+            result.copilot_session_store_db = Some(session_store_db);
         }
 
         result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
@@ -5829,6 +5837,29 @@ mod tests {
 
         assert_eq!(result.get(ClientId::Copilot).len(), 1);
         assert!(result.get(ClientId::Copilot)[0].ends_with("copilot.jsonl"));
+        assert!(result.copilot_session_store_db.is_none());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot_discovers_session_store_db() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let copilot_dir = home.join(".copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        let session_store_db = copilot_dir.join("session-store.db");
+        File::create(&session_store_db).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(
+            result.copilot_session_store_db.as_ref(),
+            Some(&session_store_db)
+        );
+        assert!(result.copilot_desktop_db.is_none());
     }
 
     #[test]

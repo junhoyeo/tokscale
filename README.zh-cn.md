@@ -62,7 +62,7 @@
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 和 `~/.prime/agent/session-artifacts/`（RLM 子会话） |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | 通过 Codex 追踪 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
-| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) |
+| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/session-store.db`（CLI 用量事件；无需 OTEL）、`~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`)、`~/.copilot/data.db` |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 和 `$HERMES_HOME/profiles/*/state.db`（回退：`~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（回退：`~/.gemini/tmp/*/chats/*.json`） |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 导出缓存于 `~/.config/tokscale/cursor-cache/usage*.csv`（桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
@@ -1472,7 +1472,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | OpenClaw | `~/.openclaw/` (+ 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) | `%USERPROFILE%\.openclaw\` (+ 旧版路径) | 所有平台使用相同路径 |
 | Codex CLI | `~/.codex/` | `%USERPROFILE%\.codex\` | 可通过 `CODEX_HOME` 环境变量配置（[源码](https://github.com/openai/codex)） |
 | Prime Agent | `~/.prime/agent/` | `%USERPROFILE%\.prime\agent\` | 根会话和 RLM 子会话；可通过 `settings.json` 中的 `sessionDir`、`PRIME_AGENT_CODING_AGENT_DIR`、`PRIME_AGENT_SESSION_DIR` 或旧版 `PRIME_AGENT_CODING_AGENT_SESSION_DIR` 配置 |
-| Copilot CLI | `~/.copilot/otel/` | `%USERPROFILE%\.copilot\otel\` | 需要 OTEL 文件导出；同时自动采集 `COPILOT_OTEL_FILE_EXPORTER_PATH` |
+| Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 用量事件来自 `session-store.db`（无需 OTEL）；同时自动采集 `COPILOT_OTEL_FILE_EXPORTER_PATH` 和桌面端 `data.db` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | 可通过 `HERMES_HOME` 环境变量配置（[源码](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | 可通过 `GEMINI_CLI_HOME` 环境变量配置 |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | 与 OpenCode 一样使用 `xdg-basedir` |
@@ -1686,9 +1686,9 @@ Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claud
 
 ### Copilot CLI
 
-位置：`~/.copilot/otel/*.jsonl` 或 `COPILOT_OTEL_FILE_EXPORTER_PATH` 中指定的显式路径
+位置：`~/.copilot/session-store.db`（CLI 用量事件；无需 OTEL）、`~/.copilot/otel/*.jsonl` 或 `COPILOT_OTEL_FILE_EXPORTER_PATH` 中指定的显式路径，以及桌面端 `~/.copilot/data.db`
 
-Copilot 支持读取文件导出的 OpenTelemetry JSONL。在运行 Copilot 之前启用它：
+Copilot CLI 用量默认从 `session-store.db` 读取。文件导出的 OpenTelemetry JSONL 仍受支持，两者同时存在时按会话优先使用 OTEL。在运行 Copilot 之前启用 OTEL：
 
 ```bash
 export COPILOT_OTEL_ENABLED=true

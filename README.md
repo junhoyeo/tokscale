@@ -61,7 +61,7 @@
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` and `~/.prime/agent/session-artifacts/` (RLM child sessions) |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | via Codex — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
-| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) |
+| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/session-store.db` (CLI usage events; no OTEL required), `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`), `~/.copilot/data.db` |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` and `$HERMES_HOME/profiles/*/state.db` (fallback: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (fallback: `~/.gemini/tmp/*/chats/*.json`) |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API export cached at `~/.config/tokscale/cursor-cache/usage*.csv` (desktop auto-login or cookie paste; not `~/.cursor`) |
@@ -1510,7 +1510,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | OpenClaw | `~/.openclaw/` (+ legacy: `.clawdbot`, `.moltbot`, `.moldbot`) | `%USERPROFILE%\.openclaw\` (+ legacy paths) | Same path on all platforms |
 | Codex CLI | `~/.codex/` | `%USERPROFILE%\.codex\` | Configurable via `CODEX_HOME` env var ([source](https://github.com/openai/codex)) |
 | Prime Agent | `~/.prime/agent/` | `%USERPROFILE%\.prime\agent\` | Root sessions plus RLM child sessions; configurable via `sessionDir` in `settings.json`, `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR`, or legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR` |
-| Copilot CLI | `~/.copilot/otel/` | `%USERPROFILE%\.copilot\otel\` | Requires OTEL file export; also auto-ingests `COPILOT_OTEL_FILE_EXPORTER_PATH` |
+| Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI usage events from `session-store.db` (no OTEL required); also auto-ingests `COPILOT_OTEL_FILE_EXPORTER_PATH` and Desktop `data.db` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | Configurable via `HERMES_HOME` env var ([source](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | Configurable via `GEMINI_CLI_HOME` env var |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | Uses `xdg-basedir` like OpenCode |
@@ -1725,9 +1725,9 @@ Event-based format with `token_count` events:
 
 ### Copilot CLI
 
-Location: `~/.copilot/otel/*.jsonl` or the explicit path in `COPILOT_OTEL_FILE_EXPORTER_PATH`
+Location: `~/.copilot/session-store.db` (CLI usage events; no OTEL required), `~/.copilot/otel/*.jsonl` or the explicit path in `COPILOT_OTEL_FILE_EXPORTER_PATH`, and Desktop `~/.copilot/data.db`
 
-Copilot support reads file-exported OpenTelemetry JSONL. Enable it before running Copilot:
+Copilot CLI usage is read from `session-store.db` by default. File-exported OpenTelemetry JSONL is still supported and wins per session when both exist. Enable OTEL before running Copilot:
 
 ```bash
 export COPILOT_OTEL_ENABLED=true

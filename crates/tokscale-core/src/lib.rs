@@ -2240,17 +2240,28 @@ fn parse_all_messages_streaming<S: MessageSink>(
         ClientId::Copilot,
         sessions::copilot::parse_copilot_file,
     );
+    let copilot_otel_sessions: HashSet<String> = all_messages
+        .iter()
+        .filter(|message| message.client == "copilot")
+        .map(|message| message.session_id.clone())
+        .collect();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
-        let otel_sessions: HashSet<String> = all_messages
-            .iter()
-            .filter(|message| message.client == "copilot")
-            .map(|message| message.session_id.clone())
-            .collect();
         let desktop_msgs = sessions::copilot_desktop::parse_copilot_desktop_db(db_path);
         all_messages.extend(
             desktop_msgs
                 .into_iter()
-                .filter(|message| !otel_sessions.contains(&message.session_id))
+                .filter(|message| !copilot_otel_sessions.contains(&message.session_id))
+                .map(|mut message| {
+                    apply_pricing_if_available(&mut message, pricing);
+                    message
+                }),
+        );
+    }
+    if let Some(db_path) = &scan_result.copilot_session_store_db {
+        all_messages.extend(
+            sessions::copilot_session_store::parse_copilot_session_store_db(db_path)
+                .into_iter()
+                .filter(|message| !copilot_otel_sessions.contains(&message.session_id))
                 .map(|mut message| {
                     apply_pricing_if_available(&mut message, pricing);
                     message
@@ -5382,15 +5393,22 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
+    let copilot_otel_sessions: HashSet<String> = copilot_unified_msgs
+        .iter()
+        .map(|message| message.session_id.clone())
+        .collect();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
-        let otel_sessions: HashSet<String> = copilot_unified_msgs
-            .iter()
-            .map(|message| message.session_id.clone())
-            .collect();
         copilot_unified_msgs.extend(
             sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
                 .into_iter()
-                .filter(|message| !otel_sessions.contains(&message.session_id)),
+                .filter(|message| !copilot_otel_sessions.contains(&message.session_id)),
+        );
+    }
+    if let Some(db_path) = &scan_result.copilot_session_store_db {
+        copilot_unified_msgs.extend(
+            sessions::copilot_session_store::parse_copilot_session_store_db(db_path)
+                .into_iter()
+                .filter(|message| !copilot_otel_sessions.contains(&message.session_id)),
         );
     }
     {
