@@ -1129,6 +1129,7 @@ pub enum ClientFilter {
     LmStudio,
     Unsloth,
     Hindsight,
+    Meept,
     Synthetic,
 }
 
@@ -1192,6 +1193,7 @@ impl ClientFilter {
             Self::LmStudio => "lmstudio",
             Self::Unsloth => "unsloth",
             Self::Hindsight => "hindsight",
+            Self::Meept => "meept",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1258,6 +1260,7 @@ impl ClientFilter {
             Self::LmStudio => Some(ClientId::LmStudio),
             Self::Unsloth => Some(ClientId::Unsloth),
             Self::Hindsight => Some(ClientId::Hindsight),
+            Self::Meept => Some(ClientId::Meept),
             Self::Synthetic => None,
         }
     }
@@ -1320,6 +1323,7 @@ impl ClientFilter {
             ClientId::LmStudio => Self::LmStudio,
             ClientId::Unsloth => Self::Unsloth,
             ClientId::Hindsight => Self::Hindsight,
+            ClientId::Meept => Self::Meept,
         }
     }
 

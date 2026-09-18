@@ -82,6 +82,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   lmstudio: "LM Studio",
   unsloth: "Unsloth",
   hindsight: "Hindsight",
+  meept: "Meept",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -147,6 +148,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   lmstudio: "https://github.com/lmstudio-ai.png",
   unsloth: "https://github.com/unslothai.png",
   hindsight: `${GITHUB_CDN_BASE}/client-hindsight.png`,
+  meept: `${GITHUB_CDN_BASE}/client-meept.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -205,6 +207,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   lmstudio: "#6C5CE7",
   unsloth: "#58CC02",
   hindsight: "#0891B2",
+  meept: "#F59E0B",
 };
 
 // Derived values

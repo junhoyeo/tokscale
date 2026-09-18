@@ -1941,6 +1941,7 @@ mod tests {
             "LM Studio",
             "Unsloth",
             "Hindsight",
+            "Meept",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
