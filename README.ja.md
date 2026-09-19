@@ -109,6 +109,7 @@
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:`モデルや`synthetic`プロバイダを検出して他ソースから再帰属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） |
 | <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（非圧縮で書き出された場合は `session.jsonl`、バージョン付きの `session.v<N>.jsonl[.zstd]` 表記も読み取り、`DSH_HOME` で上書き可） |
 | <img width="48px" src=".github/assets/client-fx.png" alt="Fx" /> | [fx](https://github.com/vercel-labs/fx) | `~/.fx/sessions/<sessionId>/usage-v2.json` (セッション単位の集計) |
+| <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl`（Windows も共通の XDG 形式パス。`subagent/<uuid>/` 配下のサブエージェント記録を含む） |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
 
@@ -183,7 +184,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - 設定可能なカラーテーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Piの使用量を追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Codeの使用量を追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -419,7 +420,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`。
+利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`。
 
 > **破壊的変更 (v4.0.0)**: クライアント単位のブール型フラグ（`--opencode`、`--claude`、`--codex` など）は削除され、現在はエラーになります。代わりに正規の `--client`/`-c` フラグを使用してください — 例: `tokscale --client opencode,claude`。
 
@@ -1093,7 +1094,7 @@ tokscale sources --json
 - **インタラクティブツールチップ**: ホバーで詳細な日別内訳を表示
 - **日別内訳パネル**: クリックでソース別、モデル別の詳細を確認
 - **年別フィルタリング**: 年間を移動
-- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight）
+- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code）
 - **統計パネル**: 総コスト、トークン、活動日数、連続記録
 - **FOUC防止**: Reactハイドレーション前にテーマを適用（フラッシュなし）
 
@@ -1513,6 +1514,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Auggie CLI のセッション JSON スナップショット（`*.json`）を解析。結合キーはトップレベルの `sessionId` |
 | Synthetic | 他ソースから再帰属 | 他ソースから再帰属 | `hf:`モデル + `synthetic`プロバイダを検出 |
 | Hindsight | `$HINDSIGHT_HOME/usage/`（フォールバック: `~/.hindsight/usage/`） | `%HINDSIGHT_HOME%\usage\`（フォールバック: `%USERPROFILE%\.hindsight\usage\`） | `tokscale hindsight sync` による API 同期；Hindsight 自体はローカルセッションログを保持しないため、LLM トレース API から追記専用 JSONL キャッシュに同期 |
+| Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 全プラットフォーム共通の XDG 形式パス。`session.jsonl` の `model_completed` 使用量イベントと `subagent/` 記録を解析 |
 
 > **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 
@@ -1947,8 +1949,15 @@ WHERE json_extract(m.data, '$.role') = 'assistant'
   "path": { "root": "/Users/me/project" }
 }
 ```
-
 Tokscale はタイムスタンプ、モデル、プロバイダ、トークン数、コスト、エージェント名のフィンガープリントを使用して、フォークされたセッション間のメッセージを重複排除します。
+
+### Muse Code
+
+場所: `~/.local/share/muse/sessions/YYYY/MM/DD/<session-uuid>/session.jsonl`（Windows を含む全プラットフォームで共通の XDG 形式パス。`subagent/<uuid>/` 配下のサブエージェント記録も走査対象）
+
+Muse Code はセッションごとにイベントソーシング形式の JSONL 記録を 1 件書き出します。Tokscale は `model_completed` イベントを読み取ります。このイベントにはモデル ID（`muse-spark-*`）、Responses 形式の `usage` オブジェクト（`input_tokens`、`output_tokens`、`cached_tokens`/`cache_read_tokens`、`cache_write_tokens`、`reasoning_tokens`）、および呼び出しの `duration_ms` が含まれます。`recorded_at` の単位はマイクロ秒です。`cached_tokens` は `input_tokens` の部分集合であり、reasoning は `output_tokens` の内数であるため、価格計算と集計の前に両方を分離します。親セッション側の `workflow_child_lifecycle` 使用量集計は、対象の子記録を別途走査するため読み飛ばします。ワークスペースラベルはファイル内の `runtime.session.metadata` レコードから取得します。
+
+Muse Spark モデルはアップストリームのデータセットから価格付けされます。LiteLLM と models.dev は Meta 公開レートの `meta/muse-spark-*` 行を収録しているため、Muse の使用量はそのままコスト化されます（Standard: 入力/出力 100 万トークンあたり $1.25/$4.25、キャッシュ入力 $0.15。Contributor: $0.10/$0.20、キャッシュ入力 $0.002。[料金とレート制限](https://dev.meta.ai/docs/pricing-rate-limits)を参照）。
 
 ## 価格
 

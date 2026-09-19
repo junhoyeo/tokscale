@@ -2419,6 +2419,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_muse() {
+        assert_eq!(client_display_name("muse"), Some("Muse Code"));
+    }
+
+    #[test]
     fn test_client_display_name_covers_every_registered_client() {
         for client in ClientId::iter() {
             assert_eq!(

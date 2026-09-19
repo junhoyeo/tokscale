@@ -1503,6 +1503,7 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Mcode => 1,
         ClientId::LmStudio => 1,
         ClientId::Hindsight => 1,
+        ClientId::Muse => 1,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching

@@ -654,6 +654,9 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "unified.jsonl" => file_name == "unified.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
+                // Muse Code: one `session.jsonl` per session directory at any
+                // depth under `muse/sessions/`, including `subagent/<uuid>/`.
+                "session.jsonl" => file_name == "session.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "cline-cli-messages" => file_name.ends_with(".messages.json"),
                 "session-usage.json" => file_name == "session-usage.json",
@@ -4108,6 +4111,18 @@ mod tests {
         File::create(jcode_sessions.join("not-a-session.json")).unwrap();
     }
 
+    fn setup_mock_muse_dir(base: &std::path::Path) {
+        // Mirror the real layout: ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/
+        // with a subagent transcript nested beside the parent session.
+        let session_dir = base.join(".local/share/muse/sessions/2026/09/18/session-fixture");
+        fs::create_dir_all(&session_dir).unwrap();
+        File::create(session_dir.join("session.jsonl")).unwrap();
+        let subagent_dir = session_dir.join("subagent/child-fixture");
+        fs::create_dir_all(&subagent_dir).unwrap();
+        File::create(subagent_dir.join("session.jsonl")).unwrap();
+        File::create(session_dir.join("cli-fixture.log")).unwrap();
+    }
+
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
         // Mirror real OpenClaw layout: ~/.openclaw/agents/<agentId>/sessions/*.jsonl
         let openclaw_sessions = base.join(".openclaw/agents/main/sessions");
@@ -7038,6 +7053,29 @@ mod tests {
         );
         assert_eq!(result.get(ClientId::Jcode).len(), 1);
         assert!(result.get(ClientId::Jcode)[0].ends_with("session_fixture.json"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+        assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_muse() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_muse_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["muse".to_string()],
+            false,
+        );
+        let files = result.get(ClientId::Muse);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|path| path.ends_with("session.jsonl")));
+        assert!(files.iter().any(|path| path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("session-fixture")));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
