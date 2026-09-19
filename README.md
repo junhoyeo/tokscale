@@ -110,6 +110,7 @@
 | <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd` (or `session.jsonl` when written uncompressed, plus versioned `session.v<N>.jsonl[.zstd]` spellings; override via `DSH_HOME`) |
 | <img width="48px" src="https://github.com/MiniMax-AI.png" alt="MiniMax Code" /> | [MiniMax Code](https://github.com/MiniMax-AI) | `~/.config/tokscale/headless/mcode/*.jsonl` (headless capture of `mcode exec --output-format stream-json`; override via `TOKSCALE_HEADLESS_DIR`) |
 | <img width="48px" src=".github/assets/client-fx.png" alt="Fx" /> | [fx](https://github.com/vercel-labs/fx) | `~/.fx/sessions/<sessionId>/usage-v2.json` (per-session aggregates) |
+| <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl` (same XDG-style path on Windows; subagent transcripts under `subagent/<uuid>/` included) |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 
@@ -181,7 +182,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, and Oh My Pi
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, and Muse Code
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -417,7 +418,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`.
 
 > **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
@@ -1127,7 +1128,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1551,6 +1552,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 | Unsloth Studio | `$UNSLOTH_STUDIO_HOME/studio.db` (fallback: `~/.unsloth/studio/studio.db`) | `%UNSLOTH_STUDIO_HOME%\studio.db` (fallback: `%USERPROFILE%\.unsloth\studio\studio.db`) | Reads exact inference counters from internal assistant metadata and the content-free authenticated API usage table; never selects prompts or responses; excludes training metrics |
 | Hindsight | `$HINDSIGHT_HOME/usage/` (fallback: `~/.hindsight/usage/`) | `%HINDSIGHT_HOME%\usage\` (fallback: `%USERPROFILE%\.hindsight\usage\`) | API sync via `tokscale hindsight sync`; Hindsight writes no local session logs of its own, so data is synced from the LLM trace API into an append-only JSONL cache |
+| Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | Same XDG-style path on all platforms; parses `session.jsonl` `model_completed` usage events plus `subagent/` transcripts |
 | MiniMax Code | `~/.config/tokscale/headless/mcode/` | `%APPDATA%\tokscale\headless\mcode\` | Headless capture only; Tokscale reads its own capture directory rather than MiniMax Code's shared Desktop/Runtime store, which does not identify the originating surface. Override the root with `TOKSCALE_HEADLESS_DIR` |
 
 > **Devin Desktop agent support**: Local usage parsing works for ACP-connected agents (e.g. Cascade/Windsurf, claude-code, opencode) that emit `usage_update` events in the NDJSON stream. The default **devin-cloud** agent does not emit local `usage_update` events — its usage stays server-side and cannot be tracked by tokscale without an account-level API.
@@ -2039,6 +2041,14 @@ The `data` column is a JSON blob with the following token-relevant fields:
 ```
 
 Tokscale deduplicates messages across forked sessions using a fingerprint of timestamps, model, provider, token counts, cost, and agent name.
+
+### Muse Code
+
+Location: `~/.local/share/muse/sessions/YYYY/MM/DD/<session-uuid>/session.jsonl` (same XDG-style path on all platforms, including Windows; subagent transcripts under `subagent/<uuid>/` are scanned too)
+
+Muse Code writes one event-sourced JSONL transcript per session. Tokscale reads `model_completed` events, which carry the model id (`muse-spark-*`), a Responses-shaped `usage` object (`input_tokens`, `output_tokens`, `cached_tokens`/`cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`) and the call's `duration_ms`; `recorded_at` is in microseconds. `cached_tokens` is a subset of `input_tokens` and reasoning rides inside `output_tokens`, so both are split out before pricing and aggregation. The parent session's `workflow_child_lifecycle` usage aggregates are skipped because the child transcripts they summarize are scanned separately. Workspace labels come from the file's `runtime.session.metadata` record.
+
+Muse Spark models are priced from upstream datasets — LiteLLM and models.dev carry `meta/muse-spark-*` rows at Meta's published rates — so Muse usage is costed out of the box (Standard: $1.25/$4.25 per 1M input/output tokens, $0.15 cached input; Contributor: $0.10/$0.20, $0.002 cached input — see [pricing and rate limits](https://dev.meta.ai/docs/pricing-rate-limits)).
 
 ## Pricing
 

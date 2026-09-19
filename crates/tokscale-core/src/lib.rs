@@ -2996,6 +2996,24 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::hindsight::parse_hindsight_file,
     );
 
+    // Muse Code `model_completed` records carry usage but never a cost, so
+    // every message leaves the parser at 0.0 and pricing is its only cost
+    // source. That makes the generic source cache safe here — unlike Junie
+    // above, there is no authoritative embedded cost for cached_messages()'s
+    // unconditional reprice to overwrite. The parser skips the parent-side
+    // `workflow_child_lifecycle` usage aggregates (they duplicate the
+    // child's own scanned transcript) and keys each event by its stable
+    // stream sequence, so the cross-file dedup pass is first-wins on keys
+    // that survive a warm cache hit.
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Muse,
+        sessions::muse::parse_muse_file,
+    );
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result
@@ -5905,6 +5923,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let hindsight_count = summed_parsed_message_count(&hindsight_msgs);
     counts.set(ClientId::Hindsight, hindsight_count);
     messages.extend(hindsight_msgs);
+
+    let muse_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Muse)
+        .par_iter()
+        .flat_map(|path| sessions::muse::parse_muse_file(path))
+        .collect();
+    let mut muse_seen: HashSet<String> = HashSet::new();
+    let muse_msgs: Vec<ParsedMessage> = muse_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut muse_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let muse_count = summed_parsed_message_count(&muse_msgs);
+    counts.set(ClientId::Muse, muse_count);
+    messages.extend(muse_msgs);
 
     let mcode_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mcode)

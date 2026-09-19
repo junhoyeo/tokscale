@@ -1129,6 +1129,7 @@ pub enum ClientFilter {
     LmStudio,
     Unsloth,
     Hindsight,
+    Muse,
     Synthetic,
 }
 
@@ -1192,6 +1193,7 @@ impl ClientFilter {
             Self::LmStudio => "lmstudio",
             Self::Unsloth => "unsloth",
             Self::Hindsight => "hindsight",
+            Self::Muse => "muse",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1258,6 +1260,7 @@ impl ClientFilter {
             Self::LmStudio => Some(ClientId::LmStudio),
             Self::Unsloth => Some(ClientId::Unsloth),
             Self::Hindsight => Some(ClientId::Hindsight),
+            Self::Muse => Some(ClientId::Muse),
             Self::Synthetic => None,
         }
     }
@@ -1320,6 +1323,7 @@ impl ClientFilter {
             ClientId::LmStudio => Self::LmStudio,
             ClientId::Unsloth => Self::Unsloth,
             ClientId::Hindsight => Self::Hindsight,
+            ClientId::Muse => Self::Muse,
         }
     }
 
@@ -8499,6 +8503,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_jcode() {
         assert_eq!(capitalize_client("jcode"), "Jcode");
+    }
+
+    #[test]
+    fn test_capitalize_client_muse() {
+        assert_eq!(capitalize_client("muse"), "Muse Code");
     }
 
     #[test]
