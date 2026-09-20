@@ -1065,7 +1065,7 @@ define_clients!(
     MiMoDesktop = 53 => {
         id: "micode-desktop",
         display: "Xiaomi MiMo AI",
-        logo: Some("https://github.com/XiaomiMiMo.png"),
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-micode-desktop.png"),
         root: PathRoot::XdgData,
         relative: "mimocode",
         pattern: "*.db",

@@ -2049,7 +2049,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // happen before the first one is recorded -- never inside that loop.
     flush_lane(&mut all_messages, &flush_context, sink);
 
-    let mut micode_indices: HashMap<String, usize> = HashMap::new();
+    let mut micode_indices: HashMap<(String, String), usize> = HashMap::new();
 
     for db_path in &scan_result.micode_dbs {
         // Pass `None` so the loader does not reprice: MiMo Code carries an
@@ -2073,7 +2073,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 apply_pricing_if_available(&mut message, pricing);
             }
             if let Some(key) = message.dedup_key.as_ref() {
-                if let Some(index) = micode_indices.get(key).copied() {
+                // Key by (dedup_key, client): the same embedded message id can
+                // legitimately appear under both MiMo Code CLI and Xiaomi MiMo
+                // AI desktop when a session is forked across surfaces. Collapsing
+                // those would hide one surface's usage from its client filter.
+                // Channel-suffixed CLI databases share the same client stamp, so
+                // true CLI duplicates still collapse.
+                let index_key = (key.clone(), message.client.clone());
+                if let Some(index) = micode_indices.get(&index_key).copied() {
                     if message.has_authoritative_cost()
                         && !all_messages[index].has_authoritative_cost()
                     {
@@ -2082,7 +2089,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     }
                     continue;
                 }
-                micode_indices.insert(key.clone(), all_messages.len());
+                micode_indices.insert(index_key, all_messages.len());
             }
             all_messages.push(message);
         }

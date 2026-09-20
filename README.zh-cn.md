@@ -98,7 +98,7 @@
 | <img width="48px" src=".github/assets/client-hindsight.png" alt="Hindsight" /> | [Hindsight](https://github.com/vectorize-io/hindsight) | `$HINDSIGHT_HOME/usage/*.jsonl`（回退：`~/.hindsight/usage/*.jsonl`；通过 `tokscale hindsight sync` 同步） |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecar（可通过 `JCODE_HOME` 覆盖） |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `~/.local/share/mimocode/mimocode.db`（XDG 数据目录；SQLite） |
-| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="Xiaomi MiMo AI" /> | Xiaomi MiMo AI（桌面端） | 与 MiMo Code 共用 `~/.local/share/mimocode/mimocode.db`；`session.version` 以 `desktop-` 开头的会话归入 `micode-desktop` |
+| <img width="48px" src=".github/assets/client-micode-desktop.png" alt="Xiaomi MiMo AI" /> | Xiaomi MiMo AI（桌面端） | 与 MiMo Code 共用 `~/.local/share/mimocode/mimocode.db`；`session.version` 以 `desktop-` 开头的会话归入 `micode-desktop` |
 | <img width="48px" src="https://github.com/JetBrains.png" alt="Junie" /> | [Junie](https://www.jetbrains.com/junie/) | `~/.junie/sessions/*/events.jsonl` |
 | <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl`（Token 使用量按 ~4 字符/Token 从转录估算；不会持久化到磁盘） |
 | <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/cli/db/db.sqlite`（v2 用量数据库）和 `~/.zcode/projects/**/*.jsonl`（旧版记录） |
