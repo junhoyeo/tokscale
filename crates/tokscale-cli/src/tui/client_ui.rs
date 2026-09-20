@@ -66,6 +66,9 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'U' },
     // Hindsight: uppercase 'H' stays mnemonic while lowercase 'h' belongs to Crush.
     ClientUi { hotkey: 'H' },
+    // Xiaomi MiMo AI desktop: uppercase 'W' stays free; lowercase letters for
+    // "MiMo"/"desktop" are already taken by MiMo Code / Crush / Mux.
+    ClientUi { hotkey: 'W' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

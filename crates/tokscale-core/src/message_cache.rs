@@ -1184,8 +1184,14 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // submit validation does not reject valid unknown-model MiMo
             // usage offline. v2->v3: duplicate merging now upgrades the
             // retained row when a later copy carries an explicit cost,
-            // including zero.
-            (ClientId::MiMoCode, 2),
+            // including zero. v3->v4: Xiaomi MiMo AI desktop sessions share
+            // the same mimocode SQLite store and are re-stamped as
+            // `micode-desktop` when `session.version` starts with `desktop-`;
+            // warm v3 entries still label every row `micode`.
+            (ClientId::MiMoCode, 3),
+            // Desktop and CLI parse through the same `parse_micode_sqlite`
+            // entrypoint and therefore share MiMo Code's invalidation history.
+            (ClientId::MiMoDesktop, 3),
             (ClientId::Kilo, 0),
         ],
     },
@@ -1519,6 +1525,7 @@ fn parser_version(client: ClientId) -> u32 {
         | ClientId::Cline
         | ClientId::OpenCode
         | ClientId::MiMoCode
+        | ClientId::MiMoDesktop
         | ClientId::Kilo
         | ClientId::CodeBuddy
         | ClientId::WorkBuddy
@@ -4564,7 +4571,8 @@ mod tests {
 
     #[test]
     fn test_micode_parser_version_invalidates_rows_without_cost_provenance() {
-        assert_eq!(parser_version(ClientId::MiMoCode), 3);
+        assert_eq!(parser_version(ClientId::MiMoCode), 4);
+        assert_eq!(parser_version(ClientId::MiMoDesktop), 4);
     }
 
     #[test]
@@ -4623,7 +4631,8 @@ mod tests {
                 "opencode schema",
                 &[
                     (ClientId::OpenCode, 2),
-                    (ClientId::MiMoCode, 2),
+                    (ClientId::MiMoCode, 3),
+                    (ClientId::MiMoDesktop, 3),
                     (ClientId::Kilo, 0),
                 ],
             ),

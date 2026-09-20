@@ -1883,6 +1883,8 @@ mod tests {
         assert_eq!(clients[49], ClientId::Omp);
         assert_eq!(clients[50], ClientId::LmStudio);
         assert_eq!(clients[51], ClientId::Unsloth);
+        assert_eq!(clients[52], ClientId::Hindsight);
+        assert_eq!(clients[53], ClientId::MiMoDesktop);
     }
 
     #[test]
@@ -1941,6 +1943,7 @@ mod tests {
             "LM Studio",
             "Unsloth",
             "Hindsight",
+            "Xiaomi MiMo AI",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -1990,6 +1993,8 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), 'Y');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::LmStudio), 'L');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Unsloth), 'U');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hindsight), 'H');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::MiMoDesktop), 'W');
     }
 
     #[test]

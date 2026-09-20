@@ -1056,6 +1056,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Xiaomi MiMo AI (desktop) shares MiMo Code's engine and on-disk SQLite
+    // store. Sessions are split at parse time by `session.version` (desktop
+    // installs stamp a `desktop-` InstallationVersion); both clients therefore
+    // resolve the same XDG data directory so either filter still discovers
+    // the shared `mimocode*.db` files.
+    MiMoDesktop = 53 => {
+        id: "micode-desktop",
+        display: "Xiaomi MiMo AI",
+        logo: Some("https://github.com/XiaomiMiMo.png"),
+        root: PathRoot::XdgData,
+        relative: "mimocode",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1171,7 +1187,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 53);
+        assert_eq!(ClientId::COUNT, 54);
     }
 
     #[test]

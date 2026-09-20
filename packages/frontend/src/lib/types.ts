@@ -54,6 +54,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "lmstudio",
   "unsloth",
   "hindsight",
+  "micode-desktop",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

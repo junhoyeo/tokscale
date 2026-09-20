@@ -82,6 +82,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   lmstudio: "LM Studio",
   unsloth: "Unsloth",
   hindsight: "Hindsight",
+  "micode-desktop": "Xiaomi MiMo AI",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -147,6 +148,8 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   lmstudio: "https://github.com/lmstudio-ai.png",
   unsloth: "https://github.com/unslothai.png",
   hindsight: `${GITHUB_CDN_BASE}/client-hindsight.png`,
+  // Desktop and CLI surfaces share the XiaomiMiMo org avatar.
+  "micode-desktop": "https://github.com/XiaomiMiMo.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -205,6 +208,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   lmstudio: "#6C5CE7",
   unsloth: "#58CC02",
   hindsight: "#0891B2",
+  "micode-desktop": "#FF6900",
 };
 
 // Derived values

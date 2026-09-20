@@ -5280,8 +5280,31 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .filter(|msg| should_keep_deduped_message(&mut micode_seen, msg))
         .map(|msg| unified_to_parsed(&msg))
         .collect();
-    let micode_count = summed_parsed_message_count(&micode_msgs);
+    let mut micode_count = 0i32;
+    let mut micode_desktop_count = 0i32;
+    for msg in &micode_msgs {
+        // Counts must respect the requested-client filter the same way the
+        // message list does below; otherwise a desktop-only scan would still
+        // report CLI rows under MiMo Code.
+        if !include_all
+            && !retain_for_requested_clients(
+                &msg.client,
+                &msg.model_id,
+                &msg.provider_id,
+                &requested,
+            )
+        {
+            continue;
+        }
+        let n = msg.message_count.max(0);
+        if msg.client == sessions::micode::MICODE_DESKTOP_CLIENT_ID {
+            micode_desktop_count += n;
+        } else {
+            micode_count += n;
+        }
+    }
     counts.set(ClientId::MiMoCode, micode_count);
+    counts.set(ClientId::MiMoDesktop, micode_desktop_count);
     messages.extend(micode_msgs);
 
     let claude_home = PathBuf::from(&home_dir);
@@ -10485,6 +10508,107 @@ mod tests {
         // fx records `request_count` as the row's message count, so the client
         // count is the summed count and not the row count.
         assert_eq!(parsed.counts.get(ClientId::Fx), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_splits_micode_desktop_by_session_version() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let micode_dir = source_home.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(&micode_dir).unwrap();
+        let conn = rusqlite::Connection::open(micode_dir.join("mimocode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                version TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ses-desktop",
+                "/Users/alice/desktop-repo",
+                "desktop-5198ff5"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["ses-cli", "/Users/alice/cli-repo", "1.0.0"],
+        )
+        .unwrap();
+        let desktop_msg = r#"{"id":"micode-desktop-msg","role":"assistant","modelID":"mimo-x-pro-preview","providerID":"xiaomi","cost":0,"tokens":{"input":1000,"output":200,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1780000000000}}"#;
+        let cli_msg = r#"{"id":"micode-cli-msg","role":"assistant","modelID":"mimo-v2.5-pro","providerID":"mimo","cost":0,"tokens":{"input":500,"output":100,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1780000005000}}"#;
+        for (id, session, data) in [
+            ("row-d", "ses-desktop", desktop_msg),
+            ("row-c", "ses-cli", cli_msg),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, session, data],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["micode".to_string(), "micode-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        let desktop = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == sessions::micode::MICODE_DESKTOP_CLIENT_ID)
+            .count();
+        let cli = parsed
+            .messages
+            .iter()
+            .filter(|msg| msg.client == sessions::micode::MICODE_CLIENT_ID)
+            .count();
+        assert_eq!(
+            desktop, 1,
+            "desktop-version session must land in micode-desktop"
+        );
+        assert_eq!(cli, 1, "non-desktop version session must stay under micode");
+        assert_eq!(parsed.counts.get(ClientId::MiMoDesktop), 1);
+        assert_eq!(parsed.counts.get(ClientId::MiMoCode), 1);
+
+        let desktop_only = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["micode-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert!(
+            desktop_only
+                .messages
+                .iter()
+                .all(|m| m.client == sessions::micode::MICODE_DESKTOP_CLIENT_ID),
+            "micode-desktop filter must discover the shared DB and keep only desktop rows"
+        );
+        assert_eq!(desktop_only.counts.get(ClientId::MiMoDesktop), 1);
+        assert_eq!(desktop_only.counts.get(ClientId::MiMoCode), 0);
     }
 
     #[test]
