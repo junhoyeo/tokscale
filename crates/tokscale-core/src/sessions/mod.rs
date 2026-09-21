@@ -39,6 +39,7 @@ pub mod kimi;
 pub mod kiro;
 pub mod lmstudio;
 pub mod mcode;
+pub mod meept;
 pub mod micode;
 pub mod mux;
 pub mod omp;
