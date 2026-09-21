@@ -4098,6 +4098,91 @@ mod tests {
         })
     }
 
+    /// A marker row tagged with a label, so a report can be asked not merely
+    /// *whether* a cache-only row reached it but *which* seeded shard produced
+    /// it. A whole-cache load bug that serves a stale shard surfaces that
+    /// shard's label specifically -- something an unlabelled marker, shared by
+    /// every seeded shard, cannot tell apart from the current shard being
+    /// served as intended.
+    fn named_marker_row(label: &str) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "dsh",
+            format!("{DSH_CACHE_MARKER}-{label}-model"),
+            format!("{DSH_CACHE_MARKER}-{label}-provider"),
+            format!("{DSH_CACHE_MARKER}-{label}-session"),
+            1,
+            crate::TokenBreakdown {
+                input: 12345,
+                output: 678,
+                cache_read: 90,
+                cache_write: 9,
+                reasoning: 0,
+            },
+            0.0,
+        )
+    }
+
+    fn report_carries_marker_labelled(messages: &[UnifiedMessage], label: &str) -> bool {
+        let needle = format!("{DSH_CACHE_MARKER}-{label}-");
+        messages.iter().any(|message| {
+            message.model_id.contains(&needle)
+                || message.provider_id.contains(&needle)
+                || message.session_id.contains(&needle)
+        })
+    }
+
+    /// Seeds one labelled marker row per transcript into shards whose envelope
+    /// carries `seeded_version`, and asserts each shard then reads the way the
+    /// version implies: stale when the version is a predecessor's, current when
+    /// it is the running one. The two directions are what a *mixed* cache pairs
+    /// in a single load; see [`seed_dsh_cache_at_version`] for why writing the
+    /// shard directly rather than through the cache API is the point.
+    fn seed_dsh_marker_shards(transcripts: &[PathBuf], seeded_version: u32, label: &str) {
+        let identity = CacheIdentity::for_client(ClientId::Dsh);
+        let seeded_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: seeded_version,
+        };
+        let mut by_shard: HashMap<CacheShardKey, Vec<CachedSourceEntry>> = HashMap::new();
+        for path in transcripts {
+            let entry = CachedSourceEntry::new(
+                seeded_identity,
+                path,
+                SourceFingerprint::from_path(path).expect("an installed transcript fingerprints"),
+                vec![named_marker_row(label)],
+                Vec::new(),
+                None,
+            );
+            by_shard
+                .entry(CacheKey::from_entry(&entry).shard())
+                .or_default()
+                .push(entry);
+        }
+        let shard_root = cache_shard_dir().expect("a sandboxed shard directory");
+        let expect_stale = seeded_version != identity.parser_version;
+        for (shard_key, entries) in &by_shard {
+            let path = shard_path(&shard_root, shard_key);
+            ensure_cache_dir(path.parent().unwrap()).unwrap();
+            write_shard_with_limit(&path, seeded_identity, entries, MAX_CACHE_SHARD_BYTES).unwrap();
+            let status = read_shard(&path, identity);
+            if expect_stale {
+                assert!(
+                    matches!(status, ShardReadStatus::Stale),
+                    "a shard seeded at parser version {seeded_version} must read as stale \
+                     under the running identity"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        status,
+                        ShardReadStatus::Loaded(_) | ShardReadStatus::Migrated(_)
+                    ),
+                    "a shard seeded at the running parser version must read as current"
+                );
+            }
+        }
+    }
+
     /// The checked-in DSH fixtures, under `crates/tokscale-core/tests/fixtures`.
     /// Each holds a `sessions/` tree and an `expected.json` recording what the
     /// current parser reports and what the released predecessor reported.
@@ -4568,6 +4653,175 @@ mod tests {
                 .count(),
             transcripts.len(),
             "every cached transcript must be served from the cache"
+        );
+    }
+
+    /// One cache, two shards, opposite identities, loaded together.
+    ///
+    /// [`dsh_predecessor_caches_are_rejected_and_rebuilt_by_the_production_scan`]
+    /// seeds every transcript at one predecessor version per run, so the cache
+    /// under test is uniform: every shard is stale, and the totals it grades
+    /// are the sum of shards that all took the same path. A load or rewrite bug
+    /// that mishandles *one* stale shard while the rest are current has nothing
+    /// failing it there -- the current shards pad the aggregate back to
+    /// plausible. This pairs the two states in a single load and grades each
+    /// shard on its own outcome rather than on the total they add to.
+    ///
+    /// The stale side is the `dsh-seq-key` fixture seeded at parser version 4,
+    /// the identity 4.15.0 shipped: reparsing it has a known-correct answer
+    /// (its `current` figures) that differs from what a served predecessor row
+    /// would report, so a shard that is wrongly served is caught by the number,
+    /// not just by the marker. The current side is a served canary: a fixture's
+    /// own shard cannot be pinned under a random temp root, and this side only
+    /// has to prove "a valid shard is served, not reparsed", so it is a
+    /// transcript placed in a shard searched to be disjoint from the stale ones
+    /// -- which also makes the two seedings write separate shard files instead
+    /// of one clobbering the other.
+    ///
+    /// Per-shard markers carry a label, so a bug that serves the stale shard
+    /// surfaces the `stale` marker specifically while the intended service of
+    /// the current shard surfaces the `served` one; the two are told apart
+    /// rather than merged. The assertions cover both the report and the cache
+    /// left on disk: the stale shard must be absent from the report, reparsed
+    /// to the current figures, and its entry rewritten to the running identity;
+    /// the current shard must be served, its entry left under the running
+    /// identity. The last of those is the one a fresh parse cannot fake -- a
+    /// rewrite-path regression that reparses correctly but never persists would
+    /// pass every report assertion and fail only here.
+    #[test]
+    #[serial_test::serial]
+    fn dsh_mixed_stale_and_current_shards_are_each_handled_on_their_own_identity() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let current_identity = CacheIdentity::for_client(ClientId::Dsh);
+
+        // The stale side: a real fixture whose reparse answer is recorded, so a
+        // served shard is caught by a wrong figure and not only by the marker.
+        let stale_transcripts = install_dsh_fixture(source_home.path(), "dsh-seq-key");
+        let expected = dsh_fixture_expectations("dsh-seq-key");
+
+        // The current side: a transcript in a shard none of the stale
+        // transcripts occupy. Shard identity is version-independent (it hashes
+        // the namespace and path, not the parser version), so a shard chosen
+        // disjoint here stays disjoint after the stale side is reparsed.
+        let stale_shards: HashSet<CacheShardKey> = stale_transcripts
+            .iter()
+            .map(|path| CacheKey::new(current_identity, path).shard())
+            .collect();
+        let served_path = (0..CACHE_SHARD_COUNT * 4)
+            .map(|index| {
+                source_home
+                    .path()
+                    .join(".dsh")
+                    .join("sessions")
+                    .join("--served--")
+                    .join(format!("canary-{index}"))
+                    .join("session.jsonl")
+            })
+            .find(|candidate| {
+                !stale_shards.contains(&CacheKey::new(current_identity, candidate).shard())
+            })
+            .expect("a served shard distinct from every stale shard");
+        std::fs::create_dir_all(served_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &served_path,
+            br#"{"type":"session","id":"canary","createdAt":1,"cwd":"/work"}
+{"type":"assistant/message","seq":1,"time":1787000000000,"data":{"turn":1,"message":{"id":"m-canary","source":{"kind":"model","provider":"canary-provider","model":"canary-model"}},"usage":{"inputTokens":1,"outputTokens":1}}}
+"#,
+        )
+        .unwrap();
+
+        seed_dsh_marker_shards(&stale_transcripts, 4, "stale");
+        seed_dsh_marker_shards(
+            std::slice::from_ref(&served_path),
+            current_identity.parser_version,
+            "served",
+        );
+
+        let report = scan_dsh(source_home.path());
+
+        // The stale shard: reparsed, so its marker never reaches the report.
+        assert!(
+            !report_carries_marker_labelled(&report, "stale"),
+            "the stale shard was served rather than reparsed"
+        );
+        // The current shard: served, so its marker does.
+        assert!(
+            report_carries_marker_labelled(&report, "served"),
+            "the current shard was reparsed rather than served"
+        );
+
+        // The reparsed stale shard reports the current figures, not the
+        // predecessor's -- the correctness the marker alone cannot show. The
+        // served marker row is the only non-fixture row, so dropping it leaves
+        // exactly what the stale side reparsed to.
+        let reparsed_only: Vec<UnifiedMessage> = report
+            .iter()
+            .filter(|message| {
+                !report_carries_marker_labelled(std::slice::from_ref(*message), "served")
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            dsh_report_json(&reparsed_only),
+            expected["current"],
+            "the reparsed stale shard must report the current figures, not the predecessor's"
+        );
+
+        // The totals are the two shards added: the stale side's reparsed
+        // current figures plus the one served marker row. A stale shard served
+        // instead of reparsed, or a current shard reparsed instead of served,
+        // moves this sum.
+        let marker = named_marker_row("served");
+        let seq = &expected["current"]["totals"];
+        let grand = &dsh_report_json(&report)["totals"];
+        assert_eq!(
+            grand["totalInput"].as_i64().unwrap(),
+            seq["totalInput"].as_i64().unwrap() + marker.tokens.input,
+        );
+        assert_eq!(
+            grand["totalOutput"].as_i64().unwrap(),
+            seq["totalOutput"].as_i64().unwrap() + marker.tokens.output,
+        );
+        assert_eq!(
+            grand["totalCacheRead"].as_i64().unwrap(),
+            seq["totalCacheRead"].as_i64().unwrap() + marker.tokens.cache_read,
+        );
+        assert_eq!(
+            grand["totalCacheWrite"].as_i64().unwrap(),
+            seq["totalCacheWrite"].as_i64().unwrap() + marker.tokens.cache_write,
+        );
+
+        // The repair is persisted, not just reflected in this scan. Every stale
+        // transcript's entry must now carry the running identity with its
+        // marker gone -- the assertion a correct reparse that never rewrote the
+        // shard would fail while passing every report check above.
+        let persisted = SourceMessageCache::load();
+        for path in &stale_transcripts {
+            let entry = persisted
+                .get(current_identity, path)
+                .unwrap_or_else(|| panic!("{} was not re-cached", path.display()));
+            assert_eq!(
+                entry.parser_version, current_identity.parser_version,
+                "the rebuilt stale entry must carry the running identity"
+            );
+            assert!(
+                !report_carries_marker_labelled(&entry.messages, "stale"),
+                "the stale shard's cache entry still carries its marker after the scan"
+            );
+        }
+
+        // The served shard was left as it was: still the running identity,
+        // still the marker. Rewriting a shard whose identity already matched
+        // would be a needless reparse this asserts against.
+        let served_entry = persisted
+            .get(current_identity, &served_path)
+            .expect("the served transcript is missing from the cache");
+        assert_eq!(served_entry.parser_version, current_identity.parser_version);
+        assert!(
+            report_carries_marker_labelled(&served_entry.messages, "served"),
+            "the served shard's cache entry was rewritten though its identity matched"
         );
     }
 
