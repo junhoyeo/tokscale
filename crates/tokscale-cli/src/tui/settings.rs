@@ -116,6 +116,22 @@ impl SettingsOrigin {
     }
 }
 
+/// Resolve the file an atomic rename must replace for `path`.
+///
+/// `rename(2)` replaces a symlink itself rather than the file it points at, so
+/// renaming onto a linked settings.json turns the link into a regular file. A
+/// dangling or unreadable link keeps the link path, where the rename is the only
+/// possible write.
+fn symlink_target(path: &Path) -> PathBuf {
+    let is_symlink = fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return path.to_path_buf();
+    }
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl SettingsFileSnapshot {
     fn from_raw(raw: &RawSettings) -> Self {
         match raw {
@@ -691,6 +707,11 @@ impl Settings {
             .primary_path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("could not resolve the tokscale settings location"))?;
+        // Rename onto the link target, not the link: dotfile managers (GNU Stow,
+        // chezmoi) keep settings.json as a symlink into a version-controlled
+        // checkout, and replacing the link with a regular file silently breaks
+        // that setup.
+        let write_path = symlink_target(path);
         // Coordinate Tokscale writers across the final comparison and rename.
         // A non-cooperating editor can still race an atomic rename, but any edit
         // present at this final check is rejected rather than overwritten.
@@ -710,7 +731,7 @@ impl Settings {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         let tmp_filename = format!(".settings.{}.{:x}.tmp", std::process::id(), nanos);
-        let temp_path = path
+        let temp_path = write_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join(&tmp_filename);
@@ -723,7 +744,7 @@ impl Settings {
             // Check after staging and syncing: edits made during those slower
             // operations must leave the destination untouched as well.
             origin.verify_unchanged()?;
-            tokscale_core::fs_atomic::replace_file(&temp_path, path)?;
+            tokscale_core::fs_atomic::replace_file(&temp_path, &write_path)?;
             Ok(())
         })();
 
@@ -1359,6 +1380,59 @@ mod tests {
         let saved: Settings =
             serde_json::from_str(&fs::read_to_string(temp.path().join("settings.json")).unwrap())
                 .unwrap();
+        assert_eq!(saved.color_palette, "green");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn save_writes_through_a_symlinked_settings_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_dir = temp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", &config_dir);
+
+        // Dotfile managers link settings.json into a version-controlled checkout.
+        // Saving must update the file behind the link, not replace the link.
+        let tracked = temp.path().join("settings.json");
+        fs::write(&tracked, r#"{"colorPalette":"blue"}"#).unwrap();
+        let path = config_dir.join("settings.json");
+        std::os::unix::fs::symlink(&tracked, &path).unwrap();
+
+        let (mut settings, origin) = Settings::load_with_origin();
+        settings.color_palette = "green".to_string();
+        settings.save_with_origin(origin).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "saving must keep settings.json a symlink"
+        );
+        let saved: Settings = serde_json::from_str(&fs::read_to_string(&tracked).unwrap()).unwrap();
+        assert_eq!(saved.color_palette, "green");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn save_replaces_a_dangling_settings_symlink() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_dir = temp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", &config_dir);
+
+        // Nothing exists behind this link, so there is no file to write through.
+        // The save must still succeed, replacing the link rather than failing.
+        let path = config_dir.join("settings.json");
+        std::os::unix::fs::symlink(temp.path().join("checkout/settings.json"), &path).unwrap();
+
+        let (mut settings, origin) = Settings::load_with_origin();
+        settings.color_palette = "green".to_string();
+        settings.save_with_origin(origin).unwrap();
+
+        let saved: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.color_palette, "green");
     }
 
