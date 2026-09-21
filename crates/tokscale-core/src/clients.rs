@@ -1057,11 +1057,27 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
+    // Xiaomi MiMo AI (desktop) shares MiMo Code's engine and on-disk SQLite
+    // store. Sessions are split at parse time by `session.version` (desktop
+    // installs stamp a `desktop-` InstallationVersion); both clients therefore
+    // resolve the same XDG data directory so either filter still discovers
+    // the shared `mimocode*.db` files.
+    MiMoDesktop = 53 => {
+        id: "micode-desktop",
+        display: "Xiaomi MiMo AI",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-micode-desktop.png"),
+        root: PathRoot::XdgData,
+        relative: "mimocode",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
     // Muse Code (Meta) persists one event-sourced `session.jsonl` per
     // session under an XDG-style data dir on every platform, including
     // Windows. Subagent transcripts live in `subagent/<uuid>/` beside the
     // parent session and are picked up by the same recursive scan.
-    Muse = 53 => {
+    Muse = 54 => {
         id: "muse",
         display: "Muse Code",
         logo: None,
@@ -1186,7 +1202,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 54);
+        assert_eq!(ClientId::COUNT, 55);
     }
 
     #[test]

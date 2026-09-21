@@ -1956,6 +1956,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Kimi
                 | ClientId::Gjc
                 | ClientId::MiMoCode
+                | ClientId::MiMoDesktop
                 | ClientId::DevinCli
                 | ClientId::Grok
                 | ClientId::PrimeAgent
@@ -2172,7 +2173,11 @@ fn scan_all_clients_with_env_strategy_inner(
     // in the parse loop (keyed on the globally unique embedded message id)
     // collapses any message present in both locations, so overlapping data is
     // never double-counted.
-    if enabled.contains(&ClientId::MiMoCode) {
+    //
+    // Xiaomi MiMo AI (desktop) shares this engine store; either client id
+    // discovering the DBs is enough for the micode parse lane, which re-stamps
+    // desktop sessions by `session.version`.
+    if enabled.contains(&ClientId::MiMoCode) || enabled.contains(&ClientId::MiMoDesktop) {
         // Derive the primary data dir from the client metadata so the scan path
         // stays in sync with `ClientId::MiMoCode` (XdgData root + `mimocode`)
         // rather than duplicating it here.

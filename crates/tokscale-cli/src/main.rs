@@ -1129,6 +1129,8 @@ pub enum ClientFilter {
     LmStudio,
     Unsloth,
     Hindsight,
+    #[value(name = "micode-desktop")]
+    MicodeDesktop,
     Muse,
     Synthetic,
 }
@@ -1193,6 +1195,7 @@ impl ClientFilter {
             Self::LmStudio => "lmstudio",
             Self::Unsloth => "unsloth",
             Self::Hindsight => "hindsight",
+            Self::MicodeDesktop => "micode-desktop",
             Self::Muse => "muse",
             Self::Synthetic => "synthetic",
         }
@@ -1260,6 +1263,7 @@ impl ClientFilter {
             Self::LmStudio => Some(ClientId::LmStudio),
             Self::Unsloth => Some(ClientId::Unsloth),
             Self::Hindsight => Some(ClientId::Hindsight),
+            Self::MicodeDesktop => Some(ClientId::MiMoDesktop),
             Self::Muse => Some(ClientId::Muse),
             Self::Synthetic => None,
         }
@@ -1323,6 +1327,7 @@ impl ClientFilter {
             ClientId::LmStudio => Self::LmStudio,
             ClientId::Unsloth => Self::Unsloth,
             ClientId::Hindsight => Self::Hindsight,
+            ClientId::MiMoDesktop => Self::MicodeDesktop,
             ClientId::Muse => Self::Muse,
         }
     }

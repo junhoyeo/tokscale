@@ -7,13 +7,73 @@
 //! itself lives in [`super::opencode_schema`]; only the places where MiMo's
 //! behaviour departs from OpenCode's are declared here, as
 //! `OpenCodeSchemaConfig::micode`.
+//!
+//! Xiaomi MiMo AI (desktop) and the mimo code CLI share this same store. The
+//! desktop engine stamps `session.version` with its InstallationVersion, which
+//! starts with `desktop-` (and also sets `MIMOCODE_CLIENT=desktop`). Messages
+//! from those sessions are re-stamped as [`MICODE_DESKTOP_CLIENT_ID`] so
+//! reports can split the two surfaces.
 
-use super::opencode_schema::{parse_opencode_schema_sqlite, OpenCodeSchemaConfig};
+use super::opencode_schema::{
+    parse_opencode_schema_sqlite, parse_opencode_schema_sqlite_with_session_clients,
+    OpenCodeSchemaConfig,
+};
 use super::UnifiedMessage;
+use std::collections::HashSet;
 use std::path::Path;
 
+/// Client id for mimo code CLI / headless engine sessions.
+pub const MICODE_CLIENT_ID: &str = "micode";
+/// Client id for Xiaomi MiMo AI desktop sessions (shared engine, desktop surface).
+pub const MICODE_DESKTOP_CLIENT_ID: &str = "micode-desktop";
+/// `session.version` prefix written by the Xiaomi MiMo AI desktop install.
+pub const MICODE_DESKTOP_VERSION_PREFIX: &str = "desktop-";
+
+/// True when a `session.version` value identifies a Xiaomi MiMo AI desktop
+/// session rather than a CLI/engine install.
+pub fn is_desktop_session_version(version: &str) -> bool {
+    version
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with(MICODE_DESKTOP_VERSION_PREFIX)
+}
+
+fn desktop_session_ids(db_path: &Path) -> Option<HashSet<String>> {
+    let conn = rusqlite::Connection::open(db_path).ok()?;
+    let mut stmt = conn.prepare("SELECT id, version FROM session").ok()?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let version: Option<String> = row.get(1)?;
+            Ok((id, version))
+        })
+        .ok()?;
+    let mut desktop = HashSet::new();
+    for (id, version) in rows.flatten() {
+        if version.as_deref().is_some_and(is_desktop_session_version) {
+            desktop.insert(id);
+        }
+    }
+    Some(desktop)
+}
+
 pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    parse_opencode_schema_sqlite(db_path, OpenCodeSchemaConfig::micode())
+    let desktop_ids = desktop_session_ids(db_path).unwrap_or_default();
+    if desktop_ids.is_empty() {
+        return parse_opencode_schema_sqlite(db_path, OpenCodeSchemaConfig::micode());
+    }
+    // Classify surfaces before the shared fingerprint merge: identical usage
+    // stats on a desktop turn and a CLI turn must not collapse into one row
+    // labeled by whichever session was read first.
+    let session_clients: std::collections::HashMap<String, String> = desktop_ids
+        .into_iter()
+        .map(|id| (id, MICODE_DESKTOP_CLIENT_ID.to_string()))
+        .collect();
+    parse_opencode_schema_sqlite_with_session_clients(
+        db_path,
+        OpenCodeSchemaConfig::micode(),
+        Some(&session_clients),
+    )
 }
 
 #[cfg(test)]
@@ -412,6 +472,187 @@ mod tests {
             Some("/Users/alice/micode-repo")
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("micode-repo"));
+    }
+
+    #[test]
+    fn test_parse_micode_sqlite_splits_desktop_sessions_by_version_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_micode.db");
+        let conn = create_micode_sqlite_db(&db_path);
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                version TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ses_desktop",
+                "/Users/alice/desktop-repo",
+                "desktop-5198ff5"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["ses_cli", "/Users/alice/cli-repo", "1.2.3"],
+        )
+        .unwrap();
+
+        let desktop_msg = r#"{
+            "id": "msg_desktop",
+            "role": "assistant",
+            "modelID": "mimo-x-pro-preview",
+            "providerID": "xiaomi",
+            "cost": 0,
+            "tokens": {
+                "input": 1000,
+                "output": 200,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let cli_msg = r#"{
+            "id": "msg_cli",
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0,
+            "tokens": {
+                "input": 500,
+                "output": 100,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000005000.0 }
+        }"#;
+        for (row_id, session_id, data) in [
+            ("msg_desktop", "ses_desktop", desktop_msg),
+            ("msg_cli", "ses_cli", cli_msg),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, session_id, data],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let messages = parse_micode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            2,
+            "desktop and CLI assistant rows must both survive parse: {:?}",
+            messages
+                .iter()
+                .map(|m| (m.session_id.as_str(), m.client.as_str()))
+                .collect::<Vec<_>>()
+        );
+        let by_session: std::collections::HashMap<&str, &str> = messages
+            .iter()
+            .map(|m| (m.session_id.as_str(), m.client.as_str()))
+            .collect();
+        assert_eq!(
+            by_session.get("ses_desktop"),
+            Some(&MICODE_DESKTOP_CLIENT_ID)
+        );
+        assert_eq!(by_session.get("ses_cli"), Some(&MICODE_CLIENT_ID));
+    }
+
+    #[test]
+    fn test_is_desktop_session_version() {
+        assert!(is_desktop_session_version("desktop-5198ff5"));
+        assert!(is_desktop_session_version("Desktop-abc"));
+        assert!(is_desktop_session_version("  desktop-abc  "));
+        assert!(!is_desktop_session_version("1.2.3"));
+        assert!(!is_desktop_session_version("latest"));
+        assert!(!is_desktop_session_version("desktopapp"));
+    }
+
+    #[test]
+    fn test_parse_micode_sqlite_keeps_cross_surface_identical_fingerprints() {
+        // Regression: desktop and CLI turns can share every fingerprint field
+        // (model, tokens, cost, agent, timestamps). Surface-aware merge must
+        // keep both; post-hoc remap after Merge would label only the retained
+        // row and hide the other surface from its client filter.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_micode.db");
+        let conn = create_micode_sqlite_db(&db_path);
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                version TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ses_desktop",
+                "/Users/alice/desktop-repo",
+                "desktop-5198ff5"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, version) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["ses_cli", "/Users/alice/cli-repo", "1.0.0"],
+        )
+        .unwrap();
+        // Identical usage fingerprint; distinct message ids.
+        for (row_id, session_id, msg_id) in [
+            ("row_desktop", "ses_desktop", "msg_desktop"),
+            ("row_cli", "ses_cli", "msg_cli"),
+        ] {
+            let data = format!(
+                r#"{{
+                    "id": "{msg_id}",
+                    "role": "assistant",
+                    "modelID": "mimo-x-pro-preview",
+                    "providerID": "xiaomi",
+                    "cost": 0,
+                    "agent": "build",
+                    "tokens": {{
+                        "input": 1000,
+                        "output": 200,
+                        "reasoning": 0,
+                        "cache": {{ "read": 0, "write": 0 }}
+                    }},
+                    "time": {{ "created": 1700000000000.0 }}
+                }}"#
+            );
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, session_id, data],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let messages = parse_micode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            2,
+            "identical fingerprints on different surfaces must not merge: {:?}",
+            messages
+                .iter()
+                .map(|m| (m.session_id.as_str(), m.client.as_str()))
+                .collect::<Vec<_>>()
+        );
+        let by_session: std::collections::HashMap<&str, &str> = messages
+            .iter()
+            .map(|m| (m.session_id.as_str(), m.client.as_str()))
+            .collect();
+        assert_eq!(
+            by_session.get("ses_desktop"),
+            Some(&MICODE_DESKTOP_CLIENT_ID)
+        );
+        assert_eq!(by_session.get("ses_cli"), Some(&MICODE_CLIENT_ID));
     }
 
     #[test]

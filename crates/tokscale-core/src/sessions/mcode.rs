@@ -1,11 +1,10 @@
 //! MiniMax Code headless stream parser.
 //!
 //! `mcode exec --output-format stream-json` emits projected Runtime events as
-//! JSONL followed by one `exec.result`. Assistant `message` events carry
-//! authoritative per-call usage, while the final result carries the actual
-//! provider/model selected for the turn. Usage is buffered until that result
-//! arrives so Tokscale never guesses a model from display text or local
-//! configuration.
+//! JSONL. Legacy assistant `message` events carry usage and are paired with a
+//! final `exec.result`; envelope streams carry both usage and model identity in
+//! `exec.completed.result`. Tokscale never guesses a model from display text or
+//! local configuration.
 
 use super::utils::{file_modified_timestamp_ms, lossy_lines};
 use super::UnifiedMessage;
@@ -23,9 +22,10 @@ struct PendingUsage {
 
 /// Parse one Tokscale-captured MiniMax Code JSONL stream.
 ///
-/// A partial stream without a model-bearing `exec.result` is deliberately
-/// ignored. The token counts are still present in that case, but attributing
-/// them to a guessed model could attach the wrong price.
+/// A partial stream without a model-bearing final result (`exec.result` or
+/// `exec.completed.result`) is deliberately ignored. The token counts are
+/// still present in that case, but attributing them to a guessed model could
+/// attach the wrong price.
 pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
@@ -36,11 +36,10 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
     // `lines().map_while(Result::ok)` ends the iteration at the first line that
     // is not valid UTF-8 rather than skipping it (#1031). That is worse here
-    // than in most parsers: usage is buffered in `pending_by_turn` and only
-    // flushed when the trailing `exec.result` is seen, so one stray byte
-    // anywhere before it drops the whole capture to zero messages instead of
-    // truncating a tail. `lossy_lines` keeps a bad byte local to its own line
-    // and strips a leading BOM.
+    // than in most parsers: legacy usage is buffered until the trailing final
+    // result is seen, so one stray byte anywhere before it drops the whole capture
+    // to zero messages instead of truncating a tail. `lossy_lines` keeps a bad byte
+    // local to its own line and strips a leading BOM.
     for line in lossy_lines(BufReader::new(file)) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -83,7 +82,7 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
                     .or_default()
                     .push(PendingUsage { timestamp, tokens });
             }
-            Some("exec.result") => {
+            Some(event_type) if matches!(event_type, "exec.result" | "exec.completed") => {
                 let Some(turn_id) = value
                     .get("turnId")
                     .and_then(Value::as_str)
@@ -100,7 +99,15 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 else {
                     continue;
                 };
-                let Some(model) = value.get("model") else {
+                let result = if event_type == "exec.completed" {
+                    let Some(result) = value.get("result") else {
+                        continue;
+                    };
+                    result
+                } else {
+                    &value
+                };
+                let Some(model) = result.get("model") else {
                     continue;
                 };
                 let Some(provider_id) = model
@@ -119,8 +126,29 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 else {
                     continue;
                 };
-                let Some(pending) = pending_by_turn.remove(turn_id) else {
-                    continue;
+                let pending = if event_type == "exec.completed" {
+                    let Some(usage) = result.get("usage") else {
+                        continue;
+                    };
+                    let tokens = tokens_from_usage(usage);
+                    if tokens.total() == 0 {
+                        continue;
+                    }
+                    let timestamp = normalize_timestamp(
+                        value
+                            .get("timestampMs")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(fallback_timestamp),
+                    );
+                    if timestamp <= 0 {
+                        continue;
+                    }
+                    vec![PendingUsage { timestamp, tokens }]
+                } else {
+                    let Some(pending) = pending_by_turn.remove(turn_id) else {
+                        continue;
+                    };
+                    pending
                 };
 
                 for (index, usage) in pending.into_iter().enumerate() {
@@ -246,6 +274,39 @@ mod tests {
         assert_eq!(messages[1].tokens.output, 5);
         assert_eq!(messages[1].tokens.cache_write, 7);
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn parses_envelope_final_result() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schemaVersion":1,"timestampMs":1789890580193,"sessionId":"session-1","turnId":"turn-1","type":"turn.completed","model":{{"providerId":"minimax","modelId":"MiniMax-M3"}},"usage":{{"inputTokens":12710,"outputTokens":24,"reasoningTokens":9,"cacheReadTokens":128,"cacheWriteTokens":7,"totalTokens":12734}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        assert!(parse_mcode_file(file.path()).is_empty());
+
+        writeln!(
+            file,
+            r#"{{"schemaVersion":1,"timestampMs":1789890580193,"sessionId":"session-1","turnId":"turn-1","type":"exec.completed","result":{{"schemaVersion":1,"type":"exec.result","sessionId":"session-1","turnId":"turn-1","status":"succeeded","model":{{"providerId":"minimax","modelId":"MiniMax-M3"}},"usage":{{"inputTokens":12710,"outputTokens":24,"reasoningTokens":9,"cacheReadTokens":128,"cacheWriteTokens":7,"totalTokens":12734}},"durationMs":10}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_mcode_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "minimax");
+        assert_eq!(messages[0].model_id, "MiniMax-M3");
+        assert_eq!(messages[0].session_id, "session-1");
+        assert_eq!(messages[0].tokens.input, 12_710);
+        assert_eq!(messages[0].tokens.output, 24);
+        assert_eq!(messages[0].tokens.cache_read, 128);
+        assert_eq!(messages[0].tokens.cache_write, 7);
+        assert_eq!(messages[0].tokens.reasoning, 0);
+        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert!(messages[0].is_turn_start);
     }
 
     #[test]
