@@ -4131,13 +4131,25 @@ mod tests {
         })
     }
 
-    /// Seeds one labelled marker row per transcript into shards whose envelope
-    /// carries `seeded_version`, and asserts each shard then reads the way the
-    /// version implies: stale when the version is a predecessor's, current when
-    /// it is the running one. The two directions are what a *mixed* cache pairs
-    /// in a single load; see [`seed_dsh_cache_at_version`] for why writing the
-    /// shard directly rather than through the cache API is the point.
-    fn seed_dsh_marker_shards(transcripts: &[PathBuf], seeded_version: u32, label: &str) {
+    /// Seeds one marker row per transcript into shards whose envelope carries
+    /// `seeded_version`, and asserts each shard then reads the way the version
+    /// implies: stale when it is a predecessor's, current when it is the
+    /// running one. [`seed_dsh_cache_at_version`] and the mixed-shard test both
+    /// build their caches through this; the two directions are what a *mixed*
+    /// cache pairs in a single load.
+    ///
+    /// Going through `write_shard_with_limit` instead of the cache API is the
+    /// point. `save_if_dirty` stamps every shard it writes with the running
+    /// identity, so a stale entry seeded that way would land inside a
+    /// current-identity envelope and only the per-entry checks could reject it.
+    /// A predecessor's real cache is rejected one level earlier —
+    /// `read_shard_with_limit` compares the envelope before it decodes anything
+    /// — and that earlier level is what an upgrading user actually hits.
+    fn seed_dsh_shards_at_version(
+        transcripts: &[PathBuf],
+        seeded_version: u32,
+        marker: UnifiedMessage,
+    ) {
         let identity = CacheIdentity::for_client(ClientId::Dsh);
         let seeded_identity = CacheIdentity {
             namespace: identity.namespace,
@@ -4149,7 +4161,7 @@ mod tests {
                 seeded_identity,
                 path,
                 SourceFingerprint::from_path(path).expect("an installed transcript fingerprints"),
-                vec![named_marker_row(label)],
+                vec![marker.clone()],
                 Vec::new(),
                 None,
             );
@@ -4164,6 +4176,10 @@ mod tests {
             let path = shard_path(&shard_root, shard_key);
             ensure_cache_dir(path.parent().unwrap()).unwrap();
             write_shard_with_limit(&path, seeded_identity, entries, MAX_CACHE_SHARD_BYTES).unwrap();
+            // Assert the precondition rather than assume it: a helper that
+            // quietly wrote the wrong envelope would leave the scan with nothing
+            // to reject (stale) or nothing to serve (current), and the test
+            // would pass without running what it claims to cover.
             let status = read_shard(&path, identity);
             if expect_stale {
                 assert!(
@@ -4292,53 +4308,12 @@ mod tests {
         })
     }
 
-    /// Writes one marker entry per transcript into shards whose *envelope*
-    /// carries `parser_version`, the identity a released build wrote them under.
-    ///
-    /// Going through `write_shard_with_limit` instead of the cache API is the
-    /// whole point. `save_if_dirty` stamps every shard it writes with
-    /// `CacheIdentity::current_for_namespace`, so a stale entry seeded that way
-    /// lands on disk inside a current-identity envelope and only the per-entry
-    /// checks can reject it. A predecessor's real cache is rejected one level
-    /// earlier — `read_shard_with_limit` compares the envelope before it
-    /// decodes anything — and that earlier level is what an upgrading user
-    /// actually hits.
+    /// The predecessor-only seeding the existing gate uses: an unlabelled
+    /// marker at a retired identity. Delegates to
+    /// [`seed_dsh_shards_at_version`], which carries the rationale for writing
+    /// the shard directly.
     fn seed_dsh_cache_at_version(transcripts: &[PathBuf], parser_version: u32) {
-        let identity = CacheIdentity::for_client(ClientId::Dsh);
-        let seeded_identity = CacheIdentity {
-            namespace: identity.namespace,
-            parser_version,
-        };
-        let mut by_shard: HashMap<CacheShardKey, Vec<CachedSourceEntry>> = HashMap::new();
-        for path in transcripts {
-            let entry = CachedSourceEntry::new(
-                seeded_identity,
-                path,
-                SourceFingerprint::from_path(path).expect("an installed transcript fingerprints"),
-                vec![cache_only_marker_row()],
-                Vec::new(),
-                None,
-            );
-            by_shard
-                .entry(CacheKey::from_entry(&entry).shard())
-                .or_default()
-                .push(entry);
-        }
-        let shard_root = cache_shard_dir().expect("a sandboxed shard directory");
-        for (shard_key, entries) in &by_shard {
-            let path = shard_path(&shard_root, shard_key);
-            ensure_cache_dir(path.parent().unwrap()).unwrap();
-            write_shard_with_limit(&path, seeded_identity, entries, MAX_CACHE_SHARD_BYTES).unwrap();
-            // Assert the precondition rather than assume it. A seeding helper
-            // that quietly wrote a current-identity shard would leave the scan
-            // below with nothing to reject, and the test would pass by never
-            // running the migration it claims to cover.
-            assert!(
-                matches!(read_shard(&path, identity), ShardReadStatus::Stale),
-                "a shard seeded at parser version {parser_version} must read as stale \
-                 under the running identity"
-            );
-        }
+        seed_dsh_shards_at_version(transcripts, parser_version, cache_only_marker_row());
     }
 
     #[test]
@@ -4732,11 +4707,11 @@ mod tests {
         )
         .unwrap();
 
-        seed_dsh_marker_shards(&stale_transcripts, 4, "stale");
-        seed_dsh_marker_shards(
+        seed_dsh_shards_at_version(&stale_transcripts, 4, named_marker_row("stale"));
+        seed_dsh_shards_at_version(
             std::slice::from_ref(&served_path),
             current_identity.parser_version,
-            "served",
+            named_marker_row("served"),
         );
 
         let report = scan_dsh(source_home.path());
