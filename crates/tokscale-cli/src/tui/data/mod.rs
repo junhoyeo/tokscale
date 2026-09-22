@@ -1356,9 +1356,6 @@ fn parse_date(date_str: &str) -> Option<NaiveDate> {
 /// - Spring-forward gap (midnight doesn't exist): fall back to UTC midnight
 ///   rather than silently returning 0 and losing the session boundary.
 fn message_timestamp_ms(msg: &UnifiedMessage) -> i64 {
-    if tokscale_core::recovery::is_daily(msg) {
-        return 0;
-    }
     if msg.timestamp > 0 {
         return msg.timestamp;
     }

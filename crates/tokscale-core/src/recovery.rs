@@ -4,7 +4,7 @@
 use crate::{CostSource, TokenBreakdown, UnifiedMessage};
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 struct Archive {
@@ -51,21 +51,79 @@ fn finite(m: &UnifiedMessage) -> bool {
         && m.cost.is_finite()
         && m.cost >= 0.0
         && m.message_count >= 0
-        && m.date.len() == 10
+        && chrono::NaiveDate::parse_from_str(&m.date, "%Y-%m-%d").is_ok()
 }
-fn signature(m: &UnifiedMessage) -> (String, String, i64, i64, i64, i64, i64) {
+fn signature(m: &UnifiedMessage) -> (String, String, String, i64, i64, i64, i64, i64, i64) {
     (
         m.client.clone(),
         m.session_id.clone(),
+        crate::model_name_for_grouping(&m.client, &m.provider_id, &m.model_id),
         m.timestamp / 1000,
         m.tokens.input,
-        m.tokens.output + m.tokens.reasoning,
+        m.tokens.output,
+        m.tokens.reasoning,
         m.tokens.cache_read,
         m.tokens.cache_write,
     )
 }
 
-pub fn apply(messages: &mut Vec<UnifiedMessage>, home: &str, clients: &[String]) {
+/// True when the ledger header is version 1 for this home.
+///
+/// The check reads only the prefix before `messages`, so a foreign or corrupt
+/// file does not force the local graph off the streaming path. `version` and
+/// `home` have to appear within the first 64KiB.
+pub fn applicable(home: &str) -> bool {
+    if !enabled() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path()) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 65_536];
+    let Ok(n) = std::io::Read::read(&mut std::io::BufReader::new(file), &mut buf) else {
+        return false;
+    };
+    header_matches(&buf[..n], home)
+}
+
+fn header_matches(bytes: &[u8], home: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Some(messages_at) = text.find("\"messages\"") else {
+        return false;
+    };
+    let mut prefix = text[..messages_at]
+        .trim_end()
+        .trim_end_matches(',')
+        .to_string();
+    prefix.push('}');
+    #[derive(Deserialize)]
+    struct Header {
+        version: u32,
+        home: String,
+    }
+    let Ok(header) = serde_json::from_str::<Header>(&prefix) else {
+        return false;
+    };
+    header.version == 1 && Path::new(&header.home) == Path::new(home)
+}
+
+fn align_dates(rows: &mut [UnifiedMessage], timezone: Option<&crate::bucket_tz::BucketTimezone>) {
+    let Some(timezone) = timezone.filter(|timezone| timezone.is_pinned()) else {
+        return;
+    };
+    for row in rows {
+        row.rebucket_date(timezone);
+    }
+}
+
+pub fn apply(
+    messages: &mut Vec<UnifiedMessage>,
+    home: &str,
+    clients: &[String],
+    timezone: Option<&crate::bucket_tz::BucketTimezone>,
+) {
     if !enabled() {
         return;
     }
@@ -73,10 +131,12 @@ pub fn apply(messages: &mut Vec<UnifiedMessage>, home: &str, clients: &[String])
         let f = std::fs::File::open(path())?;
         Ok(serde_json::from_reader(std::io::BufReader::new(f))?)
     })();
-    let archive = match result {
-        Ok(a) if a.version == 1 && PathBuf::from(&a.home) == PathBuf::from(home) => a,
+    let mut archive = match result {
+        Ok(a) if a.version == 1 && Path::new(&a.home) == Path::new(home) => a,
         _ => return,
     };
+    align_dates(&mut archive.messages, timezone);
+    align_dates(&mut archive.daily_floors, timezone);
     let all = clients.is_empty();
     let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
     merge(messages, archive.messages, archive.daily_floors, |m| {
@@ -269,5 +329,64 @@ mod tests {
             false
         });
         assert!(n.is_empty());
+    }
+    #[test]
+    fn invalid_calendar_date_is_dropped() {
+        let mut bad = row("bad-date", 20);
+        bad.date = "2026-99-99".into();
+        let mut n = vec![];
+        merge(&mut n, vec![bad], vec![], |_| true);
+        assert!(n.is_empty());
+    }
+    #[test]
+    fn same_second_different_model_or_reasoning_both_restore() {
+        let mut output = row("out", 0);
+        output.tokens.output = 20;
+        let mut reasoning = row("reason", 0);
+        reasoning.session_id = output.session_id.clone();
+        reasoning.timestamp = output.timestamp;
+        reasoning.tokens.reasoning = 20;
+        let mut other_model = row("model", 0);
+        other_model.session_id = output.session_id.clone();
+        other_model.timestamp = output.timestamp;
+        other_model.model_id = "gpt-5.5".into();
+        other_model.tokens.output = 20;
+        let mut n = vec![];
+        merge(&mut n, vec![output, reasoning, other_model], vec![], |_| {
+            true
+        });
+        assert_eq!(n.len(), 3);
+    }
+    #[test]
+    fn pinned_zone_moves_recovered_request_before_floor_gap() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-02-02T00:30:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let mut recovered = row("missing", 10);
+        recovered.timestamp = ts;
+        recovered.date = "2026-02-02".into();
+        let mut floor = row("floor", 10);
+        floor.timestamp = 0;
+        floor.date = "2026-02-02".into();
+        let timezone =
+            crate::bucket_tz::BucketTimezone::from_pinned_name(Some("America/Los_Angeles"));
+        let mut messages = vec![recovered];
+        let mut floors = vec![floor];
+        align_dates(&mut messages, Some(&timezone));
+        align_dates(&mut floors, Some(&timezone));
+        let mut n = vec![];
+        merge(&mut n, messages, floors, |_| true);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].date, "2026-02-01");
+        assert_eq!(n[1].date, "2026-02-02");
+        assert_eq!(n.iter().map(|m| total(&m.tokens)).sum::<i64>(), 20);
+    }
+    #[test]
+    fn header_requires_version_and_same_home() {
+        let raw = br#"{"version":1,"home":"C:\\Users\\15pro","created_at":"2026-09-14T00:00:00Z","policy":"local","messages":[]}"#;
+        assert!(header_matches(raw, r"C:\Users\15pro"));
+        assert!(!header_matches(raw, r"D:\other"));
+        let wrong = br#"{"version":2,"home":"C:\\Users\\15pro","messages":[]}"#;
+        assert!(!header_matches(wrong, r"C:\Users\15pro"));
     }
 }

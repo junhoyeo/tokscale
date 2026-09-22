@@ -14,8 +14,8 @@ pub mod opencode_model_name;
 mod parser;
 pub mod paths;
 pub mod pricing;
-pub mod recovery;
 mod provider_identity;
+pub mod recovery;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
@@ -979,7 +979,13 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         cache_policy,
         &mut messages,
     );
-    recovery::apply(&mut messages, home_dir, clients);
+    let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
+    recovery::apply(
+        &mut messages,
+        home_dir,
+        clients,
+        timezone.is_pinned().then_some(&timezone),
+    );
     messages
 }
 
@@ -4496,7 +4502,9 @@ async fn generate_graph_with_loaded_pricing(
     // applies the same date filters per message and drops each one after it
     // has landed in the day map and produced its session span.
     let mut sink = GraphSink::new(Some(&options), pricing, pricing_requirement);
-    if matches!(pricing_requirement, GraphPricingRequirement::Lenient) && recovery::enabled() {
+    if matches!(pricing_requirement, GraphPricingRequirement::Lenient)
+        && recovery::applicable(&home_dir)
+    {
         // Local recovery requires native-session reconciliation. Submission
         // always streams only the verifiable source messages.
         for message in parse_all_messages_with_pricing_with_env_strategy(
