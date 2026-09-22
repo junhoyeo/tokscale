@@ -69,9 +69,10 @@ fn signature(m: &UnifiedMessage) -> (String, String, String, i64, i64, i64, i64,
 
 /// True when the ledger header is version 1 for this home.
 ///
-/// The check reads only the prefix before `messages`, so a foreign or corrupt
-/// file does not force the local graph off the streaming path. `version` and
-/// `home` have to appear within the first 64KiB.
+/// Only the top-level `version` and `home` are inspected, in either order.
+/// `messages` may be absent. Once both fields are known the rest of the file
+/// is left unread, so a foreign home or another version keeps the local graph
+/// on the streaming path.
 pub fn applicable(home: &str) -> bool {
     if !enabled() {
         return false;
@@ -79,34 +80,207 @@ pub fn applicable(home: &str) -> bool {
     let Ok(file) = std::fs::File::open(path()) else {
         return false;
     };
-    let mut buf = vec![0u8; 65_536];
-    let Ok(n) = std::io::Read::read(&mut std::io::BufReader::new(file), &mut buf) else {
-        return false;
-    };
-    header_matches(&buf[..n], home)
+    header_matches(file, home)
 }
 
-fn header_matches(bytes: &[u8], home: &str) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
+fn header_matches(reader: impl std::io::Read, home: &str) -> bool {
+    let Some((version, found_home)) = read_header(&mut Scan::new(reader)) else {
         return false;
     };
-    let Some(messages_at) = text.find("\"messages\"") else {
-        return false;
-    };
-    let mut prefix = text[..messages_at]
-        .trim_end()
-        .trim_end_matches(',')
-        .to_string();
-    prefix.push('}');
-    #[derive(Deserialize)]
-    struct Header {
-        version: u32,
-        home: String,
+    version == 1 && Path::new(&found_home) == Path::new(home)
+}
+
+struct Scan<R> {
+    inner: std::io::BufReader<R>,
+    undone: Option<u8>,
+}
+
+impl<R: std::io::Read> Scan<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            inner: std::io::BufReader::new(reader),
+            undone: None,
+        }
     }
-    let Ok(header) = serde_json::from_str::<Header>(&prefix) else {
-        return false;
-    };
-    header.version == 1 && Path::new(&header.home) == Path::new(home)
+
+    fn next(&mut self) -> Option<u8> {
+        if let Some(byte) = self.undone.take() {
+            return Some(byte);
+        }
+        let mut buf = [0u8; 1];
+        match std::io::Read::read(&mut self.inner, &mut buf) {
+            Ok(1) => Some(buf[0]),
+            _ => None,
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        let byte = self.next()?;
+        self.undone = Some(byte);
+        Some(byte)
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.next();
+        }
+    }
+}
+
+fn read_header(scan: &mut Scan<impl std::io::Read>) -> Option<(u32, String)> {
+    scan.skip_ws();
+    if scan.next() != Some(b'{') {
+        return None;
+    }
+    let mut version = None;
+    let mut found_home = None;
+    loop {
+        if let (Some(version), Some(found_home)) = (version, found_home.clone()) {
+            return Some((version, found_home));
+        }
+        scan.skip_ws();
+        match scan.peek() {
+            Some(b'}') => break,
+            Some(b',') => {
+                scan.next();
+                continue;
+            }
+            Some(b'"') => {}
+            _ => return None,
+        }
+        let key = parse_json_string(scan)?;
+        scan.skip_ws();
+        if scan.next() != Some(b':') {
+            return None;
+        }
+        match key.as_str() {
+            "version" => version = Some(parse_u32(scan)?),
+            "home" => found_home = Some(parse_json_string(scan)?),
+            _ => skip_json_value(scan)?,
+        }
+    }
+    match (version, found_home) {
+        (Some(version), Some(found_home)) => Some((version, found_home)),
+        _ => None,
+    }
+}
+
+fn parse_u32(scan: &mut Scan<impl std::io::Read>) -> Option<u32> {
+    scan.skip_ws();
+    let mut value: u32 = 0;
+    let mut any = false;
+    while let Some(byte @ b'0'..=b'9') = scan.peek() {
+        any = true;
+        scan.next();
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    if !any || matches!(scan.peek(), Some(b'.' | b'e' | b'E')) {
+        return None;
+    }
+    Some(value)
+}
+
+fn parse_json_string(scan: &mut Scan<impl std::io::Read>) -> Option<String> {
+    scan.skip_ws();
+    if scan.next() != Some(b'"') {
+        return None;
+    }
+    let mut out = Vec::new();
+    loop {
+        match scan.next()? {
+            b'"' => break,
+            b'\\' => match scan.next()? {
+                b'"' => out.push(b'"'),
+                b'\\' => out.push(b'\\'),
+                b'/' => out.push(b'/'),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0c),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'u' => {
+                    let mut hex = [0u8; 4];
+                    for slot in &mut hex {
+                        *slot = scan.next()?;
+                    }
+                    let code = u32::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?;
+                    let ch = char::from_u32(code)?;
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+                _ => return None,
+            },
+            byte => out.push(byte),
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn skip_json_value(scan: &mut Scan<impl std::io::Read>) -> Option<()> {
+    scan.skip_ws();
+    match scan.peek()? {
+        b'"' => {
+            parse_json_string(scan)?;
+        }
+        b'{' => skip_json_container(scan, b'{', b'}')?,
+        b'[' => skip_json_container(scan, b'[', b']')?,
+        b't' => skip_literal(scan, b"true")?,
+        b'f' => skip_literal(scan, b"false")?,
+        b'n' => skip_literal(scan, b"null")?,
+        b'-' | b'0'..=b'9' => skip_number(scan)?,
+        _ => return None,
+    }
+    Some(())
+}
+
+fn skip_json_container(scan: &mut Scan<impl std::io::Read>, open: u8, close: u8) -> Option<()> {
+    if scan.next() != Some(open) {
+        return None;
+    }
+    loop {
+        scan.skip_ws();
+        if scan.peek() == Some(close) {
+            scan.next();
+            return Some(());
+        }
+        if scan.peek() == Some(b',') {
+            scan.next();
+            continue;
+        }
+        if open == b'{' {
+            parse_json_string(scan)?;
+            scan.skip_ws();
+            if scan.next() != Some(b':') {
+                return None;
+            }
+        }
+        skip_json_value(scan)?;
+    }
+}
+
+fn skip_literal(scan: &mut Scan<impl std::io::Read>, literal: &[u8]) -> Option<()> {
+    for expected in literal {
+        if scan.next() != Some(*expected) {
+            return None;
+        }
+    }
+    Some(())
+}
+
+fn skip_number(scan: &mut Scan<impl std::io::Read>) -> Option<()> {
+    scan.skip_ws();
+    if scan.peek() == Some(b'-') {
+        scan.next();
+    }
+    let mut any = false;
+    while matches!(
+        scan.peek(),
+        Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+    ) {
+        any = true;
+        scan.next();
+    }
+    any.then_some(())
 }
 
 fn align_dates(rows: &mut [UnifiedMessage], timezone: Option<&crate::bucket_tz::BucketTimezone>) {
@@ -384,9 +558,16 @@ mod tests {
     #[test]
     fn header_requires_version_and_same_home() {
         let raw = br#"{"version":1,"home":"C:\\Users\\15pro","created_at":"2026-09-14T00:00:00Z","policy":"local","messages":[]}"#;
-        assert!(header_matches(raw, r"C:\Users\15pro"));
-        assert!(!header_matches(raw, r"D:\other"));
+        assert!(header_matches(&raw[..], r"C:\Users\15pro"));
+        assert!(!header_matches(&raw[..], r"D:\other"));
         let wrong = br#"{"version":2,"home":"C:\\Users\\15pro","messages":[]}"#;
-        assert!(!header_matches(wrong, r"C:\Users\15pro"));
+        assert!(!header_matches(&wrong[..], r"C:\Users\15pro"));
+        let messages_first =
+            br#"{"messages":[{"client":"codex"}],"daily_floors":[],"home":"C:\\Users\\15pro","version":1}"#;
+        assert!(header_matches(&messages_first[..], r"C:\Users\15pro"));
+        let floors_only = br#"{"version":1,"home":"C:\\Users\\15pro","daily_floors":[]}"#;
+        assert!(header_matches(&floors_only[..], r"C:\Users\15pro"));
+        let truncated = br#"{"version":1,"home":"C:\\Users\\15pro","messages":"#;
+        assert!(header_matches(&truncated[..], r"C:\Users\15pro"));
     }
 }
