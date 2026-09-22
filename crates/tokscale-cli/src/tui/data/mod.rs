@@ -892,7 +892,9 @@ impl DataLoader {
             // Hourly aggregation: derive hour from timestamp (Unix ms),
             // falling back to msg.date 00:00 when timestamp is missing/zero
             // so we don't silently drop messages (matches CLI bucketing).
-            if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, &msg.date) {
+            if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, &msg.date)
+                .filter(|_| !tokscale_core::recovery::is_daily(msg))
+            {
                 let hourly_entry = hourly_map.entry(hour_dt).or_insert_with(|| HourlyUsage {
                     datetime: hour_dt,
                     tokens: TokenBreakdown::default(),
@@ -980,6 +982,7 @@ impl DataLoader {
             // the tab do not pay the per-minute bucketing cost.
             let minute_bucket = if self.minutely_enabled {
                 minute_bucket_with_fallback(msg.timestamp, &msg.date)
+                    .filter(|_| !tokscale_core::recovery::is_daily(msg))
             } else {
                 None
             };
@@ -1353,6 +1356,9 @@ fn parse_date(date_str: &str) -> Option<NaiveDate> {
 /// - Spring-forward gap (midnight doesn't exist): fall back to UTC midnight
 ///   rather than silently returning 0 and losing the session boundary.
 fn message_timestamp_ms(msg: &UnifiedMessage) -> i64 {
+    if tokscale_core::recovery::is_daily(msg) {
+        return 0;
+    }
     if msg.timestamp > 0 {
         return msg.timestamp;
     }
