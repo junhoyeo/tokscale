@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -120,8 +120,9 @@ impl SettingsOrigin {
 ///
 /// `rename(2)` replaces a symlink itself rather than the file it points at, so
 /// renaming onto a linked settings.json turns the link into a regular file. A
-/// dangling or unreadable link keeps the link path, where the rename is the only
-/// possible write.
+/// link that is dangling, unreadable, or does not point at a regular file keeps
+/// the link path: there is no file to write through, and a rename at the link
+/// path is then the only write that can succeed.
 fn symlink_target(path: &Path) -> PathBuf {
     let is_symlink = fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -129,7 +130,23 @@ fn symlink_target(path: &Path) -> PathBuf {
     if !is_symlink {
         return path.to_path_buf();
     }
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    match fs::canonicalize(path) {
+        Ok(target) if fs::metadata(&target).map(|m| m.is_file()).unwrap_or(false) => target,
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Refuse a staged write when the link no longer resolves to the staged target.
+///
+/// The target is resolved before the temp file is staged, and the snapshot check
+/// compares contents only: a link retargeted at a file with identical contents
+/// would otherwise land the rename on the file the link used to point at, and
+/// leave the file it points at now stale.
+fn verify_target_unchanged(path: &Path, staged: &Path) -> Result<()> {
+    if symlink_target(path) != staged {
+        bail!("settings.json now resolves to a different file; refusing to replace it");
+    }
+    Ok(())
 }
 
 impl SettingsFileSnapshot {
@@ -731,19 +748,34 @@ impl Settings {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         let tmp_filename = format!(".settings.{}.{:x}.tmp", std::process::id(), nanos);
-        let temp_path = write_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(&tmp_filename);
+        let staging_dir = write_path.parent().unwrap_or(std::path::Path::new("."));
+        let temp_path = staging_dir.join(&tmp_filename);
+        // A write routed through a link is staged in the target's directory,
+        // which can refuse it (read-only mount, store path, checkout owned by
+        // another user). Name that directory instead of surfacing a bare errno.
+        let write_through_link = write_path.as_path() != path;
 
         let write_result = (|| -> Result<()> {
-            let mut file = fs::File::create(&temp_path)?;
+            let mut file = fs::File::create(&temp_path).with_context(|| {
+                if write_through_link {
+                    format!(
+                        "could not stage a settings write in {}, the directory holding the file that {} links to",
+                        staging_dir.display(),
+                        path.display()
+                    )
+                } else {
+                    format!("could not create {}", temp_path.display())
+                }
+            })?;
             use std::io::Write;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
             // Check after staging and syncing: edits made during those slower
             // operations must leave the destination untouched as well.
             origin.verify_unchanged()?;
+            // The snapshot check compares contents; the link itself must still
+            // name the file the write was staged against.
+            verify_target_unchanged(path, &write_path)?;
             tokscale_core::fs_atomic::replace_file(&temp_path, &write_path)?;
             Ok(())
         })();
@@ -1434,6 +1466,38 @@ mod tests {
 
         let saved: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.color_palette, "green");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_is_rejected_when_settings_json_is_relinked() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let tracked = temp.path().join("tracked.json");
+        let other = temp.path().join("other.json");
+        fs::write(&tracked, r#"{"colorPalette":"blue"}"#).unwrap();
+        fs::write(&other, r#"{"colorPalette":"blue"}"#).unwrap();
+        std::os::unix::fs::symlink(&tracked, &path).unwrap();
+
+        // Staged while the link points at `tracked`.
+        let staged = symlink_target(&path);
+        verify_target_unchanged(&path, &staged).unwrap();
+
+        // A dotfile manager retargets the link before the rename. The two files
+        // hold identical contents, so the snapshot check cannot catch this.
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(verify_target_unchanged(&path, &staged).is_err());
+
+        // Unpacking a regular file over the link is the same hazard.
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, r#"{"colorPalette":"blue"}"#).unwrap();
+        assert!(verify_target_unchanged(&path, &staged).is_err());
+
+        // Without a link the staged target is the settings path itself.
+        let plain = temp.path().join("plain.json");
+        fs::write(&plain, "{}").unwrap();
+        verify_target_unchanged(&plain, &symlink_target(&plain)).unwrap();
     }
 
     #[test]
