@@ -198,22 +198,40 @@ fn parse_json_string(scan: &mut Scan<impl std::io::Read>) -> Option<String> {
                 b'n' => out.push(b'\n'),
                 b'r' => out.push(b'\r'),
                 b't' => out.push(b'\t'),
-                b'u' => {
-                    let mut hex = [0u8; 4];
-                    for slot in &mut hex {
-                        *slot = scan.next()?;
-                    }
-                    let code = u32::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?;
-                    let ch = char::from_u32(code)?;
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                }
+                b'u' => push_unicode_escape(scan, &mut out)?,
                 _ => return None,
             },
             byte => out.push(byte),
         }
     }
     String::from_utf8(out).ok()
+}
+
+fn push_unicode_escape(scan: &mut Scan<impl std::io::Read>, out: &mut Vec<u8>) -> Option<()> {
+    let code = read_hex4(scan)?;
+    let ch = if (0xD800..=0xDBFF).contains(&code) {
+        if scan.next() != Some(b'\\') || scan.next() != Some(b'u') {
+            return None;
+        }
+        let low = read_hex4(scan)?;
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            return None;
+        }
+        char::from_u32(0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00)))?
+    } else {
+        char::from_u32(code)?
+    };
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    Some(())
+}
+
+fn read_hex4(scan: &mut Scan<impl std::io::Read>) -> Option<u32> {
+    let mut hex = [0u8; 4];
+    for slot in &mut hex {
+        *slot = scan.next()?;
+    }
+    u32::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()
 }
 
 fn skip_json_value(scan: &mut Scan<impl std::io::Read>) -> Option<()> {
@@ -569,5 +587,9 @@ mod tests {
         assert!(header_matches(&floors_only[..], r"C:\Users\15pro"));
         let truncated = br#"{"version":1,"home":"C:\\Users\\15pro","messages":"#;
         assert!(header_matches(&truncated[..], r"C:\Users\15pro"));
+        let surrogate = br#"{"messages":[{"title":"\uD83D\uDE00"}],"version":1,"home":"C:\\Users\\\uD83D\uDE00"}"#;
+        assert!(header_matches(&surrogate[..], "C:\\Users\\\u{1F600}"));
+        let lone = br#"{"version":1,"home":"\uD800"}"#;
+        assert!(!header_matches(&lone[..], "\u{1F600}"));
     }
 }
