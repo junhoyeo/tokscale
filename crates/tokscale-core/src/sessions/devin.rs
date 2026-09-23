@@ -38,6 +38,8 @@ struct DevinNodeMetadata {
     #[serde(default)]
     num_tokens: Option<i64>,
     #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     metrics: Option<DevinMetrics>,
     #[serde(default)]
     generation_model: Option<String>,
@@ -271,7 +273,22 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
             _ => recorded_timestamp,
         };
-        let dedup_key = format!("devin-cli:{session_id}:{row_id}");
+        // Devin CLI can persist the same assistant response in multiple
+        // message_nodes rows (for example, a transcript row with and without
+        // UI-only tool-call metadata). `row_id` differs between those copies,
+        // while `metadata.request_id` identifies the underlying API request.
+        // Keep row_id as a fallback for older records that lack that id.
+        let request_id = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.request_id.as_deref())
+            .map(str::trim)
+            .filter(|request_id| !request_id.is_empty());
+        let dedup_key = match request_id {
+            Some(request_id) => {
+                format!("devin-cli:{session_id}:request:{request_id}")
+            }
+            None => format!("devin-cli:{session_id}:row:{row_id}"),
+        };
         let mut unified = UnifiedMessage::new_with_dedup(
             "devin-cli",
             model_id,
@@ -694,6 +711,50 @@ mod tests {
         assert_eq!(msg.timestamp, 1_700_000_000_000 - 2846);
         assert_eq!(msg.duration_ms, Some(2846));
         assert_eq!(msg.workspace_key.as_deref(), Some("/Users/alice/project"));
+    }
+
+    #[test]
+    fn test_parse_devin_cli_sqlite_deduplicates_rows_by_request_id() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_session(&conn, "sess-1", "/Users/alice/project", "gpt-5");
+
+        // Devin stores some assistant responses twice, with the duplicate
+        // carrying UI-only metadata. Both rows represent the same API request.
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"request_id":"req-1","generation_model":"gpt-5","metrics":{"input_tokens":67,"output_tokens":103}}}"#,
+            1_700_000_000,
+        );
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"request_id":"req-1","generation_model":"gpt-5","metrics":{"input_tokens":67,"output_tokens":103},"extensions":{"chisel/tool_call_content":{}}}}"#,
+            1_700_000_000,
+        );
+        // Older records without request_id must retain distinct row-based keys.
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"generation_model":"gpt-5","metrics":{"input_tokens":10,"output_tokens":5}}}"#,
+            1_700_000_001,
+        );
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"generation_model":"gpt-5","metrics":{"input_tokens":20,"output_tokens":5}}}"#,
+            1_700_000_002,
+        );
+        drop(conn);
+
+        let messages = parse_devin_cli_sqlite(&db_path);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].tokens.input, messages[1].tokens.input);
+        assert_eq!(messages[0].tokens.output, messages[1].tokens.output);
+        assert_eq!(messages[0].dedup_key, messages[1].dedup_key);
+        assert_ne!(messages[2].dedup_key, messages[3].dedup_key);
     }
 
     #[test]
