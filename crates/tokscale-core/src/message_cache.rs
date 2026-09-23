@@ -1323,8 +1323,9 @@ fn parser_version(client: ClientId) -> u32 {
         // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
         // message timestamp is now back-calculated to the turn start
         // (created_at - total_time_ms) instead of the recorded (end-anchored)
-        // created_at. Follow-up to #890.
-        ClientId::DevinCli => 3,
+        // created_at. Follow-up to #890. v3->v4 deduplicates CLI copies by
+        // request_id instead of database row id.
+        ClientId::DevinCli => 4,
         // Desktop v1 parsed a non-ACP shape and did not track its CLI title
         // lookup; its timestamp handling is unaffected by the #890 follow-up.
         ClientId::DevinDesktop => 2,
@@ -3600,8 +3601,8 @@ mod tests {
     }
 
     #[test]
-    fn test_devin_parser_versions_invalidate_v1_entries() {
-        assert_eq!(parser_version(ClientId::DevinCli), 3);
+    fn test_devin_parser_versions_invalidate_v3_entries() {
+        assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
@@ -3639,7 +3640,7 @@ mod tests {
         // cache entries are also invalidated.
         assert_eq!(parser_version(ClientId::Junie), 3);
         assert_eq!(parser_version(ClientId::Jcode), 7);
-        assert_eq!(parser_version(ClientId::DevinCli), 3);
+        assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
         assert_eq!(parser_version(ClientId::Kiro), 2);
