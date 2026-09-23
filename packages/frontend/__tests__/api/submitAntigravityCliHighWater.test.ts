@@ -889,6 +889,169 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
     expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
   });
 
+  it("replaces (not freezes) when both legacy ledgers hold the same response", async () => {
+    // Pre-transition device: the same 240,000-token response was submitted
+    // from two family surfaces, so it sits in both legacy parser ledgers
+    // while the stored day breakdown correctly holds one copy. The legacy
+    // ledgers are interchangeable evidence of that single credited lifetime,
+    // so the first full-history family snapshot covering 240,000 must
+    // replace the layout -- not freeze against a summed 480,000.
+    const store = newStore();
+    const initial = submissionBody("antigravity-cli", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(initial);
+    expect((await post(initial)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const duplicatedLedger = (tokens: number, messages: number) => {
+      const cell: ClientBreakdownData = {
+        tokens,
+        cost: tokens / 1000,
+        input: tokens,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages,
+        models: {
+          "gemini-3-pro": {
+            tokens,
+            cost: tokens / 1000,
+            input: tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages,
+          },
+        },
+      };
+      return {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens,
+          input: tokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages,
+          inputIncludingCacheRead: tokens,
+        },
+        days: { "2026-08-07": cell },
+        observedDays: { "2026-08-07": cell },
+      };
+    };
+    store.device.parserStates["antigravity"] = duplicatedLedger(240_000, 12);
+    store.device.parserStates["antigravity-cli"] = duplicatedLedger(240_000, 12);
+
+    const transition = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+    );
+    installTx(store);
+    mockSubmit(transition);
+    const response = await post(transition);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    // Replace mode reconciles the family with a "Reconciled" notice; the
+    // freeze-mode "Preserved" warning must NOT appear.
+    expect(
+      json.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(false);
+    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
+    expect(
+      store.days[0].sourceBreakdown["antigravity-extension"].tokens,
+    ).toBe(240_000);
+    expect(store.device.parserStates["antigravity"]).toBeUndefined();
+    expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
+  });
+
+  it("credits only genuine growth after both legacy ledgers hold the same response", async () => {
+    // Same dual-ledger device, with the incoming family snapshot grown to
+    // 480,000 (240,000 genuinely new tokens). Coverage is the per-field max
+    // across the legacy ledgers (240,000), so the replace credits the real
+    // 480,000 -- with the ledgers summed, the same covers() check would pass
+    // against 480,000 and write the full snapshot over the stored 240,000,
+    // crediting the duplicated response twice.
+    const store = newStore();
+    const initial = submissionBody("antigravity-cli", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(initial);
+    expect((await post(initial)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const duplicatedLedger = (tokens: number, messages: number) => {
+      const cell: ClientBreakdownData = {
+        tokens,
+        cost: tokens / 1000,
+        input: tokens,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages,
+        models: {
+          "gemini-3-pro": {
+            tokens,
+            cost: tokens / 1000,
+            input: tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages,
+          },
+        },
+      };
+      return {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens,
+          input: tokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages,
+          inputIncludingCacheRead: tokens,
+        },
+        days: { "2026-08-07": cell },
+        observedDays: { "2026-08-07": cell },
+      };
+    };
+    store.device.parserStates["antigravity"] = duplicatedLedger(240_000, 12);
+    store.device.parserStates["antigravity-cli"] = duplicatedLedger(240_000, 12);
+
+    const grown = submissionBody("antigravity-extension", [
+      { date: "2026-08-07", tokens: 240_000, messages: 12 },
+      { date: "2026-08-10", tokens: 240_000, messages: 12 },
+    ]);
+    installTx(store);
+    mockSubmit(grown);
+    const response = await post(grown);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(json.metrics.totalTokens).toBe(480_000);
+    expect(storedTokens(store)).toBe(480_000);
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-07",
+      "2026-08-10",
+    ]);
+    expect(store.device.parserStates["antigravity"]).toBeUndefined();
+    expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
+  });
+
   it("keeps an unsupported incoming generation so an older parser cannot replace it", async () => {
     const store = newStore();
     const future = submissionBody(

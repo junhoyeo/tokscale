@@ -57,15 +57,6 @@ function coverage(cells: Array<ClientBreakdownData | undefined>): CoverageSummar
   return { total, models };
 }
 
-function addSummary(target: CoverageSummary, source: CoverageSummary): void {
-  addCoverage(target.total, source.total);
-  for (const [modelId, model] of source.models) {
-    const modelCoverage = target.models.get(modelId) ?? emptyCoverage();
-    addCoverage(modelCoverage, model);
-    target.models.set(modelId, modelCoverage);
-  }
-}
-
 function maximum(left: CoverageSummary, right: CoverageSummary): CoverageSummary {
   const summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
   for (const field of COVERAGE_FIELDS) {
@@ -99,7 +90,14 @@ export function antigravityPriorCoverage(
       ANTIGRAVITY_FAMILY.map((client) => ownValue(breakdown, client)),
     ),
   );
-  const parserLedger: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+  // Legacy per-client parser ledgers are interchangeable evidence of the same
+  // credited lifetime: devices that submitted the same response from two
+  // family surfaces pre-transition hold that response in BOTH ledgers, so
+  // summing the ledgers would demand 2x coverage and freeze the family
+  // channel forever (or double-credit on replace). Take the per-field max
+  // across them instead -- the same reconciliation maximum() applies to
+  // stored-vs-ledger.
+  let parserLedger: CoverageSummary | null = null;
   let unverifiable = false;
 
   for (const client of ANTIGRAVITY_FAMILY) {
@@ -125,9 +123,14 @@ export function antigravityPriorCoverage(
       }
       clientLedger.total[field] = Math.max(clientLedger.total[field], aggregate);
     }
-    addSummary(parserLedger, clientLedger);
+    parserLedger = parserLedger
+      ? maximum(parserLedger, clientLedger)
+      : clientLedger;
   }
 
-  const combined = maximum(stored, parserLedger);
+  const combined = maximum(
+    stored,
+    parserLedger ?? { total: emptyCoverage(), models: new Map() },
+  );
   return { ...combined, unverifiable };
 }
