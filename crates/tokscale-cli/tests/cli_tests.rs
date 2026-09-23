@@ -1782,6 +1782,111 @@ fn test_import_stdout_is_pure_json() {
 }
 
 #[test]
+fn test_import_submit_dry_run_survives_cold_pricing_cache_with_local_sessions() {
+    // Regression for the #1363 follow-up: `import --submit` runs a local scan
+    // to dedupe against this machine's own usage. That scan only needs (date,
+    // client) identities, not submission-grade costs, so it must use the
+    // lenient local report. Previously it called the submission-grade
+    // generator, which hard-errors with "pricing data is unavailable for
+    // submission" when the pricing cache is cold (offline) and local sessions
+    // carry no provider-reported costs — aborting the entire import.
+    let home = TempDir::new().unwrap();
+    // Unpriced local session on the same (date, client) as the export: with
+    // the old submission-grade scan this combination was the failure trigger.
+    // `write_codex_token_session` hardcodes a 2026-01-01 timestamp, so write
+    // the 2026-05-11 session inline to land on the export's day.
+    let sessions = home.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("session-import-dedup.jsonl"),
+        concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-4o-mini"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-11T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50}}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    // No pricing cache anywhere under this home (TOKSCALE_PRICING_CACHE_ONLY=1
+    // plus the dead loopback proxies in cmd_with_home keep it that way).
+    // A second, non-overlapping codex day keeps the graph non-empty after
+    // dedup: the only overlap case the old code ever reached was a fully
+    // dropped graph (the empty day fell through), so a partial-overlap
+    // fixture is what actually proves the early-exit and the scan coexist.
+    let export_path = home.path().join("export.json");
+    fs::write(
+        &export_path,
+        r#"{
+          "dailyAggregates": [
+            {
+              "date": "2026-05-11",
+              "source": "codex",
+              "machineId": "m1",
+              "inputTokens": 100,
+              "outputTokens": 50,
+              "cacheCreationTokens": 0,
+              "cacheReadTokens": 10,
+              "totalCost": "0.50",
+              "modelsUsed": ["gpt-5.5"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.5", "cost": 0.5, "inputTokens": 100,
+                  "outputTokens": 50, "cacheReadTokens": 10, "cacheCreationTokens": 0 }
+              ]
+            },
+            {
+              "date": "2026-05-12",
+              "source": "codex",
+              "machineId": "m1",
+              "inputTokens": 40,
+              "outputTokens": 20,
+              "cacheCreationTokens": 0,
+              "cacheReadTokens": 0,
+              "totalCost": "0.20",
+              "modelsUsed": ["gpt-5.5"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.5", "cost": 0.2, "inputTokens": 40,
+                  "outputTokens": 20, "cacheReadTokens": 0, "cacheCreationTokens": 0 }
+              ]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let output = cmd_with_home(home.path())
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--submit",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("pricing data is unavailable"),
+        "cold pricing cache must not abort import --submit: {stderr}"
+    );
+    // The local session overlaps the export's first day, so it is dropped;
+    // the second day survives to the dry-run summary with a recomputed total.
+    assert!(
+        stderr.contains("Left out 1 day/client row(s)"),
+        "expected the overlap dedup to drop 2026-05-11 codex: {stderr}"
+    );
+    assert!(
+        stderr.contains("To submit as imported history (clawdboard): 1 days, 60 tokens, $0.20"),
+        "expected only the non-overlapping day to remain: {stderr}"
+    );
+    assert!(stderr.contains("Dry run - not submitting"));
+}
+
+#[test]
 fn test_import_does_not_leak_local_mcp_servers() {
     // Reusing the graph/submit converter must not embed the local
     // machine's configured MCP server names into data derived purely from

@@ -5772,9 +5772,25 @@ fn run_import_command(
         }
 
         let mut graph = outcome.graph.clone();
+        // Capture the imported clients before any filtering: the overlap scan
+        // below narrows to the export's clients, and tokenless exclusion may
+        // empty the graph's summary (an all-cost-only export), which would
+        // otherwise leave the scan with no clients to look at.
+        let imported_clients = graph.summary.clients.clone();
         let excluded_rows = exclude_tokenless_cost_contributions(&mut graph);
         report_excluded_tokenless_rows(&excluded_rows);
-        let overlap = drop_locally_scanned_usage(&mut graph)?;
+        // Exclusion can leave a day with no clients at all (e.g. a Cursor
+        // export whose rows that day were all cost-only charges). Remove
+        // emptied days and recompute the rollups so an all-cost-only import
+        // exits below with "Nothing left to submit." instead of POSTing
+        // zero-usage backfill days, and a mixed import carries a correct
+        // dateRange/summary after the emptied days are gone.
+        normalize_graph_after_row_removal(&mut graph);
+        if graph.contributions.is_empty() {
+            eprintln!("{}", "\n  Nothing left to submit.\n".yellow());
+            return Ok(());
+        }
+        let overlap = drop_locally_scanned_usage(&mut graph, &imported_clients)?;
         if !overlap.is_empty() {
             const MAX_LISTED: usize = 10;
             let listed: Vec<String> = overlap
@@ -5798,10 +5814,6 @@ fn run_import_command(
                 )
                 .yellow()
             );
-        }
-        if graph.contributions.is_empty() {
-            eprintln!("{}", "\n  Nothing left to submit.\n".yellow());
-            return Ok(());
         }
         eprintln!(
             "{}",
@@ -5894,15 +5906,21 @@ fn submit_imported_graph(payload: &TsTokenContributionData) -> Result<()> {
 /// earlier whose files are gone can't be seen from here.
 fn drop_locally_scanned_usage(
     graph: &mut tokscale_core::GraphResult,
+    imported_clients: &[String],
 ) -> Result<Vec<(String, String)>> {
-    use tokscale_core::{generate_submission_graph, GroupBy, ReportOptions};
+    use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
+    // This scan only feeds overlap detection, which reads (date, client)
+    // identities and non-zero token flags — never costs — so the lenient local
+    // report (optional pricing) is the right generator: a cold pricing cache
+    // must not abort the whole import over a scan whose costs nobody reads.
+    // The imported costs come from the export itself.
     let rt = tokio::runtime::Runtime::new()?;
     let local = rt
-        .block_on(generate_submission_graph(ReportOptions {
+        .block_on(generate_local_graph_report(ReportOptions {
             home_dir: None,
             use_env_roots: true,
-            clients: Some(graph.summary.clients.clone()),
+            clients: Some(imported_clients.to_vec()),
             since: Some(graph.meta.date_range_start.clone()),
             until: Some(graph.meta.date_range_end.clone()),
             year: None,
@@ -5956,17 +5974,25 @@ fn drop_overlapping_rows(
     }
 
     if !dropped.is_empty() {
-        graph.contributions.retain(|day| !day.clients.is_empty());
-        tokscale_core::calculate_intensities(&mut graph.contributions);
-        graph.summary = tokscale_core::calculate_summary(&graph.contributions);
-        graph.years = tokscale_core::calculate_years(&graph.contributions);
-        if let (Some(first), Some(last)) = (graph.contributions.first(), graph.contributions.last())
-        {
-            graph.meta.date_range_start = first.date.clone();
-            graph.meta.date_range_end = last.date.clone();
-        }
+        normalize_graph_after_row_removal(graph);
     }
     dropped
+}
+
+/// Re-normalize a graph after client rows were removed from its days: drop
+/// days left with no clients at all, then rebuild intensities, summary, year
+/// rollups, and the meta date range from what remains. Shared by
+/// [`drop_overlapping_rows`] and the tokenless-cost exclusion path in
+/// `run_import_command`, where exclusion can empty every client of a day.
+fn normalize_graph_after_row_removal(graph: &mut tokscale_core::GraphResult) {
+    graph.contributions.retain(|day| !day.clients.is_empty());
+    tokscale_core::calculate_intensities(&mut graph.contributions);
+    graph.summary = tokscale_core::calculate_summary(&graph.contributions);
+    graph.years = tokscale_core::calculate_years(&graph.contributions);
+    if let (Some(first), Some(last)) = (graph.contributions.first(), graph.contributions.last()) {
+        graph.meta.date_range_start = first.date.clone();
+        graph.meta.date_range_end = last.date.clone();
+    }
 }
 
 /// The submit payload for an imported graph. MCP names stay the local ones, as
@@ -9226,6 +9252,79 @@ mod tests {
         assert_eq!(only_claude.contributions.len(), 1);
         assert_eq!(only_claude.meta.date_range_start, "2026-05-02");
         assert_eq!(only_claude.summary.total_tokens, 70);
+    }
+
+    /// F1: tokenless-cost exclusion can empty every client of a day. The
+    /// import submit path must drop that day and recompute the graph (what
+    /// `drop_overlapping_rows` already does after overlap drops), so a mixed
+    /// import never uploads zero-usage backfill days with a stale date range.
+    #[test]
+    fn import_submit_drops_days_tokenless_exclusion_emptied() {
+        let mut imported = graph_result_with_contributions(vec![
+            // 05-01: real usage plus a cost-only Cursor charge.
+            day_with_clients(
+                "2026-05-01",
+                100,
+                vec![
+                    client_contribution("cursor", "claude-3.7-sonnet", "anthropic", 100, 0.03, 1),
+                    client_contribution("cursor", "auto", "cursor", 0, 0.04, 1),
+                ],
+            ),
+            // 05-02: only cost-only charges — exclusion empties the whole day.
+            day_with_clients(
+                "2026-05-02",
+                0,
+                vec![client_contribution("cursor", "auto", "cursor", 0, 0.04, 1)],
+            ),
+        ]);
+
+        let excluded = exclude_tokenless_cost_contributions(&mut imported);
+        assert_eq!(excluded.len(), 2);
+        // Exclusion alone leaves the emptied day in place.
+        assert_eq!(imported.contributions.len(), 2);
+        assert!(imported.contributions[1].clients.is_empty());
+
+        normalize_graph_after_row_removal(&mut imported);
+
+        assert_eq!(imported.contributions.len(), 1);
+        assert_eq!(imported.contributions[0].date, "2026-05-01");
+        assert_eq!(imported.meta.date_range_start, "2026-05-01");
+        assert_eq!(imported.meta.date_range_end, "2026-05-01");
+        assert_eq!(imported.summary.total_tokens, 100);
+        assert!((imported.summary.total_cost - 0.03).abs() < 1e-9);
+        assert_eq!(imported.summary.active_days, 1);
+        assert_eq!(imported.years.len(), 1);
+        assert_eq!(imported.years[0].range_start, "2026-05-01");
+        assert_eq!(imported.years[0].range_end, "2026-05-01");
+    }
+
+    /// F1: an export whose rows are ALL cost-only (no tokens anywhere) must
+    /// normalize to zero contributions, which is exactly what
+    /// `run_import_command`'s "Nothing left to submit." early exit keys on —
+    /// no payload is ever built or POSTed for it.
+    #[test]
+    fn import_submit_all_cost_only_normalizes_to_nothing_to_submit() {
+        let mut imported = graph_result_with_contributions(vec![
+            day_with_clients(
+                "2026-05-01",
+                0,
+                vec![client_contribution("cursor", "auto", "cursor", 0, 0.04, 1)],
+            ),
+            day_with_clients(
+                "2026-05-02",
+                0,
+                vec![client_contribution("cursor", "auto", "cursor", 0, 0.04, 1)],
+            ),
+        ]);
+
+        let excluded = exclude_tokenless_cost_contributions(&mut imported);
+        assert_eq!(excluded.len(), 2);
+
+        normalize_graph_after_row_removal(&mut imported);
+
+        assert!(imported.contributions.is_empty());
+        assert_eq!(imported.summary.total_tokens, 0);
+        assert_eq!(imported.summary.active_days, 0);
     }
 
     #[test]
