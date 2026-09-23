@@ -189,10 +189,10 @@ fn read_session_bytes_bounded(
 
 /// Parse one DSH `session.jsonl.zstd` transcript into unified messages.
 ///
-/// Each `assistant/message` event with a non-zero `data.usage` becomes one
-/// [`UnifiedMessage`]. Messages without usable timestamps are skipped; usage
-/// with a zero total is skipped so noise rows (e.g. echoed tool-call-only
-/// messages) do not produce zero-token contributions.
+/// Each `assistant/message` or `assistant/attempt` event with non-zero provider
+/// usage becomes one [`UnifiedMessage`]. Usage may be top-level on a message or
+/// embedded in its compact Assistant stream. Events without usable timestamps
+/// are skipped; zero-usage rows do not produce contributions.
 pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
     let decoded = read_session_bytes(path);
     if decoded.is_empty() {
@@ -220,6 +220,10 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let mut messages = Vec::new();
     let mut seen = HashSet::new();
+    // DSH token accounting replaces a settlement with a later sample for the
+    // same (turn, step), unless a durable retry-started event closes that
+    // replacement slot. Retried attempts then accumulate as separate calls.
+    let mut last_settlement: Option<(i64, i64, usize)> = None;
     // Turn numbers that already emitted a turn-start message.
     let mut turn_started: HashSet<i64> = HashSet::new();
     // Fallback turn-start marker for transcripts without turn numbers: a
@@ -257,6 +261,17 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
             "user/message" => {
                 pending_user_turn = true;
             }
+            "llm/retry-started" => {
+                let retry_turn = value.pointer("/data/turn").and_then(Value::as_i64);
+                let retry_step = value.pointer("/data/step").and_then(Value::as_i64);
+                if last_settlement.is_some_and(|(turn, step, _)| {
+                    Some(turn) == retry_turn && Some(step) == retry_step
+                }) {
+                    // Keep the failed request already emitted above, but let
+                    // the upcoming retry add a separate usage contribution.
+                    last_settlement = None;
+                }
+            }
             // A compaction summary is a real provider call, not bookkeeping:
             // DSH sends the shadowed range to the model and persists what that
             // call spent on `data.usage`, with the routing fields in the same
@@ -264,8 +279,9 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
             // shares no `(turn, step)` with one, so it is counted in addition
             // to the messages around it rather than replacing any of them.
             // Falling through to `_` billed those calls at zero (#1152).
-            "assistant/message" | "compaction/summary" => {
+            "assistant/message" | "assistant/attempt" | "compaction/summary" => {
                 let is_summary = event_type == "compaction/summary";
+                let is_attempt = event_type == "assistant/attempt";
                 // Fork/continuation ownership boundary. Forking copies the
                 // parent's completed prefix into the child transcript verbatim
                 // — same `seq`, `time`, `usage` and `message.id` — and records
@@ -281,7 +297,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 {
                     continue;
                 }
-                let Some(usage) = value.pointer("/data/usage") else {
+                let Some(usage) = usage_for_event(&value, event_type) else {
                     continue;
                 };
                 let tokens = tokens_from_usage(usage);
@@ -316,7 +332,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 // next assistant reply — taking it here would hand the turn to
                 // the summary and leave the real reply looking like a
                 // continuation.
-                let is_turn_start = if is_summary {
+                let is_turn_start = if is_summary || is_attempt {
                     false
                 } else {
                     let turn = value.pointer("/data/turn").and_then(Value::as_i64);
@@ -353,36 +369,55 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 // damaged summaries without a compaction id. It remains better
                 // than the session id for the seedLength-less fork handled by
                 // #1173, because the fork copies the sequence number too.
-                let identity = value
-                    .pointer("/data/message/id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(|id| format!("msg:{id}"))
-                    .or_else(|| {
-                        if !is_summary {
-                            return None;
-                        }
-                        value
-                            .pointer("/data/compactionId")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|id| !id.is_empty())
-                            .map(|id| format!("cmp:{id}"))
-                    })
-                    .or_else(|| {
-                        value
-                            .get("seq")
-                            .and_then(Value::as_i64)
-                            .map(|seq| format!("seq:{seq}"))
-                    })
-                    .unwrap_or_else(|| format!("sid:{sid}"));
+                let identity = if is_attempt {
+                    value
+                        .get("seq")
+                        .and_then(Value::as_i64)
+                        .map(|seq| format!("attempt-seq:{seq}"))
+                        .or_else(|| {
+                            let turn = value.pointer("/data/turn").and_then(Value::as_i64)?;
+                            let step = value.pointer("/data/step").and_then(Value::as_i64)?;
+                            Some(format!("attempt:{turn}:{step}:{timestamp}"))
+                        })
+                        .unwrap_or_else(|| format!("sid:{sid}"))
+                } else {
+                    value
+                        .pointer("/data/message/id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(|id| format!("msg:{id}"))
+                        .or_else(|| {
+                            if !is_summary {
+                                return None;
+                            }
+                            value
+                                .pointer("/data/compactionId")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .map(|id| format!("cmp:{id}"))
+                        })
+                        .or_else(|| {
+                            value
+                                .get("seq")
+                                .and_then(Value::as_i64)
+                                .map(|seq| format!("seq:{seq}"))
+                        })
+                        .unwrap_or_else(|| format!("sid:{sid}"))
+                };
                 // Namespace the summary so it can never collapse against a loop
                 // step: a summary carries no `message.id` of its own, so both
                 // fall back to `sid:` and a summary that happened to match a
                 // reply's timestamp, routing and buckets would otherwise be
                 // dropped as a duplicate of it.
-                let kind = if is_summary { "summary:" } else { "" };
+                let kind = if is_summary {
+                    "summary:"
+                } else if is_attempt {
+                    "attempt:"
+                } else {
+                    ""
+                };
                 let dedup_key = format!(
                     "dsh:{kind}{identity}:{timestamp}:{provider_id}:{model_id}:{}:{}:{}:{}:{}",
                     tokens.input,
@@ -412,13 +447,75 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                         message.set_workspace(Some(key), label);
                     }
                 }
-                messages.push(message);
+                if is_summary {
+                    messages.push(message);
+                    continue;
+                }
+
+                let step = value
+                    .pointer("/data/turn")
+                    .and_then(Value::as_i64)
+                    .zip(value.pointer("/data/step").and_then(Value::as_i64));
+                if let Some((turn, step)) = step {
+                    if let Some((last_turn, last_step, index)) = last_settlement {
+                        if last_turn == turn && last_step == step {
+                            // This settlement is another sample for the same
+                            // attempt slot. Keep the latest route and usage,
+                            // matching DSH's token-meter replacement rule.
+                            messages[index] = message;
+                            last_settlement = Some((turn, step, index));
+                            continue;
+                        }
+                    }
+                    let index = messages.len();
+                    messages.push(message);
+                    last_settlement = Some((turn, step, index));
+                } else {
+                    messages.push(message);
+                    last_settlement = None;
+                }
             }
             _ => {}
         }
     }
 
     messages
+}
+
+/// Return the authoritative usage sample for a durable DSH model settlement.
+///
+/// Current DSH logs carry usage on the top-level `assistant/message` when
+/// available. Otherwise, and for log-only `assistant/attempt` events, usage is
+/// retained as a raw `usage` chunk inside the compact Assistant stream. DSH's
+/// token meter uses the last usage chunk in that stream; earlier samples are
+/// intermediate snapshots and must not be added to it.
+fn usage_for_event<'a>(value: &'a Value, event_type: &str) -> Option<&'a Value> {
+    if event_type == "assistant/message" {
+        return value
+            .pointer("/data/usage")
+            .or_else(|| last_assistant_stream_usage(value));
+    }
+    if event_type == "assistant/attempt" {
+        return last_assistant_stream_usage(value);
+    }
+    if event_type == "compaction/summary" {
+        return value.pointer("/data/usage");
+    }
+    None
+}
+
+fn last_assistant_stream_usage(value: &Value) -> Option<&Value> {
+    value
+        .pointer("/data/stream")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find_map(|record| {
+            let chunk = record.get("chunk")?;
+            (record.get("type")?.as_str()? == "chunk" && chunk.get("type")?.as_str()? == "usage")
+                .then(|| chunk.get("usage"))
+                .flatten()
+        })
 }
 
 /// Return the concrete model that served a DSH call.
@@ -700,6 +797,53 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some("dsh:msg:m-served:1787122684043:zai-coding-cn:glm-5.3:8425:207:576:0:0")
         );
+    }
+
+    #[test]
+    fn reads_usage_from_embedded_assistant_streams_and_attempts() {
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-stream-usage","createdAt":1,"cwd":"/work"}"#,
+            r#"{"type":"request/header","seq":1,"time":1786669450001,"data":{"header":{"config":{"provider":"fixture-provider","model":"fixture-model"}}}}"#,
+            r#"{"type":"user/message","seq":2,"time":1786669450002,"data":{"turn":1}}"#,
+            r#"{"type":"assistant/attempt","seq":3,"time":1786669450003,"data":{"turn":1,"step":1,"stream":[{"type":"chunk","time":1786669450003,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":3}}},{"type":"chunk","time":1786669450004,"chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":5}}},{"type":"chunk","time":1786669450005,"chunk":{"type":"finish","reason":{"kind":"error"}}}]}}"#,
+            r#"{"type":"llm/retry-started","seq":4,"time":1786669450005,"data":{"turn":1,"step":1,"retry":1,"retryId":"retry-1"}}"#,
+            r#"{"type":"assistant/message","seq":5,"time":1786669450006,"data":{"turn":1,"step":1,"message":{"source":{"provider":"fixture-provider","model":"fixture-model"}},"usage":{"inputTokens":30,"outputTokens":7},"stream":[{"type":"chunk","time":1786669450006,"chunk":{"type":"usage","usage":{"inputTokens":999,"outputTokens":999}}}]}}"#,
+            r#"{"type":"user/message","seq":6,"time":1786669450007,"data":{"turn":2}}"#,
+            r#"{"type":"assistant/message","seq":7,"time":1786669450008,"data":{"turn":2,"step":1,"message":{"source":{"provider":"fixture-provider","model":"fixture-model"}},"stream":[{"type":"chunk","time":1786669450008,"chunk":{"type":"usage","usage":{"inputTokens":41,"outputTokens":9}}},{"type":"chunk","time":1786669450009,"chunk":{"type":"finish","reason":{"kind":"stop"}}}]}}"#,
+            r#"{"type":"user/message","seq":8,"time":1786669450010,"data":{"turn":3}}"#,
+            r#"{"type":"assistant/attempt","seq":9,"time":1786669450011,"data":{"turn":3,"step":1,"stream":[{"type":"chunk","time":1786669450011,"chunk":{"type":"usage","usage":{"inputTokens":50,"outputTokens":8}}},{"type":"chunk","time":1786669450012,"chunk":{"type":"finish","reason":{"kind":"error"}}}]}}"#,
+            r#"{"type":"assistant/message","seq":10,"time":1786669450013,"data":{"turn":3,"step":1,"message":{"source":{"provider":"fixture-provider","model":"fixture-model"}},"usage":{"inputTokens":52,"outputTokens":10}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+        assert_eq!(messages.len(), 4);
+
+        let attempt = &messages[0];
+        assert_eq!(attempt.model_id, "fixture-model");
+        assert_eq!(attempt.provider_id, "fixture-provider");
+        assert_eq!(attempt.tokens.input, 20, "use the last stream usage sample");
+        assert_eq!(attempt.tokens.output, 5);
+        assert!(
+            !attempt.is_turn_start,
+            "an attempt must not consume the user turn marker"
+        );
+
+        let message_with_authoritative_usage = &messages[1];
+        assert_eq!(message_with_authoritative_usage.tokens.input, 30);
+        assert_eq!(message_with_authoritative_usage.tokens.output, 7);
+        assert!(message_with_authoritative_usage.is_turn_start);
+
+        let message_with_stream_only_usage = &messages[2];
+        assert_eq!(message_with_stream_only_usage.tokens.input, 41);
+        assert_eq!(message_with_stream_only_usage.tokens.output, 9);
+        assert!(message_with_stream_only_usage.is_turn_start);
+
+        // Without a retry-started boundary, a later settlement for the same
+        // step replaces the earlier attempt instead of adding another call.
+        let replaced_attempt = &messages[3];
+        assert_eq!(replaced_attempt.tokens.input, 52);
+        assert_eq!(replaced_attempt.tokens.output, 10);
+        assert!(replaced_attempt.is_turn_start);
     }
 
     #[test]

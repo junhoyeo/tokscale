@@ -1473,7 +1473,11 @@ fn parser_version(client: ClientId) -> u32 {
         // `data.compactionId` before the per-transcript `seq` fallback. Reparse
         // released v4 rows so unrelated summaries with otherwise identical
         // call data are no longer collapsed across files (#1187).
-        ClientId::Dsh => 5,
+        // v5->v6: current DSH assistant settlements can keep usage only in
+        // their embedded stream, and failed attempts are durable
+        // `assistant/attempt` events. Reparse old rows so those provider calls
+        // are included in usage and cost totals (#1348).
+        ClientId::Dsh => 6,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -4134,11 +4138,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dsh_compaction_identity_parser_version_invalidates_v4_entries() {
-        // A finished transcript is never rewritten when attribution starts
-        // preferring compactionId, so its fingerprint remains valid and only
-        // the parser version can retire the seq-keyed row released in v4.14.0.
-        assert_eq!(parser_version(ClientId::Dsh), 5);
+    fn test_dsh_embedded_usage_parser_version_invalidates_v5_entries() {
+        // DSH transcript files are append-only, so a v5 source fingerprint
+        // stays valid after parsing embedded assistant usage differently.
+        assert_eq!(parser_version(ClientId::Dsh), 6);
     }
 
     /// Names the row that only a served cache can put in a report. No DSH
