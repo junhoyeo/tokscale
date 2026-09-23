@@ -171,6 +171,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
 - [세션 데이터 보존](#세션-데이터-보존)
 - [데이터 소스](#데이터-소스)
 - [가격](#가격)
+- [로컬 사용량 복구 원장](#로컬-사용량-복구-원장)
 - [기여](#기여)
   - [개발 가이드라인](#개발-가이드라인)
 - [감사의 글](#감사의-글)
@@ -1007,6 +1008,7 @@ Claude Code에만 해당하는 주의사항이 있습니다. Claude Code는 세�
 | `TOKSCALE_EXTRA_DIRS` | unset | 일회성 추가 세션 루트, `client:/abs/path,client:/abs/path` 형식 |
 | `TOKSCALE_CONFIG_DIR` | unset | 설정 디렉토리 루트(`settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, `trae-cache/` 위치)를 오버라이드합니다. 절대 경로 권장; 상대 경로는 프로세스 CWD 기준으로 해석됩니다. CI 샌드박스나 비기본 위치를 고정할 때 유용합니다. 설정되면 tokscale은 macOS 레거시 경로(`~/Library/Application Support/tokscale/`)로 폴백하지 않습니다. |
 | `TOKSCALE_FM_DEBUG` | unset | 설정되면 Apple Foundation Models 진단 정보(macOS 버전 게이트, dlopen dylib 경로, 로드/심볼 오류)를 stderr로 출력하여 온디바이스 apple-fm이 동작했는지 또는 동작하지 않았는지 이유를 설명합니다. |
+| `TOKSCALE_RECOVERY_DISABLE` | unset | 설정되면 파일이 존재하더라도 로컬 사용량 복구 원장(`recovered-usage-v1.json`)을 비활성화합니다. |
 
 ```bash
 # 예시: 매우 큰 데이터셋에 대한 타임아웃 증가
@@ -2022,6 +2024,19 @@ Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/li
 - 캐시 쓰기 토큰
 - 추론 토큰 (o1과 같은 모델용)
 - 모델별 구간 가격 (예: 200k 또는 272k 토큰 이상)
+
+## 로컬 사용량 복구 원장
+
+클라이언트가 오래된 세션 트랜스크립트를 삭제한 경우, 옵트인 원장 `~/.config/tokscale/recovered-usage-v1.json`(`TOKSCALE_CONFIG_DIR`로 해석되는 설정 디렉토리)을 통해 해당 세션의 이전에 낸 낸출물(export)을 로컬 리포트에 맞춰 복구할 수 있습니다. 파일은 `Archive` JSON 객체로, `version`(반드시 `1`), `home`(스캔 대상 홈 디렉토리와 정확히 일치해야 함), 그리고 선택적 `messages` / `daily_floors` 배열(직렬화된 `UnifiedMessage` 레코드)로 구성됩니다. `messages`는 디스크에 더 이상 없는 세션의 아카이브된 요청 행을 복원하고, `daily_floors`는 (클라이언트, 날짜)별 집계 스냅샷을 보관하여 스냅샷과 집계된 일일 합계 사이의 양의 차이만 채웁니다. 실제 트랜스크립트가 항상 우선하며, 복구된 행은 `local-recovery:` 디듑(dedup) 키와 "Recovered request archive" / "Recovered daily aggregate" 에이전트 레이블로 표시됩니다. 오버레이는 철저히 로컬 전용입니다: 복구된 사용량은 리더보드에 제출되지 않고, 소스 메시지 캐시에 기록되지도 않으며, 일일 플로어 집계는 Sessions, Agents, Hourly, Minutely 뷰에서 제외됩니다. 원장을 무시하려면 `TOKSCALE_RECOVERY_DISABLE`을 설정하세요. 형식은 내부 전용입니다: `local-recovery:` 키는 Tokscale이 직접 생성한 것으로 신뢰되므로 수동으로 작성하지 마세요. 일치하는 원장이 존재하는 동안 로컬 리포트는 메시지를 스트리밍하지 않고 모두 수집하므로, 매우 큰 코퍼스를 가진 사용자는 메모리 사용량이 늘어날 수 있습니다.
+
+```json
+{
+  "version": 1,
+  "home": "/Users/you",
+  "messages": [ /* 직렬화된 UnifiedMessage 형태의 아카이브된 요청 행 */ ],
+  "daily_floors": [ /* 직렬화된 UnifiedMessage 형태의 (클라이언트, 날짜)별 집계 스냅샷 */ ]
+}
+```
 
 ## 기여
 

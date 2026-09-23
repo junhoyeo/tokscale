@@ -588,6 +588,13 @@ impl DataLoader {
         }
 
         for msg in &messages {
+            // Recovered daily-floor rows are day-level aggregates with a
+            // synthetic session/agent identity; they must not appear as fake
+            // sessions in the Sessions tab or fake agents in the Agents tab.
+            // They still count toward every other aggregate below (model,
+            // daily, project), so this is filtered per-aggregation rather
+            // than by dropping the message from the loop entirely.
+            let is_recovery_floor = tokscale_core::recovery::is_daily(msg);
             let normalized_model =
                 model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
             let model_key = normalize_model_for_grouping(&msg.model_id);
@@ -718,326 +725,328 @@ impl DataLoader {
                 model_entry.session_count += 1;
             }
 
-            if let Some(agent) = msg.agent.as_ref() {
-                let normalized_agent = if msg.client == "opencode" {
-                    sessions::normalize_opencode_agent_name(agent)
-                } else if msg.client == "copilot" {
-                    sessions::normalize_copilot_agent_name(agent)
-                } else {
-                    sessions::normalize_agent_name(agent)
-                };
-                let agent_entry = agent_map
-                    .entry(normalized_agent.clone())
-                    .or_insert_with(|| AgentUsage {
-                        agent: normalized_agent.clone(),
-                        clients: String::new(),
+            if !is_recovery_floor {
+                if let Some(agent) = msg.agent.as_ref() {
+                    let normalized_agent = if msg.client == "opencode" {
+                        sessions::normalize_opencode_agent_name(agent)
+                    } else if msg.client == "copilot" {
+                        sessions::normalize_copilot_agent_name(agent)
+                    } else {
+                        sessions::normalize_agent_name(agent)
+                    };
+                    let agent_entry =
+                        agent_map
+                            .entry(normalized_agent.clone())
+                            .or_insert_with(|| AgentUsage {
+                                agent: normalized_agent.clone(),
+                                clients: String::new(),
+                                tokens: TokenBreakdown::default(),
+                                cost: 0.0,
+                                message_count: 0,
+                            });
+
+                    agent_entry.tokens.input = agent_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    agent_entry.tokens.output = agent_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    agent_entry.tokens.cache_read = agent_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    agent_entry.tokens.cache_write = agent_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    agent_entry.tokens.reasoning = agent_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    agent_entry.cost += msg_cost;
+                    agent_entry.message_count = agent_entry
+                        .message_count
+                        .saturating_add(msg.message_count.max(0) as u32);
+
+                    agent_clients
+                        .entry(normalized_agent)
+                        .or_default()
+                        .insert(msg.client.clone());
+                }
+
+                if let Some(date) = parse_date(&msg.date) {
+                    let daily_entry = daily_map.entry(date).or_insert_with(|| DailyUsage {
+                        date,
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
+                        source_breakdown: BTreeMap::new(),
                         message_count: 0,
+                        turn_count: 0,
                     });
 
-                agent_entry.tokens.input = agent_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                agent_entry.tokens.output = agent_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                agent_entry.tokens.cache_read = agent_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                agent_entry.tokens.cache_write = agent_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                agent_entry.tokens.reasoning = agent_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                agent_entry.cost += msg_cost;
-                agent_entry.message_count = agent_entry
-                    .message_count
-                    .saturating_add(msg.message_count.max(0) as u32);
+                    daily_entry.tokens.input = daily_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    daily_entry.tokens.output = daily_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    daily_entry.tokens.cache_read = daily_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    daily_entry.tokens.cache_write = daily_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    daily_entry.tokens.reasoning = daily_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    let msg_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
+                        msg.cost
+                    } else {
+                        0.0
+                    };
+                    daily_entry.cost += msg_cost;
+                    daily_entry.message_count += msg.message_count.max(0) as u32;
+                    if msg.is_turn_start {
+                        daily_entry.turn_count += 1;
+                    }
 
-                agent_clients
-                    .entry(normalized_agent)
-                    .or_default()
-                    .insert(msg.client.clone());
-            }
-
-            if let Some(date) = parse_date(&msg.date) {
-                let daily_entry = daily_map.entry(date).or_insert_with(|| DailyUsage {
-                    date,
-                    tokens: TokenBreakdown::default(),
-                    cost: 0.0,
-                    source_breakdown: BTreeMap::new(),
-                    message_count: 0,
-                    turn_count: 0,
-                });
-
-                daily_entry.tokens.input = daily_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                daily_entry.tokens.output = daily_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                daily_entry.tokens.cache_read = daily_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                daily_entry.tokens.cache_write = daily_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                daily_entry.tokens.reasoning = daily_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let msg_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
-                    msg.cost
-                } else {
-                    0.0
-                };
-                daily_entry.cost += msg_cost;
-                daily_entry.message_count += msg.message_count.max(0) as u32;
-                if msg.is_turn_start {
-                    daily_entry.turn_count += 1;
-                }
-
-                let source_entry = daily_entry
-                    .source_breakdown
-                    .entry(msg.client.clone())
-                    .or_insert_with(|| DailySourceInfo {
-                        tokens: TokenBreakdown::default(),
-                        cost: 0.0,
-                        models: BTreeMap::new(),
-                    });
-
-                source_entry.tokens.input = source_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                source_entry.tokens.output = source_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                source_entry.tokens.cache_read = source_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                source_entry.tokens.cache_write = source_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                source_entry.tokens.reasoning = source_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                source_entry.cost += msg_cost;
-
-                let daily_model_key = daily_source_model_key(
-                    group_by,
-                    &workspace_group_key,
-                    &msg.provider_id,
-                    &normalized_model,
-                );
-
-                let model_info = source_entry
-                    .models
-                    .entry(daily_model_key)
-                    .or_insert_with(|| DailyModelInfo {
-                        provider: msg.provider_id.clone(),
-                        display_name: daily_source_model_display_name(
-                            group_by,
-                            &workspace_label,
-                            &msg.provider_id,
-                            &normalized_model,
-                        ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
-                        tokens: TokenBreakdown::default(),
-                        cost: 0.0,
-                        messages: 0,
-                    });
-
-                model_info.tokens.input = model_info
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                model_info.tokens.output = model_info
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                model_info.tokens.cache_read = model_info
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                model_info.tokens.cache_write = model_info
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                model_info.tokens.reasoning = model_info
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                model_info.cost += msg_cost;
-                model_info.messages = model_info
-                    .messages
-                    .saturating_add(msg.message_count.max(0) as u64);
-            }
-
-            // Hourly aggregation: derive hour from timestamp (Unix ms),
-            // falling back to msg.date 00:00 when timestamp is missing/zero
-            // so we don't silently drop messages (matches CLI bucketing).
-            if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, &msg.date)
-                .filter(|_| !tokscale_core::recovery::is_daily(msg))
-            {
-                let hourly_entry = hourly_map.entry(hour_dt).or_insert_with(|| HourlyUsage {
-                    datetime: hour_dt,
-                    tokens: TokenBreakdown::default(),
-                    cost: 0.0,
-                    clients: BTreeSet::new(),
-                    models: BTreeMap::new(),
-                    message_count: 0,
-                    turn_count: 0,
-                });
-
-                hourly_entry.tokens.input = hourly_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                hourly_entry.tokens.output = hourly_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                hourly_entry.tokens.cache_read = hourly_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                hourly_entry.tokens.cache_write = hourly_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                hourly_entry.tokens.reasoning = hourly_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let h_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
-                    msg.cost
-                } else {
-                    0.0
-                };
-                hourly_entry.cost += h_cost;
-                hourly_entry.message_count += msg.message_count.max(0) as u32;
-                if msg.is_turn_start {
-                    hourly_entry.turn_count += 1;
-                }
-                hourly_entry.clients.insert(msg.client.clone());
-
-                let hourly_model_key =
-                    hourly_model_key(group_by, &msg.provider_id, &normalized_model);
-                let h_model = hourly_entry
-                    .models
-                    .entry(hourly_model_key)
-                    .or_insert_with(|| HourlyModelInfo {
-                        provider: msg.provider_id.clone(),
-                        display_name: hourly_model_display_name(
-                            group_by,
-                            &msg.provider_id,
-                            &normalized_model,
-                        ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
-                        tokens: TokenBreakdown::default(),
-                        cost: 0.0,
-                    });
-                h_model.tokens.input = h_model
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                h_model.tokens.output = h_model
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                h_model.tokens.cache_read = h_model
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                h_model.tokens.cache_write = h_model
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                h_model.tokens.reasoning = h_model
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                h_model.cost += h_cost;
-            }
-
-            // Minute aggregation: same fallback semantics as hourly, but
-            // truncated to the minute. Used by the Minutely tab. Gated
-            // on `Settings::minutely_tab_enabled` so users who never open
-            // the tab do not pay the per-minute bucketing cost.
-            let minute_bucket = if self.minutely_enabled {
-                minute_bucket_with_fallback(msg.timestamp, &msg.date)
-                    .filter(|_| !tokscale_core::recovery::is_daily(msg))
-            } else {
-                None
-            };
-            if let Some(minute_dt) = minute_bucket {
-                let minutely_entry =
-                    minutely_map
-                        .entry(minute_dt)
-                        .or_insert_with(|| MinutelyUsage {
-                            datetime: minute_dt,
+                    let source_entry = daily_entry
+                        .source_breakdown
+                        .entry(msg.client.clone())
+                        .or_insert_with(|| DailySourceInfo {
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
-                            clients: BTreeSet::new(),
                             models: BTreeMap::new(),
-                            message_count: 0,
-                            turn_count: 0,
                         });
 
-                minutely_entry.tokens.input = minutely_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                minutely_entry.tokens.output = minutely_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                minutely_entry.tokens.cache_read = minutely_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                minutely_entry.tokens.cache_write = minutely_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                minutely_entry.tokens.reasoning = minutely_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let m_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
-                    msg.cost
-                } else {
-                    0.0
-                };
-                minutely_entry.cost += m_cost;
-                minutely_entry.message_count += msg.message_count.max(0) as u32;
-                if msg.is_turn_start {
-                    minutely_entry.turn_count += 1;
-                }
-                minutely_entry.clients.insert(msg.client.clone());
+                    source_entry.tokens.input = source_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    source_entry.tokens.output = source_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    source_entry.tokens.cache_read = source_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    source_entry.tokens.cache_write = source_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    source_entry.tokens.reasoning = source_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    source_entry.cost += msg_cost;
 
-                let m_model_key = hourly_model_key(group_by, &msg.provider_id, &normalized_model);
-                let m_model =
-                    minutely_entry
-                        .models
-                        .entry(m_model_key)
-                        .or_insert_with(|| HourlyModelInfo {
+                    let daily_model_key = daily_source_model_key(
+                        group_by,
+                        &workspace_group_key,
+                        &msg.provider_id,
+                        &normalized_model,
+                    );
+
+                    let model_info =
+                        source_entry
+                            .models
+                            .entry(daily_model_key)
+                            .or_insert_with(|| DailyModelInfo {
+                                provider: msg.provider_id.clone(),
+                                display_name: daily_source_model_display_name(
+                                    group_by,
+                                    &workspace_label,
+                                    &msg.provider_id,
+                                    &normalized_model,
+                                ),
+                                color_key: model_color_key(group_by, &msg.provider_id, &model_key),
+                                tokens: TokenBreakdown::default(),
+                                cost: 0.0,
+                                messages: 0,
+                            });
+
+                    model_info.tokens.input = model_info
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    model_info.tokens.output = model_info
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    model_info.tokens.cache_read = model_info
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    model_info.tokens.cache_write = model_info
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    model_info.tokens.reasoning = model_info
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    model_info.cost += msg_cost;
+                    model_info.messages = model_info
+                        .messages
+                        .saturating_add(msg.message_count.max(0) as u64);
+                }
+
+                // Hourly aggregation: derive hour from timestamp (Unix ms),
+                // falling back to msg.date 00:00 when timestamp is missing/zero
+                // so we don't silently drop messages (matches CLI bucketing).
+                if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, &msg.date)
+                    .filter(|_| !tokscale_core::recovery::is_daily(msg))
+                {
+                    let hourly_entry = hourly_map.entry(hour_dt).or_insert_with(|| HourlyUsage {
+                        datetime: hour_dt,
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                        clients: BTreeSet::new(),
+                        models: BTreeMap::new(),
+                        message_count: 0,
+                        turn_count: 0,
+                    });
+
+                    hourly_entry.tokens.input = hourly_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    hourly_entry.tokens.output = hourly_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    hourly_entry.tokens.cache_read = hourly_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    hourly_entry.tokens.cache_write = hourly_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    hourly_entry.tokens.reasoning = hourly_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    let h_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
+                        msg.cost
+                    } else {
+                        0.0
+                    };
+                    hourly_entry.cost += h_cost;
+                    hourly_entry.message_count += msg.message_count.max(0) as u32;
+                    if msg.is_turn_start {
+                        hourly_entry.turn_count += 1;
+                    }
+                    hourly_entry.clients.insert(msg.client.clone());
+
+                    let hourly_model_key =
+                        hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                    let h_model =
+                        hourly_entry
+                            .models
+                            .entry(hourly_model_key)
+                            .or_insert_with(|| HourlyModelInfo {
+                                provider: msg.provider_id.clone(),
+                                display_name: hourly_model_display_name(
+                                    group_by,
+                                    &msg.provider_id,
+                                    &normalized_model,
+                                ),
+                                color_key: model_color_key(group_by, &msg.provider_id, &model_key),
+                                tokens: TokenBreakdown::default(),
+                                cost: 0.0,
+                            });
+                    h_model.tokens.input = h_model
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    h_model.tokens.output = h_model
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    h_model.tokens.cache_read = h_model
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    h_model.tokens.cache_write = h_model
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    h_model.tokens.reasoning = h_model
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    h_model.cost += h_cost;
+                }
+
+                // Minute aggregation: same fallback semantics as hourly, but
+                // truncated to the minute. Used by the Minutely tab. Gated
+                // on `Settings::minutely_tab_enabled` so users who never open
+                // the tab do not pay the per-minute bucketing cost.
+                let minute_bucket = if self.minutely_enabled {
+                    minute_bucket_with_fallback(msg.timestamp, &msg.date)
+                        .filter(|_| !tokscale_core::recovery::is_daily(msg))
+                } else {
+                    None
+                };
+                if let Some(minute_dt) = minute_bucket {
+                    let minutely_entry =
+                        minutely_map
+                            .entry(minute_dt)
+                            .or_insert_with(|| MinutelyUsage {
+                                datetime: minute_dt,
+                                tokens: TokenBreakdown::default(),
+                                cost: 0.0,
+                                clients: BTreeSet::new(),
+                                models: BTreeMap::new(),
+                                message_count: 0,
+                                turn_count: 0,
+                            });
+
+                    minutely_entry.tokens.input = minutely_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    minutely_entry.tokens.output = minutely_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    minutely_entry.tokens.cache_read = minutely_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    minutely_entry.tokens.cache_write = minutely_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    minutely_entry.tokens.reasoning = minutely_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    let m_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
+                        msg.cost
+                    } else {
+                        0.0
+                    };
+                    minutely_entry.cost += m_cost;
+                    minutely_entry.message_count += msg.message_count.max(0) as u32;
+                    if msg.is_turn_start {
+                        minutely_entry.turn_count += 1;
+                    }
+                    minutely_entry.clients.insert(msg.client.clone());
+
+                    let m_model_key =
+                        hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                    let m_model = minutely_entry.models.entry(m_model_key).or_insert_with(|| {
+                        HourlyModelInfo {
                             provider: msg.provider_id.clone(),
                             display_name: hourly_model_display_name(
                                 group_by,
@@ -1047,126 +1056,127 @@ impl DataLoader {
                             color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
-                        });
-                m_model.tokens.input = m_model
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                m_model.tokens.output = m_model
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                m_model.tokens.cache_read = m_model
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                m_model.tokens.cache_write = m_model
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                m_model.tokens.reasoning = m_model
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                m_model.cost += m_cost;
-            }
-
-            // Session aggregation: one bucket per (client, session_id) so the
-            // Sessions tab can show cost/tokens per individual conversation.
-            // Skips messages with an empty session_id (some legacy/scanner
-            // records lack one) rather than lumping them into a single bogus
-            // "no-session" row.
-            if !msg.session_id.is_empty() {
-                let session_key = format!("{}:{}", msg.client, msg.session_id);
-                let session_entry =
-                    session_map
-                        .entry(session_key)
-                        .or_insert_with(|| SessionUsage {
-                            session_id: msg.session_id.clone(),
-                            client: msg.client.clone(),
-                            title: None,
-                            models: Vec::new(),
-                            tokens: TokenBreakdown::default(),
-                            cost: 0.0,
-                            message_count: 0,
-                            turn_count: 0,
-                            first_active_ms: 0,
-                            last_active_ms: 0,
-                        });
-
-                session_entry.tokens.input = session_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                session_entry.tokens.output = session_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                session_entry.tokens.cache_read = session_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                session_entry.tokens.cache_write = session_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                session_entry.tokens.reasoning = session_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                session_entry.cost += msg_cost;
-                session_entry.message_count = session_entry
-                    .message_count
-                    .saturating_add(msg.message_count.max(0) as u32);
-                if msg.is_turn_start {
-                    session_entry.turn_count += 1;
+                        }
+                    });
+                    m_model.tokens.input = m_model
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    m_model.tokens.output = m_model
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    m_model.tokens.cache_read = m_model
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    m_model.tokens.cache_write = m_model
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    m_model.tokens.reasoning = m_model
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    m_model.cost += m_cost;
                 }
 
-                let ts = message_timestamp_ms(msg);
-                if ts > 0 {
-                    if session_entry.first_active_ms == 0 || ts < session_entry.first_active_ms {
-                        session_entry.first_active_ms = ts;
-                    }
-                    if ts > session_entry.last_active_ms {
-                        session_entry.last_active_ms = ts;
-                    }
-                }
+                // Session aggregation: one bucket per (client, session_id) so the
+                // Sessions tab can show cost/tokens per individual conversation.
+                // Skips messages with an empty session_id (some legacy/scanner
+                // records lack one) rather than lumping them into a single bogus
+                // "no-session" row.
+                if !is_recovery_floor && !msg.session_id.is_empty() {
+                    let session_key = format!("{}:{}", msg.client, msg.session_id);
+                    let session_entry =
+                        session_map
+                            .entry(session_key)
+                            .or_insert_with(|| SessionUsage {
+                                session_id: msg.session_id.clone(),
+                                client: msg.client.clone(),
+                                title: None,
+                                models: Vec::new(),
+                                tokens: TokenBreakdown::default(),
+                                cost: 0.0,
+                                message_count: 0,
+                                turn_count: 0,
+                                first_active_ms: 0,
+                                last_active_ms: 0,
+                            });
 
-                // Adopt the first non-empty session_title seen across the
-                // session's messages. Parsers that don't populate the field
-                // leave it `None` and the Sessions tab falls back to the ID.
-                if session_entry.title.is_none() {
-                    if let Some(ref title) = msg.session_title {
-                        let trimmed = title.trim();
-                        if !trimmed.is_empty() {
-                            session_entry.title = Some(trimmed.to_string());
+                    session_entry.tokens.input = session_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    session_entry.tokens.output = session_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    session_entry.tokens.cache_read = session_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    session_entry.tokens.cache_write = session_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    session_entry.tokens.reasoning = session_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    session_entry.cost += msg_cost;
+                    session_entry.message_count = session_entry
+                        .message_count
+                        .saturating_add(msg.message_count.max(0) as u32);
+                    if msg.is_turn_start {
+                        session_entry.turn_count += 1;
+                    }
+
+                    let ts = message_timestamp_ms(msg);
+                    if ts > 0 {
+                        if session_entry.first_active_ms == 0 || ts < session_entry.first_active_ms
+                        {
+                            session_entry.first_active_ms = ts;
+                        }
+                        if ts > session_entry.last_active_ms {
+                            session_entry.last_active_ms = ts;
                         }
                     }
+
+                    // Adopt the first non-empty session_title seen across the
+                    // session's messages. Parsers that don't populate the field
+                    // leave it `None` and the Sessions tab falls back to the ID.
+                    if session_entry.title.is_none() {
+                        if let Some(ref title) = msg.session_title {
+                            let trimmed = title.trim();
+                            if !trimmed.is_empty() {
+                                session_entry.title = Some(trimmed.to_string());
+                            }
+                        }
+                    }
+
+                    // Track distinct models in first-seen order, retaining
+                    // provider and color_key for correct shade-map lookups.
+                    if !session_entry
+                        .models
+                        .iter()
+                        .any(|m| m.display_name == normalized_model)
+                    {
+                        session_entry.models.push(SessionModel {
+                            display_name: normalized_model.clone(),
+                            provider: msg.provider_id.clone(),
+                            color_key: model_key.clone(),
+                        });
+                    }
                 }
 
-                // Track distinct models in first-seen order, retaining
-                // provider and color_key for correct shade-map lookups.
-                if !session_entry
-                    .models
-                    .iter()
-                    .any(|m| m.display_name == normalized_model)
-                {
-                    session_entry.models.push(SessionModel {
-                        display_name: normalized_model.clone(),
-                        provider: msg.provider_id.clone(),
-                        color_key: model_key.clone(),
-                    });
-                }
-            }
-
-            // Project aggregation: one bucket per repo identity so the Projects
-            // tab rolls up per project no matter which global grouping the
-            // Models tab is using. Gated on `projects_enabled` because the
-            // workspace resolution above is only paid when this or the
-            // WorkspaceModel grouping consumes it.
-            if self.projects_enabled {
-                let project_entry =
-                    project_map
+                // Project aggregation: one bucket per repo identity so the Projects
+                // tab rolls up per project no matter which global grouping the
+                // Models tab is using. Gated on `projects_enabled` because the
+                // workspace resolution above is only paid when this or the
+                // WorkspaceModel grouping consumes it.
+                if self.projects_enabled {
+                    let project_entry = project_map
                         .entry(project_group_key.clone())
                         .or_insert_with(|| ProjectUsage {
                             group_key: project_group_key.clone(),
@@ -1183,64 +1193,66 @@ impl DataLoader {
                             last_active_ms: 0,
                         });
 
-                project_entry.tokens.input = project_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                project_entry.tokens.output = project_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                project_entry.tokens.cache_read = project_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                project_entry.tokens.cache_write = project_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                project_entry.tokens.reasoning = project_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                project_entry.cost += msg_cost;
-                project_entry.message_count = project_entry
-                    .message_count
-                    .saturating_add(msg.message_count.max(0) as u32);
+                    project_entry.tokens.input = project_entry
+                        .tokens
+                        .input
+                        .saturating_add(msg.tokens.input.max(0) as u64);
+                    project_entry.tokens.output = project_entry
+                        .tokens
+                        .output
+                        .saturating_add(msg.tokens.output.max(0) as u64);
+                    project_entry.tokens.cache_read = project_entry
+                        .tokens
+                        .cache_read
+                        .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                    project_entry.tokens.cache_write = project_entry
+                        .tokens
+                        .cache_write
+                        .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                    project_entry.tokens.reasoning = project_entry
+                        .tokens
+                        .reasoning
+                        .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                    project_entry.cost += msg_cost;
+                    project_entry.message_count = project_entry
+                        .message_count
+                        .saturating_add(msg.message_count.max(0) as u32);
 
-                let ts = message_timestamp_ms(msg);
-                if ts > 0 {
-                    if project_entry.first_active_ms == 0 || ts < project_entry.first_active_ms {
-                        project_entry.first_active_ms = ts;
+                    let ts = message_timestamp_ms(msg);
+                    if ts > 0 {
+                        if project_entry.first_active_ms == 0 || ts < project_entry.first_active_ms
+                        {
+                            project_entry.first_active_ms = ts;
+                        }
+                        if ts > project_entry.last_active_ms {
+                            project_entry.last_active_ms = ts;
+                        }
                     }
-                    if ts > project_entry.last_active_ms {
-                        project_entry.last_active_ms = ts;
+
+                    if !project_entry.clients.iter().any(|c| c == &msg.client) {
+                        project_entry.clients.push(msg.client.clone());
                     }
-                }
 
-                if !project_entry.clients.iter().any(|c| c == &msg.client) {
-                    project_entry.clients.push(msg.client.clone());
-                }
+                    if !project_entry
+                        .models
+                        .iter()
+                        .any(|m| m.display_name == normalized_model)
+                    {
+                        project_entry.models.push(SessionModel {
+                            display_name: normalized_model.clone(),
+                            provider: msg.provider_id.clone(),
+                            color_key: model_key.clone(),
+                        });
+                    }
 
-                if !project_entry
-                    .models
-                    .iter()
-                    .any(|m| m.display_name == normalized_model)
-                {
-                    project_entry.models.push(SessionModel {
-                        display_name: normalized_model.clone(),
-                        provider: msg.provider_id.clone(),
-                        color_key: model_key.clone(),
-                    });
-                }
-
-                if !msg.session_id.is_empty() {
-                    let session_key = format!("{}:{}", msg.client, msg.session_id);
-                    let project_sessions = project_session_ids
-                        .entry(project_group_key.clone())
-                        .or_default();
-                    if project_sessions.insert(session_key) {
-                        project_entry.session_count += 1;
+                    if !msg.session_id.is_empty() {
+                        let session_key = format!("{}:{}", msg.client, msg.session_id);
+                        let project_sessions = project_session_ids
+                            .entry(project_group_key.clone())
+                            .or_default();
+                        if project_sessions.insert(session_key) {
+                            project_entry.session_count += 1;
+                        }
                     }
                 }
             }

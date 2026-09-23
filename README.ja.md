@@ -173,6 +173,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 - [セッションデータ保持](#セッションデータ保持)
 - [データソース](#データソース)
 - [価格](#価格)
+- [ローカル使用状況復元レジャー](#ローカル使用状況復元レジャー)
 - [コントリビューション](#コントリビューション)
   - [開発ガイドライン](#開発ガイドライン)
 - [謝辞](#謝辞)
@@ -1008,6 +1009,7 @@ Claude Code に限って注意点があります。Claude Code はセッショ�
 | `TOKSCALE_EXTRA_DIRS` | unset | 一時的な追加セッションルートを `client:/abs/path,client:/abs/path` 形式で指定 |
 | `TOKSCALE_CONFIG_DIR` | unset | 設定ディレクトリのルート（`settings.json`、`star-cache.json`、`cache/`、`antigravity-cache/`、`trae-cache/` の保存場所）をオーバーライドします。絶対パス推奨；相対パスはプロセス CWD を基準に解決されます。CI サンドボックスや非デフォルトの場所を固定したい場合に便利です。設定されている場合、tokscale は macOS のレガシーパス（`~/Library/Application Support/tokscale/`）にフォールバックしません。 |
 | `TOKSCALE_FM_DEBUG` | unset | 設定すると、Apple Foundation Models の診断情報（macOS バージョンゲート、dlopen の dylib パス、ロード/シンボルエラー）を stderr に出力し、オンデバイスの apple-fm が動作した（またはしなかった）理由を説明します。 |
+| `TOKSCALE_RECOVERY_DISABLE` | unset | 設定すると、ファイルが存在してもローカル使用状況復元レジャー（`recovered-usage-v1.json`）を無効化します。 |
 
 ```bash
 # 例：非常に大きなデータセット用にタイムアウトを増加
@@ -1985,6 +1987,19 @@ Tokscaleは[LiteLLMの価格データベース](https://github.com/BerriAI/litel
 - キャッシュ書き込みトークン
 - 推論トークン（o1などのモデル用）
 - モデル固有の階層型価格（例: 200k または 272k トークン以上）
+
+## ローカル使用状況復元レジャー
+
+クライアントが古いセッショントランスクリプトを削除した場合、オプトインのレジャー `~/.config/tokscale/recovered-usage-v1.json`（`TOKSCALE_CONFIG_DIR` で解決される設定ディレクトリ）を使って、それらのセッションの古いローカルエクスポートをローカルレポートに突き合わせて復元できます。ファイルは `Archive` JSON オブジェクトで、`version`（`1` 必須）、`home`（スキャン対象のホームディレクトリと完全一致必須）、および省略可能な `messages` / `daily_floors` 配列（シリアライズされた `UnifiedMessage` レコード）からなります。`messages` はディスク上に残っていないセッションのアーカイブ済みリクエスト行を復元し、`daily_floors` は（クライアント、日付）ごとの集計スナップショットを保持し、スナップショットと計上済み日次合計との正の差分のみを埋めます。ライブのトランスクリプトが常に優先され、復元行は `local-recovery:` デデュープキーと「Recovered request archive」/「Recovered daily aggregate」のエージェントラベルで示されます。オーバーレイは厳密にローカル専用です：復元された使用状況がリーダーボードに送信されることはなく、ソースメッセージキャッシュに書き込まれることもなく、日次フロア集計は Sessions・Agents・Hourly・Minutely の各ビューから除外されます。レジャーを無視するには `TOKSCALE_RECOVERY_DISABLE` を設定してください。フォーマットは内部向けです：`local-recovery:` キーは Tokscale 自身が生成したものとして信頼されるため、手作業で作成しないでください。一致するレジャーが存在する間、ローカルレポートはメッセージをストリーミングせず全件収集するため、非常に大きなコーパスを持つユーザーはメモリ使用量が増加する場合があります。
+
+```json
+{
+  "version": 1,
+  "home": "/Users/you",
+  "messages": [ /* シリアライズされた UnifiedMessage としてのアーカイブ済みリクエスト行 */ ],
+  "daily_floors": [ /* シリアライズされた UnifiedMessage としての（クライアント、日付）ごとの集計スナップショット */ ]
+}
+```
 
 ## コントリビューション
 

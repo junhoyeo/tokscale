@@ -171,6 +171,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 - [Session Data Retention](#session-data-retention)
 - [Data Sources](#data-sources)
 - [Pricing](#pricing)
+- [Local Usage Recovery Ledger](#local-usage-recovery-ledger)
 - [Contributing](#contributing)
   - [Development Guidelines](#development-guidelines)
 - [Acknowledgments](#acknowledgments)
@@ -1037,6 +1038,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 | `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, and `trae-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 | `TOKSCALE_FM_DEBUG` | unset | When set, prints Apple Foundation Models diagnostics (macOS version gate, dlopen dylib path, load/symbol errors) to stderr to explain why on-device apple-fm did or didn't engage. |
+| `TOKSCALE_RECOVERY_DISABLE` | unset | When set, disables the local usage recovery ledger (`recovered-usage-v1.json`) even if the file exists. |
 
 ```bash
 # Example: Increase timeout for very large datasets
@@ -2076,6 +2078,19 @@ Pricing includes:
 - Cache write tokens
 - Reasoning tokens (for models like o1)
 - Model-specific tiered pricing (for example, above 200k or 272k tokens)
+
+## Local Usage Recovery Ledger
+
+Tokscale can reconcile an older local export of wiped session transcripts back into local reports via an opt-in ledger at `~/.config/tokscale/recovered-usage-v1.json` (the config directory resolved by `TOKSCALE_CONFIG_DIR`). The file is an `Archive` JSON object: `version` (must be `1`), `home` (must exactly match the scanned home directory), and optional `messages` / `daily_floors` arrays of serialized `UnifiedMessage` records — `messages` restores archived request rows for sessions no longer on disk, while `daily_floors` holds per-(client, date) aggregate snapshots that fill only the positive gap between the snapshot and the counted daily total. Live transcripts always win, recovered rows are marked with `local-recovery:` dedup keys and "Recovered request archive" / "Recovered daily aggregate" agent labels, and the overlay is strictly local-only: recovered usage is never submitted to the leaderboard, never written into the source-message cache, and daily-floor aggregates are excluded from the Sessions, Agents, Hourly, and Minutely views. Set `TOKSCALE_RECOVERY_DISABLE` to ignore the ledger. The format is internal: `local-recovery:` keys are trusted as produced by Tokscale itself, so do not hand-author them. While a matching ledger is present, local reports collect all messages instead of streaming them, so users with very large corpora may see higher memory usage.
+
+```json
+{
+  "version": 1,
+  "home": "/Users/you",
+  "messages": [ /* archived request rows as serialized UnifiedMessages */ ],
+  "daily_floors": [ /* per-(client, date) aggregate snapshots as serialized UnifiedMessages */ ]
+}
+```
 
 ## Contributing
 

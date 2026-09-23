@@ -32,11 +32,29 @@ fn key(m: &UnifiedMessage) -> (String, String, String) {
 fn total(t: &TokenBreakdown) -> i64 {
     t.input + t.output + t.cache_read + t.cache_write + t.reasoning
 }
+/// Local marker prepended to every dedup key produced by this overlay.
+/// Internal only: the ledger lives in the user's own config dir and
+/// `local-recovery:` keys are trusted as produced by Tokscale itself, never
+/// by a remote party or a submitted payload. Do not hand-author ledger keys.
+const KEY_PREFIX: &str = "local-recovery:";
+/// Infix marking a daily-floor row inside its dedup key.
+const DAILY_INFIX: &str = "daily:";
+
+/// True for rows this overlay generated as daily-floor aggregates.
+///
+/// The marker is derived from how `merge` composes the key, not from the raw
+/// prefix alone: a request-archive row keeps its ledger id verbatim after
+/// `local-recovery:`, so a ledger id of `daily:...` could spoof a naive
+/// `starts_with("local-recovery:daily:")` check. Requiring the session id to
+/// equal the dedup key rejects that — request rows keep their own session id,
+/// while `merge` sets both to the daily key it constructed.
 pub fn is_daily(m: &UnifiedMessage) -> bool {
-    m.dedup_key
-        .as_deref()
-        .unwrap_or("")
-        .starts_with("local-recovery:daily:")
+    let Some(key) = m.dedup_key.as_deref() else {
+        return false;
+    };
+    m.session_id == key
+        && key.starts_with(KEY_PREFIX)
+        && key[KEY_PREFIX.len()..].starts_with(DAILY_INFIX)
 }
 fn finite(m: &UnifiedMessage) -> bool {
     [
@@ -348,12 +366,7 @@ pub fn merge<F: Fn(&UnifiedMessage) -> bool>(
     include: F,
 ) {
     // Reapplying the overlay is idempotent, including on an already merged vector.
-    native.retain(|m| {
-        !m.dedup_key
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("local-recovery:")
-    });
+    native.retain(|m| !m.dedup_key.as_deref().unwrap_or("").starts_with(KEY_PREFIX));
     let sessions: HashSet<(String, String)> = native
         .iter()
         .map(|m| (m.client.clone(), m.session_id.clone()))
@@ -374,7 +387,7 @@ pub fn merge<F: Fn(&UnifiedMessage) -> bool>(
         if id.is_empty() || !ids.insert(id.clone()) || !seen.insert(signature(&m)) {
             continue;
         }
-        m.dedup_key = Some(format!("local-recovery:{id}"));
+        m.dedup_key = Some(format!("{KEY_PREFIX}{id}"));
         m.agent = Some("Recovered request archive".into());
         m.is_turn_start = false;
         native.push(m);
@@ -475,7 +488,9 @@ pub fn merge<F: Fn(&UnifiedMessage) -> bool>(
             m.message_count = count.min(i32::MAX as i64) as i32;
             m.agent = Some("Recovered daily aggregate (component split estimated)".into());
             let k = key(&m);
-            m.session_id = format!("local-recovery:daily:{}:{}:{}", k.0, k.1, k.2);
+            // session_id deliberately equals dedup_key: that equality is the
+            // structural marker `is_daily` relies on (see its doc comment).
+            m.session_id = format!("{KEY_PREFIX}{DAILY_INFIX}{}:{}:{}", k.0, k.1, k.2);
             m.session_title = Some("Recovered daily usage; original sessions unavailable".into());
             m.dedup_key = Some(m.session_id.clone());
             m.is_turn_start = false;
@@ -548,6 +563,39 @@ mod tests {
             true
         });
         assert_eq!(n.len(), 3);
+    }
+    /// Mirrors the structural half of `is_daily` so the test can find the
+    /// generated floor row without constructing a full UnifiedMessage probe.
+    fn is_daily_key(key: &str) -> bool {
+        key.starts_with(KEY_PREFIX) && key[KEY_PREFIX.len()..].starts_with(DAILY_INFIX)
+    }
+    #[test]
+    fn request_row_with_daily_prefixed_id_is_not_treated_as_floor() {
+        // A ledger request id beginning with `daily:` must not mark the row as
+        // a daily-floor aggregate: `is_daily` requires the session id to equal
+        // the composed dedup key, which only holds for rows `merge` builds as
+        // daily floors.
+        let mut native = vec![];
+        merge(
+            &mut native,
+            vec![row("daily:abc", 20)],
+            vec![row("floor", 50)],
+            |_| true,
+        );
+        let request = native
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("local-recovery:daily:abc"))
+            .expect("request archive row restored");
+        assert!(!is_daily(request));
+        let floor = native
+            .iter()
+            .find(|m| {
+                m.dedup_key
+                    .as_deref()
+                    .is_some_and(|key| key != "local-recovery:daily:abc" && is_daily_key(key))
+            })
+            .expect("daily floor row generated");
+        assert!(is_daily(floor));
     }
     #[test]
     fn pinned_zone_moves_recovered_request_before_floor_gap() {
