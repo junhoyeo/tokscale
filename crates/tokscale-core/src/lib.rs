@@ -6539,6 +6539,8 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
         .is_none_or(|key| seen_keys.insert(key.clone()))
 }
 
+type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
+
 /// Read every Antigravity surface in legacy-first order, then collapse copies
 /// of the same provider response even when each surface assigned it a
 /// different session ID. Antigravity's response ID is shared by the desktop
@@ -6547,7 +6549,7 @@ fn parse_antigravity_family_messages(
     scan_result: &scanner::ScanResult,
     pricing: Option<&pricing::PricingService>,
 ) -> Vec<UnifiedMessage> {
-    let sources: [(ClientId, fn(&Path) -> Vec<UnifiedMessage>); 3] = [
+    let sources: [(ClientId, AntigravitySourceParser); 3] = [
         (
             ClientId::Antigravity,
             sessions::antigravity::parse_antigravity_file,
