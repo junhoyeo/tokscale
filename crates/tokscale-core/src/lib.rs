@@ -3394,35 +3394,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         all_messages.extend(crush_messages);
     }
 
-    let antigravity_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Antigravity)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity::parse_antigravity_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    all_messages.extend(antigravity_messages);
-
-    let antigravity_cli_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::AntigravityCli)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity_cli::parse_antigravity_cli_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    all_messages.extend(antigravity_cli_messages);
+    all_messages.extend(parse_antigravity_family_messages(&scan_result, pricing));
 
     // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
     let trae_messages: Vec<UnifiedMessage> = scan_result
@@ -6246,33 +6218,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Crush, crush_count);
     messages.extend(crush_msgs);
 
-    let antigravity_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Antigravity)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity::parse_antigravity_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let antigravity_count = antigravity_msgs.len() as i32;
-    counts.set(ClientId::Antigravity, antigravity_count);
-    messages.extend(antigravity_msgs);
-
-    let antigravity_cli_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::AntigravityCli)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity_cli::parse_antigravity_cli_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let antigravity_cli_count = antigravity_cli_msgs.len() as i32;
-    counts.set(ClientId::AntigravityCli, antigravity_cli_count);
-    messages.extend(antigravity_cli_msgs);
+    let antigravity_msgs = parse_antigravity_family_messages(&scan_result, None);
+    for client in [
+        ClientId::Antigravity,
+        ClientId::AntigravityCli,
+        ClientId::AntigravityExtension,
+    ] {
+        let count = antigravity_msgs
+            .iter()
+            .filter(|message| message.client == client.as_str())
+            .count() as i32;
+        counts.set(client, count);
+    }
+    messages.extend(antigravity_msgs.iter().map(unified_to_parsed));
 
     let trae_msgs: Vec<ParsedMessage> = {
         let unique_trae_messages = dedupe_latest_trae_messages(
@@ -6581,6 +6539,64 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
         .is_none_or(|key| seen_keys.insert(key.clone()))
 }
 
+/// Read every Antigravity surface in legacy-first order, then collapse copies
+/// of the same provider response even when each surface assigned it a
+/// different session ID. Antigravity's response ID is shared by the desktop
+/// cache, CLI database, and IDE extension database; session IDs are not.
+fn parse_antigravity_family_messages(
+    scan_result: &scanner::ScanResult,
+    pricing: Option<&pricing::PricingService>,
+) -> Vec<UnifiedMessage> {
+    let sources: [(ClientId, fn(&Path) -> Vec<UnifiedMessage>); 3] = [
+        (
+            ClientId::Antigravity,
+            sessions::antigravity::parse_antigravity_file,
+        ),
+        (
+            ClientId::AntigravityCli,
+            sessions::antigravity_cli::parse_antigravity_cli_file,
+        ),
+        (
+            ClientId::AntigravityExtension,
+            sessions::antigravity_cli::parse_antigravity_extension_file,
+        ),
+    ];
+
+    let mut messages = Vec::new();
+    for (client, parse) in sources {
+        let mut source_messages: Vec<UnifiedMessage> = scan_result
+            .get(client)
+            .par_iter()
+            .flat_map_iter(|path| parse(path))
+            .collect();
+        if let Some(pricing) = pricing {
+            for message in &mut source_messages {
+                apply_pricing_if_available(message, Some(pricing));
+            }
+        }
+        messages.extend(source_messages);
+    }
+
+    dedupe_antigravity_family_messages(messages)
+}
+
+/// Deduplicate only response IDs within the Antigravity family. Missing IDs
+/// stay separate because identical token counts and timestamps are not proof
+/// that two independent generations are the same call.
+fn dedupe_antigravity_family_messages(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    let mut seen_response_ids = HashSet::new();
+    messages
+        .into_iter()
+        .filter(|message| {
+            message
+                .dedup_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+                .is_none_or(|key| seen_response_ids.insert(key.to_string()))
+        })
+        .collect()
+}
+
 fn summed_parsed_message_count(messages: &[ParsedMessage]) -> i32 {
     messages
         .iter()
@@ -6641,13 +6657,13 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_hourly_usage_entries, aggregate_model_usage_entries,
+        aggregate_by_date, aggregate_hourly_usage_entries, aggregate_model_usage_entries,
         aggregate_monthly_usage_v2_entries, apply_pricing_if_available, build_graph_from_messages,
-        dedupe_latest_trae_messages, filter_messages_for_report,
-        generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
-        merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
-        normalize_model_for_grouping, opencode_json_superseded_by_sqlite,
-        parse_all_messages_with_pricing_with_cache_policy,
+        dedupe_antigravity_family_messages, dedupe_latest_trae_messages,
+        filter_messages_for_report, generate_graph_with_loaded_pricing, get_home_dir_string,
+        is_generic_routing_label, merge_claude_cross_file_duplicate, message_cache,
+        message_passes_report_filter, normalize_model_for_grouping,
+        opencode_json_superseded_by_sqlite, parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
         paths, prepare_submission_pricing, pricing, retain_for_requested_clients, scanner,
         select_local_parse_pricing, sessions, unified_to_parsed, validate_priced_messages,
@@ -6665,6 +6681,56 @@ mod tests {
     use serial_test::serial;
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::io::Write;
+
+    #[test]
+    fn antigravity_response_ids_deduplicate_across_independent_sessions() {
+        let make_message =
+            |client: &str, session: &str, input: i64, output: i64, dedup_key: Option<&str>| {
+                UnifiedMessage::new_with_dedup(
+                    client,
+                    "gemini-3.5-flash-high",
+                    "google",
+                    session,
+                    1_781_502_653_000,
+                    TokenBreakdown {
+                        input,
+                        output,
+                        ..Default::default()
+                    },
+                    0.0,
+                    dedup_key.map(str::to_string),
+                )
+            };
+
+        let unique = dedupe_antigravity_family_messages(vec![
+            make_message("antigravity-cli", "cli-session", 100, 20, Some("resp-copy")),
+            make_message(
+                "antigravity-extension",
+                "extension-session",
+                100,
+                20,
+                Some("resp-copy"),
+            ),
+            make_message(
+                "antigravity-extension",
+                "extension-session",
+                13,
+                4,
+                Some("resp-new"),
+            ),
+            // Without a stable provider ID, two otherwise identical requests
+            // cannot safely be treated as copies.
+            make_message("antigravity-extension", "another-session", 7, 2, None),
+        ]);
+
+        assert_eq!(unique.len(), 3);
+        assert_eq!(unique[0].client, "antigravity-cli");
+        let daily = aggregate_by_date(unique);
+        assert_eq!(daily.len(), 1);
+        assert_eq!(daily[0].totals.tokens, 146);
+        assert_eq!(daily[0].token_breakdown.input, 120);
+        assert_eq!(daily[0].token_breakdown.output, 26);
+    }
 
     #[test]
     fn graph_sink_keeps_only_one_bounded_pricing_batch() {

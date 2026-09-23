@@ -1132,6 +1132,8 @@ pub enum ClientFilter {
     #[value(name = "micode-desktop")]
     MicodeDesktop,
     Muse,
+    #[value(name = "antigravity-extension")]
+    AntigravityExtension,
     Synthetic,
 }
 
@@ -1174,6 +1176,7 @@ impl ClientFilter {
             Self::Commandcode => "commandcode",
             Self::Micode => "micode",
             Self::AntigravityCli => "antigravity-cli",
+            Self::AntigravityExtension => "antigravity-extension",
             Self::Junie => "junie",
             Self::Zcode => "zcode",
             Self::Opencodereview => "opencodereview",
@@ -1242,6 +1245,7 @@ impl ClientFilter {
             Self::Commandcode => Some(ClientId::CommandCode),
             Self::Micode => Some(ClientId::MiMoCode),
             Self::AntigravityCli => Some(ClientId::AntigravityCli),
+            Self::AntigravityExtension => Some(ClientId::AntigravityExtension),
             Self::Junie => Some(ClientId::Junie),
             Self::Zcode => Some(ClientId::Zcode),
             Self::Opencodereview => Some(ClientId::OpenCodeReview),
@@ -1306,6 +1310,7 @@ impl ClientFilter {
             ClientId::CommandCode => Self::Commandcode,
             ClientId::MiMoCode => Self::Micode,
             ClientId::AntigravityCli => Self::AntigravityCli,
+            ClientId::AntigravityExtension => Self::AntigravityExtension,
             ClientId::Junie => Self::Junie,
             ClientId::Zcode => Self::Zcode,
             ClientId::OpenCodeReview => Self::Opencodereview,
@@ -4512,6 +4517,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     ClientId::Cursor => "Cursor IDE",
                     ClientId::Kimi => "Kimi CLI",
                     ClientId::AntigravityCli => "Antigravity CLI",
+                    ClientId::AntigravityExtension => "Antigravity IDE Extension",
                     _ => client_ui::display_name(client),
                 }
                 .to_string();
@@ -5013,8 +5019,9 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
 /// reads and parses exactly the same files. Suggesting one would also cost
 /// data — it clears `full_history` on the scan scope, and
 /// `planParserHighWaterSubmission` freezes a partial snapshot for every client
-/// in `SUPPORTED_VERSIONED_PARSERS` (copilot, droid, antigravity-cli,
-/// antigravity). So the tip names `--client` and nothing else.
+/// in `SUPPORTED_VERSIONED_PARSERS` (copilot, droid, Antigravity CLI,
+/// Antigravity IDE Extension, antigravity). So the tip names `--client` and
+/// nothing else.
 ///
 /// It stays quiet once the user has already passed `--client`, and under
 /// autosubmit, whose stdout is the scheduler log file rather than a terminal

@@ -792,6 +792,10 @@ describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
     expect(SUPPORTED_VERSIONED_PARSERS.antigravity).toBe(1);
   });
 
+  it("registers Antigravity IDE Extensions at generation 1", () => {
+    expect(SUPPORTED_VERSIONED_PARSERS["antigravity-extension"]).toBe(1);
+  });
+
   it("does not raise the stored total when standalone rows are re-dated", async () => {
     const { store, firstJson, secondJson } = await submitOldThenNew(
       "antigravity",

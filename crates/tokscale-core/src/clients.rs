@@ -1087,6 +1087,21 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Antigravity IDE Extensions (VS Code, JetBrains, Zed, and others) persist
+    // the same generation databases as the CLI under a separate application
+    // directory. Keep the client identity distinct for attribution; the
+    // Antigravity parser family removes repeated response IDs across surfaces.
+    AntigravityExtension = 55 => {
+        id: "antigravity-extension",
+        display: "Antigravity IDE Extension",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"),
+        root: PathRoot::Home,
+        relative: ".gemini/antigravity/conversations",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1202,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 55);
+        assert_eq!(ClientId::COUNT, 56);
     }
 
     #[test]
@@ -2298,6 +2313,21 @@ mod tests {
     #[test]
     fn test_antigravity_submit_default_is_true() {
         assert!(ClientId::Antigravity.submit_default());
+    }
+
+    #[test]
+    fn test_antigravity_extension_database_path() {
+        let client = ClientId::AntigravityExtension;
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            native_join(
+                std::path::Path::new("/tmp/home"),
+                ".gemini/antigravity/conversations"
+            )
+        );
+        assert_eq!(client.data().pattern, "*.db");
+        assert!(client.parse_local());
+        assert!(client.submit_default());
     }
 
     #[test]

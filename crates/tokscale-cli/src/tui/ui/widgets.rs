@@ -824,15 +824,16 @@ pub fn get_client_color(client: &str) -> Color {
         "codebuff" => Color::Rgb(124, 58, 237),    // #7C3AED Codebuff brand purple
         "freebuff" => Color::Rgb(56, 189, 248),    // #38BDF8 Freebuff sky blue
         "antigravity" => Color::Rgb(99, 102, 241), // #6366F1 Antigravity indigo
-        "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
-        "warp" => Color::Rgb(1, 155, 150),         // #019B96 Warp teal
-        "gjc" => Color::Rgb(220, 38, 38),          // #DC2626 gajae-code red-claw
-        "jcode" => Color::Rgb(245, 158, 11),       // #F59E0B Jcode amber
-        "junie" => Color::Rgb(123, 97, 255),       // #7B61FF Junie violet
+        "antigravity-cli" | "antigravity-extension" => Color::Rgb(99, 102, 241),
+        "zed" => Color::Rgb(8, 76, 207),     // #084CCF Zed blue
+        "warp" => Color::Rgb(1, 155, 150),   // #019B96 Warp teal
+        "gjc" => Color::Rgb(220, 38, 38),    // #DC2626 gajae-code red-claw
+        "jcode" => Color::Rgb(245, 158, 11), // #F59E0B Jcode amber
+        "junie" => Color::Rgb(123, 97, 255), // #7B61FF Junie violet
         "prime-agent" => Color::Rgb(108, 99, 255), // #6C63FF Prime violet
-        "unsloth" => Color::Rgb(88, 204, 2),       // #58CC02 Unsloth green
-        "muse" => Color::Rgb(0, 100, 224),         // #0064E0 Muse brand blue
-        _ => Color::Rgb(136, 136, 136),            // #888888
+        "unsloth" => Color::Rgb(88, 204, 2), // #58CC02 Unsloth green
+        "muse" => Color::Rgb(0, 100, 224),   // #0064E0 Muse brand blue
+        _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }
 

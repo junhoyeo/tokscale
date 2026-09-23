@@ -1523,6 +1523,7 @@ mod tests {
         let width = 200;
         for (a, b) in [
             ("antigravity-cli", "antigravity"),
+            ("antigravity-extension", "antigravity"),
             ("opencodereview", "opencode"),
             ("devin-desktop", "devin"),
             ("openclaw", "opencode"),

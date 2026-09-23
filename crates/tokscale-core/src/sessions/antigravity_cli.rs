@@ -1,11 +1,10 @@
-//! Antigravity CLI session parser
+//! Antigravity generation database parser
 //!
-//! The Antigravity CLI (the terminal agent, distinct from the Antigravity IDE)
-//! stores each conversation as a SQLite database under
-//! `~/.gemini/antigravity-cli/conversations/<uuid>.db`. Unlike the IDE-backed
-//! [`super::antigravity`] source — which depends on a *running* language server
-//! reachable over RPC and caches JSONL under the config dir — the CLI usage is
-//! already on disk and can be read directly. No RPC, no `antigravity sync`.
+//! Antigravity CLI conversations live under
+//! `~/.gemini/antigravity-cli/conversations/<uuid>.db`; IDE extension
+//! conversations live under `~/.gemini/antigravity/conversations/<uuid>.db`.
+//! Both store generation metadata in the same SQLite format and are read
+//! directly, without RPC or `antigravity sync`.
 //!
 //! Each `gen_metadata` row is one generation encoded as the same
 //! `GeneratorMetadata` protobuf the IDE returns over
@@ -67,7 +66,21 @@ use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
+/// Bump when parsing behavior for Antigravity generation databases changes.
+/// The CLI and IDE extension clients share this parser and cache generation.
+pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 1;
+
+/// Parse an Antigravity CLI conversation database.
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_antigravity_db_file(path, "antigravity-cli")
+}
+
+/// Parse an Antigravity IDE extension conversation database.
+pub fn parse_antigravity_extension_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_antigravity_db_file(path, "antigravity-extension")
+}
+
+fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMessage> {
     let Some(conn) = open_readonly_sqlite_opt(path) else {
         return Vec::new();
     };
@@ -85,7 +98,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     // attribution from anywhere in the conversation, not just from rows that
     // happen to precede it.
     //
-    // Quiet: a database without `gen_metadata` is not an Antigravity CLI
+    // Quiet: a database without `gen_metadata` is not an Antigravity generation
     // database at all, so there is nothing to warn about.
     let mut rows: Vec<(Option<i64>, Vec<u8>)> = Vec::new();
     sqlite_for_each_row_on(
@@ -102,6 +115,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     );
     let session_models = SessionModels::from_blobs(rows.iter().map(|(_, blob)| blob.as_slice()));
     let ctx = GenContext {
+        client,
         session_id: &session_id,
         session_timestamp: meta.fallback_ms,
         session_anchor: meta.created_ms,
@@ -278,6 +292,7 @@ fn display_label_to_model_id(label: &str) -> Option<&'static str> {
 }
 
 struct GenContext<'a> {
+    client: &'static str,
     session_id: &'a str,
     session_timestamp: i64,
     session_anchor: Option<i64>,
@@ -357,7 +372,7 @@ fn parse_gen_metadata(
         .to_string();
 
     Some(UnifiedMessage::new_with_dedup(
-        "antigravity-cli",
+        ctx.client,
         model_id,
         provider_id,
         ctx.session_id,
@@ -1065,6 +1080,7 @@ mod tests {
         let models = SessionModels::default();
         let step_timestamps = StepTimestamps::default();
         let ctx = GenContext {
+            client: "antigravity-cli",
             session_id: "s",
             session_timestamp: session_fallback,
             session_anchor: anchor,
@@ -1088,6 +1104,7 @@ mod tests {
         let models = SessionModels::default();
         let step_timestamps = StepTimestamps::default();
         let ctx = GenContext {
+            client: "antigravity-cli",
             session_id,
             session_timestamp,
             session_anchor: Some(session_timestamp),
@@ -1226,6 +1243,21 @@ mod tests {
             Some("C:/Users/Frank/obsidian-vault")
         );
         assert_eq!(message.workspace_label.as_deref(), Some("obsidian-vault"));
+    }
+
+    #[test]
+    fn parses_antigravity_ide_extension_database_with_shared_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extension-conversation.db");
+        write_conversation(&path, &[build_gen_metadata()]);
+
+        let messages = parse_antigravity_extension_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "antigravity-extension");
+        assert_eq!(messages[0].session_id, "extension-conversation");
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("resp-1"));
+        assert_eq!(messages[0].tokens.input, 1632);
     }
 
     #[test]

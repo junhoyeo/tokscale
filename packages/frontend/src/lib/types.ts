@@ -35,6 +35,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "commandcode",
   "micode",
   "antigravity-cli",
+  "antigravity-extension",
   "junie",
   "zcode",
   "opencodereview",

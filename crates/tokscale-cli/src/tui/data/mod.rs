@@ -1886,6 +1886,7 @@ mod tests {
         assert_eq!(clients[52], ClientId::Hindsight);
         assert_eq!(clients[53], ClientId::MiMoDesktop);
         assert_eq!(clients[54], ClientId::Muse);
+        assert_eq!(clients[55], ClientId::AntigravityExtension);
     }
 
     #[test]
@@ -1946,6 +1947,7 @@ mod tests {
             "Hindsight",
             "Xiaomi MiMo AI",
             "Muse Code",
+            "Antigravity IDE Extension",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -1998,6 +2000,10 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hindsight), 'H');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::MiMoDesktop), 'W');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Muse), 'N');
+        assert_eq!(
+            crate::tui::client_ui::hotkey(ClientId::AntigravityExtension),
+            'I'
+        );
     }
 
     #[test]

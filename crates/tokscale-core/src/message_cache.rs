@@ -1109,6 +1109,16 @@ struct SharedParserFamily {
 /// responsibility.
 const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
     SharedParserFamily {
+        // Antigravity CLI and IDE extension conversation databases use the
+        // same gen_metadata parser in `sessions/antigravity_cli.rs`.
+        name: "antigravity generation database",
+        base: crate::sessions::antigravity_cli::ANTIGRAVITY_DB_PARSER_BASE_VERSION,
+        members: &[
+            (ClientId::AntigravityCli, 0),
+            (ClientId::AntigravityExtension, 0),
+        ],
+    },
+    SharedParserFamily {
         // Pi, Kimchi, Omp, and Senpi delegate to the pi-format parser in
         // `sessions/pi.rs`; Prime Agent rides on it through
         // `parse_pi_format_rlm_file_with_observer` (#1195, #1288).
@@ -1508,7 +1518,6 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Warp => 1,
         ClientId::Gjc => 1,
         ClientId::CommandCode => 1,
-        ClientId::AntigravityCli => 1,
         ClientId::Augment => 1,
         ClientId::CherryStudio => 1,
         ClientId::Mcode => 1,
@@ -1533,6 +1542,8 @@ fn parser_version(client: ClientId) -> u32 {
         | ClientId::Cline
         | ClientId::OpenCode
         | ClientId::MiMoCode
+        | ClientId::AntigravityCli
+        | ClientId::AntigravityExtension
         | ClientId::MiMoDesktop
         | ClientId::Kilo
         | ClientId::CodeBuddy
@@ -4690,6 +4701,13 @@ mod tests {
     #[test]
     fn test_shared_parser_family_roster_pins_exact_membership() {
         let expected: &[(&str, &[(ClientId, u32)])] = &[
+            (
+                "antigravity generation database",
+                &[
+                    (ClientId::AntigravityCli, 0),
+                    (ClientId::AntigravityExtension, 0),
+                ],
+            ),
             (
                 "pi-format",
                 &[
