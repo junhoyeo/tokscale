@@ -371,15 +371,26 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 // #1173, because the fork copies the sequence number too.
                 let identity = if is_attempt {
                     value
-                        .get("seq")
-                        .and_then(Value::as_i64)
-                        .map(|seq| format!("attempt-seq:{seq}"))
+                        .pointer("/data/attemptId")
+                        .or_else(|| value.pointer("/data/retryId"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(|id| format!("attempt-id:{id}"))
+                        .or_else(|| {
+                            value
+                                .get("seq")
+                                .and_then(Value::as_i64)
+                                .map(|seq| format!("attempt-session:{sid}:seq:{seq}"))
+                        })
                         .or_else(|| {
                             let turn = value.pointer("/data/turn").and_then(Value::as_i64)?;
                             let step = value.pointer("/data/step").and_then(Value::as_i64)?;
-                            Some(format!("attempt:{turn}:{step}:{timestamp}"))
+                            Some(format!(
+                                "attempt-session:{sid}:turn:{turn}:step:{step}:{timestamp}"
+                            ))
                         })
-                        .unwrap_or_else(|| format!("sid:{sid}"))
+                        .unwrap_or_else(|| format!("attempt-session:{sid}"))
                 } else {
                     value
                         .pointer("/data/message/id")
@@ -844,6 +855,37 @@ mod tests {
         assert_eq!(replaced_attempt.tokens.input, 52);
         assert_eq!(replaced_attempt.tokens.output, 10);
         assert!(replaced_attempt.is_turn_start);
+    }
+
+    #[test]
+    fn attempt_sequence_fallback_is_scoped_to_its_session() {
+        let attempt = r#"{"type":"assistant/attempt","seq":9,"time":1786669450011,"data":{"turn":3,"step":1,"stream":[{"type":"chunk","time":1786669450011,"chunk":{"type":"usage","usage":{"inputTokens":50,"outputTokens":8}}},{"type":"chunk","time":1786669450012,"chunk":{"type":"finish","reason":{"kind":"error"}}}]}}"#;
+        let first = write_zstd_session(&[
+            r#"{"type":"session","id":"session-attempt-a","createdAt":1,"cwd":"/work"}"#,
+            attempt,
+        ]);
+        let second = write_zstd_session(&[
+            r#"{"type":"session","id":"session-attempt-b","createdAt":1,"cwd":"/work"}"#,
+            attempt,
+        ]);
+
+        let first = parse_dsh_file(first.path());
+        let second = parse_dsh_file(second.path());
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(
+            first[0].dedup_key, second[0].dedup_key,
+            "sequence numbers restart per transcript and cannot identify attempts globally"
+        );
+        assert!(first[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.contains("attempt-session:session-attempt-a:seq:9")));
+        assert!(second[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.contains("attempt-session:session-attempt-b:seq:9")));
     }
 
     #[test]
