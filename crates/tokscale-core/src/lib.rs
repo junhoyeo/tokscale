@@ -5114,12 +5114,21 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
         1.0
     };
 
-    let openai_fast_mode_multiplier = if provider_identity::canonical_provider(&message.provider_id)
+    let openai_fast_mode_multiplier =
+        openai_fast_mode_multiplier(Some(&message.provider_id), message.service_tier.as_deref());
+
+    zed_hosted_multiplier * openai_fast_mode_multiplier
+}
+
+fn openai_fast_mode_multiplier(provider_id: Option<&str>, service_tier: Option<&str>) -> f64 {
+    if provider_id
+        .and_then(provider_identity::canonical_provider)
         .as_deref()
         == Some("openai")
-        && message.service_tier.as_deref().is_some_and(|tier| {
+        && service_tier.is_some_and(|tier| {
             tier.trim().eq_ignore_ascii_case("priority") || tier.trim().eq_ignore_ascii_case("fast")
-        }) {
+        })
+    {
         // OpenAI's Fast mode (formerly Priority processing) applies a 2x
         // per-token premium to its supported models. Cached input discounts
         // continue to apply, so doubling the standard calculated cost also
@@ -5127,9 +5136,21 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
         2.0
     } else {
         1.0
-    };
+    }
+}
 
-    zed_hosted_multiplier * openai_fast_mode_multiplier
+/// Price a parsed message while applying the request's recorded service tier.
+/// Provider-reported costs should be handled by the caller before using this
+/// estimated-cost path.
+pub fn calculate_cost_with_service_tier(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+) -> f64 {
+    pricing.calculate_cost_with_provider(model_id, provider_id, tokens)
+        * openai_fast_mode_multiplier(provider_id, service_tier)
 }
 
 fn apply_pricing_if_available(

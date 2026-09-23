@@ -35,10 +35,13 @@ use std::time::UNIX_EPOCH;
 // 7: OpenCode incremental marks record row provenance. Version-6 shards have a
 // wire migration below: unrelated clients retain their cache, while OpenCode
 // keeps its parsed messages and takes one full scan to acquire the new map.
-const CACHE_FORMAT_VERSION: u32 = 7;
-// Only MiMo uses this envelope. Its positional v7 entry remains nested intact,
-// with exact per-row provenance stored beside it; unrelated shards stay v7.
-const MICODE_CACHE_FORMAT_VERSION: u32 = 8;
+// 8: UnifiedMessage gained service_tier, changing the bincode payload layout.
+// Old shards rebuild as stale so every client remains readable after the field
+// is added.
+const CACHE_FORMAT_VERSION: u32 = 8;
+// MiMo stores exact per-row provenance beside each cached entry. Its envelope
+// version moves too because those entries also serialize UnifiedMessage.
+const MICODE_CACHE_FORMAT_VERSION: u32 = 9;
 const LEGACY_CACHE_FORMAT_VERSION_V4: u32 = 4;
 const LEGACY_CACHE_FORMAT_VERSION_V5: u32 = 5;
 const LEGACY_CACHE_FORMAT_VERSION_V6: u32 = 6;
@@ -2652,7 +2655,6 @@ fn read_shard_with_limit(
             Err(error) => ShardReadStatus::Invalid(error.to_string()),
         };
     }
-
     if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V4 {
         return match bincode::options()
             .with_limit(max_shard_bytes)
@@ -2687,6 +2689,12 @@ fn read_shard_with_limit(
         };
     }
     if envelope.format_version != CACHE_FORMAT_VERSION {
+        return ShardReadStatus::Stale;
+    }
+    if identity.namespace == ClientId::MiMoCode.as_str() {
+        // MiMo v8 shards use the prior UnifiedMessage layout. The generic v8
+        // number now belongs to the current shared envelope, so rebuild those
+        // MiMo shards instead of decoding them with the wrong wire shape.
         return ShardReadStatus::Stale;
     }
 
@@ -5806,6 +5814,22 @@ mod tests {
                 matches!(read_shard(&path,identity),ShardReadStatus::Loaded(entries) if entries[0].micode_metadata.is_none())
             );
         }
+        let old_micode_envelope = CachedShardEnvelope {
+            format_version: CACHE_FORMAT_VERSION,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: vec![0xff, 0xff],
+        };
+        std::fs::write(
+            &path,
+            bincode::options().serialize(&old_micode_envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_shard(&path, identity),
+            ShardReadStatus::Stale
+        ));
+
         let unrelated = CacheIdentity::for_client(ClientId::Claude);
         let entry = test_entry(unrelated, source.path(), "retained-claude");
         write_shard_with_limit(&path, unrelated, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
@@ -5830,12 +5854,12 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_micode_v7_has_no_provenance_and_requires_one_reparse() {
+    fn test_old_micode_unified_message_layout_is_stale() {
         let source = write_temp_file(b"{}\n");
         let identity = CacheIdentity::for_client(ClientId::MiMoCode);
         let entry = test_entry(identity, source.path(), "legacy");
         let envelope = CachedShardEnvelope {
-            format_version: CACHE_FORMAT_VERSION,
+            format_version: CACHE_FORMAT_VERSION - 1,
             parser_namespace: identity.namespace.to_string(),
             parser_version: identity.parser_version,
             payload: bincode::options().serialize(&vec![entry]).unwrap(),
@@ -5843,10 +5867,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("legacy.bin");
         std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
-        assert!(
-            matches!(read_shard(&path,identity),ShardReadStatus::Loaded(entries)
-            if entries[0].messages.len()==1 && !entries[0].has_valid_micode_metadata())
-        );
+        assert!(matches!(
+            read_shard(&path, identity),
+            ShardReadStatus::Stale
+        ));
     }
 
     #[test]

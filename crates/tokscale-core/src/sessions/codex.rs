@@ -532,6 +532,7 @@ fn parse_codex_reader<R: BufRead>(
                             state.session_id_from_meta = Some(id.clone());
                         }
                         state.current_model = payload_model.clone();
+                        state.current_service_tier = extract_service_tier(&payload);
                         handled = true;
                     } else {
                         if entry.entry_type == "event_msg"
@@ -582,6 +583,9 @@ fn parse_codex_reader<R: BufRead>(
                     }
                 }
 
+                if entry.entry_type == "turn_context" {
+                    state.current_service_tier = None;
+                }
                 if let Some(service_tier) = extract_service_tier(&payload) {
                     state.current_service_tier = Some(service_tier);
                 }
@@ -1656,6 +1660,26 @@ mod tests {
         );
         assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
         assert_eq!(messages[1].service_tier.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn test_turn_context_resets_service_tier_without_dropping_new_turn_metadata() {
+        let file = create_test_file(concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra","service_tier":"priority"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[1].service_tier, None);
     }
 
     #[test]
