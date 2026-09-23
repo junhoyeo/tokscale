@@ -6,9 +6,9 @@ import {
 import { createSafeRecord, ownValue } from "../safeRecord";
 
 /**
- * Clients whose submissions are bounded by a device/client lifetime
- * high-water instead of being merged day by day, mapped to the parser
- * generation the server accepts.
+ * Parser generations accepted for re-attributing clients. Most use a
+ * device/client lifetime high-water; source families that can overlap use an
+ * atomic family transition instead of independent client ledgers.
  *
  * A client belongs here when its parser can re-attribute usage it has already
  * submitted. The per-day merge guard refuses a decrease per (day, client), so
@@ -25,13 +25,14 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * Antigravity parsers are registered at generation 1. The database parser is
  * shared by the CLI and IDE extension, and reads a per-generation stamp out of
  * `gen_metadata`; the `antigravity` parser correlates standalone rows to
- * trajectory steps. A rescan therefore moves unchanged usage off the
- * session-start day and onto the days the work actually happened, which is
- * precisely the shape the per-day guard turns into permanent inflation.
+ * trajectory steps. All three source labels are admitted and reconciled as one
+ * family because the same provider response can appear in multiple surfaces.
  */
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
   droid: 1,
+  // Membership and accepted generations for the atomic Antigravity family
+  // transition; the submit route deliberately skips independent client plans.
   "antigravity-cli": 1,
   "antigravity-extension": 1,
   antigravity: 1,

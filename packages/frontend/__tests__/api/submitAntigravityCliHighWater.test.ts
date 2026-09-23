@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SUPPORTED_VERSIONED_PARSERS } from "../../src/lib/db/parserHighWater";
+import { ANTIGRAVITY_FAMILY } from "../../src/lib/db/antigravityTransition";
 import type { ClientBreakdownData } from "../../src/lib/db/helpers";
 
 // End-to-end regression for the Antigravity CLI re-attribution.
@@ -398,8 +399,14 @@ function submissionBody(
   client: string,
   days: Array<{ date: string; tokens: number; messages: number }>,
   retentionFloor?: string,
+  fullFamilyScope = true,
 ) {
   const dates = days.map((day) => day.date).sort();
+  const parserVersions = (ANTIGRAVITY_FAMILY as readonly string[]).includes(client)
+    ? Object.fromEntries(
+        (fullFamilyScope ? ANTIGRAVITY_FAMILY : [client]).map((source) => [source, 1]),
+      )
+    : { [client]: 1 };
   return {
     device: { id: "dev_1", name: "Device one" },
     meta: {
@@ -407,10 +414,10 @@ function submissionBody(
       version: "4.13.0",
       dateRange: { start: dates[0], end: dates[dates.length - 1] },
     },
-    // The CLI declares generation 1 for every client but Copilot, so a real
-    // Antigravity CLI submit carries exactly this.
+    // An unfiltered scan declares all Antigravity family generations even
+    // though de-duplication may leave usage attributed to only one source.
     scanScope: {
-      parserVersions: { [client]: 1 },
+      parserVersions,
       fullHistory: true,
       ...(retentionFloor
         ? { retentionFloors: { [client]: retentionFloor } }
@@ -505,7 +512,7 @@ async function submitOldThenNew(client: string) {
   return { store, firstJson, secondJson };
 }
 
-describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
+describe("POST /api/submit Antigravity family high-water", () => {
   it("registers antigravity-cli at the generation the CLI declares", () => {
     // Both re-attributions move a token to a different day and never change
     // the lifetime total, so no installed generation has to be frozen out.
@@ -520,27 +527,30 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     );
 
     // The old-dating submit stores the whole session on its start day and
-    // establishes the lifetime high-water at that total.
+    // establishes the Antigravity family baseline at that total.
     expect(firstJson.metrics.totalTokens).toBe(240_000);
 
-    // The re-dated rescan carries the SAME 240,000 tokens, so the high-water
-    // credits nothing: the session-start row is preserved untouched and the
-    // generation days add no rows at all.
+    // The re-dated rescan carries the SAME 240,000 tokens, so the family
+    // layout is replaced with its current dates without adding any usage.
     expect(secondJson.metrics.totalTokens).toBe(240_000);
     expect(storedTokens(store)).toBe(240_000);
-    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
-    expect(store.days[0].sourceBreakdown["antigravity-cli"].tokens).toBe(
-      240_000,
-    );
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-07",
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    expect(store.days.map((day) => day.sourceBreakdown["antigravity-cli"].tokens).sort((a, b) => a - b)).toEqual([
+      40_000,
+      80_000,
+      120_000,
+    ]);
 
-    // The high-water state persisted on the device row is what the next
-    // submit bounds against.
-    expect(store.device.parserVersions["antigravity-cli"]).toBe(1);
-    expect(
-      (store.device.parserStates["antigravity-cli"] as {
-        aggregate: { tokens: number };
-      }).aggregate.tokens,
-    ).toBe(240_000);
+    // All source generations are persisted together so a copied response
+    // cannot acquire a fresh client-specific baseline later.
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(1);
+      expect(store.device.parserStates[client]).toBeUndefined();
+    }
   });
 
   it("still credits genuinely new antigravity-cli usage after the re-dating", async () => {
@@ -585,18 +595,7 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
       store.days.find((day) => day.date === "2026-08-07")?.sourceBreakdown[
         "antigravity-cli"
       ].tokens,
-    ).toBe(240_000);
-
-    const state = store.device.parserStates["antigravity-cli"] as {
-      aggregate: { tokens: number };
-      days: Record<string, { tokens: number }>;
-      observedDays: Record<string, { tokens: number }>;
-    };
-    expect(state.aggregate.tokens).toBe(260_000);
-    expect(
-      Object.values(state.days).reduce((sum, day) => sum + day.tokens, 0),
-    ).toBe(260_000);
-    expect(state.observedDays["2026-08-07"].tokens).toBe(60_000);
+    ).toBe(60_000);
 
     // The credited ledger, not the parser's cellwise envelope, is the next
     // lifetime baseline. Replaying the same snapshot therefore adds nothing.
@@ -606,11 +605,7 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     expect(replay.status).toBe(200);
     expect((await replay.json()).metrics.totalTokens).toBe(260_000);
     expect(storedTokens(store)).toBe(260_000);
-    expect(
-      (store.device.parserStates["antigravity-cli"] as {
-        aggregate: { tokens: number };
-      }).aggregate.tokens,
-    ).toBe(260_000);
+    expect(storedTokens(store)).toBe(260_000);
   });
 
   it("reports the deficit when the store ages history out from under the high-water", async () => {
@@ -640,10 +635,8 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     // What must not happen silently. Without the warning this response is
     // identical to one that stored everything.
     expect(
-      json.warnings.some(
-        (warning: string) =>
-          warning.includes("Added no Antigravity CLI tokens") &&
-          warning.includes("150,000"),
+      json.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
       ),
     ).toBe(true);
   });
@@ -672,13 +665,12 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
     expect(
       (json.warnings ?? []).some((warning: string) =>
-        warning.includes("Added no Antigravity CLI tokens") &&
-        warning.includes("150,000"),
+        warning.includes("Preserved Antigravity sources together"),
       ),
     ).toBe(true);
   });
 
-  it("warns about token deficit while retaining newly credited messages", async () => {
+  it("freezes every family source when the incoming snapshot no longer covers its credited usage", async () => {
     const store = newStore();
     const first = submissionBody("antigravity-cli", SESSION_START_DATING);
     installTx(store);
@@ -693,14 +685,11 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
     const response = await post(smaller);
     expect(response.status).toBe(200);
     const json = await response.json();
-    const added = store.days.find((day) => day.date === "2026-09-01")!.sourceBreakdown["antigravity-cli"];
-    expect(added.tokens).toBe(0);
-    expect(added.messages).toBe(8);
     expect(json.metrics.totalTokens).toBe(240_000);
+    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
     expect(json.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("150,000"),
+      expect.stringContaining("Preserved Antigravity sources together"),
     ]));
-    expect(json.warnings.some((warning: string) => warning.includes("Added no Antigravity CLI usage"))).toBe(false);
   });
 
   it("credits nothing when a re-attribution happens under a retention floor", async () => {
@@ -747,7 +736,7 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
       const response = await post(moved);
       expect(response.status).toBe(200);
       expect((await response.json()).metrics.totalTokens).toBe(300_000);
-      expect(store.days.map(({ date }) => date)).toEqual(["2026-08-07", "2026-08-08"]);
+      expect(store.days.map(({ date }) => date).sort()).toEqual(["2026-08-07", "2026-09-01"]);
     }
   });
 
@@ -781,19 +770,80 @@ describe("POST /api/submit antigravity-cli re-attribution high-water", () => {
   });
 });
 
-describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
-  // The IDE-backed client shares the sync that writes the artifacts, and #1151
-  // stopped standalone usage rows falling back to the session-created date:
-  // they are now correlated to trajectory-step timestamps. That is the same
-  // re-attribution shape as the CLI client, on a different client id, so it
-  // needs the same lifetime bound. The harness above is client-id agnostic,
-  // so these reuse it directly.
+describe("POST /api/submit Antigravity source-family re-attribution", () => {
   it("registers antigravity at the generation the CLI declares", () => {
     expect(SUPPORTED_VERSIONED_PARSERS.antigravity).toBe(1);
   });
 
   it("registers Antigravity IDE Extensions at generation 1", () => {
     expect(SUPPORTED_VERSIONED_PARSERS["antigravity-extension"]).toBe(1);
+  });
+
+  it("does not count a response again when its source changes to the IDE extension", async () => {
+    const store = newStore();
+    const desktopBody = submissionBody("antigravity", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(desktopBody);
+    expect((await post(desktopBody)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const extensionBody = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+    );
+    installTx(store);
+    mockSubmit(extensionBody);
+    const response = await post(extensionBody);
+    expect(response.status).toBe(200);
+    expect((await response.json()).metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days).toHaveLength(1);
+    expect(store.days[0].sourceBreakdown.antigravity).toBeUndefined();
+    expect(
+      store.days[0].sourceBreakdown["antigravity-extension"].tokens,
+    ).toBe(240_000);
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(1);
+      expect(store.device.parserStates[client]).toBeUndefined();
+    }
+  });
+
+  it("freezes a client-filtered scan until the complete Antigravity family is submitted", async () => {
+    const store = newStore();
+    const desktopBody = submissionBody("antigravity", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(desktopBody);
+    expect((await post(desktopBody)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const filteredExtension = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+      undefined,
+      false,
+    );
+    installTx(store);
+    mockSubmit(filteredExtension);
+    const response = await post(filteredExtension);
+    expect(response.status).toBe(200);
+    expect((await response.json()).metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days[0].sourceBreakdown.antigravity).toBeDefined();
+    expect(store.days[0].sourceBreakdown["antigravity-extension"]).toBeUndefined();
+  });
+
+  it("keeps the total flat when extension generations move to their event dates", async () => {
+    const { store, firstJson, secondJson } = await submitOldThenNew(
+      "antigravity-extension",
+    );
+
+    expect(firstJson.metrics.totalTokens).toBe(240_000);
+    expect(secondJson.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days.map((day) => day.date).sort()).toEqual(
+      PER_GENERATION_DATING.map((day) => day.date),
+    );
+    expect(store.device.parserVersions["antigravity-extension"]).toBe(1);
   });
 
   it("does not raise the stored total when standalone rows are re-dated", async () => {
@@ -804,8 +854,14 @@ describe("POST /api/submit antigravity (IDE) re-attribution high-water", () => {
     expect(firstJson.metrics.totalTokens).toBe(240_000);
     expect(secondJson.metrics.totalTokens).toBe(240_000);
     expect(storedTokens(store)).toBe(240_000);
-    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
-    expect(store.device.parserVersions.antigravity).toBe(1);
+    expect(store.days.map((day) => day.date).sort()).toEqual([
+      "2026-08-07",
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(1);
+    }
   });
 
   it("still credits genuinely new antigravity usage after the re-dating", async () => {

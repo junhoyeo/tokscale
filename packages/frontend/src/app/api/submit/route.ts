@@ -43,6 +43,10 @@ import {
   type ParserHighWaterPlan,
 } from "@/lib/db/parserHighWater";
 import { MICODE_FAMILY, planMiCodeTransition } from "@/lib/db/micodeTransition";
+import {
+  ANTIGRAVITY_FAMILY,
+  planAntigravityTransition,
+} from "@/lib/db/antigravityTransition";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
@@ -783,19 +787,15 @@ export async function POST(request: Request) {
       }
 
       const deviceParserStates = (submittedDevice.parserStates ?? {}) as DeviceParserStates;
-      // Every client whose parser can re-attribute already-submitted history
-      // runs through the high-water path, not just Copilot. A re-attribution
-      // moves a day's tokens without changing the lifetime total, and the
-      // per-day merge guard defends each stored day against a decrease, so the
-      // days that fall are pinned while the days that rise are written: the
-      // device's stored total inflates by exactly what moved. Bounding each
-      // submission by the device/client lifetime high-water makes a pure
-      // reshuffle contribute nothing, which is the only reading of it that is
-      // both non-destructive and non-inflating.
+      // Clients whose parsers can re-attribute prior history use high-water
+      // plans. Antigravity and MiMo are handled below as atomic source families
+      // because their presentation surfaces can overlap; the remaining
+      // clients use independent device/client ledgers.
       const parserPlans = new Map<string, ParserHighWaterPlan>();
       for (const [client, supportedVersion] of Object.entries(
         SUPPORTED_VERSIONED_PARSERS
       )) {
+        if ((ANTIGRAVITY_FAMILY as readonly string[]).includes(client)) continue;
         const wasScanned =
           submittedClients.has(client) ||
           Boolean(
@@ -885,6 +885,30 @@ export async function POST(request: Request) {
             : { mode: "freeze", increments: {} });
         }
         if (micodePlan.warning) warnings.push(micodePlan.warning);
+      }
+      const antigravityPlan = planAntigravityTransition({
+        submittedClients,
+        incomingVersions: data.scanScope?.parserVersions,
+        persistedVersions: submittedDevice.parserVersions ?? undefined,
+        fullHistory: data.scanScope?.fullHistory === true,
+        isBackfill,
+        contributions: data.contributions,
+        existingDays: existingDeviceDays,
+      });
+      if (antigravityPlan.mode !== "status-quo") {
+        for (const client of ANTIGRAVITY_FAMILY) {
+          parserPlans.set(
+            client,
+            antigravityPlan.mode === "replace"
+              ? {
+                  mode: "replace",
+                  increments: {},
+                  layoutDays: antigravityPlan.layouts![client],
+                }
+              : { mode: "freeze", increments: {} }
+          );
+        }
+        if (antigravityPlan.warning) warnings.push(antigravityPlan.warning);
       }
       const plannedIncrementClients = [...parserPlans].filter(
         ([, plan]) =>
@@ -1155,13 +1179,25 @@ export async function POST(request: Request) {
       const advancedParserStates = [...parserPlans].flatMap(([client, plan]) =>
         plan.nextState ? [[client, plan.nextState] as const] : []
       );
-      if (advancedParserStates.length > 0 || micodePlan.parserVersions) {
+      if (
+        advancedParserStates.length > 0 ||
+        micodePlan.parserVersions ||
+        antigravityPlan.parserVersions
+      ) {
+        const parserStatesForUpdate = Object.fromEntries(
+          Object.entries(deviceParserStates).filter(
+            ([client]) =>
+              antigravityPlan.mode === "status-quo" ||
+              !(ANTIGRAVITY_FAMILY as readonly string[]).includes(client)
+          )
+        );
         await tx
           .update(submittedDevices)
           .set({
             parserVersions: {
               ...(submittedDevice.parserVersions ?? {}),
               ...micodePlan.parserVersions,
+              ...antigravityPlan.parserVersions,
               ...Object.fromEntries(
                 advancedParserStates.map(([client, state]) => [
                   client,
@@ -1170,7 +1206,7 @@ export async function POST(request: Request) {
               ),
             },
             parserStates: {
-              ...deviceParserStates,
+              ...parserStatesForUpdate,
               ...Object.fromEntries(advancedParserStates),
             },
           })
