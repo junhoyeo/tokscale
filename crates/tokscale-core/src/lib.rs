@@ -4445,6 +4445,9 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 #[derive(Clone, Copy)]
 enum GraphPricingRequirement {
     Lenient,
+    /// Lenient pricing over the source messages only, as submission reads
+    /// them: no local recovery overlay.
+    LenientSourceOnly,
     Submission,
 }
 
@@ -4566,7 +4569,7 @@ impl<'a> GraphSink<'a> {
         let batch = std::mem::take(&mut self.buffer);
 
         let batch = match self.requirement {
-            GraphPricingRequirement::Lenient => batch,
+            GraphPricingRequirement::Lenient | GraphPricingRequirement::LenientSourceOnly => batch,
             GraphPricingRequirement::Submission => {
                 let (mut submitted, zeroed, unpriced_usage, incomplete_cost_dates) =
                     prepare_submission_pricing(batch, self.pricing);
@@ -4927,6 +4930,19 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
         options,
         pricing.as_deref(),
         GraphPricingRequirement::Lenient,
+    )
+    .await
+}
+
+/// Which days have usage in the messages `submit` would send, without needing
+/// submission-grade pricing: lenient pricing, and no local recovery overlay
+/// (see [`recovery`]), which submission never reads.
+pub async fn generate_source_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = load_pricing_for_local_parse().await;
+    generate_graph_with_loaded_pricing(
+        options,
+        pricing.as_deref(),
+        GraphPricingRequirement::LenientSourceOnly,
     )
     .await
 }
