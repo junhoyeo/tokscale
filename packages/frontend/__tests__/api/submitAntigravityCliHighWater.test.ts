@@ -605,7 +605,6 @@ describe("POST /api/submit Antigravity family high-water", () => {
     expect(replay.status).toBe(200);
     expect((await replay.json()).metrics.totalTokens).toBe(260_000);
     expect(storedTokens(store)).toBe(260_000);
-    expect(storedTokens(store)).toBe(260_000);
   });
 
   it("reports the deficit when the store ages history out from under the high-water", async () => {
@@ -808,6 +807,123 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
     }
   });
 
+  it("preserves legacy client high-water state until the family snapshot covers it", async () => {
+    const store = newStore();
+    const initial = submissionBody("antigravity-cli", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(initial);
+    expect((await post(initial)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const highWaterCell: ClientBreakdownData = {
+      tokens: 300_000,
+      cost: 0,
+      input: 300_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 15,
+      models: {
+        "gemini-3-pro": {
+          tokens: 300_000,
+          cost: 0,
+          input: 300_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 15,
+        },
+      },
+    };
+    const previousState = {
+      stateVersion: 2,
+      version: 1,
+      baselineEstablished: true,
+      aggregate: {
+        tokens: 300_000,
+        input: 300_000,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 15,
+        inputIncludingCacheRead: 300_000,
+      },
+      days: { "2026-08-07": highWaterCell },
+      observedDays: { "2026-08-07": highWaterCell },
+    };
+    store.device.parserStates["antigravity-cli"] = previousState;
+
+    const underCovered = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+    );
+    installTx(store);
+    mockSubmit(underCovered);
+    const underCoveredResponse = await post(underCovered);
+    expect(underCoveredResponse.status).toBe(200);
+    const underCoveredJson = await underCoveredResponse.json();
+    expect(underCoveredJson.metrics.totalTokens).toBe(240_000);
+    expect(store.days.map((day) => day.date)).toEqual(["2026-08-07"]);
+    expect(store.days[0].sourceBreakdown["antigravity-cli"].tokens).toBe(
+      240_000,
+    );
+    expect(store.device.parserStates["antigravity-cli"]).toEqual(previousState);
+    expect(
+      underCoveredJson.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(true);
+
+    const covered = submissionBody("antigravity-extension", [
+      { date: "2026-08-10", tokens: 320_000, messages: 16 },
+    ]);
+    installTx(store);
+    mockSubmit(covered);
+    const coveredResponse = await post(covered);
+    expect(coveredResponse.status).toBe(200);
+    expect((await coveredResponse.json()).metrics.totalTokens).toBe(320_000);
+    expect(storedTokens(store)).toBe(320_000);
+    expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
+  });
+
+  it("keeps an unsupported incoming generation so an older parser cannot replace it", async () => {
+    const store = newStore();
+    const future = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+    );
+    future.scanScope.parserVersions["antigravity-extension"] = 2;
+
+    installTx(store);
+    mockSubmit(future);
+    const futureResponse = await post(future);
+    expect(futureResponse.status).toBe(200);
+    expect((await futureResponse.json()).metrics.totalTokens).toBe(0);
+    expect(store.device.parserVersions).toEqual({ "antigravity-extension": 2 });
+    expect(store.days).toHaveLength(0);
+
+    const older = submissionBody(
+      "antigravity-extension",
+      SESSION_START_DATING,
+    );
+    installTx(store);
+    mockSubmit(older);
+    const olderResponse = await post(older);
+    expect(olderResponse.status).toBe(200);
+    const olderJson = await olderResponse.json();
+    expect(olderJson.metrics.totalTokens).toBe(0);
+    expect(store.device.parserVersions["antigravity-extension"]).toBe(2);
+    expect(store.days).toHaveLength(0);
+    expect(
+      olderJson.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(true);
+  });
+
   it("freezes a client-filtered scan until the complete Antigravity family is submitted", async () => {
     const store = newStore();
     const desktopBody = submissionBody("antigravity", SESSION_START_DATING);
@@ -826,10 +942,16 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
     mockSubmit(filteredExtension);
     const response = await post(filteredExtension);
     expect(response.status).toBe(200);
-    expect((await response.json()).metrics.totalTokens).toBe(240_000);
+    const json = await response.json();
+    expect(json.metrics.totalTokens).toBe(240_000);
     expect(storedTokens(store)).toBe(240_000);
     expect(store.days[0].sourceBreakdown.antigravity).toBeDefined();
     expect(store.days[0].sourceBreakdown["antigravity-extension"]).toBeUndefined();
+    expect(
+      json.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps the total flat when extension generations move to their event dates", async () => {

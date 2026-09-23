@@ -1,17 +1,18 @@
 import type { ClientBreakdownData } from "./helpers";
 import {
+  ANTIGRAVITY_FAMILY,
+  antigravityPriorCoverage,
+} from "./antigravityStateCoverage";
+import {
   foldParserClientSnapshot,
   modelsForHighWater,
   SUPPORTED_VERSIONED_PARSERS,
+  type DeviceParserStates,
   type IncomingParserContribution,
 } from "./parserHighWater";
 import { ownValue } from "../safeRecord";
 
-export const ANTIGRAVITY_FAMILY = [
-  "antigravity",
-  "antigravity-cli",
-  "antigravity-extension",
-] as const;
+export { ANTIGRAVITY_FAMILY } from "./antigravityStateCoverage";
 
 type AntigravityClient = (typeof ANTIGRAVITY_FAMILY)[number];
 type FamilyLayouts = Record<
@@ -92,6 +93,7 @@ export function planAntigravityTransition(args: {
   submittedClients: ReadonlySet<string>;
   incomingVersions?: Record<string, number>;
   persistedVersions?: Record<string, number>;
+  parserStates?: DeviceParserStates;
   fullHistory: boolean;
   isBackfill: boolean;
   contributions: Array<IncomingParserContribution & { totals?: { costIsComplete?: boolean } }>;
@@ -105,14 +107,30 @@ export function planAntigravityTransition(args: {
   const unknownStoredGeneration = ANTIGRAVITY_FAMILY.some((client) =>
     (ownValue(args.persistedVersions, client) ?? 0) > SUPPORTED_VERSIONED_PARSERS[client]
   );
+  const unsupportedIncoming = ANTIGRAVITY_FAMILY.some((client) => {
+    const incoming = ownValue(args.incomingVersions, client);
+    return incoming !== undefined && incoming !== SUPPORTED_VERSIONED_PARSERS[client];
+  });
+  const incomingFutureVersions = Object.fromEntries(
+    ANTIGRAVITY_FAMILY.flatMap((client) => {
+      const incoming = ownValue(args.incomingVersions, client);
+      return incoming !== undefined && incoming > SUPPORTED_VERSIONED_PARSERS[client]
+        ? [[client, incoming]]
+        : [];
+    }),
+  );
   const parserVersions = unknownStoredGeneration
     ? undefined
-    : Object.fromEntries(
-        ANTIGRAVITY_FAMILY.map((client) => [
-          client,
-          SUPPORTED_VERSIONED_PARSERS[client],
-        ])
-      );
+    : unsupportedIncoming
+      ? Object.keys(incomingFutureVersions).length > 0
+        ? incomingFutureVersions
+        : undefined
+      : Object.fromEntries(
+          ANTIGRAVITY_FAMILY.map((client) => [
+            client,
+            SUPPORTED_VERSIONED_PARSERS[client],
+          ]),
+        );
   const freeze = (reason: string): AntigravityTransitionPlan => ({
     mode: "freeze",
     parserVersions,
@@ -121,6 +139,7 @@ export function planAntigravityTransition(args: {
 
   if (
     unknownStoredGeneration ||
+    unsupportedIncoming ||
     args.isBackfill ||
     !args.fullHistory ||
     !ANTIGRAVITY_FAMILY.every((client) =>
@@ -148,14 +167,10 @@ export function planAntigravityTransition(args: {
     ])
   ) as FamilyLayouts;
 
-  const existingBreakdowns = args.existingDays.map((day) =>
-    (day.sourceBreakdown ?? {}) as Record<string, ClientBreakdownData>
-  );
-  const previous = familyCoverage(
-    existingBreakdowns.flatMap((breakdown) =>
-      ANTIGRAVITY_FAMILY.map((client) => ownValue(breakdown, client))
-    )
-  );
+  const previous = antigravityPriorCoverage(args.existingDays, args.parserStates);
+  if (previous.unverifiable) {
+    return freeze("a prior Antigravity parser high-water state cannot be verified");
+  }
   // Date changes are expected as providers expose per-generation timestamps.
   // Compare family lifetime/model coverage across dates, then replace all
   // source layouts atomically. This retains the credited total while allowing

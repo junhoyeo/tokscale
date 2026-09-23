@@ -890,6 +890,7 @@ export async function POST(request: Request) {
         submittedClients,
         incomingVersions: data.scanScope?.parserVersions,
         persistedVersions: submittedDevice.parserVersions ?? undefined,
+        parserStates: deviceParserStates,
         fullHistory: data.scanScope?.fullHistory === true,
         isBackfill,
         contributions: data.contributions,
@@ -1187,7 +1188,7 @@ export async function POST(request: Request) {
         const parserStatesForUpdate = Object.fromEntries(
           Object.entries(deviceParserStates).filter(
             ([client]) =>
-              antigravityPlan.mode === "status-quo" ||
+              antigravityPlan.mode !== "replace" ||
               !(ANTIGRAVITY_FAMILY as readonly string[]).includes(client)
           )
         );

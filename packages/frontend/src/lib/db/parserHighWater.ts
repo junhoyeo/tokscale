@@ -317,7 +317,7 @@ function aggregateSnapshot(
   return aggregate;
 }
 
-const PARSER_HIGH_WATER_STATE_VERSION = 2;
+export const PARSER_HIGH_WATER_STATE_VERSION = 2;
 
 function normalizeStateDays(
   source: Record<string, ClientBreakdownData>

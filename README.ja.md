@@ -1497,6 +1497,8 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Crush | `$XDG_DATA_HOME/crush/`（フォールバック: `~/.local/share/crush/`） | `%USERPROFILE%\.local\share\crush\`（設定されていれば `%XDG_DATA_HOME%\crush\`） | フォールバック付きでXDGデータディレクトリを使用 |
 | Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support、レガシー Block パス) | `%USERPROFILE%\.local\share\goose\sessions\` | `GOOSE_PATH_ROOT` 環境変数で設定可能 |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` は現在 macOS / Linux でのみサポート |
+| Antigravity CLI | `~/.gemini/antigravity-cli/conversations/` | `%USERPROFILE%\.gemini\antigravity-cli\conversations\` | `GEMINI_CLI_HOME` 環境変数で設定可能 |
+| Antigravity IDE Extension | `~/.gemini/antigravity/conversations/` | `%USERPROFILE%\.gemini\antigravity\conversations\` | すべてのプラットフォームで同じパス |
 | Zed Agent | `~/.local/share/zed/threads/threads.db` | `%LOCALAPPDATA%\Zed\threads\threads.db` | ホスティング済み Zed モデルの使用量のみ；外部 ACP エージェントは対象外 |
 | Kiro | `~/.kiro/sessions/cli/` および `~/.local/share/kiro-cli/data.sqlite3` | `%USERPROFILE%\.kiro\sessions\cli\` および `%USERPROFILE%\.local\share\kiro-cli\data.sqlite3` | Kiro セッションファイルに加え、存在する場合は Kiro CLI の SQLite データベースを解析 |
 | Trae | `~/.config/tokscale/trae-cache/sessions/` | `%APPDATA%\tokscale\trae-cache\sessions\` | `tokscale trae sync` で 1 回だけ同期。インストール済みの Trae IDE または Trae Solo デスクトップアプリから資格情報を自動検出 |
