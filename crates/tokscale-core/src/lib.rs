@@ -363,6 +363,7 @@ pub struct ParsedMessage {
     /// authoritative cost.
     pub cost: f64,
     pub cost_source: CostSource,
+    pub service_tier: Option<String>,
 }
 
 pub struct ParsedMessages {
@@ -5102,7 +5103,7 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // LiteLLM update adds rows under provider `zed.dev` that already include
     // Zed's markup, this function would double-bill — revisit by threading
     // the matched-price provenance through `apply_pricing_if_available`.
-    if message.client == "zed"
+    let zed_hosted_multiplier = if message.client == "zed"
         && message
             .provider_id
             .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
@@ -5110,7 +5111,45 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
         1.1
     } else {
         1.0
+    };
+
+    let openai_fast_mode_multiplier =
+        openai_fast_mode_multiplier(Some(&message.provider_id), message.service_tier.as_deref());
+
+    zed_hosted_multiplier * openai_fast_mode_multiplier
+}
+
+fn openai_fast_mode_multiplier(provider_id: Option<&str>, service_tier: Option<&str>) -> f64 {
+    if provider_id
+        .and_then(provider_identity::canonical_provider)
+        .as_deref()
+        == Some("openai")
+        && service_tier.is_some_and(|tier| {
+            tier.trim().eq_ignore_ascii_case("priority") || tier.trim().eq_ignore_ascii_case("fast")
+        })
+    {
+        // OpenAI's Fast mode (formerly Priority processing) applies a 2x
+        // per-token premium to its supported models. Cached input discounts
+        // continue to apply, so doubling the standard calculated cost also
+        // doubles each corresponding cached-token rate.
+        2.0
+    } else {
+        1.0
     }
+}
+
+/// Price a parsed message while applying the request's recorded service tier.
+/// Provider-reported costs should be handled by the caller before using this
+/// estimated-cost path.
+pub fn calculate_cost_with_service_tier(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+) -> f64 {
+    pricing.calculate_cost_with_provider(model_id, provider_id, tokens)
+        * openai_fast_mode_multiplier(provider_id, service_tier)
 }
 
 fn apply_pricing_if_available(
@@ -6556,6 +6595,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         agent: msg.agent.clone(),
         cost: msg.cost,
         cost_source: msg.cost_source,
+        service_tier: msg.service_tier.clone(),
     }
 }
 
@@ -6673,6 +6713,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         },
         cost,
         cost_source: CostSource::Unknown,
+        service_tier: msg.service_tier.clone(),
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
@@ -16153,6 +16194,69 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_applies_openai_fast_mode_premium() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.6-terra".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0001),
+                cache_creation_input_token_cost: Some(0.0015),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 4,
+            cache_write: 2,
+            reasoning: 0,
+        };
+
+        let mut fast = UnifiedMessage::new(
+            "codex",
+            "gpt-5.6-terra",
+            "openai-codex",
+            "session-fast",
+            1_733_011_200_000,
+            tokens.clone(),
+            0.0,
+        );
+        fast.service_tier = Some("priority".to_string());
+        apply_pricing_if_available(&mut fast, Some(&pricing));
+
+        let mut standard = UnifiedMessage::new(
+            "codex",
+            "gpt-5.6-terra",
+            "openai",
+            "session-standard",
+            1_733_011_200_000,
+            tokens.clone(),
+            0.0,
+        );
+        standard.service_tier = Some("default".to_string());
+        apply_pricing_if_available(&mut standard, Some(&pricing));
+
+        let mut non_openai = UnifiedMessage::new(
+            "codex",
+            "gpt-5.6-terra",
+            "azure",
+            "session-azure",
+            1_733_011_200_000,
+            tokens,
+            0.0,
+        );
+        non_openai.service_tier = Some("fast".to_string());
+        apply_pricing_if_available(&mut non_openai, Some(&pricing));
+
+        assert!((fast.cost - 0.0468).abs() < 1e-12);
+        assert!((standard.cost - 0.0234).abs() < 1e-12);
+        assert!((non_openai.cost - 0.0234).abs() < 1e-12);
     }
 
     #[test]

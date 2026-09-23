@@ -63,6 +63,23 @@ pub struct CodexPayload {
     pub model_name: Option<String>,
     pub model_info: Option<CodexModelInfo>,
     pub info: Option<CodexInfo>,
+    /// Fast/Priority tier recorded directly on request-level rollout items.
+    pub service_tier: Option<String>,
+    /// `thread_settings_applied` snapshot. This is the only wire location Codex
+    /// actually stamps the Fast/Priority service tier today (7,298 occurrences
+    /// across ~5,900 local rollouts, all in this shape; upstream codex-rs emits
+    /// it from `EventMsg::ThreadSettingsApplied` /
+    /// `ThreadSettingsSnapshot.service_tier`). The snapshot is thread-scoped:
+    /// emitted once near the head of a rollout and re-emitted only when the
+    /// user changes settings mid-thread, so the tier applies to every turn
+    /// until the next snapshot — unlike the request-scoped arms below, it must
+    /// not be reset at `turn_context` boundaries.
+    pub thread_settings: Option<CodexThreadSettings>,
+    /// Request-level usage item; kept as a service-tier forward-compat arm in
+    /// case Codex ever stamps the tier on request-level usage records. Its
+    /// token counters are not emitted separately because the existing
+    /// token_count stream already accounts for them.
+    pub usage: Option<CodexTokenUsage>,
     pub turn_id: Option<String>,
     /// Unix timestamp (seconds) from `task_started` events. Legacy Codex turns
     /// may use UUID v4 ids, so this is their only causal ordering signal.
@@ -111,16 +128,27 @@ pub struct CodexModelInfo {
     pub slug: Option<String>,
 }
 
+/// `thread_settings` snapshot carried by `event_msg` `thread_settings_applied`
+/// payloads. Only the service tier is modeled; the remaining settings
+/// (approval policy, permission profile, cwd, reasoning effort, …) do not
+/// affect usage accounting.
+#[derive(Debug, Deserialize)]
+pub struct CodexThreadSettings {
+    pub service_tier: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CodexInfo {
     pub model: Option<String>,
     pub model_name: Option<String>,
+    pub service_tier: Option<String>,
     pub last_token_usage: Option<CodexTokenUsage>,
     pub total_token_usage: Option<CodexTokenUsage>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CodexTokenUsage {
+    pub service_tier: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
@@ -236,9 +264,27 @@ impl CodexTotals {
     }
 }
 
+/// Where the active service tier was read from. The tier's lifetime depends
+/// on the source: a thread-scoped `thread_settings_applied` snapshot applies
+/// to every turn until the next snapshot, whereas a request-scoped record
+/// (payload / info / usage arms) belongs to one response and must be cleared
+/// at the next `turn_context` boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum CodexServiceTierSource {
+    /// Thread-scoped `thread_settings_applied` snapshot — sticky across turns.
+    ThreadSettings,
+    /// Request-scoped rollout item (`token_usage_record`, `turn_context`, or a
+    /// `token_count` info/usage field) — reset at the next `turn_context`.
+    RequestScoped,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
     pub current_model: Option<String>,
+    #[serde(default)]
+    pub current_service_tier: Option<String>,
+    #[serde(default)]
+    pub current_service_tier_source: Option<CodexServiceTierSource>,
     #[serde(default)]
     pub current_turn_start_ms: Option<i64>,
     #[serde(default)]
@@ -467,6 +513,36 @@ fn parse_codex_reader<R: BufRead>(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
             if let Some(payload) = entry.payload {
+                // Request-level usage records carry actual per-response tier
+                // metadata in newer Codex rollouts. The token_count snapshots
+                // remain the canonical usage source to avoid counting each
+                // response a second time.
+                if entry.entry_type == "token_usage_record" {
+                    if !state.forked_child_waiting_for_turn_context {
+                        if let Some(service_tier) = extract_service_tier(&payload) {
+                            state.current_service_tier = Some(service_tier);
+                            state.current_service_tier_source =
+                                Some(CodexServiceTierSource::RequestScoped);
+                        }
+                    }
+                    continue;
+                }
+
+                // The service tier's only real wire location today: a
+                // thread-scoped settings snapshot (upstream
+                // `EventMsg::ThreadSettingsApplied`). It applies to every turn
+                // until the next snapshot — including one whose tier is absent,
+                // which clears it — so it must never be reset at a
+                // `turn_context` boundary.
+                if entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("thread_settings_applied")
+                    && !state.forked_child_waiting_for_turn_context
+                {
+                    state.current_service_tier = extract_service_tier(&payload);
+                    state.current_service_tier_source =
+                        Some(CodexServiceTierSource::ThreadSettings);
+                }
+
                 let payload_model = extract_model(&payload);
                 let is_token_count = entry.entry_type == "event_msg"
                     && payload.payload_type.as_deref() == Some("token_count");
@@ -510,6 +586,12 @@ fn parse_codex_reader<R: BufRead>(
                             state.session_id_from_meta = Some(id.clone());
                         }
                         state.current_model = payload_model.clone();
+                        // The child's own `turn_context` is request-scoped;
+                        // a missing tier clears any request-scoped tier the
+                        // parent replay left behind.
+                        state.current_service_tier = extract_service_tier(&payload);
+                        state.current_service_tier_source =
+                            Some(CodexServiceTierSource::RequestScoped);
                         handled = true;
                     } else {
                         if entry.entry_type == "event_msg"
@@ -558,6 +640,30 @@ fn parse_codex_reader<R: BufRead>(
                         }
                         continue;
                     }
+                }
+
+                // A `turn_context` starts a new turn, which ends only
+                // request-scoped tiers. A tier from a thread-scoped
+                // `thread_settings_applied` snapshot survives turn boundaries
+                // until the next snapshot says otherwise.
+                if entry.entry_type == "turn_context"
+                    && state.current_service_tier_source
+                        == Some(CodexServiceTierSource::RequestScoped)
+                {
+                    state.current_service_tier = None;
+                    state.current_service_tier_source = None;
+                }
+                if let Some(service_tier) = extract_service_tier(&payload) {
+                    state.current_service_tier = Some(service_tier);
+                    state.current_service_tier_source = Some(
+                        if entry.entry_type == "event_msg"
+                            && payload.payload_type.as_deref() == Some("thread_settings_applied")
+                        {
+                            CodexServiceTierSource::ThreadSettings
+                        } else {
+                            CodexServiceTierSource::RequestScoped
+                        },
+                    );
                 }
 
                 if !pending_model_messages.is_empty()
@@ -827,6 +933,7 @@ fn parse_codex_reader<R: BufRead>(
                         0.0,
                         agent,
                     );
+                    message.service_tier = state.current_service_tier.clone();
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
                     // The announced turn has produced usage, so it is under
@@ -1323,6 +1430,39 @@ fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
         .or(info.model_name.clone().filter(|s| !s.is_empty()))
 }
 
+fn extract_service_tier(payload: &CodexPayload) -> Option<String> {
+    payload
+        .thread_settings
+        .as_ref()
+        .and_then(|settings| settings.service_tier.as_deref())
+        .or(payload.service_tier.as_deref())
+        .or_else(|| {
+            payload.info.as_ref().and_then(|info| {
+                info.service_tier
+                    .as_deref()
+                    .or_else(|| {
+                        info.last_token_usage
+                            .as_ref()
+                            .and_then(|usage| usage.service_tier.as_deref())
+                    })
+                    .or_else(|| {
+                        info.total_token_usage
+                            .as_ref()
+                            .and_then(|usage| usage.service_tier.as_deref())
+                    })
+            })
+        })
+        .or_else(|| {
+            payload
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.service_tier.as_deref())
+        })
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 struct CodexHeadlessUsage {
     input: i64,
     output: i64,
@@ -1574,6 +1714,99 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 30);
         assert_eq!(messages[0].tokens.cache_read, 20);
+    }
+
+    #[test]
+    fn test_service_tier_is_carried_from_request_and_token_count_records() {
+        let file = create_test_file(concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+            "\n",
+            r#"{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":3,"service_tier":"priority"}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"service_tier":"default","total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            2,
+            "request usage records must not double-count tokens"
+        );
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[1].service_tier.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn test_turn_context_resets_service_tier_without_dropping_new_turn_metadata() {
+        let file = create_test_file(concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra","service_tier":"priority"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[1].service_tier, None);
+    }
+
+    #[test]
+    fn test_thread_settings_applied_service_tier_is_sticky_across_turns_and_clears_on_none_snapshot(
+    ) {
+        // Fixture built from a real `thread_settings_applied` rollout line
+        // (`~/.codex/sessions/2026/09/05`, thread settings payload reduced to
+        // the fields Codex actually emits there). This is the ONLY wire
+        // location that carries the tier today: ~7,300 `service_tier`
+        // occurrences across the local rollout corpus, all in this shape.
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-09-05T07:00:39.728Z","ordinal":10,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"01a0705e-8c8e-73d1-a6b5-c2d1c297342d","thread_settings":{"model":"gpt-5.6-luna","model_provider_id":"gateway","service_tier":"priority"}}}"#,
+            "
+",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "
+",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "
+",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "
+",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "
+",
+            // A later snapshot without a tier (e.g. the user switched back to
+            // standard processing) clears the sticky tier from then on.
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","model_provider_id":"gateway"}}}"#,
+            "
+",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "
+",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":9,"total_tokens":39},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "
+"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        // The 2x OpenAI Fast/Priority premium engages on the first turn...
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        // ...and persists across the next `turn_context` boundary because the
+        // snapshot is thread-scoped, not request-scoped.
+        assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
+        // A later `thread_settings_applied` without a tier clears it.
+        assert_eq!(messages[2].service_tier, None);
     }
 
     #[test]
@@ -3246,6 +3479,7 @@ mod tests {
     #[test]
     fn test_cached_tokens_takes_max_of_both_fields() {
         let usage = CodexTokenUsage {
+            service_tier: None,
             input_tokens: Some(100),
             output_tokens: Some(30),
             cached_input_tokens: Some(10),

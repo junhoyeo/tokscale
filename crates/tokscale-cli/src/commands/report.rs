@@ -14,7 +14,8 @@ use tokscale_core::content_extractor::{extract_session_content, metadata_only_co
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
 use tokscale_core::{
-    parse_local_clients, CostSource, LocalParseOptions, ParsedMessage, TokenBreakdown,
+    calculate_cost_with_service_tier, parse_local_clients, CostSource, LocalParseOptions,
+    ParsedMessage, TokenBreakdown,
 };
 
 pub struct ReportOptions {
@@ -1575,7 +1576,8 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
     let Some(pricing) = pricing else {
         return 0.0;
     };
-    pricing.calculate_cost_with_provider(
+    calculate_cost_with_service_tier(
+        pricing,
         &msg.model_id,
         Some(&msg.provider_id),
         &TokenBreakdown {
@@ -1585,6 +1587,7 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
             cache_write: msg.cache_write,
             reasoning: msg.reasoning,
         },
+        msg.service_tier.as_deref(),
     )
 }
 
@@ -1630,6 +1633,15 @@ mod tests {
                 ..Default::default()
             },
         );
+        litellm.insert(
+            "gpt-5.6-terra".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0001),
+                output_cost_per_token: Some(0.0002),
+                cache_read_input_token_cost: Some(0.00001),
+                ..Default::default()
+            },
+        );
         PricingService::new(litellm, HashMap::new())
     }
 
@@ -1653,6 +1665,7 @@ mod tests {
             agent: None,
             cost: 0.0,
             cost_source: CostSource::Unknown,
+            service_tier: None,
         }
     }
 
@@ -1681,6 +1694,22 @@ mod tests {
             canonical > 0.0,
             "expected a positive cost for a known model"
         );
+    }
+
+    #[test]
+    fn compute_msg_cost_applies_openai_fast_and_priority_tiers() {
+        let pricing = test_pricing_service();
+        let mut standard = parsed_message("gpt-5.6-terra");
+        standard.provider_id = "openai".to_string();
+        let standard_cost = compute_msg_cost(&standard, Some(&pricing));
+        assert!(standard_cost > 0.0);
+
+        for tier in ["priority", "FaSt"] {
+            let mut fast = parsed_message("gpt-5.6-terra");
+            fast.provider_id = "openai".to_string();
+            fast.service_tier = Some(tier.to_string());
+            assert_eq!(compute_msg_cost(&fast, Some(&pricing)), standard_cost * 2.0);
+        }
     }
 
     #[test]
@@ -1809,6 +1838,7 @@ mod tests {
 
         msg.cost = 0.42;
         msg.cost_source = CostSource::ProviderReported;
+        msg.service_tier = Some("priority".to_string());
         assert_eq!(compute_msg_cost(&msg, Some(&pricing)), 0.42);
         // An authoritative figure does not need a pricing dataset at all.
         assert_eq!(compute_msg_cost(&msg, None), 0.42);
@@ -1816,6 +1846,7 @@ mod tests {
         // A parser-side cost that is not authoritative never overrides the
         // canonical pricing of the tokens.
         msg.cost_source = CostSource::Estimated;
+        msg.service_tier = None;
         assert_eq!(compute_msg_cost(&msg, Some(&pricing)), estimated);
     }
 
