@@ -1298,7 +1298,10 @@ fn parser_version(client: ClientId) -> u32 {
         // `session_is_subagent` and `session_is_guardian`. A v8 entry would keep
         // replaying one Agents row per nickname (or no agent at all), and its
         // parse state predates the new layout.
-        ClientId::Codex => 9,
+        // v9->v10: Codex now retains the actual service tier on each usage row
+        // and applies OpenAI's Fast mode pricing premium. Warm rows must be
+        // reparsed so their cached state and estimated costs include the tier.
+        ClientId::Codex => 10,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -3606,15 +3609,15 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_duration_parser_version_invalidates_v4_entries() {
+    fn test_codex_parser_version_invalidates_v9_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
         // bucket, v7->v8 retags rollouts OpenClaw originated as openclaw, and
         // v8->v9 buckets agent attribution into "Codex" / "Codex Subagent" /
         // "Codex Guardian" / "Codex Headless" instead of the per-thread random
-        // nickname.
+        // nickname; v9->v10 retains service_tier for Fast mode pricing.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 9);
+        assert_eq!(parser_version(ClientId::Codex), 10);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 

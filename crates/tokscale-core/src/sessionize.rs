@@ -502,6 +502,7 @@ mod tests {
             },
             cost: 0.01,
             cost_source: Default::default(),
+            service_tier: None,
             message_count: 1,
             agent: None,
             dedup_key: None,

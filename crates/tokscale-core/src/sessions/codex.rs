@@ -63,6 +63,11 @@ pub struct CodexPayload {
     pub model_name: Option<String>,
     pub model_info: Option<CodexModelInfo>,
     pub info: Option<CodexInfo>,
+    /// Fast/Priority tier recorded directly on request-level rollout items.
+    pub service_tier: Option<String>,
+    /// Request-level usage item; its token counters are not emitted separately
+    /// because the existing token_count stream already accounts for them.
+    pub usage: Option<CodexTokenUsage>,
     pub turn_id: Option<String>,
     /// Unix timestamp (seconds) from `task_started` events. Legacy Codex turns
     /// may use UUID v4 ids, so this is their only causal ordering signal.
@@ -115,12 +120,14 @@ pub struct CodexModelInfo {
 pub struct CodexInfo {
     pub model: Option<String>,
     pub model_name: Option<String>,
+    pub service_tier: Option<String>,
     pub last_token_usage: Option<CodexTokenUsage>,
     pub total_token_usage: Option<CodexTokenUsage>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CodexTokenUsage {
+    pub service_tier: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
@@ -239,6 +246,8 @@ impl CodexTotals {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
     pub current_model: Option<String>,
+    #[serde(default)]
+    pub current_service_tier: Option<String>,
     #[serde(default)]
     pub current_turn_start_ms: Option<i64>,
     #[serde(default)]
@@ -467,6 +476,19 @@ fn parse_codex_reader<R: BufRead>(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
             if let Some(payload) = entry.payload {
+                // Request-level usage records carry actual per-response tier
+                // metadata in newer Codex rollouts. The token_count snapshots
+                // remain the canonical usage source to avoid counting each
+                // response a second time.
+                if entry.entry_type == "token_usage_record" {
+                    if !state.forked_child_waiting_for_turn_context {
+                        if let Some(service_tier) = extract_service_tier(&payload) {
+                            state.current_service_tier = Some(service_tier);
+                        }
+                    }
+                    continue;
+                }
+
                 let payload_model = extract_model(&payload);
                 let is_token_count = entry.entry_type == "event_msg"
                     && payload.payload_type.as_deref() == Some("token_count");
@@ -558,6 +580,10 @@ fn parse_codex_reader<R: BufRead>(
                         }
                         continue;
                     }
+                }
+
+                if let Some(service_tier) = extract_service_tier(&payload) {
+                    state.current_service_tier = Some(service_tier);
                 }
 
                 if !pending_model_messages.is_empty()
@@ -827,6 +853,7 @@ fn parse_codex_reader<R: BufRead>(
                         0.0,
                         agent,
                     );
+                    message.service_tier = state.current_service_tier.clone();
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
                     // The announced turn has produced usage, so it is under
@@ -1323,6 +1350,37 @@ fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
         .or(info.model_name.clone().filter(|s| !s.is_empty()))
 }
 
+fn extract_service_tier(payload: &CodexPayload) -> Option<String> {
+    payload
+        .service_tier
+        .as_deref()
+        .or_else(|| {
+            payload.info.as_ref().and_then(|info| {
+                info.service_tier
+                    .as_deref()
+                    .or_else(|| {
+                        info.last_token_usage
+                            .as_ref()
+                            .and_then(|usage| usage.service_tier.as_deref())
+                    })
+                    .or_else(|| {
+                        info.total_token_usage
+                            .as_ref()
+                            .and_then(|usage| usage.service_tier.as_deref())
+                    })
+            })
+        })
+        .or_else(|| {
+            payload
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.service_tier.as_deref())
+        })
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 struct CodexHeadlessUsage {
     input: i64,
     output: i64,
@@ -1574,6 +1632,30 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 30);
         assert_eq!(messages[0].tokens.cache_read, 20);
+    }
+
+    #[test]
+    fn test_service_tier_is_carried_from_request_and_token_count_records() {
+        let file = create_test_file(concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+            "\n",
+            r#"{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":3,"service_tier":"priority"}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"service_tier":"default","total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            2,
+            "request usage records must not double-count tokens"
+        );
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[1].service_tier.as_deref(), Some("default"));
     }
 
     #[test]
@@ -3246,6 +3328,7 @@ mod tests {
     #[test]
     fn test_cached_tokens_takes_max_of_both_fields() {
         let usage = CodexTokenUsage {
+            service_tier: None,
             input_tokens: Some(100),
             output_tokens: Some(30),
             cached_input_tokens: Some(10),
