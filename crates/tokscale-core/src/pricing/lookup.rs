@@ -2020,6 +2020,8 @@ fn is_openai_full_request_272k_model(model_id: &str) -> bool {
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
     ]
     .into_iter()
     .any(|base| matches_model_or_snapshot(model_id, base))
@@ -7382,20 +7384,21 @@ mod tests {
 
     #[test]
     fn openai_272k_preference_still_prefers_complete_litellm_pricing() {
-        let litellm_pricing = openai_272k_result("gpt-5.6-sol", "LiteLLM").pricing;
-        let openrouter_pricing = openai_272k_result("openai/gpt-5.6-sol", "OpenRouter").pricing;
+        for model in ["gpt-5.6-sol", "gpt-6-sol", "gpt-6-luna"] {
+            let litellm_pricing = openai_272k_result(model, "LiteLLM").pricing;
+            let openrouter_key = format!("openai/{model}");
+            let openrouter_pricing = openai_272k_result(&openrouter_key, "OpenRouter").pricing;
 
-        let lookup = PricingLookup::new(
-            HashMap::from([("gpt-5.6-sol".into(), litellm_pricing)]),
-            HashMap::from([("openai/gpt-5.6-sol".into(), openrouter_pricing)]),
-            HashMap::new(),
-        );
+            let lookup = PricingLookup::new(
+                HashMap::from([(model.into(), litellm_pricing)]),
+                HashMap::from([(openrouter_key, openrouter_pricing)]),
+                HashMap::new(),
+            );
 
-        let result = lookup
-            .lookup_with_provider("gpt-5.6-sol", Some("openai"))
-            .unwrap();
-        assert_eq!(result.source, "LiteLLM");
-        assert_eq!(result.matched_key, "gpt-5.6-sol");
+            let result = lookup.lookup_with_provider(model, Some("openai")).unwrap();
+            assert_eq!(result.source, "LiteLLM", "wrong source for {model}");
+            assert_eq!(result.matched_key, model);
+        }
     }
 
     #[test]
@@ -7413,6 +7416,10 @@ mod tests {
             "gpt-6-astra",
             "openai/gpt-6-astra",
             "gpt-6-astra-2026-09-03",
+            "gpt-6-sol",
+            "openai/gpt-6-sol",
+            "gpt-6-luna",
+            "openai/gpt-6-luna",
         ] {
             assert!(
                 uses_openai_full_request_272k_pricing(
@@ -7554,6 +7561,93 @@ mod tests {
             Some("azure"),
             Some(&result)
         ));
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_apply_full_request_pricing_above_272k_threshold() {
+        let cases = [
+            // Official Standard rates per million tokens: input, output,
+            // cache read, cache write; followed by the >272K full-request rates.
+            (
+                "gpt-6-sol",
+                2e-6,
+                10e-6,
+                0.2e-6,
+                2.5e-6,
+                4e-6,
+                15e-6,
+                0.4e-6,
+                5e-6,
+            ),
+            (
+                "gpt-6-luna",
+                0.1e-6,
+                0.5e-6,
+                0.01e-6,
+                0.125e-6,
+                0.2e-6,
+                0.75e-6,
+                0.02e-6,
+                0.25e-6,
+            ),
+        ];
+
+        for (
+            model,
+            input_rate,
+            output_rate,
+            cache_read_rate,
+            cache_write_rate,
+            long_input_rate,
+            long_output_rate,
+            long_cache_read_rate,
+            long_cache_write_rate,
+        ) in cases
+        {
+            let result = LookupResult {
+                matched_key: model.into(),
+                source: "LiteLLM".into(),
+                evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
+                pricing: ModelPricing {
+                    input_cost_per_token: Some(input_rate),
+                    input_cost_per_token_above_272k_tokens: Some(long_input_rate),
+                    output_cost_per_token: Some(output_rate),
+                    output_cost_per_token_above_272k_tokens: Some(long_output_rate),
+                    cache_read_input_token_cost: Some(cache_read_rate),
+                    cache_read_input_token_cost_above_272k_tokens: Some(long_cache_read_rate),
+                    cache_creation_input_token_cost: Some(cache_write_rate),
+                    ..Default::default()
+                },
+            };
+            assert!(uses_openai_full_request_272k_pricing(
+                &result,
+                Some("openai")
+            ));
+
+            let at_threshold = TokenBreakdown {
+                input: 272_000,
+                ..Default::default()
+            };
+            let cost_at_threshold = compute_cost_for_lookup(&result, Some("openai"), &at_threshold);
+            assert!((cost_at_threshold - (272_000.0 * input_rate)).abs() < 1e-12);
+
+            let above_threshold = TokenBreakdown {
+                input: 272_001,
+                output: 10_000,
+                cache_read: 1_000,
+                cache_write: 500,
+                reasoning: 0,
+            };
+            let expected = 272_001.0 * long_input_rate
+                + 10_000.0 * long_output_rate
+                + 1_000.0 * long_cache_read_rate
+                + 500.0 * long_cache_write_rate;
+            let actual = compute_cost_for_lookup(&result, Some("openai"), &above_threshold);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "wrong long-context cost for {model}"
+            );
+        }
     }
 
     #[test]
