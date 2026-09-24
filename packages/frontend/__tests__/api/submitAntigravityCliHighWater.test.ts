@@ -478,11 +478,6 @@ async function post(body: object) {
   );
 }
 
-// One 12-turn, 240,000-token conversation that ran from the evening of
-// 2026-08-07 into 08-09. The old parser dated every turn at the session start;
-// the new one dates each turn by its generation timestamp. Re-dating moves
-// turns between days -- it does not create them -- so both layouts carry the
-// same 240,000 tokens and the same 12 messages.
 /**
  * A legacy per-client parser ledger (stateVersion 2) whose credited days are
  * `days`, each a single gemini-3-pro cell with input-only tokens.
@@ -536,6 +531,11 @@ function legacyLedger(days: Record<string, { tokens: number; messages: number }>
   };
 }
 
+// One 12-turn, 240,000-token conversation that ran from the evening of
+// 2026-08-07 into 08-09. The old parser dated every turn at the session start;
+// the new one dates each turn by its generation timestamp. Re-dating moves
+// turns between days -- it does not create them -- so both layouts carry the
+// same 240,000 tokens and the same 12 messages.
 const SESSION_START_DATING = [
   { date: "2026-08-07", tokens: 240_000, messages: 12 },
 ];
@@ -1024,6 +1024,44 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
       "2026-08-07",
       "2026-08-10",
     ]);
+    expect(store.device.parserStates["antigravity"]).toBeUndefined();
+    expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
+  });
+
+  it("replaces when the two legacy ledgers date one conversation differently", async () => {
+    // Re-dated overlap: the desktop ledger holds the conversation at its
+    // session start (08-07) and the CLI ledger per generation (08-07..08-09).
+    // No (date, model) cell matches, but both record the same 240,000-token,
+    // 12-message lifetime on the same models with a shared date, so they are
+    // one lifetime and a correct 240,000 snapshot must replace, not freeze
+    // against a summed 480,000.
+    const store = newStore();
+    const initial = submissionBody("antigravity-cli", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(initial);
+    expect((await post(initial)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    const dated = (days: typeof PER_GENERATION_DATING) =>
+      Object.fromEntries(
+        days.map(({ date, tokens, messages }) => [date, { tokens, messages }]),
+      );
+    store.device.parserStates["antigravity"] = legacyLedger(dated(SESSION_START_DATING));
+    store.device.parserStates["antigravity-cli"] = legacyLedger(dated(PER_GENERATION_DATING));
+
+    const transition = submissionBody("antigravity-extension", SESSION_START_DATING);
+    installTx(store);
+    mockSubmit(transition);
+    const response = await post(transition);
+    expect(response.status).toBe(200);
+    const json = await response.json();
+
+    expect(storedTokens(store)).toBe(240_000);
+    expect(
+      json.warnings.some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(false);
     expect(store.device.parserStates["antigravity"]).toBeUndefined();
     expect(store.device.parserStates["antigravity-cli"]).toBeUndefined();
   });

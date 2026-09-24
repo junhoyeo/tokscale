@@ -82,6 +82,53 @@ function sameCoverage(left: Coverage, right: Coverage): boolean {
   return COVERAGE_FIELDS.every((field) => left[field] === right[field]);
 }
 
+type LegacyLedger = {
+  days: Record<string, ClientBreakdownData>;
+  aggregate: ParserAggregateHighWater;
+};
+
+/** Per-field lifetime of one ledger: its aggregate or its day cells, whichever is larger. */
+function ledgerLifetime(ledger: LegacyLedger): Coverage {
+  const lifetime = coverage(Object.values(ledger.days)).total;
+  for (const field of COVERAGE_FIELDS) {
+    const aggregate = ledger.aggregate[field];
+    if (Number.isSafeInteger(aggregate) && aggregate > lifetime[field]) {
+      lifetime[field] = aggregate;
+    }
+  }
+  return lifetime;
+}
+
+function ledgerModels(ledger: LegacyLedger): Set<string> {
+  const models = new Set<string>();
+  for (const cell of Object.values(ledger.days)) {
+    for (const modelId of Object.keys(modelsForHighWater(cell))) models.add(modelId);
+  }
+  return models;
+}
+
+/**
+ * Ledgers that record one credited lifetime from different surfaces. Parsers
+ * can date the same conversation differently (session start vs. per
+ * generation), so their day cells need not match. Identical lifetime totals on
+ * every field, the same models and at least one shared date are treated as
+ * the same lifetime. Distinct usage with coincidentally equal totals is kept
+ * apart by requiring a shared date.
+ */
+function oneLifetime(ledgers: LegacyLedger[]): boolean {
+  if (ledgers.length < 2) return false;
+  const lifetime = ledgerLifetime(ledgers[0]);
+  const models = [...ledgerModels(ledgers[0])].sort().join("\u0000");
+  const dateSets = ledgers.map((ledger) => new Set(Object.keys(ledger.days)));
+  return ledgers.every((ledger, index) =>
+    sameCoverage(ledgerLifetime(ledger), lifetime) &&
+    [...ledgerModels(ledger)].sort().join("\u0000") === models &&
+    dateSets.every((other, otherIndex) =>
+      otherIndex === index || [...dateSets[index]].some((date) => other.has(date)),
+    ),
+  );
+}
+
 /**
  * Combine the legacy per-client parser ledgers of the family.
  *
@@ -89,19 +136,33 @@ function sameCoverage(left: Coverage, right: Coverage): boolean {
  * response from two surfaces before the family existed holds it in both
  * ledgers, while separate sessions are distinct credited usage. Summing
  * freezes the overlap case forever; a per-field max silently drops the
- * disjoint case on replace. Neither is sound alone, so the overlap has to be
- * proven: an identical (date, model) cell in more than one ledger is the
- * signature of one response credited twice and counts once. Every other cell
- * is distinct usage and is summed. A ledger's aggregate excess beyond its own
- * day cells cannot be attributed to a cell, so it is also summed. Anything
- * unproven therefore stays conservative and freezes rather than replaces.
+ * disjoint case on replace. Neither is sound alone, so a ledger is only
+ * collapsed into another on a strong overlap signature, and everything else
+ * stays conservative (summed, so an uncovered snapshot freezes, never drops):
+ *
+ * - Whole ledgers recording one lifetime (see `oneLifetime`) fold by max.
+ * - Otherwise an identical (date, model) cell in more than one ledger is
+ *   treated as one response credited twice and counts once. Every other cell
+ *   is distinct usage and is summed. A ledger's aggregate excess beyond its
+ *   own day cells cannot be attributed to a cell, so it is also summed.
+ *
+ * Both are strong heuristics, not proofs: distinct usage whose totals match
+ * on all seven fields would be undercounted.
  */
 function legacyLedgerCoverage(
-  ledgers: Array<{
-    days: Record<string, ClientBreakdownData>;
-    aggregate: ParserAggregateHighWater;
-  }>,
+  ledgers: LegacyLedger[],
 ): { summary: CoverageSummary; unverifiable: boolean } {
+  if (oneLifetime(ledgers)) {
+    let summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+    let unverifiable = false;
+    for (const ledger of ledgers) {
+      const single = legacyLedgerCoverage([ledger]);
+      summary = maximum(summary, single.summary);
+      unverifiable ||= single.unverifiable;
+    }
+    return { summary, unverifiable };
+  }
+
   const cellsByDateModel = new Map<string, Coverage[]>();
   const summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
   let unverifiable = false;
@@ -149,7 +210,7 @@ export function antigravityPriorCoverage(
       ANTIGRAVITY_FAMILY.map((client) => ownValue(breakdown, client)),
     ),
   );
-  const ledgers: Parameters<typeof legacyLedgerCoverage>[0] = [];
+  const ledgers: LegacyLedger[] = [];
   let unverifiable = false;
 
   for (const client of ANTIGRAVITY_FAMILY) {
