@@ -264,27 +264,20 @@ impl CodexTotals {
     }
 }
 
-/// Where the active service tier was read from. The tier's lifetime depends
-/// on the source: a thread-scoped `thread_settings_applied` snapshot applies
-/// to every turn until the next snapshot, whereas a request-scoped record
-/// (payload / info / usage arms) belongs to one response and must be cleared
-/// at the next `turn_context` boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CodexServiceTierSource {
-    /// Thread-scoped `thread_settings_applied` snapshot — sticky across turns.
-    ThreadSettings,
-    /// Request-scoped rollout item (`token_usage_record`, `turn_context`, or a
-    /// `token_count` info/usage field) — reset at the next `turn_context`.
-    RequestScoped,
-}
-
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
     pub current_model: Option<String>,
+    /// Tier from the latest thread-scoped `thread_settings_applied`
+    /// snapshot. It applies to every later turn until another snapshot
+    /// replaces or clears it, so turn boundaries never reset it.
     #[serde(default)]
-    pub current_service_tier: Option<String>,
+    pub thread_service_tier: Option<String>,
+    /// Tier from a request-scoped record (`token_usage_record`,
+    /// `turn_context`, or a `token_count` info/usage field). It overrides the
+    /// thread tier for its own turn and is cleared at the next
+    /// `turn_context`, which restores the thread tier.
     #[serde(default)]
-    pub current_service_tier_source: Option<CodexServiceTierSource>,
+    pub request_service_tier: Option<String>,
     #[serde(default)]
     pub current_turn_start_ms: Option<i64>,
     #[serde(default)]
@@ -519,10 +512,8 @@ fn parse_codex_reader<R: BufRead>(
                 // response a second time.
                 if entry.entry_type == "token_usage_record" {
                     if !state.forked_child_waiting_for_turn_context {
-                        if let Some(service_tier) = extract_service_tier(&payload) {
-                            state.current_service_tier = Some(service_tier);
-                            state.current_service_tier_source =
-                                Some(CodexServiceTierSource::RequestScoped);
+                        if let Some(service_tier) = extract_request_service_tier(&payload) {
+                            state.request_service_tier = Some(service_tier);
                         }
                     }
                     continue;
@@ -538,9 +529,7 @@ fn parse_codex_reader<R: BufRead>(
                     && payload.payload_type.as_deref() == Some("thread_settings_applied")
                     && !state.forked_child_waiting_for_turn_context
                 {
-                    state.current_service_tier = extract_service_tier(&payload);
-                    state.current_service_tier_source =
-                        Some(CodexServiceTierSource::ThreadSettings);
+                    state.thread_service_tier = extract_thread_service_tier(&payload);
                 }
 
                 let payload_model = extract_model(&payload);
@@ -588,10 +577,9 @@ fn parse_codex_reader<R: BufRead>(
                         state.current_model = payload_model.clone();
                         // The child's own `turn_context` is request-scoped;
                         // a missing tier clears any request-scoped tier the
-                        // parent replay left behind.
-                        state.current_service_tier = extract_service_tier(&payload);
-                        state.current_service_tier_source =
-                            Some(CodexServiceTierSource::RequestScoped);
+                        // parent replay left behind. The thread tier is
+                        // untouched: parent-replay snapshots were skipped.
+                        state.request_service_tier = extract_request_service_tier(&payload);
                         handled = true;
                     } else {
                         if entry.entry_type == "event_msg"
@@ -642,28 +630,14 @@ fn parse_codex_reader<R: BufRead>(
                     }
                 }
 
-                // A `turn_context` starts a new turn, which ends only
-                // request-scoped tiers. A tier from a thread-scoped
-                // `thread_settings_applied` snapshot survives turn boundaries
-                // until the next snapshot says otherwise.
-                if entry.entry_type == "turn_context"
-                    && state.current_service_tier_source
-                        == Some(CodexServiceTierSource::RequestScoped)
-                {
-                    state.current_service_tier = None;
-                    state.current_service_tier_source = None;
+                // A `turn_context` starts a new turn, which ends only the
+                // request-scoped tier. The thread tier lives in its own slot,
+                // so a request-scoped record can never end it early.
+                if entry.entry_type == "turn_context" {
+                    state.request_service_tier = None;
                 }
-                if let Some(service_tier) = extract_service_tier(&payload) {
-                    state.current_service_tier = Some(service_tier);
-                    state.current_service_tier_source = Some(
-                        if entry.entry_type == "event_msg"
-                            && payload.payload_type.as_deref() == Some("thread_settings_applied")
-                        {
-                            CodexServiceTierSource::ThreadSettings
-                        } else {
-                            CodexServiceTierSource::RequestScoped
-                        },
-                    );
+                if let Some(service_tier) = extract_request_service_tier(&payload) {
+                    state.request_service_tier = Some(service_tier);
                 }
 
                 if !pending_model_messages.is_empty()
@@ -933,7 +907,10 @@ fn parse_codex_reader<R: BufRead>(
                         0.0,
                         agent,
                     );
-                    message.service_tier = state.current_service_tier.clone();
+                    message.service_tier = state
+                        .request_service_tier
+                        .clone()
+                        .or_else(|| state.thread_service_tier.clone());
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
                     // The announced turn has produced usage, so it is under
@@ -1430,12 +1407,29 @@ fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
         .or(info.model_name.clone().filter(|s| !s.is_empty()))
 }
 
-fn extract_service_tier(payload: &CodexPayload) -> Option<String> {
+fn normalize_service_tier(tier: Option<&str>) -> Option<String> {
+    tier.map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// The thread-scoped tier from a `thread_settings_applied` snapshot. An
+/// absent tier returns `None`, which clears the sticky thread tier.
+fn extract_thread_service_tier(payload: &CodexPayload) -> Option<String> {
+    normalize_service_tier(
+        payload
+            .thread_settings
+            .as_ref()
+            .and_then(|settings| settings.service_tier.as_deref()),
+    )
+}
+
+/// Request-scoped tier arms. None are emitted by current Codex builds; they
+/// are kept for forward compatibility and never read `thread_settings`.
+fn extract_request_service_tier(payload: &CodexPayload) -> Option<String> {
     payload
-        .thread_settings
-        .as_ref()
-        .and_then(|settings| settings.service_tier.as_deref())
-        .or(payload.service_tier.as_deref())
+        .service_tier
+        .as_deref()
         .or_else(|| {
             payload.info.as_ref().and_then(|info| {
                 info.service_tier
@@ -1807,6 +1801,38 @@ mod tests {
         assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
         // A later `thread_settings_applied` without a tier clears it.
         assert_eq!(messages[2].service_tier, None);
+    }
+
+    #[test]
+    fn test_request_scoped_tier_overrides_one_turn_without_ending_the_thread_tier() {
+        // A request-scoped tier (forward-compat arm) applies to its own turn
+        // only. The next `turn_context` must restore the sticky thread tier
+        // rather than clearing every later turn back to standard pricing.
+        let file = create_test_file(concat!(
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","service_tier":"priority"}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "\n",
+            r#"{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":3,"service_tier":"flex"}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":9,"total_tokens":39},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].service_tier.as_deref(), Some("flex"));
+        assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[2].service_tier.as_deref(), Some("priority"));
     }
 
     #[test]
