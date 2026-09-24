@@ -654,7 +654,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColProvider => "공급자",
         MessageKey::ColSource => "소스",
         MessageKey::ColMessages => "메시지",
-        MessageKey::ColMessagesShort => "대화",
+        MessageKey::ColMessagesShort => "메시지",
         MessageKey::ColInput => "입력",
         MessageKey::ColOutput => "출력",
         MessageKey::ColCacheRead => "캐시 읽기",

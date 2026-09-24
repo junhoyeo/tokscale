@@ -68,7 +68,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             tr(lang, MessageKey::ColSource),
             tr(lang, MessageKey::ColTokens),
             tr(lang, MessageKey::ColCost),
-            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColMessagesShort),
         ]
     };
 

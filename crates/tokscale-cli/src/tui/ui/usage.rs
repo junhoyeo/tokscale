@@ -118,7 +118,12 @@ fn status_label(app: &App) -> String {
         let providers_str = match lang {
             TuiLanguage::En => format!("{} providers", inventory.providers),
             TuiLanguage::Fr => format!("{} fournisseurs", inventory.providers),
-            TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => {
+            TuiLanguage::Ko => format!(
+                "{}개 {}",
+                inventory.providers,
+                tr(lang, MessageKey::HeadingProviders)
+            ),
+            TuiLanguage::Ja | TuiLanguage::ZhCn => {
                 format!(
                     "{}{}",
                     inventory.providers,
@@ -173,7 +178,8 @@ fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> Stri
     };
     let format_count = |n: usize, label: &str| -> String {
         match lang {
-            TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => format!("{}{}", n, label),
+            TuiLanguage::Ko => format!("{}개 {}", n, label),
+            TuiLanguage::Ja | TuiLanguage::ZhCn => format!("{}{}", n, label),
             TuiLanguage::En | TuiLanguage::Fr => format!("{} {}", n, label),
         }
     };
@@ -3263,6 +3269,31 @@ mod tests {
             body.contains("Snapshot  2 ready · 0 at risk · 1 saved · 1 managed"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn usage_header_counts_korean_formatting() {
+        let mut app = make_app();
+        app.settings.tui_language = TuiLanguage::Ko;
+        app.subscription_usage = vec![
+            output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_work".to_string(),
+                    label: Some("work".to_string()),
+                    is_active: true,
+                }),
+            ),
+            output("Copilot", None),
+        ];
+
+        assert_eq!(status_label(&app), "2개 공급자 · 1개 저장됨 · 1개 관리됨");
+        assert_eq!(
+            identity_count_label(TuiLanguage::Ko, 1, 1),
+            "1개 저장됨 · 1개 관리됨"
+        );
+        assert_eq!(identity_count_label(TuiLanguage::Ko, 1, 0), "1개 저장됨");
+        assert_eq!(identity_count_label(TuiLanguage::Ko, 0, 2), "2개 관리됨");
     }
 
     #[test]
