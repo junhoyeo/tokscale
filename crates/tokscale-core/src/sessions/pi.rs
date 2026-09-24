@@ -669,9 +669,7 @@ fn parse_pi_format_file_inner(
 
             if entry_type != "session" {
                 if entry_type == "title" {
-                    buffer.clear();
-                    buffer.extend_from_slice(trimmed.as_bytes());
-                    if let Ok(record) = simd_json::from_slice::<PiTitleRecord>(&mut buffer) {
+                    if let Some(record) = parse_json_line::<PiTitleRecord>(trimmed, &mut buffer) {
                         if let Some(title) = normalized_title(record.title.as_deref()) {
                             rolling_title = Some(title);
                         }
