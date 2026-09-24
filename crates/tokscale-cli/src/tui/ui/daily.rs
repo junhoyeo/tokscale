@@ -342,7 +342,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let title = app
         .daily_detail_date()
-        .map(|date| format!(" {}{} ", tr(lang, MessageKey::TitleDailyDetailPrefix), date))
+        .map(|date| format!("{}{} ", tr(lang, MessageKey::TitleDailyDetailPrefix), date))
         .unwrap_or_else(|| tr(lang, MessageKey::TitleDailyDetail).to_string());
 
     let block = Block::default()

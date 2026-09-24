@@ -64,7 +64,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Title line
     lines.push(Line::from(vec![
         Span::styled(
-            "Hourly Profile",
+            tr(lang, MessageKey::TitleHourlyProfile).trim(),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -138,11 +138,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             _ => period.label,
         };
 
+        let p_width = unicode_width::UnicodeWidthStr::width(p_label);
+        let p_pad = 10usize.saturating_sub(p_width);
+        let p_display = format!("  {}{}", p_label, " ".repeat(p_pad));
+
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<10}", p_label),
-                Style::default().fg(app.theme.foreground),
-            ),
+            Span::styled(p_display, Style::default().fg(app.theme.foreground)),
             Span::styled(
                 format!("{:>12}", period.hour_range),
                 Style::default().fg(app.theme.muted),
@@ -203,9 +204,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             _ => weekday.day,
         };
 
+        let w_width = unicode_width::UnicodeWidthStr::width(w_label);
+        let w_pad = 10usize.saturating_sub(w_width);
+        let w_display = format!("  {}{}", w_label, " ".repeat(w_pad));
+
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:<10}", w_label),
+                w_display,
                 Style::default().fg(if is_best {
                     app.theme.hint_key_color()
                 } else {
@@ -264,10 +269,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Hint
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        tr(lang, MessageKey::ProfileSwitchHint),
-        Style::default().fg(app.theme.muted),
-    )]));
+    let (prefix, suffix) = match lang {
+        crate::tui::i18n::TuiLanguage::Ko => ("", " 키를 눌러 테이블 보기로 전환"),
+        crate::tui::i18n::TuiLanguage::Ja => ("", " を押してテーブル表示に切替"),
+        crate::tui::i18n::TuiLanguage::ZhCn => ("按 ", " 切换到表格视图"),
+        crate::tui::i18n::TuiLanguage::Fr => ("Appuyez sur ", " pour passer en vue tableau"),
+        crate::tui::i18n::TuiLanguage::En => ("Press ", " to switch to table view"),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(prefix, Style::default().fg(app.theme.muted)),
+        Span::styled("[v]", app.theme.hint_key_style()),
+        Span::styled(suffix, Style::default().fg(app.theme.muted)),
+    ]));
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner);

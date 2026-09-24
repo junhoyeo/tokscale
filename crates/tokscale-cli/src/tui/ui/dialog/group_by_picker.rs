@@ -126,12 +126,18 @@ impl DialogContent for GroupByPickerDialog {
             .split(inner);
 
         let current = self.selected.borrow();
+        let current_display = self
+            .options
+            .iter()
+            .find(|o| o.value == *current)
+            .map(|o| o.label.to_string())
+            .unwrap_or_else(|| current.to_string());
         let header = Paragraph::new(Line::from(vec![
             Span::styled(
                 tr(self.lang, MessageKey::DialogCurrentLabel),
                 Style::default().fg(theme.muted),
             ),
-            Span::styled(current.to_string(), Style::default().fg(theme.accent)),
+            Span::styled(current_display, Style::default().fg(theme.accent)),
         ]));
         frame.render_widget(header, rows[0]);
 

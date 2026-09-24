@@ -678,24 +678,7 @@ impl App {
             self.needs_reload = true;
         }
 
-        if *self.dialog_needs_save_language.borrow() {
-            *self.dialog_needs_save_language.borrow_mut() = false;
-            let new_lang = *self.dialog_language_selected.borrow();
-            self.settings.tui_language = new_lang;
-            if let Err(e) = Settings::update_and_save("tuiLanguage", new_lang.code()) {
-                self.set_status(&format!(
-                    "Language: {} (save failed: {})",
-                    new_lang.native_name(),
-                    e
-                ));
-            } else {
-                self.set_status(&format!(
-                    "{} {}",
-                    tr(new_lang, MessageKey::StatusLanguageChanged),
-                    new_lang.native_name()
-                ));
-            }
-        }
+        self.apply_pending_language_change();
 
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
@@ -831,6 +814,27 @@ impl App {
         }
     }
 
+    pub fn apply_pending_language_change(&mut self) {
+        if *self.dialog_needs_save_language.borrow() {
+            *self.dialog_needs_save_language.borrow_mut() = false;
+            let new_lang = *self.dialog_language_selected.borrow();
+            self.settings.tui_language = new_lang;
+            if let Err(e) = Settings::update_and_save("tuiLanguage", new_lang.code()) {
+                self.set_status(&format!(
+                    "{} {}",
+                    tr(new_lang, MessageKey::StatusLanguageSaveFailed),
+                    e
+                ));
+            } else {
+                self.set_status(&format!(
+                    "{} {}",
+                    tr(new_lang, MessageKey::StatusLanguageChanged),
+                    new_lang.native_name()
+                ));
+            }
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
         // Remap the produced character to its US-QWERTY physical position so
         // single-letter hotkeys keep working under non-Latin layouts (Russian,
@@ -840,6 +844,7 @@ impl App {
         let code = crate::tui::keymap::normalize_hotkey(key.code);
 
         if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.apply_pending_language_change();
             self.should_quit = true;
             return true;
         }
@@ -847,6 +852,7 @@ impl App {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key.code);
             self.consume_confirmed_codex_account_action();
+            self.apply_pending_language_change();
             return false;
         }
 
@@ -860,6 +866,7 @@ impl App {
 
         match code {
             KeyCode::Char('q') => {
+                self.apply_pending_language_change();
                 self.should_quit = true;
                 return true;
             }

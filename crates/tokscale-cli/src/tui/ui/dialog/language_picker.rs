@@ -22,7 +22,6 @@ pub struct LanguagePickerDialog {
     selected: Rc<RefCell<TuiLanguage>>,
     needs_save: Rc<RefCell<bool>>,
     cursor: usize,
-    initial: TuiLanguage,
 }
 
 impl LanguagePickerDialog {
@@ -36,7 +35,6 @@ impl LanguagePickerDialog {
             selected,
             needs_save,
             cursor,
-            initial,
         }
     }
 
@@ -44,10 +42,6 @@ impl LanguagePickerDialog {
         let new_val = self.options[self.cursor];
         *self.selected.borrow_mut() = new_val;
         *self.needs_save.borrow_mut() = true;
-    }
-
-    fn cancel(&mut self) {
-        *self.selected.borrow_mut() = self.initial;
     }
 }
 
@@ -135,12 +129,10 @@ impl DialogContent for LanguagePickerDialog {
         frame.render_widget(hint, rows[3]);
     }
 
+    // Esc cancellation is handled directly by `DialogStack::handle_key`,
+    // which closes the dialog without invoking select_current().
     fn handle_key(&mut self, key: KeyCode) -> DialogResult {
         match key {
-            KeyCode::Esc => {
-                self.cancel();
-                DialogResult::Close
-            }
             KeyCode::Up => {
                 if self.cursor == 0 {
                     self.cursor = self.options.len() - 1;

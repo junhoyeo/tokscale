@@ -33,6 +33,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if minutely.is_empty() {
         let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoMinutelyData))
             .style(Style::default().fg(app.theme.muted))
+            .wrap(ratatui::widgets::Wrap { trim: true })
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
         return;

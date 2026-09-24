@@ -7,7 +7,7 @@ use crate::commands::usage::{
 };
 use crate::tui::app::{App, ClickAction};
 use crate::tui::codex_login::CodexLoginOutcome;
-use crate::tui::i18n::{tr, MessageKey};
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     get_provider_shade, light_ratio_bar_spans, truncate_ellipsis as truncate_string,
@@ -96,36 +96,50 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn status_label(app: &App) -> String {
+    let lang = app.settings.tui_language;
     if app.is_fetching_usage() {
-        return "Syncing usage".to_string();
+        return tr(lang, MessageKey::StatusSyncingUsage).to_string();
     }
     if app.is_codex_login_running() {
-        return "Codex login".to_string();
+        return tr(lang, MessageKey::StatusCodexLogin).to_string();
     }
 
     let inventory = usage_inventory(&app.subscription_usage);
 
     if inventory.providers == 0 && app.usage_fetch_attempted {
         if app.usage_fetch_diagnostics.is_empty() {
-            "No data".to_string()
+            tr(lang, MessageKey::StatusNoData).to_string()
         } else {
-            usage_issue_count_label(app.usage_fetch_diagnostics.len())
+            usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
         }
     } else if inventory.providers == 0 {
-        "Not loaded".to_string()
-    } else if app.usage_fetch_diagnostics.is_empty() {
-        format!(
-            "{} providers · {}",
-            inventory.providers,
-            identity_count_label(inventory.saved, inventory.managed)
-        )
+        tr(lang, MessageKey::StatusNotLoaded).to_string()
     } else {
-        format!(
-            "{} providers · {} · {}",
-            inventory.providers,
-            identity_count_label(inventory.saved, inventory.managed),
-            usage_issue_count_label(app.usage_fetch_diagnostics.len())
-        )
+        let providers_str = match lang {
+            TuiLanguage::En => format!("{} providers", inventory.providers),
+            TuiLanguage::Fr => format!("{} fournisseurs", inventory.providers),
+            TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => {
+                format!(
+                    "{}{}",
+                    inventory.providers,
+                    tr(lang, MessageKey::HeadingProviders)
+                )
+            }
+        };
+        if app.usage_fetch_diagnostics.is_empty() {
+            format!(
+                "{} · {}",
+                providers_str,
+                identity_count_label(lang, inventory.saved, inventory.managed)
+            )
+        } else {
+            format!(
+                "{} · {} · {}",
+                providers_str,
+                identity_count_label(lang, inventory.saved, inventory.managed),
+                usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
+            )
+        }
     }
 }
 
@@ -146,19 +160,46 @@ fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
     }
 }
 
-fn identity_count_label(saved: usize, managed: usize) -> String {
+fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> String {
+    let saved_label = if saved == 1 {
+        tr(lang, MessageKey::StatusSavedSingular)
+    } else {
+        tr(lang, MessageKey::StatusSavedPlural)
+    };
+    let managed_label = if managed == 1 {
+        tr(lang, MessageKey::StatusManagedSingular)
+    } else {
+        tr(lang, MessageKey::StatusManagedPlural)
+    };
+    let format_count = |n: usize, label: &str| -> String {
+        match lang {
+            TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => format!("{}{}", n, label),
+            TuiLanguage::En | TuiLanguage::Fr => format!("{} {}", n, label),
+        }
+    };
     match (saved, managed) {
-        (0, 0) => "0 saved".to_string(),
-        (saved, 0) => format!("{saved} saved"),
-        (0, managed) => format!("{managed} managed"),
-        (saved, managed) => format!("{saved} saved · {managed} managed"),
+        (0, 0) => format_count(0, saved_label),
+        (saved, 0) => format_count(saved, saved_label),
+        (0, managed) => format_count(managed, managed_label),
+        (saved, managed) => format!(
+            "{} · {}",
+            format_count(saved, saved_label),
+            format_count(managed, managed_label)
+        ),
     }
 }
 
-fn usage_issue_count_label(count: usize) -> String {
-    match count {
-        1 => "1 issue".to_string(),
-        count => format!("{count} issues"),
+fn usage_issue_count_label(lang: TuiLanguage, count: usize) -> String {
+    let issue_label = if count == 1 {
+        tr(lang, MessageKey::StatusIssueSingular)
+    } else {
+        tr(lang, MessageKey::StatusIssuePlural)
+    };
+    match lang {
+        TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => {
+            format!("{}{}", count, issue_label)
+        }
+        TuiLanguage::En | TuiLanguage::Fr => format!("{} {}", count, issue_label),
     }
 }
 
@@ -166,13 +207,18 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
     if area.height == 0 {
         return area;
     }
+    let lang = app.settings.tui_language;
     let compact = area.width < 48;
     let show_prefix = area.width >= 36;
 
     let refresh_label = if app.is_fetching_usage() {
-        if compact { "r Sync" } else { "r Syncing" }.to_string()
+        if compact {
+            "r Sync".to_string()
+        } else {
+            tr(lang, MessageKey::ActionRefreshSyncing).to_string()
+        }
     } else {
-        "r Refresh".to_string()
+        tr(lang, MessageKey::ActionRefresh).to_string()
     };
     let refresh_style = if app.is_fetching_usage() {
         ButtonKind::Disabled
@@ -182,13 +228,14 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
 
     let add_label = if app.is_codex_login_running() {
         if compact {
-            "a Adding"
+            "a Adding".to_string()
         } else {
-            "a Adding Codex"
+            tr(lang, MessageKey::ActionAddingCodex).to_string()
         }
-        .to_string()
+    } else if compact {
+        "a Add".to_string()
     } else {
-        if compact { "a Add" } else { "a Add Codex" }.to_string()
+        tr(lang, MessageKey::ActionAddCodex).to_string()
     };
     let add_style = if app.is_codex_login_running() {
         ButtonKind::Disabled
@@ -211,9 +258,15 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
     if !app.subscription_usage.is_empty() {
         buttons.push(ButtonSpec {
             label: if app.hide_usage_emails {
-                if compact { "m Show" } else { "m Show Emails" }.to_string()
+                if compact {
+                    "m Show".to_string()
+                } else {
+                    tr(lang, MessageKey::ActionShowEmails).to_string()
+                }
+            } else if compact {
+                "m Hide".to_string()
             } else {
-                if compact { "m Hide" } else { "m Hide Emails" }.to_string()
+                tr(lang, MessageKey::ActionHideEmails).to_string()
             },
             kind: ButtonKind::Secondary,
             action: ClickAction::UsageToggleEmailPrivacy,
@@ -225,7 +278,10 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
 
     let mut spans = Vec::new();
     if show_prefix {
-        spans.push(Span::styled(" Actions ", app.theme.subtle_text_style()));
+        spans.push(Span::styled(
+            format!(" {} ", tr(lang, MessageKey::HeadingActions)),
+            app.theme.subtle_text_style(),
+        ));
     }
     let start_x = area.x + Line::from(spans.clone()).width() as u16;
     push_click_buttons(&mut spans, app, buttons, start_x, area.y, area.right());
@@ -249,8 +305,9 @@ fn selected_reset_action_button(app: &App) -> Option<ButtonSpec> {
     }
 
     let account_id = output.account.as_ref()?.id.clone();
+    let lang = app.settings.tui_language;
     Some(ButtonSpec {
-        label: "x Reset".to_string(),
+        label: tr(lang, MessageKey::ActionReset).to_string(),
         kind: ButtonKind::Warning,
         action: ClickAction::CodexResetAccount { account_id },
     })
@@ -655,7 +712,10 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
     let attention_outputs = attention_outputs(outputs);
     push_section_spacing(&mut lines, inner.height as usize);
     if lines.len() + 1 < inner.height as usize {
-        lines.push(section_heading("Attention", app));
+        lines.push(section_heading(
+            tr(app.settings.tui_language, MessageKey::HeadingAttention),
+            app,
+        ));
         if attention_outputs.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  No accounts need attention",
@@ -880,7 +940,10 @@ fn append_usage_diagnostic_lines(
         return;
     }
 
-    lines.push(section_heading("Diagnostics", app));
+    lines.push(section_heading(
+        tr(app.settings.tui_language, MessageKey::HeadingDiagnostics),
+        app,
+    ));
     let available = max_lines.saturating_sub(lines.len());
     if available == 0 {
         return;
@@ -975,7 +1038,10 @@ fn append_provider_summary_lines(
         return;
     }
 
-    lines.push(section_heading("Providers", app));
+    lines.push(section_heading(
+        tr(app.settings.tui_language, MessageKey::HeadingProviders),
+        app,
+    ));
 
     for group in group_outputs_by_provider(outputs) {
         if lines.len() >= max_lines {
@@ -1006,9 +1072,14 @@ fn push_kv_styled(
     value_style: Style,
     width: usize,
 ) {
+    let key_width = unicode_width::UnicodeWidthStr::width(key);
+    let padding = " ".repeat(12usize.saturating_sub(key_width));
     let max_value = width.saturating_sub(16);
     lines.push(Line::from(vec![
-        Span::styled(format!("  {:<12}", key), app.theme.subtle_text_style()),
+        Span::styled(
+            format!("  {}{}", key, padding),
+            app.theme.subtle_text_style(),
+        ),
         Span::styled(truncate_string(value, max_value), value_style),
     ]));
 }
@@ -1116,7 +1187,7 @@ fn provider_summary_line(
         .filter(|(_, output)| output.account.is_some())
         .count();
     let managed = group.outputs.len().saturating_sub(saved);
-    let count_label = identity_count_label(saved, managed);
+    let count_label = identity_count_label(app.settings.tui_language, saved, managed);
     let ready = group
         .outputs
         .iter()
@@ -1176,11 +1247,12 @@ fn render_selected_account(
     let detail_limit = max_lines.saturating_sub(action_lines);
     let mut lines = Vec::new();
 
+    let lang = app.settings.tui_language;
     if lines.len() < detail_limit {
         push_kv_styled(
             &mut lines,
             app,
-            "Status",
+            tr(lang, MessageKey::LabelStatus),
             &selected_status_line(selected),
             Style::default()
                 .fg(readiness_color(app, readiness))
@@ -1192,7 +1264,7 @@ fn render_selected_account(
         push_kv_styled(
             &mut lines,
             app,
-            "Email",
+            tr(lang, MessageKey::LabelEmail),
             &email_display(app, selected.email.as_deref()),
             app.theme.secondary_text_style(),
             inner.width as usize,
@@ -1202,7 +1274,7 @@ fn render_selected_account(
         push_kv_styled(
             &mut lines,
             app,
-            "Credential",
+            tr(lang, MessageKey::LabelCredential),
             &credential_detail(selected),
             app.theme.secondary_text_style(),
             inner.width as usize,
@@ -1213,7 +1285,7 @@ fn render_selected_account(
             push_kv_styled(
                 &mut lines,
                 app,
-                "Credits",
+                tr(lang, MessageKey::LabelCredits),
                 &label,
                 app.theme.secondary_text_style(),
                 inner.width as usize,
@@ -1229,7 +1301,10 @@ fn render_selected_account(
     );
     push_section_spacing(&mut lines, detail_limit);
     if lines.len() < detail_limit {
-        lines.push(section_heading("Limits", app));
+        lines.push(section_heading(
+            tr(app.settings.tui_language, MessageKey::HeadingLimits),
+            app,
+        ));
     }
     let mut metric_index = 0usize;
     while lines.len() < detail_limit {
@@ -1252,7 +1327,10 @@ fn render_selected_account(
     }
     push_section_spacing(&mut lines, max_lines);
     if lines.len() + 1 < max_lines {
-        lines.push(section_heading("Actions", app));
+        lines.push(section_heading(
+            tr(app.settings.tui_language, MessageKey::HeadingActions),
+            app,
+        ));
     }
     if lines.len() < max_lines {
         let y = inner.y.saturating_add(lines.len() as u16);
@@ -1285,7 +1363,14 @@ fn append_selected_reset_credit_lines(
     } else {
         app.theme.secondary_text_style()
     };
-    push_kv_styled(lines, app, "Reset Bank", &count_label, value_style, width);
+    push_kv_styled(
+        lines,
+        app,
+        tr(app.settings.tui_language, MessageKey::LabelResetBank),
+        &count_label,
+        value_style,
+        width,
+    );
 
     if lines.len() >= max_lines {
         return;
@@ -1380,7 +1465,13 @@ fn append_credit_bank_summary_lines(
     }
 
     lines.push(Line::from(vec![
-        Span::styled("  Credit Bank  ", section_heading_style(app)),
+        Span::styled(
+            format!(
+                "  {}  ",
+                tr(app.settings.tui_language, MessageKey::HeadingCreditBank)
+            ),
+            section_heading_style(app),
+        ),
         Span::styled(
             truncate_string(&reset_bank_summary(outputs), width.saturating_sub(15)),
             Style::default()
@@ -1611,7 +1702,11 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
     let inventory = usage_inventory(outputs);
     let summary = format!(
         "  Snapshot  {ready} ready · {at_risk} at risk · {}{}",
-        identity_count_label(inventory.saved, inventory.managed),
+        identity_count_label(
+            app.settings.tui_language,
+            inventory.saved,
+            inventory.managed
+        ),
         if app.hide_usage_emails {
             " · emails hidden"
         } else {
@@ -1794,22 +1889,25 @@ fn render_narrow_accounts_table(
 }
 
 fn account_table_header(app: &App) -> Row<'static> {
+    let lang = app.settings.tui_language;
     let style = app.theme.subtle_text_style();
     Row::new([
         table_right_cell("#", style),
-        table_text_cell("Provider", style),
-        table_text_cell("Account", style),
-        table_text_cell("Plan", style),
-        table_text_cell("Auth", style),
-        table_text_cell("Health", style),
-        table_text_cell("Limit", style),
-        table_text_cell("Reset", style),
+        table_text_cell(tr(lang, MessageKey::ColProvider), style),
+        table_text_cell(tr(lang, MessageKey::ColAccount), style),
+        table_text_cell(tr(lang, MessageKey::ColPlan), style),
+        table_text_cell(tr(lang, MessageKey::ColAuth), style),
+        table_text_cell(tr(lang, MessageKey::ColHealth), style),
+        table_text_cell(tr(lang, MessageKey::ColLimit), style),
+        table_text_cell(tr(lang, MessageKey::ColReset), style),
     ])
 }
 
 fn narrow_table_header(app: &App, width: u16) -> Line<'static> {
+    let lang = app.settings.tui_language;
+    let label = format!(" #  {}", tr(lang, MessageKey::UsageAccountOrStatus));
     Line::from(Span::styled(
-        truncate_string(" #  Account / Status", width as usize),
+        truncate_string(&label, width as usize),
         app.theme.subtle_text_style(),
     ))
 }

@@ -309,7 +309,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .monthly_detail_month()
         .map(|month| {
             format!(
-                " {}{} ",
+                "{}{} ",
                 tr(lang, MessageKey::TitleDailyBreakdownPrefix),
                 month
             )

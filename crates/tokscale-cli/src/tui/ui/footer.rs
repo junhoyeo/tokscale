@@ -164,8 +164,16 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn current_count_label(app: &App) -> String {
     let lang = app.settings.tui_language;
-    let format_count =
-        |n: usize, key: MessageKey| -> String { format!(" ({} {})", n, tr(lang, key)) };
+    let format_count = |n: usize, key: MessageKey| -> String {
+        match lang {
+            TuiLanguage::Ko | TuiLanguage::Ja | TuiLanguage::ZhCn => {
+                format!(" ({}{})", n, tr(lang, key))
+            }
+            TuiLanguage::En | TuiLanguage::Fr => {
+                format!(" ({} {})", n, tr(lang, key))
+            }
+        }
+    };
     match app.current_tab {
         Tab::Overview | Tab::Models => format_count(app.data.models.len(), MessageKey::CountModels),
         Tab::Agents => format_count(app.data.agents.len(), MessageKey::CountAgents),
