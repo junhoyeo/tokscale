@@ -240,6 +240,10 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             spans.push(Span::styled("v", hint_style));
         }
+        if app.current_tab == Tab::Sessions {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            spans.push(Span::styled("b", hint_style));
+        }
         spans
     } else {
         let lang = app.settings.tui_language;
