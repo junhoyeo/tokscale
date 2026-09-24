@@ -162,7 +162,7 @@ impl SessionColumn {
             Self::Client => tr(lang, MessageKey::ColClient),
             Self::Model => tr(lang, MessageKey::ColModel),
             Self::Turn => tr(lang, MessageKey::ColTurn),
-            Self::Msgs => tr(lang, MessageKey::ColMessagesShort),
+            Self::Msgs => tr(lang, MessageKey::ColMessages),
             Self::Input => tr(lang, MessageKey::ColInput),
             Self::Output => tr(lang, MessageKey::ColOutput),
             Self::CacheRead => tr(lang, MessageKey::ColCacheRead),
