@@ -187,6 +187,49 @@ impl SessionUsage {
             subagent_count: 0,
         }
     }
+
+    /// Merge a rolled-up subagent branch into this root entry: usage sums,
+    /// the activity window extends across both, and this entry's own title
+    /// (the root session's) takes precedence over the branch's. Used to fold
+    /// sub-sub-agent chains into the root session. `subagent_count` is
+    /// assigned from the merged child sets afterwards, not here.
+    fn merge_subagent_branch(&mut self, branch: &SessionUsage) {
+        self.tokens.input = self.tokens.input.saturating_add(branch.tokens.input);
+        self.tokens.output = self.tokens.output.saturating_add(branch.tokens.output);
+        self.tokens.cache_read = self
+            .tokens
+            .cache_read
+            .saturating_add(branch.tokens.cache_read);
+        self.tokens.cache_write = self
+            .tokens
+            .cache_write
+            .saturating_add(branch.tokens.cache_write);
+        self.tokens.reasoning = self
+            .tokens
+            .reasoning
+            .saturating_add(branch.tokens.reasoning);
+        self.cost += branch.cost;
+        self.message_count = self.message_count.saturating_add(branch.message_count);
+        self.turn_count = self.turn_count.saturating_add(branch.turn_count);
+        if branch.first_active_ms != 0
+            && (self.first_active_ms == 0 || branch.first_active_ms < self.first_active_ms)
+        {
+            self.first_active_ms = branch.first_active_ms;
+        }
+        self.last_active_ms = self.last_active_ms.max(branch.last_active_ms);
+        if self.title.is_none() {
+            self.title = branch.title.clone();
+        }
+        for model in &branch.models {
+            if !self
+                .models
+                .iter()
+                .any(|m| m.display_name == model.display_name)
+            {
+                self.models.push(model.clone());
+            }
+        }
+    }
 }
 
 /// Accumulate one message into a session bucket: tokens, cost, counts,
@@ -695,6 +738,11 @@ impl DataLoader {
         // Distinct subagent session ids rolled into each bucket, so the
         // "(+N)" marker counts sessions, not messages.
         let mut rolled_child_sessions: HashMap<String, HashSet<String>> = HashMap::new();
+        // Immediate-parent edge per subagent session (child key -> parent
+        // key), recorded once per link. Messages name only their immediate
+        // parent, so sub-sub-agent chains are resolved to the root session
+        // from these edges after the pass.
+        let mut rolled_parent_of: HashMap<String, String> = HashMap::new();
 
         for msg in &messages {
             // Recovered daily-floor rows are day-level aggregates with a
@@ -1205,8 +1253,10 @@ impl DataLoader {
             // A second, parallel aggregation rolls subagent sessions (OMP
             // transcripts carrying `parent_session_id`) into their parent's
             // bucket so the Sessions tab can show the full cost of a session
-            // including its subagents. Both views are built in the same pass
-            // because messages are dropped after aggregation.
+            // including its subagents. Sub-sub-agent chains land one level
+            // down here and fold into the root session after the pass. Both
+            // views are built in the same pass because messages are dropped
+            // after aggregation.
             if !is_recovery_floor && !msg.session_id.is_empty() {
                 let session_key = format!("{}:{}", msg.client, msg.session_id);
                 let session_entry = session_map
@@ -1232,10 +1282,16 @@ impl DataLoader {
                     .entry(rolled_key.clone())
                     .or_insert_with(|| SessionUsage::new(&msg.client, rolled_session_id));
                 if is_subagent_msg {
-                    rolled_child_sessions
-                        .entry(rolled_key)
+                    if rolled_child_sessions
+                        .entry(rolled_key.clone())
                         .or_default()
-                        .insert(msg.session_id.clone());
+                        .insert(msg.session_id.clone())
+                    {
+                        // First sight of this link: remember the edge so the
+                        // chain fold below can resolve it to the root.
+                        rolled_parent_of
+                            .insert(format!("{}:{}", msg.client, msg.session_id), rolled_key);
+                    }
                 }
                 accumulate_session_entry(
                     rolled_entry,
@@ -1372,6 +1428,46 @@ impl DataLoader {
         minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
         let monthly = aggregate_monthly_from_daily(&daily);
+
+        // Fold sub-sub-agent chains into the root session: a message names
+        // only its immediate parent, so an intermediate subagent would
+        // otherwise surface as a rolled row holding only its own children.
+        // Cyclic links (corrupt data) stay as direct-parent roll-ups.
+        let chain_roots: Vec<(String, String)> = rolled_parent_of
+            .keys()
+            .map(|child| {
+                let mut root = child.clone();
+                let mut seen = HashSet::new();
+                while seen.insert(root.clone()) {
+                    match rolled_parent_of.get(&root) {
+                        Some(parent) => root = parent.clone(),
+                        None => break,
+                    }
+                }
+                (child.clone(), root)
+            })
+            .collect();
+        for (child_key, root_key) in chain_roots {
+            if child_key == root_key {
+                continue;
+            }
+            let Some(child_entry) = session_rolled_map.remove(&child_key) else {
+                continue;
+            };
+            let Some(root_entry) = session_rolled_map.get_mut(&root_key) else {
+                // Unreachable: every parent link created its bucket during
+                // the pass. Keep the row rather than drop its usage.
+                session_rolled_map.insert(child_key, child_entry);
+                continue;
+            };
+            root_entry.merge_subagent_branch(&child_entry);
+            if let Some(children) = rolled_child_sessions.remove(&child_key) {
+                rolled_child_sessions
+                    .entry(root_key)
+                    .or_default()
+                    .extend(children);
+            }
+        }
 
         for (key, children) in rolled_child_sessions {
             if let Some(entry) = session_rolled_map.get_mut(&key) {
@@ -3987,6 +4083,60 @@ after"#,
             usage.sessions_rolled[0].title.as_deref(),
             Some("New name")
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_folds_sub_sub_agent_chains_into_root() {
+        let loader = DataLoader::new(None);
+        let base_ms = 1_735_689_600_000_i64;
+        let mk = |session_id: &str, parent: Option<&str>, ms: i64, input: i64| {
+            let mut msg = UnifiedMessage::new(
+                "pi",
+                "gpt-5",
+                "openai",
+                session_id,
+                ms,
+                tokscale_core::TokenBreakdown {
+                    input,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                input as f64 / 100.0,
+            );
+            msg.parent_session_id = parent.map(str::to_string);
+            msg
+        };
+
+        // leaf -> mid -> root: a message names only its immediate parent, so
+        // without the chain fold the root row would miss the leaf and "mid"
+        // would surface as a rolled row holding only the leaf's usage.
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    mk("root", None, base_ms, 100),
+                    mk("mid", Some("root"), base_ms + 1000, 50),
+                    mk("leaf", Some("mid"), base_ms + 2000, 25),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        // Flat view still shows every session as its own row.
+        assert_eq!(usage.sessions.len(), 3);
+        assert!(usage.sessions.iter().all(|s| s.subagent_count == 0));
+
+        // Rolled view: the whole chain folds into the root session.
+        assert_eq!(usage.sessions_rolled.len(), 1);
+        let root = &usage.sessions_rolled[0];
+        assert_eq!(root.session_id, "root");
+        assert_eq!(root.subagent_count, 2, "mid and leaf both rolled in");
+        assert_eq!(root.tokens.input, 175);
+        assert!((root.cost - 1.75).abs() < 1e-9);
+        assert_eq!(root.message_count, 3);
+        assert_eq!(root.first_active_ms, base_ms);
+        assert_eq!(root.last_active_ms, base_ms + 2000);
     }
 
     #[test]
