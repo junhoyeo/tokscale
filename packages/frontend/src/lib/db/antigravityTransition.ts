@@ -82,6 +82,11 @@ function covers(previous: Coverage, incoming?: Coverage): boolean {
   });
 }
 
+/** True when the device has no credited family usage to double-count against. */
+function isZeroCoverage(total: Coverage): boolean {
+  return COVERAGE_FIELDS.every((field) => total[field] === 0);
+}
+
 /**
  * Antigravity's desktop cache, CLI, and IDE extension can contain the same
  * provider response. Their source labels are presentation surfaces, not
@@ -103,6 +108,10 @@ export function planAntigravityTransition(args: {
     args.submittedClients.has(client) || ownValue(args.incomingVersions, client) !== undefined
   );
   if (!touchesFamily) return { mode: "status-quo" };
+
+  const submittedMembers = ANTIGRAVITY_FAMILY.filter((client) =>
+    args.submittedClients.has(client)
+  );
 
   const unknownStoredGeneration = ANTIGRAVITY_FAMILY.some((client) =>
     (ownValue(args.persistedVersions, client) ?? 0) > SUPPORTED_VERSIONED_PARSERS[client]
@@ -137,6 +146,55 @@ export function planAntigravityTransition(args: {
     warning: `Preserved Antigravity sources together: ${reason}. No Antigravity token or cost changes were applied. Submit antigravity, antigravity-cli, and antigravity-extension together with a full-history scan to update them.`,
   });
 
+  const layouts = Object.fromEntries(
+    ANTIGRAVITY_FAMILY.map((client) => [
+      client,
+      foldParserClientSnapshot(args.contributions, client),
+    ])
+  ) as FamilyLayouts;
+
+  const previous = antigravityPriorCoverage(args.existingDays, args.parserStates);
+  if (previous.unverifiable) {
+    return freeze("a prior Antigravity parser high-water state cannot be verified");
+  }
+
+  if (
+    submittedMembers.length > 0 &&
+    !args.isBackfill &&
+    args.fullHistory &&
+    isZeroCoverage(previous.total)
+  ) {
+    // First admission: this device has no credited Antigravity family usage,
+    // so there is nothing a partial snapshot could double-count. Admit the
+    // submitted members now; the missing surfaces get empty layouts and the
+    // usual coverage check guards every later submit. Cost-incomplete days
+    // are still floored by the replace path, not silently completed.
+    const badVersion = submittedMembers.some((client) => {
+      const incoming = ownValue(args.incomingVersions, client);
+      return (
+        incoming !== undefined &&
+        incoming !== SUPPORTED_VERSIONED_PARSERS[client]
+      );
+    });
+    if (badVersion) {
+      return freeze("a submitted Antigravity source declares an unsupported parser generation");
+    }
+    const admittedVersions = Object.fromEntries(
+      submittedMembers.flatMap((client) => {
+        const incoming = ownValue(args.incomingVersions, client);
+        return incoming !== undefined ? [[client, incoming]] : [];
+      })
+    );
+    return {
+      mode: "replace",
+      parserVersions:
+        Object.keys(admittedVersions).length > 0 ? admittedVersions : undefined,
+      layouts,
+      warning:
+        "Admitted Antigravity usage for the submitted sources as first admission; missing surfaces start empty and later snapshots are still coverage-checked.",
+    };
+  }
+
   if (
     unknownStoredGeneration ||
     unsupportedIncoming ||
@@ -160,17 +218,6 @@ export function planAntigravityTransition(args: {
     return freeze("the Antigravity family snapshot has incomplete pricing");
   }
 
-  const layouts = Object.fromEntries(
-    ANTIGRAVITY_FAMILY.map((client) => [
-      client,
-      foldParserClientSnapshot(args.contributions, client),
-    ])
-  ) as FamilyLayouts;
-
-  const previous = antigravityPriorCoverage(args.existingDays, args.parserStates);
-  if (previous.unverifiable) {
-    return freeze("a prior Antigravity parser high-water state cannot be verified");
-  }
   // Date changes are expected as providers expose per-generation timestamps.
   // Compare family lifetime/model coverage across dates, then replace all
   // source layouts atomically. This retains the credited total while allowing
