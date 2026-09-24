@@ -193,8 +193,9 @@ impl SessionUsage {
 /// activity window, title adoption, and the distinct-models list. Shared by
 /// the flat and subagent-rolled session aggregations. `owner_msg` is true
 /// when the message belongs to the bucket's own session (vs a rolled-in
-/// subagent): the bucket owner's title always wins, while a subagent title
-/// only fills an empty slot.
+/// subagent): among owner messages the most recent title wins, so a
+/// mid-session rename surfaces the latest title, while a subagent title only
+/// fills an empty slot.
 fn accumulate_session_entry(
     entry: &mut SessionUsage,
     msg: &UnifiedMessage,
@@ -241,10 +242,11 @@ fn accumulate_session_entry(
         }
     }
 
-    // Adopt the first non-empty session_title seen across the session's
-    // messages. Parsers that don't populate the field leave it `None` and
-    // the Sessions tab falls back to the ID. In rolled-up buckets the
-    // parent session's own title takes precedence over a subagent's.
+    // Adopt the most recent non-empty session_title from the bucket's own
+    // messages (last-wins, so a mid-session rename surfaces the latest
+    // title); a subagent's title only fills the slot when the owner
+    // contributed none. Parsers that don't populate the field leave it
+    // `None` and the Sessions tab falls back to the ID.
     if let Some(ref title) = msg.session_title {
         let trimmed = title.trim();
         if !trimmed.is_empty() && (owner_msg || entry.title.is_none()) {
@@ -3937,6 +3939,54 @@ after"#,
         assert_eq!(orphan.subagent_count, 1);
         assert_eq!(orphan.tokens.input, 25);
         assert_eq!(orphan.title.as_deref(), Some("[Sub]: orphan work"));
+    }
+
+    #[test]
+    fn test_session_title_adoption_is_last_wins_on_rename() {
+        let loader = DataLoader::new(None);
+        let base_ms = 1_735_689_600_000_i64;
+        let mk = |title: Option<&str>, ms: i64| {
+            let mut msg = UnifiedMessage::new(
+                "pi",
+                "gpt-5",
+                "openai",
+                "session-1",
+                ms,
+                tokscale_core::TokenBreakdown {
+                    input: 10,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.1,
+            );
+            msg.session_title = title.map(str::to_string);
+            msg
+        };
+
+        // Parsers emit titles point-in-time (see sessions::pi docs), so a
+        // mid-session rename arrives as later messages carrying the new
+        // title. The row must show the latest, not the first.
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    mk(Some("Old name"), base_ms),
+                    mk(Some("New name"), base_ms + 1000),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(
+            usage.sessions[0].title.as_deref(),
+            Some("New name"),
+            "a rename must surface the latest owner title"
+        );
+        assert_eq!(
+            usage.sessions_rolled[0].title.as_deref(),
+            Some("New name")
+        );
     }
 
     #[test]
