@@ -2026,7 +2026,7 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 
 ## 本地用量恢复账本
 
-如果客户端清除了旧的会话转录文件，Tokscale 可以通过一个可选启用的账本文件 `~/.config/tokscale/recovered-usage-v1.json`（由 `TOKSCALE_CONFIG_DIR` 解析出的配置目录）将这些会话的旧本地导出重新对账到本地报告中。该文件是一个 `Archive` JSON 对象，包含 `version`（必须为 `1`）、`home`（必须与被扫描的主目录完全一致），以及可选的 `messages` / `daily_floors` 数组（序列化的 `UnifiedMessage` 记录）——`messages` 用于恢复磁盘上已不存在的会话的请求归档行，而 `daily_floors` 保存按（客户端、日期）聚合的快照，仅填补快照与已统计每日总量之间的正向差额。实时转录始终优先，恢复的行带有 `local-recovery:` 去重键和 “Recovered request archive” / “Recovered daily aggregate” 的 agent 标签。该叠加层严格仅限本地：恢复的用量绝不会提交到排行榜，也绝不会写入源消息缓存，且每日下限聚合行会从 Sessions、Agents、Hourly、Minutely 视图中排除。设置 `TOKSCALE_RECOVERY_DISABLE` 可忽略账本。该格式为内部格式：`local-recovery:` 键被信任为由 Tokscale 自身生成，请勿手工编写。当存在匹配的账本时，本地报告会收集全部消息而非流式处理，因此拥有超大语料库的用户可能会看到更高的内存占用。
+如果客户端清除了旧的会话转录文件，Tokscale 可以通过一个可选启用的账本文件 `~/.config/tokscale/recovered-usage-v1.json`（由 `TOKSCALE_CONFIG_DIR` 解析出的配置目录）将这些会话的旧本地导出重新对账到本地报告中。该文件是一个 `Archive` JSON 对象，包含 `version`（必须为 `1`）、`home`（必须与被扫描的主目录完全一致），以及可选的 `messages` / `daily_floors` 数组（序列化的 `UnifiedMessage` 记录）——`messages` 用于恢复磁盘上已不存在的会话的请求归档行，而 `daily_floors` 保存按（客户端、日期）聚合的快照，仅填补快照与已统计每日总量之间的正向差额。实时转录始终优先，恢复的行带有 `local-recovery:` 去重键和 “Recovered request archive” / “Recovered daily aggregate (component split estimated)” 的 agent 标签。该叠加层严格仅限本地：恢复的用量绝不会提交到排行榜，也绝不会写入源消息缓存，且每日下限聚合行会从 Sessions、Agents、Hourly、Minutely 视图中排除。设置 `TOKSCALE_RECOVERY_DISABLE` 可忽略账本。该格式为内部格式：`local-recovery:` 键被信任为由 Tokscale 自身生成，请勿手工编写。当存在匹配的账本时，本地报告会收集全部消息而非流式处理，因此拥有超大语料库的用户可能会看到更高的内存占用。
 
 ```json
 {
