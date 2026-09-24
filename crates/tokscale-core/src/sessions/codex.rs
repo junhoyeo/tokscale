@@ -529,7 +529,15 @@ fn parse_codex_reader<R: BufRead>(
                     && payload.payload_type.as_deref() == Some("thread_settings_applied")
                     && !state.forked_child_waiting_for_turn_context
                 {
-                    state.thread_service_tier = extract_thread_service_tier(&payload);
+                    if payload.thread_settings.is_some() {
+                        // A snapshot without a tier (standard processing)
+                        // clears the sticky tier from then on.
+                        state.thread_service_tier = extract_thread_service_tier(&payload);
+                    } else if let Some(tier) = extract_request_service_tier(&payload) {
+                        // Forward-compat: a flat tier on the snapshot itself.
+                        // An unrecognized shape never clears the sticky tier.
+                        state.thread_service_tier = Some(tier);
+                    }
                 }
 
                 let payload_model = extract_model(&payload);
@@ -575,11 +583,10 @@ fn parse_codex_reader<R: BufRead>(
                             state.session_id_from_meta = Some(id.clone());
                         }
                         state.current_model = payload_model.clone();
-                        // The child's own `turn_context` is request-scoped;
-                        // a missing tier clears any request-scoped tier the
-                        // parent replay left behind. The thread tier is
-                        // untouched: parent-replay snapshots were skipped.
-                        state.request_service_tier = extract_request_service_tier(&payload);
+                        // No tier bookkeeping here: this `turn_context` falls
+                        // through to the reset below, which clears any
+                        // request-scoped tier left by the parent replay. The
+                        // thread tier is untouched (replay snapshots were skipped).
                         handled = true;
                     } else {
                         if entry.entry_type == "event_msg"
@@ -1427,34 +1434,33 @@ fn extract_thread_service_tier(payload: &CodexPayload) -> Option<String> {
 /// Request-scoped tier arms. None are emitted by current Codex builds; they
 /// are kept for forward compatibility and never read `thread_settings`.
 fn extract_request_service_tier(payload: &CodexPayload) -> Option<String> {
-    payload
-        .service_tier
-        .as_deref()
-        .or_else(|| {
-            payload.info.as_ref().and_then(|info| {
-                info.service_tier
-                    .as_deref()
-                    .or_else(|| {
-                        info.last_token_usage
-                            .as_ref()
-                            .and_then(|usage| usage.service_tier.as_deref())
-                    })
-                    .or_else(|| {
-                        info.total_token_usage
-                            .as_ref()
-                            .and_then(|usage| usage.service_tier.as_deref())
-                    })
+    normalize_service_tier(
+        payload
+            .service_tier
+            .as_deref()
+            .or_else(|| {
+                payload.info.as_ref().and_then(|info| {
+                    info.service_tier
+                        .as_deref()
+                        .or_else(|| {
+                            info.last_token_usage
+                                .as_ref()
+                                .and_then(|usage| usage.service_tier.as_deref())
+                        })
+                        .or_else(|| {
+                            info.total_token_usage
+                                .as_ref()
+                                .and_then(|usage| usage.service_tier.as_deref())
+                        })
+                })
             })
-        })
-        .or_else(|| {
-            payload
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.service_tier.as_deref())
-        })
-        .map(str::trim)
-        .filter(|tier| !tier.is_empty())
-        .map(str::to_ascii_lowercase)
+            .or_else(|| {
+                payload
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.service_tier.as_deref())
+            }),
+    )
 }
 
 struct CodexHeadlessUsage {
@@ -1801,6 +1807,33 @@ mod tests {
         assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
         // A later `thread_settings_applied` without a tier clears it.
         assert_eq!(messages[2].service_tier, None);
+    }
+
+    #[test]
+    fn test_thread_snapshot_without_settings_object_keeps_or_sets_the_sticky_tier() {
+        // Only a snapshot that carries `thread_settings` may clear the sticky
+        // tier. A flat tier on the snapshot sets it (forward-compat), and an
+        // unrecognized shape leaves it alone instead of wiping the premium.
+        let file = create_test_file(concat!(
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","service_tier":"priority"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26},"last_token_usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].service_tier.as_deref(), Some("priority"));
+        assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
     }
 
     #[test]
