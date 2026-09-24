@@ -11711,6 +11711,32 @@ mod tests {
         .unwrap();
 
         seed_openclaw_agent_db(home, "main", "sess-a", None, &migrated);
+        // A compressed SQLite fork and zstd archive must collapse against
+        // the same events, while a compressed-only event must still count.
+        let compressed_db = home.join(".openclaw/agents/archive/agent/openclaw-agent.sqlite");
+        let conn = sessions::openclaw::test_fixtures::create_compressed_agent_db(&compressed_db);
+        for (seq, event) in migrated.iter().enumerate() {
+            sessions::openclaw::test_fixtures::insert_compressed_event(
+                &conn,
+                "sess-fork",
+                seq as i64,
+                event,
+                1_756_548_000_000,
+            );
+        }
+        sessions::openclaw::test_fixtures::insert_compressed_event(
+            &conn,
+            "sess-fork",
+            migrated.len() as i64,
+            &openclaw_assistant_event("c1", 300, 40, 1_756_548_004_000),
+            1_756_548_004_000,
+        );
+        drop(conn);
+        std::fs::write(
+            sessions_dir.join("sess-a.jsonl.deleted.timestamp.zst"),
+            zstd::encode_all(migrated.join("\n").as_bytes(), 1).unwrap(),
+        )
+        .unwrap();
         // A session that only ever existed in SQLite.
         seed_openclaw_agent_db(
             home,
@@ -11726,6 +11752,7 @@ mod tests {
         let expected_keys = vec![
             "openclaw:a1:1756548001000:100:50",
             "openclaw:a2:1756548002000:20:10",
+            "openclaw:c1:1756548004000:300:40",
             "openclaw:n1:1756548003000:1:1",
             "openclaw:r1:1756541000000:5:5",
             "openclaw:z1:1756540000000:7:3",
@@ -11738,7 +11765,7 @@ mod tests {
         );
         assert_eq!(openclaw_dedup_keys(&cold), expected_keys);
         let input_total: i64 = cold.iter().map(|message| message.tokens.input).sum();
-        assert_eq!(input_total, 100 + 20 + 1 + 7 + 5);
+        assert_eq!(input_total, 100 + 20 + 300 + 1 + 7 + 5);
 
         // Cached entries keep their keys, so a warm scan collapses the same way.
         let warm = parse_all_messages_with_pricing(
@@ -11758,8 +11785,8 @@ mod tests {
             scanner_settings: scanner::ScannerSettings::default(),
         })
         .unwrap();
-        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 5);
-        assert_eq!(parsed.messages.len(), 5);
+        assert_eq!(parsed.counts.get(ClientId::OpenClaw), 6);
+        assert_eq!(parsed.messages.len(), 6);
     }
 
     #[test]

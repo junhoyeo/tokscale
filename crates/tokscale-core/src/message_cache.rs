@@ -1284,7 +1284,9 @@ fn parser_version(client: ClientId) -> u32 {
         // are Codex rollouts OpenClaw owns, rather than OpenClaw transcripts.
         // Their bytes are unchanged, so v5's cached empty transcript result
         // must not survive the new path classification.
-        ClientId::OpenClaw => 6,
+        // v6->v7: SQLite rows with NULL event_json hold zstd payloads. Older
+        // scans cached only the plain rows, even when the store never changed.
+        ClientId::OpenClaw => 7,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -3755,9 +3757,10 @@ mod tests {
     /// sessions by the archived spelling is served warm forever. #1298 needs
     /// v6 because legacy CLI-auth Codex rollout bytes were cached as empty
     /// OpenClaw transcripts before their path classification changed.
+    /// v7 retires SQLite scans that omitted compressed transcript rows.
     #[test]
-    fn test_openclaw_parser_version_invalidates_v5_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 6);
+    fn test_openclaw_parser_version_invalidates_v6_entries() {
+        assert_eq!(parser_version(ClientId::OpenClaw), 7);
     }
 
     #[test]
@@ -4098,8 +4101,89 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 6);
+        assert_eq!(cached.parser_version, 7);
         assert_eq!(cached.messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_v6_sqlite_shards_are_reparsed_with_compressed_rows() {
+        use crate::sessions::openclaw::{scan_openclaw_sqlite, test_fixtures::*};
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("openclaw-agent.sqlite");
+        let conn = create_compressed_agent_db(&source);
+        let plain = assistant_event(
+            "a1",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":100,"output":20}"#,
+            1_756_548_001_000,
+        );
+        let compressed = assistant_event(
+            "a2",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":300,"output":40}"#,
+            1_756_548_002_000,
+        );
+        insert_event(&conn, "sess-a", 0, &plain, 1_756_548_001_000);
+        insert_compressed_event(&conn, "sess-a", 1, &compressed, 1_756_548_002_000);
+        drop(conn);
+        let parsed = scan_openclaw_sqlite(&source);
+        assert!(parsed.complete);
+        assert_eq!(parsed.messages.len(), 2);
+
+        let identity = CacheIdentity::for_client(ClientId::OpenClaw);
+        let stale_identity = CacheIdentity {
+            parser_version: 6,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_sqlite_path(&source).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            parsed.messages[..1].to_vec(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(
+            cache.get(identity, &source).is_none(),
+            "v6's nonempty undercount must be discarded"
+        );
+        assert_eq!(
+            SourceFingerprint::from_sqlite_path(&source).unwrap(),
+            fingerprint
+        );
+        let reparsed = scan_openclaw_sqlite(&source);
+        assert!(reparsed.complete);
+        assert_eq!(reparsed.messages, parsed.messages);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            reparsed.messages.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(
+            warm.get(identity, &source).unwrap().messages,
+            reparsed.messages
+        );
     }
 
     #[test]
