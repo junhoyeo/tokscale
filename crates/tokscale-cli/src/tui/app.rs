@@ -1001,11 +1001,14 @@ impl App {
                 self.roll_up_subagents = !self.roll_up_subagents;
                 self.reset_selection();
                 let count = self.active_sessions().len();
-                self.set_status(&if self.roll_up_subagents {
-                    format!("Subagent sessions rolled into parents ({count} sessions)")
-                } else {
-                    format!("Subagent sessions shown separately ({count} sessions)")
-                });
+                self.set_status(&format!(
+                    "Subagent sessions {} ({count} sessions)",
+                    if self.roll_up_subagents {
+                        "rolled into parents"
+                    } else {
+                        "shown separately"
+                    }
+                ));
             }
             KeyCode::Char('a') if self.current_tab == Tab::Usage => {
                 self.start_codex_login();
@@ -4589,18 +4592,11 @@ mod tests {
         // subagents into the parent row
         let mut app = make_app();
         app.current_tab = Tab::Sessions;
-        let mk = |session_id: &str| SessionUsage {
-            session_id: session_id.to_string(),
-            client: "pi".to_string(),
-            title: None,
-            models: Vec::new(),
-            tokens: TokenBreakdown::default(),
-            cost: 1.0,
-            message_count: 1,
-            turn_count: 0,
-            first_active_ms: 0,
-            last_active_ms: 0,
-            subagent_count: 0,
+        let mk = |session_id: &str| {
+            let mut s = SessionUsage::new("pi", session_id);
+            s.cost = 1.0;
+            s.message_count = 1;
+            s
         };
         app.data.sessions = vec![mk("parent"), mk("child-1"), mk("child-2")];
         app.data.sessions_rolled = vec![mk("parent")];
@@ -4622,32 +4618,15 @@ mod tests {
     #[test]
     fn test_active_sessions_follows_rollup_toggle() {
         let mut app = make_app();
-        app.data.sessions = vec![SessionUsage {
-            session_id: "child".to_string(),
-            client: "pi".to_string(),
-            title: None,
-            models: Vec::new(),
-            tokens: TokenBreakdown::default(),
-            cost: 0.5,
-            message_count: 1,
-            turn_count: 0,
-            first_active_ms: 0,
-            last_active_ms: 0,
-            subagent_count: 0,
-        }];
-        app.data.sessions_rolled = vec![SessionUsage {
-            session_id: "parent".to_string(),
-            client: "pi".to_string(),
-            title: None,
-            models: Vec::new(),
-            tokens: TokenBreakdown::default(),
-            cost: 1.5,
-            message_count: 3,
-            turn_count: 0,
-            first_active_ms: 0,
-            last_active_ms: 0,
-            subagent_count: 1,
-        }];
+        let mut child = SessionUsage::new("pi", "child");
+        child.cost = 0.5;
+        child.message_count = 1;
+        let mut parent = SessionUsage::new("pi", "parent");
+        parent.cost = 1.5;
+        parent.message_count = 3;
+        parent.subagent_count = 1;
+        app.data.sessions = vec![child];
+        app.data.sessions_rolled = vec![parent];
 
         assert_eq!(app.active_sessions()[0].session_id, "child");
         app.roll_up_subagents = true;

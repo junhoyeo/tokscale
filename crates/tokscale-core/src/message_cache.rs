@@ -3240,84 +3240,62 @@ fn read_shard_with_limit(
         };
     }
 
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V4 {
-        return match bincode::options()
-            .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV4>>(&envelope.payload)
-        {
-            Ok(entries) => {
-                migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
+    match envelope.format_version {
+        LEGACY_CACHE_FORMAT_VERSION_V4 => {
+            migrate_legacy_shard::<LegacyCachedSourceEntryV4>(&envelope.payload, max_shard_bytes)
+        }
+        LEGACY_CACHE_FORMAT_VERSION_V5 => {
+            migrate_legacy_shard::<LegacyCachedSourceEntryV5>(&envelope.payload, max_shard_bytes)
+        }
+        LEGACY_CACHE_FORMAT_VERSION_V6 => {
+            migrate_legacy_shard::<LegacyCachedSourceEntryV6>(&envelope.payload, max_shard_bytes)
+        }
+        LEGACY_CACHE_FORMAT_VERSION_V7 => {
+            migrate_legacy_shard::<LegacyCachedSourceEntryV7>(&envelope.payload, max_shard_bytes)
+        }
+        LEGACY_CACHE_FORMAT_VERSION_V8 => {
+            migrate_legacy_shard::<LegacyCachedSourceEntryV8>(&envelope.payload, max_shard_bytes)
+        }
+        // Version 9 already carries `cache_write_1h`, so unlike the older
+        // formats it keeps the Claude retention provenance marker: the
+        // entry's token split is complete and a reparse would only churn the
+        // retained set. It therefore does not go through `migrated_shard`.
+        LEGACY_CACHE_FORMAT_VERSION_V9 => {
+            match bincode::options()
+                .with_limit(max_shard_bytes)
+                .deserialize::<Vec<LegacyCachedSourceEntryV9>>(&envelope.payload)
+            {
+                Ok(entries) => ShardReadStatus::Migrated(
+                    entries.into_iter().map(CachedSourceEntry::from).collect(),
+                ),
+                Err(error) => ShardReadStatus::Invalid(error.to_string()),
             }
-            Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
-    }
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V5 {
-        return match bincode::options()
+        }
+        CACHE_FORMAT_VERSION => match bincode::options()
             .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV5>>(&envelope.payload)
+            .deserialize(&envelope.payload)
         {
-            Ok(entries) => {
-                migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
-            }
+            Ok(entries) => ShardReadStatus::Loaded(entries),
             Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
+        },
+        _ => ShardReadStatus::Stale,
     }
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V6 {
-        return match bincode::options()
-            .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV6>>(&envelope.payload)
-        {
-            Ok(entries) => {
-                migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
-            }
-            Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
-    }
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V7 {
-        return match bincode::options()
-            .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV7>>(&envelope.payload)
-        {
-            Ok(entries) => {
-                migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
-            }
-            Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
-    }
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V8 {
-        return match bincode::options()
-            .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV8>>(&envelope.payload)
-        {
-            Ok(entries) => {
-                migrated_shard(entries.into_iter().map(CachedSourceEntry::from).collect())
-            }
-            Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
-    }
-    // Version 9 already carries `cache_write_1h`, so unlike the older formats
-    // it keeps the Claude retention provenance marker: the entry's token split
-    // is complete and a reparse would only churn the retained set.
-    if envelope.format_version == LEGACY_CACHE_FORMAT_VERSION_V9 {
-        return match bincode::options()
-            .with_limit(max_shard_bytes)
-            .deserialize::<Vec<LegacyCachedSourceEntryV9>>(&envelope.payload)
-        {
-            Ok(entries) => ShardReadStatus::Migrated(
-                entries.into_iter().map(CachedSourceEntry::from).collect(),
-            ),
-            Err(error) => ShardReadStatus::Invalid(error.to_string()),
-        };
-    }
-    if envelope.format_version != CACHE_FORMAT_VERSION {
-        return ShardReadStatus::Stale;
-    }
+}
 
+/// Decode a pre-`cache_write_1h` shard into its exact legacy wire type and
+/// convert every entry to the current layout. Shared by the v4-v8 migration
+/// arms: each legacy entry type only differs in the fields it carries beside
+/// `messages`, and all of them go through [`migrated_shard`] so a Claude entry
+/// drops retention provenance it can no longer vouch for.
+fn migrate_legacy_shard<T>(payload: &[u8], max_shard_bytes: u64) -> ShardReadStatus
+where
+    T: serde::de::DeserializeOwned + Into<CachedSourceEntry>,
+{
     match bincode::options()
         .with_limit(max_shard_bytes)
-        .deserialize(&envelope.payload)
+        .deserialize::<Vec<T>>(payload)
     {
-        Ok(entries) => ShardReadStatus::Loaded(entries),
+        Ok(entries) => migrated_shard(entries.into_iter().map(Into::into).collect()),
         Err(error) => ShardReadStatus::Invalid(error.to_string()),
     }
 }

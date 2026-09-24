@@ -172,7 +172,7 @@ pub struct SessionUsage {
 }
 
 impl SessionUsage {
-    fn new(client: &str, session_id: &str) -> Self {
+    pub(crate) fn new(client: &str, session_id: &str) -> Self {
         Self {
             session_id: session_id.to_string(),
             client: client.to_string(),
@@ -1281,17 +1281,16 @@ impl DataLoader {
                 let rolled_entry = session_rolled_map
                     .entry(rolled_key.clone())
                     .or_insert_with(|| SessionUsage::new(&msg.client, rolled_session_id));
-                if is_subagent_msg {
-                    if rolled_child_sessions
+                if is_subagent_msg
+                    && rolled_child_sessions
                         .entry(rolled_key.clone())
                         .or_default()
                         .insert(msg.session_id.clone())
-                    {
-                        // First sight of this link: remember the edge so the
-                        // chain fold below can resolve it to the root.
-                        rolled_parent_of
-                            .insert(format!("{}:{}", msg.client, msg.session_id), rolled_key);
-                    }
+                {
+                    // First sight of this link: remember the edge so the
+                    // chain fold below can resolve it to the root.
+                    rolled_parent_of
+                        .insert(format!("{}:{}", msg.client, msg.session_id), rolled_key);
                 }
                 accumulate_session_entry(
                     rolled_entry,
@@ -1433,10 +1432,9 @@ impl DataLoader {
         // only its immediate parent, so an intermediate subagent would
         // otherwise surface as a rolled row holding only its own children.
         // Cyclic links (corrupt data) stay as direct-parent roll-ups.
-        let chain_roots: Vec<(String, String)> = rolled_parent_of
-            .keys()
-            .map(|child| {
-                let mut root = child.clone();
+        for child_key in rolled_parent_of.keys() {
+            let root_key = {
+                let mut root = child_key.clone();
                 let mut seen = HashSet::new();
                 while seen.insert(root.clone()) {
                     match rolled_parent_of.get(&root) {
@@ -1444,24 +1442,22 @@ impl DataLoader {
                         None => break,
                     }
                 }
-                (child.clone(), root)
-            })
-            .collect();
-        for (child_key, root_key) in chain_roots {
-            if child_key == root_key {
+                root
+            };
+            if child_key == &root_key {
                 continue;
             }
-            let Some(child_entry) = session_rolled_map.remove(&child_key) else {
+            let Some(child_entry) = session_rolled_map.remove(child_key) else {
                 continue;
             };
             let Some(root_entry) = session_rolled_map.get_mut(&root_key) else {
                 // Unreachable: every parent link created its bucket during
                 // the pass. Keep the row rather than drop its usage.
-                session_rolled_map.insert(child_key, child_entry);
+                session_rolled_map.insert(child_key.clone(), child_entry);
                 continue;
             };
             root_entry.merge_subagent_branch(&child_entry);
-            if let Some(children) = rolled_child_sessions.remove(&child_key) {
+            if let Some(children) = rolled_child_sessions.remove(child_key) {
                 rolled_child_sessions
                     .entry(root_key)
                     .or_default()
@@ -4053,6 +4049,7 @@ after"#,
                     output: 0,
                     cache_read: 0,
                     cache_write: 0,
+                    cache_write_1h: 0,
                     reasoning: 0,
                 },
                 0.1,
@@ -4079,10 +4076,7 @@ after"#,
             Some("New name"),
             "a rename must surface the latest owner title"
         );
-        assert_eq!(
-            usage.sessions_rolled[0].title.as_deref(),
-            Some("New name")
-        );
+        assert_eq!(usage.sessions_rolled[0].title.as_deref(), Some("New name"));
     }
 
     #[test]
@@ -4101,6 +4095,7 @@ after"#,
                     output: 0,
                     cache_read: 0,
                     cache_write: 0,
+                    cache_write_1h: 0,
                     reasoning: 0,
                 },
                 input as f64 / 100.0,
