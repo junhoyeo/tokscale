@@ -6,6 +6,10 @@ use super::data::UsageData;
 /// Serializes `UsageData` into the pretty-printed JSON payload used by the
 /// `e` export hotkey. Pure: callers are responsible for file I/O and any
 /// user-facing status messages.
+///
+/// Sessions are always the flat per-session list (`UsageData::sessions`):
+/// subagent sessions export as their own rows regardless of the Sessions
+/// tab roll-up toggle, which only affects the on-screen view.
 pub fn build_export_json(data: &UsageData) -> Result<String> {
     let export_data = json!({
         "models": data.models.iter().map(|m| json!({
