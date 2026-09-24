@@ -574,11 +574,10 @@ fn label_with_rollup_marker(
     budget: usize,
     truncate: fn(&str, usize) -> String,
 ) -> String {
-    let marker = if app.roll_up_subagents && s.subagent_count > 0 {
-        format!("(+{}) ", s.subagent_count)
-    } else {
-        String::new()
-    };
+    if !app.roll_up_subagents || s.subagent_count == 0 {
+        return truncate(session_label(s), budget);
+    }
+    let marker = format!("(+{}) ", s.subagent_count);
     let keep = budget.saturating_sub(marker.chars().count());
     format!("{}{}", marker, truncate(session_label(s), keep))
 }
