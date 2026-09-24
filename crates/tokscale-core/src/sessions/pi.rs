@@ -4,11 +4,16 @@
 //! OMP builds write a `title` metadata record before the `session` header in
 //! newly-created session files; see `PRE_SESSION_METADATA_TYPES`.
 //!
-//! Human-readable session titles come from three places, in precedence order:
-//! the `session` header's `title` field (v3 headers; OMP rewrites the header
-//! in place on rename, so it holds the latest title), then the most recent
-//! `title`/`title_change` record seen. The resolved title is copied onto every
-//! message's `session_title` so the Sessions tab shows it instead of the UUID.
+//! Human-readable session titles resolve in precedence order: the `session`
+//! header's `title` field (v3 headers; OMP rewrites the header in place on
+//! rename, so it holds the latest title), then the most recent `title` or
+//! `title_change` record seen so far (`title` records are read before the
+//! header; afterwards renames arrive as `title_change`). Resolution is
+//! point-in-time: a mid-session rename retitles only the messages that
+//! follow it, so on pre-v3 transcripts (no header title) the early messages
+//! carry the first recorded title. The resolved title is copied onto every
+//! message's `session_title`; the TUI adopts the most recent one, so the
+//! Sessions tab shows the latest rename instead of the UUID.
 //!
 //! Pi descendants reuse this record layout verbatim, so `parse_pi_format_file`
 //! is shared: see `sessions::kimchi` for Kimchi, `sessions::senpi` for Senpi (OmO Native),

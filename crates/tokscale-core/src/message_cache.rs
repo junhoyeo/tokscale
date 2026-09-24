@@ -22,7 +22,7 @@ use std::time::UNIX_EPOCH;
 // later-created parent transcript still invalidates the entry.
 // 3: UnifiedMessage gained session_title, changing the bincode payload layout.
 // 4: UnifiedMessage gained model_attribution_conflicted, changing the bincode
-// payload layout. Old shards must be silently rebuilt rather than decoded.
+// payload layout.
 // 5: Prime Agent entries cache reconciliation accounting beside their messages.
 // Version-4 shards have an explicit wire migration below, so other clients stay
 // warm and Prime entries need only one rebuild/backfill.
