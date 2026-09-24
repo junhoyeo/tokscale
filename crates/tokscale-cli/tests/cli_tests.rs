@@ -1887,6 +1887,80 @@ fn test_import_submit_dry_run_survives_cold_pricing_cache_with_local_sessions() 
 }
 
 #[test]
+fn test_import_submit_stops_when_the_local_scan_covers_every_row() {
+    // Every imported (date, client) row is already on this machine, so the
+    // overlap pass removes all of them. That must end with "Nothing left to
+    // submit." and no payload, not an empty backfill POST.
+    let home = TempDir::new().unwrap();
+    let sessions = home.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("session-import-full-overlap.jsonl"),
+        concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-4o-mini"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-11T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50}}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let export_path = home.path().join("export.json");
+    fs::write(
+        &export_path,
+        r#"{
+          "dailyAggregates": [
+            {
+              "date": "2026-05-11",
+              "source": "codex",
+              "machineId": "m1",
+              "inputTokens": 100,
+              "outputTokens": 50,
+              "cacheCreationTokens": 0,
+              "cacheReadTokens": 0,
+              "totalCost": "0.50",
+              "modelsUsed": ["gpt-5.5"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.5", "cost": 0.5, "inputTokens": 100,
+                  "outputTokens": 50, "cacheReadTokens": 0, "cacheCreationTokens": 0 }
+              ]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+    let payload_path = home.path().join("payload.json");
+
+    let output = cmd_with_home(home.path())
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--submit",
+            "--dry-run",
+            "--output",
+            payload_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Left out 1 day/client row(s)"), "{stderr}");
+    assert!(stderr.contains("Nothing left to submit."), "{stderr}");
+    assert!(
+        !stderr.contains("To submit as imported history"),
+        "{stderr}"
+    );
+    assert!(
+        !payload_path.exists(),
+        "no payload may be written for an empty backfill"
+    );
+}
+
+#[test]
 fn test_import_does_not_leak_local_mcp_servers() {
     // Reusing the graph/submit converter must not embed the local
     // machine's configured MCP server names into data derived purely from

@@ -5815,6 +5815,13 @@ fn run_import_command(
                 .yellow()
             );
         }
+        // The overlap pass can remove every remaining row. Stop here too, so
+        // an export this machine already reports never becomes an empty
+        // backfill POST.
+        if graph.contributions.is_empty() {
+            eprintln!("{}", "\n  Nothing left to submit.\n".yellow());
+            return Ok(());
+        }
         eprintln!(
             "{}",
             format!(
