@@ -89,10 +89,11 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner)[1];
 
+    let lang = app.settings.tui_language;
     let mut spans = spinner::get_scanner_spans(app.spinner_frame, &app.theme);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        spinner::get_phase_message("parsing-sources"),
+        spinner::get_phase_message("parsing-sources", lang),
         Style::default().fg(app.theme.muted),
     ));
 
@@ -121,7 +122,12 @@ fn render_error(frame: &mut Frame, app: &App, area: Rect, error: &str) {
         ])
         .split(inner)[1];
 
-    let text = format!("Error: {}", error);
+    let lang = app.settings.tui_language;
+    let text = format!(
+        "{}: {}",
+        crate::tui::i18n::tr(lang, crate::tui::i18n::MessageKey::LabelError),
+        error
+    );
     let paragraph = Paragraph::new(text)
         .style(Style::default().fg(Color::Red))
         .alignment(Alignment::Center);

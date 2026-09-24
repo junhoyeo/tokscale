@@ -7,6 +7,7 @@ use super::widgets::{
     viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, ChartGranularity};
+use crate::tui::i18n::{tr, MessageKey};
 use tokscale_core::GroupBy;
 
 struct ModelRowData {
@@ -220,19 +221,24 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         })
         .collect();
 
+    let lang = app.settings.tui_language;
     let title = if is_very_narrow {
-        "Top Models".to_string()
+        tr(lang, MessageKey::OverviewTopModels).to_string()
     } else {
         match sort_field {
-            SortField::Tokens => "Models by Tokens".to_string(),
-            _ => "Models by Cost".to_string(),
+            SortField::Tokens => tr(lang, MessageKey::OverviewModelsByTokens).to_string(),
+            _ => tr(lang, MessageKey::OverviewModelsByCost).to_string(),
         }
     };
 
     let title_right = if is_very_narrow {
         format_cost(total_cost)
     } else {
-        format!("Total: {}", format_cost(total_cost))
+        format!(
+            "{}{}",
+            tr(lang, MessageKey::OverviewTotal),
+            format_cost(total_cost)
+        )
     };
 
     let block = Block::default()
@@ -258,7 +264,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     frame.render_widget(block, area);
 
     if models_data.is_empty() {
-        let empty = Paragraph::new("No data available")
+        let empty = Paragraph::new(tr(lang, MessageKey::EmptyNoDataAvailable))
             .style(Style::default().fg(theme_muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, inner);

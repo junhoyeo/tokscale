@@ -6,15 +6,17 @@ use super::widgets::{
     truncate_text, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::i18n::{tr, MessageKey};
 use crate::ClientFilter;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Agents ",
+            format!(" {} ", tr(lang, MessageKey::TabAgents)),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -47,12 +49,27 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let lang = app.settings.tui_language;
     let header_cells = if is_very_narrow {
-        vec!["Agent", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColAgent),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else if is_narrow {
-        vec!["Agent", "Tokens", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColAgent),
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else {
-        vec!["#", "Agent", "Source", "Tokens", "Cost", "Msgs"]
+        vec![
+            tr(lang, MessageKey::ColRank),
+            tr(lang, MessageKey::ColAgent),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColMessages),
+        ]
     };
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -191,6 +208,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn get_empty_message(app: &App) -> String {
+    let lang = app.settings.tui_language;
     let enabled_clients = app.enabled_clients.borrow();
     let only_codex = !enabled_clients.is_empty()
         && enabled_clients
@@ -198,11 +216,9 @@ fn get_empty_message(app: &App) -> String {
             .all(|client| *client == ClientFilter::Codex);
 
     if only_codex {
-        "No agent breakdown is available for the current sources.\nThe selected source usually does not record agent metadata for regular sessions.\nPress 's' to try a different source."
-            .to_string()
+        tr(lang, MessageKey::EmptyNoAgentCodex).to_string()
     } else {
-        "No agent breakdown is available for the current sources.\nOnly some sources record agent metadata.\nPress 's' to change sources or 'r' to refresh."
-            .to_string()
+        tr(lang, MessageKey::EmptyNoAgentMixed).to_string()
     }
 }
 
@@ -222,7 +238,7 @@ mod tests {
     use crate::ClientFilter;
 
     fn make_app(clients: Vec<ClientFilter>) -> App {
-        let app = App::new_with_cached_data(
+        let mut app = App::new_with_cached_data(
             TuiConfig {
                 theme: "tokscale".to_string(),
                 refresh: 0,
@@ -238,6 +254,7 @@ mod tests {
         )
         .unwrap();
 
+        app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         *app.enabled_clients.borrow_mut() = clients.into_iter().collect();
         app
     }

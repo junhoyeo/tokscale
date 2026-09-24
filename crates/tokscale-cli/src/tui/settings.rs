@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokscale_core::scanner::ScannerSettings;
 
+use super::i18n::TuiLanguage;
 use super::themes::ThemeName;
 
 const DEFAULT_AUTO_REFRESH_MS: u64 = 60_000;
@@ -343,6 +344,9 @@ pub struct Settings {
     /// hardcoded dark one. Toggled live with the `L` key and persisted.
     #[serde(default)]
     pub tui_light_mode: bool,
+    /// Preferred UI language for the TUI interface.
+    #[serde(default)]
+    pub tui_language: TuiLanguage,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -413,6 +417,7 @@ impl Default for Settings {
             autosubmit: AutosubmitSettings::default(),
             model_aliases: tokscale_core::ModelAliasMap::default(),
             tui_light_mode: false,
+            tui_language: TuiLanguage::En,
         }
     }
 }
@@ -1556,5 +1561,34 @@ mod tests {
             .to_string()
             .contains("changed since it was loaded"));
         assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn test_tui_language_serialization_and_fallback() {
+        // Missing field defaults to English
+        let json = r#"{"colorPalette":"blue"}"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.tui_language, TuiLanguage::En);
+
+        // Explicit languages parse properly
+        let json_ko = r#"{"tuiLanguage":"ko"}"#;
+        let parsed: Settings = serde_json::from_str(json_ko).unwrap();
+        assert_eq!(parsed.tui_language, TuiLanguage::Ko);
+
+        let json_ja = r#"{"tuiLanguage":"ja"}"#;
+        let parsed: Settings = serde_json::from_str(json_ja).unwrap();
+        assert_eq!(parsed.tui_language, TuiLanguage::Ja);
+
+        let json_zh = r#"{"tuiLanguage":"zh-CN"}"#;
+        let parsed: Settings = serde_json::from_str(json_zh).unwrap();
+        assert_eq!(parsed.tui_language, TuiLanguage::ZhCn);
+
+        let json_fr = r#"{"tuiLanguage":"fr"}"#;
+        let parsed: Settings = serde_json::from_str(json_fr).unwrap();
+        assert_eq!(parsed.tui_language, TuiLanguage::Fr);
+
+        // Serialization outputs camelCase tuiLanguage with canonical code
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains(r#""tuiLanguage":"fr""#));
     }
 }

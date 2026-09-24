@@ -4,14 +4,16 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::widgets::{format_cost, format_tokens, AMBIENT_STABLE_BORDER_SET};
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, aggregate_by_weekday, find_peak_hour};
+use crate::tui::i18n::{tr, MessageKey};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Hourly Profile ",
+            tr(lang, MessageKey::TitleHourlyProfile),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -22,7 +24,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.data.hourly.is_empty() {
-        let empty_msg = Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoHourlyData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -48,7 +50,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let date_range = match (min_date, max_date) {
         (Some(mn), Some(mx)) if mn == mx => mn.format("%Y-%m-%d").to_string(),
         (Some(mn), Some(mx)) => format!("{} to {}", mn.format("%Y-%m-%d"), mx.format("%Y-%m-%d")),
-        _ => "No data".to_string(),
+        _ => tr(lang, MessageKey::EmptyNoDataAvailable).to_string(),
     };
 
     // Aggregate data
@@ -74,15 +76,26 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Summary line
     let summary_spans = vec![
-        Span::styled(format!("{} hours", hourly.len()), app.theme.count_style()),
-        Span::styled("  |  ", Style::default().fg(app.theme.muted)),
         Span::styled(
-            format!("{} total tokens", format_tokens(total_tokens)),
+            format!("{} {}", hourly.len(), tr(lang, MessageKey::CountHours)),
             app.theme.count_style(),
         ),
         Span::styled("  |  ", Style::default().fg(app.theme.muted)),
         Span::styled(
-            format!("{} total cost", format_cost(total_cost)),
+            format!(
+                "{} {}",
+                format_tokens(total_tokens),
+                tr(lang, MessageKey::ProfileTotalTokens)
+            ),
+            app.theme.count_style(),
+        ),
+        Span::styled("  |  ", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!(
+                "{} {}",
+                format_cost(total_cost),
+                tr(lang, MessageKey::ProfileTotalCost)
+            ),
             Style::default().fg(Color::Green),
         ),
     ];
@@ -91,7 +104,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Time-of-day breakdown
     lines.push(Line::from(vec![Span::styled(
-        "When You Work Most",
+        tr(lang, MessageKey::ProfileWhenYouWorkMost),
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -117,9 +130,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let bar = format!("{}{}", "█".repeat(bar_filled), "░".repeat(bar_empty));
 
+        let p_label = match period.label {
+            "Morning" => tr(lang, MessageKey::PeriodMorning),
+            "Daytime" => tr(lang, MessageKey::PeriodDaytime),
+            "Evening" => tr(lang, MessageKey::PeriodEvening),
+            "Night" => tr(lang, MessageKey::PeriodNight),
+            _ => period.label,
+        };
+
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:<10}", period.label),
+                format!("  {:<10}", p_label),
                 Style::default().fg(app.theme.foreground),
             ),
             Span::styled(
@@ -136,7 +157,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Weekday breakdown
     lines.push(Line::from(vec![Span::styled(
-        "Most Productive Day",
+        tr(lang, MessageKey::ProfileMostProductiveDay),
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -171,9 +192,20 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let is_best = weekday.day == best_weekday;
 
+        let w_label = match weekday.day {
+            "Monday" => tr(lang, MessageKey::WeekdayMonday),
+            "Tuesday" => tr(lang, MessageKey::WeekdayTuesday),
+            "Wednesday" => tr(lang, MessageKey::WeekdayWednesday),
+            "Thursday" => tr(lang, MessageKey::WeekdayThursday),
+            "Friday" => tr(lang, MessageKey::WeekdayFriday),
+            "Saturday" => tr(lang, MessageKey::WeekdaySaturday),
+            "Sunday" => tr(lang, MessageKey::WeekdaySunday),
+            _ => weekday.day,
+        };
+
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:<10}", weekday.day),
+                format!("  {:<10}", w_label),
                 Style::default().fg(if is_best {
                     app.theme.hint_key_color()
                 } else {
@@ -191,7 +223,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some((hour, tokens, cost)) = peak_hour {
         lines.push(Line::from(vec![
             Span::styled(
-                "Peak Hour: ",
+                tr(lang, MessageKey::ProfilePeakHour),
                 Style::default()
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -202,7 +234,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             ),
             Span::styled("  (", Style::default().fg(app.theme.muted)),
             Span::styled(format_tokens(tokens), app.theme.count_style()),
-            Span::styled(" tokens, ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                format!(" {}, ", tr(lang, MessageKey::ColTokens)),
+                Style::default().fg(app.theme.muted),
+            ),
             Span::styled(format_cost(cost), Style::default().fg(Color::Green)),
             Span::styled(")", Style::default().fg(app.theme.muted)),
         ]));
@@ -211,23 +246,28 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Legend
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("Legend: ", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            tr(lang, MessageKey::ProfileLegend),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled("░", Style::default().fg(app.theme.muted)),
-        Span::styled(" low  ", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!(" {}  ", tr(lang, MessageKey::ProfileLow)),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled("█", Style::default().fg(Color::Green)),
-        Span::styled(" high", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!(" {}", tr(lang, MessageKey::ProfileHigh)),
+            Style::default().fg(app.theme.muted),
+        ),
     ]));
 
     // Hint
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Press ", Style::default().fg(app.theme.muted)),
-        Span::styled("[v]", app.theme.hint_key_style()),
-        Span::styled(
-            " to switch to table view",
-            Style::default().fg(app.theme.muted),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        tr(lang, MessageKey::ProfileSwitchHint),
+        Style::default().fg(app.theme.muted),
+    )]));
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner);

@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 
 use super::widgets::format_tokens;
 use crate::tui::app::App;
+use crate::tui::i18n::{tr, MessageKey};
 
 /// 8-level block characters for sub-cell precision (matching OpenTUI)
 const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -61,20 +62,19 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
     };
 
     // Title
+    let lang = app.settings.tui_language;
     let title = if is_very_narrow {
-        "Tokens"
+        tr(lang, MessageKey::ChartTokens)
     } else {
-        "Tokens per Day"
+        tr(lang, MessageKey::ChartTokensPerDay)
     };
     let title_y = area.y;
-    for (i, ch) in title.chars().enumerate() {
-        let x = area.x + y_label_width + i as u16;
-        if x < area.x + area.width {
-            buf[(x, title_y)]
-                .set_char(ch)
-                .set_style(Style::default().add_modifier(Modifier::BOLD));
-        }
-    }
+    buf.set_string(
+        area.x + y_label_width,
+        title_y,
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    );
 
     // Render bars row by row (from top to bottom visually, which is high values to low)
     for row_from_bottom in (0..chart_height).rev() {

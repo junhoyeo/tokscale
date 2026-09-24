@@ -10,6 +10,7 @@ use super::widgets::{
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 
 /// Widest the Model column ever grows; surplus past this goes to Session.
 const MODEL_COLUMN_MAX_CHARS: u16 = 36;
@@ -155,27 +156,23 @@ struct WideLayout {
 }
 
 impl SessionColumn {
-    fn header(self) -> &'static str {
+    fn header(self, lang: TuiLanguage) -> &'static str {
         match self {
-            Self::Session => "Session",
-            Self::Client => "Client",
-            Self::Model => "Model",
-            Self::Turn => "Turn",
-            Self::Msgs => "Msgs",
-            Self::Input => "Input",
-            Self::Output => "Output",
-            Self::CacheRead => "Cache R",
-            Self::CacheWrite => "Cache W",
-            // U+2715, not U+00D7: the multiplication sign is
-            // East-Asian-Ambiguous and would make the header row stream a
-            // cell wide in a CJK locale; the multiplication X is
-            // East-Asian-Neutral, one cell in both ambients.
-            Self::CacheHit => "Cache✕",
-            Self::Total => "Total",
-            Self::Cost => "Cost",
-            Self::CostPerMillion => "Cost/1M",
-            Self::Duration => "Duration",
-            Self::LastActive => "Last Active",
+            Self::Session => tr(lang, MessageKey::ColSession),
+            Self::Client => tr(lang, MessageKey::ColClient),
+            Self::Model => tr(lang, MessageKey::ColModel),
+            Self::Turn => tr(lang, MessageKey::ColTurn),
+            Self::Msgs => tr(lang, MessageKey::ColMessages),
+            Self::Input => tr(lang, MessageKey::ColInput),
+            Self::Output => tr(lang, MessageKey::ColOutput),
+            Self::CacheRead => tr(lang, MessageKey::ColCacheRead),
+            Self::CacheWrite => tr(lang, MessageKey::ColCacheWrite),
+            Self::CacheHit => tr(lang, MessageKey::ColCacheHit),
+            Self::Total => tr(lang, MessageKey::ColTotal),
+            Self::Cost => tr(lang, MessageKey::ColCost),
+            Self::CostPerMillion => tr(lang, MessageKey::ColCostPer1M),
+            Self::Duration => tr(lang, MessageKey::ColDuration),
+            Self::LastActive => tr(lang, MessageKey::ColLastActive),
         }
     }
 
@@ -484,12 +481,13 @@ fn session_label(s: &SessionUsage) -> &str {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Sessions ",
+            format!(" {} ", tr(lang, MessageKey::TabSessions)),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -504,7 +502,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let sessions = app.get_sorted_sessions();
     if sessions.is_empty() {
-        let empty_msg = Paragraph::new("No session usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoSessionData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -575,16 +573,32 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|c| {
                 let indicator = c.sort_field().map(sort_indicator).unwrap_or("");
-                format!("{}{}", c.header(), indicator)
+                format!("{}{}", c.header(lang), indicator)
             })
             .collect()
     } else {
-        let labels: &[&str] = if is_very_narrow {
-            &["Session", "Cost"]
+        let labels: Vec<&str> = if is_very_narrow {
+            vec![
+                tr(lang, MessageKey::ColSession),
+                tr(lang, MessageKey::ColCost),
+            ]
         } else if has_turn_data {
-            &["Session", "Client", "Turn", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColSession),
+                tr(lang, MessageKey::ColClient),
+                tr(lang, MessageKey::ColTurn),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         } else {
-            &["Session", "Client", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColSession),
+                tr(lang, MessageKey::ColClient),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         };
         // The narrow layouts keep their hand-picked indices, and `usize::MAX`
         // still stands for "this sort has no column here".
@@ -938,7 +952,8 @@ mod tests {
     /// substring of `Cost/1M`, so the longer label is stripped before looking for
     /// the shorter one; no other pair of labels overlaps.
     fn header_columns(header: &str) -> Vec<SessionColumn> {
-        let without_cost_per_million = header.replace(SessionColumn::CostPerMillion.header(), "");
+        let without_cost_per_million =
+            header.replace(SessionColumn::CostPerMillion.header(TuiLanguage::En), "");
         ALL.iter()
             .copied()
             .filter(|c| {
@@ -947,7 +962,7 @@ mod tests {
                 } else {
                     header
                 };
-                haystack.contains(c.header())
+                haystack.contains(c.header(TuiLanguage::En))
             })
             .collect()
     }
@@ -1049,6 +1064,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = TuiLanguage::En;
         app.terminal_width = width;
         app.current_tab = Tab::Sessions;
         app.sort_field = SortField::Cost;
@@ -1175,7 +1191,7 @@ mod tests {
                     let header = header_line(&mut app, width);
                     for column in *group {
                         assert_eq!(
-                            header.contains(column.header()),
+                            header.contains(column.header(TuiLanguage::En)),
                             want,
                             "{:?} at width {width} (turn={has_turn}) should be {}\n{header}",
                             column,
@@ -1278,7 +1294,7 @@ mod tests {
                 let row = lines.next().unwrap_or_default();
                 for column in expected_columns(width, has_turn) {
                     assert!(
-                        header.contains(column.header()),
+                        header.contains(column.header(TuiLanguage::En)),
                         "header {:?} squeezed at width {width} (turn={has_turn})\n{header}",
                         column
                     );
@@ -1319,7 +1335,7 @@ mod tests {
                         continue;
                     }
                     assert!(
-                        !header.contains(column.header()),
+                        !header.contains(column.header(TuiLanguage::En)),
                         "{:?} header showed at width {width} (turn={has_turn})\n{header}",
                         column
                     );
@@ -1365,7 +1381,10 @@ mod tests {
                         let header = header_line(&mut app, width);
                         if expected_columns(width, has_turn).contains(&column) {
                             assert!(
-                                header.contains(&format!("{} {arrow}", column.header())),
+                                header.contains(&format!(
+                                    "{} {arrow}",
+                                    column.header(TuiLanguage::En)
+                                )),
                                 "{:?} {arrow} clipped at width {width} (turn={has_turn})\n{header}",
                                 field
                             );

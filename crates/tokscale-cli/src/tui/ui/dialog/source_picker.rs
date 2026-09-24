@@ -44,12 +44,14 @@ pub struct ClientPickerDialog {
     /// Indices into `sources` that match the current type-to-filter
     /// substring. `selected` indexes into this vec, not into `sources`.
     filtered_indices: Vec<usize>,
+    lang: crate::tui::i18n::TuiLanguage,
 }
 
 impl ClientPickerDialog {
     pub fn new(
         enabled: Rc<RefCell<HashSet<ClientFilter>>>,
         needs_reload: Rc<RefCell<bool>>,
+        lang: crate::tui::i18n::TuiLanguage,
     ) -> Self {
         let sources: Vec<ClientFilter> = ClientFilter::value_variants().to_vec();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
@@ -60,6 +62,7 @@ impl ClientPickerDialog {
             selected: 0,
             filter: String::new(),
             filtered_indices,
+            lang,
         }
     }
 
@@ -131,8 +134,9 @@ impl DialogContent for ClientPickerDialog {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        use crate::tui::i18n::{tr, MessageKey};
         let block = Block::default()
-            .title(" Clients ")
+            .title(tr(self.lang, MessageKey::ClientDialogTitle))
             .borders(Borders::ALL)
             .border_set(AMBIENT_STABLE_BORDER_SET)
             .border_style(Style::default().fg(theme.accent));
@@ -150,12 +154,18 @@ impl DialogContent for ClientPickerDialog {
             .split(inner);
 
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(theme.muted))
+            Span::styled(
+                tr(self.lang, MessageKey::DialogFilterPlaceholder),
+                Style::default().fg(theme.muted),
+            )
         } else {
             Span::styled(&self.filter, Style::default().fg(theme.foreground))
         };
         let filter_line = Paragraph::new(Line::from(vec![
-            Span::styled("Filter: ", Style::default().fg(theme.accent)),
+            Span::styled(
+                tr(self.lang, MessageKey::DialogFilterLabel),
+                Style::default().fg(theme.accent),
+            ),
             filter_text,
         ]));
         frame.render_widget(filter_line, rows[0]);
@@ -212,14 +222,14 @@ impl DialogContent for ClientPickerDialog {
 
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled(
-                "  No results",
+                format!("  {}", tr(self.lang, MessageKey::DialogNoResults)),
                 Style::default().fg(theme.muted),
             ))));
         }
 
         frame.render_widget(List::new(items), list_area);
 
-        let hint = Paragraph::new("↑↓ navigate • Enter toggle • Esc close")
+        let hint = Paragraph::new(tr(self.lang, MessageKey::ClientDialogHint))
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.muted));
         frame.render_widget(hint, rows[3]);

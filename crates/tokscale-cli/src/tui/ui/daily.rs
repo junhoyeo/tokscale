@@ -8,6 +8,7 @@ use super::widgets::{
     truncate_text, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::i18n::{tr, MessageKey};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.is_daily_detail_active() {
@@ -15,12 +16,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Daily Usage ",
+            tr(lang, MessageKey::TitleDailyUsage),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -35,7 +37,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let daily = app.get_sorted_daily();
     if daily.is_empty() {
-        let empty_msg = Paragraph::new("No daily usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoDailyData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -77,23 +79,52 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         "%Y-%m-%d"
     };
 
+    let lang = app.settings.tui_language;
     let header_cells = if is_very_narrow {
-        vec!["Date", "Cost"]
+        vec![tr(lang, MessageKey::ColDate), tr(lang, MessageKey::ColCost)]
     } else if is_narrow {
         if has_turn_data {
-            vec!["Date", "Turn", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColDate),
+                tr(lang, MessageKey::ColTurn),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         } else {
-            vec!["Date", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColDate),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         }
     } else if has_turn_data {
         vec![
-            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
-            "Cost", "Cost/1M",
+            tr(lang, MessageKey::ColDate),
+            tr(lang, MessageKey::ColTurn),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     } else {
         vec![
-            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total", "Cost",
-            "Cost/1M",
+            tr(lang, MessageKey::ColDate),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     };
 
@@ -308,10 +339,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let title = app
         .daily_detail_date()
-        .map(|date| format!(" Daily Detail: {} ", date))
-        .unwrap_or_else(|| " Daily Detail ".to_string());
+        .map(|date| format!(" {}{} ", tr(lang, MessageKey::TitleDailyDetailPrefix), date))
+        .unwrap_or_else(|| tr(lang, MessageKey::TitleDailyDetail).to_string());
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -331,12 +363,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
+    let lang = app.settings.tui_language;
     let rows_data = app.get_sorted_daily_detail_rows();
     if rows_data.is_empty() {
-        let empty_msg =
-            Paragraph::new("No model details found for this day. Press Esc to go back.")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center);
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoModelDetailsDay))
+            .style(Style::default().fg(app.theme.muted))
+            .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
         return;
     }
@@ -357,13 +389,32 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
 
     let header_cells = if is_very_narrow {
-        vec!["Model", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else if is_narrow {
-        vec!["Model", "Source", "Msgs", "Tokens", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else {
         vec![
-            "#", "Model", "Provider", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W",
-            "Cache✕", "Total", "Cost",
+            tr(lang, MessageKey::ColRank),
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColProvider),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
         ]
     };
 
@@ -564,6 +615,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app.terminal_width = width;
         app.current_tab = Tab::Daily;
         app.sort_field = SortField::Date;

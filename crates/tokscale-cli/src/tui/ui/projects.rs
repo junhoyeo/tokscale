@@ -9,6 +9,7 @@ use super::widgets::{
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 
 /// One column of the wide Projects layout, in left-to-right display order.
 ///
@@ -115,25 +116,21 @@ struct WideLayout {
 }
 
 impl ProjectColumn {
-    fn header(self) -> &'static str {
+    fn header(self, lang: TuiLanguage) -> &'static str {
         match self {
-            Self::Rank => "#",
-            Self::Project => "Project",
-            Self::Sessions => "Sessions",
-            Self::Sources => "Sources",
-            Self::Models => "Models",
-            Self::Input => "Input",
-            Self::Output => "Output",
-            Self::CacheRead => "Cache R",
-            Self::CacheWrite => "Cache W",
-            // U+2715, not U+00D7: the multiplication sign is
-            // East-Asian-Ambiguous and would make the header row stream a
-            // cell wide in a CJK locale; the multiplication X is
-            // East-Asian-Neutral, one cell in both ambients.
-            Self::CacheHit => "Cache✕",
-            Self::Total => "Total",
-            Self::Cost => "Cost",
-            Self::LastActive => "Last Active",
+            Self::Rank => tr(lang, MessageKey::ColRank),
+            Self::Project => tr(lang, MessageKey::ColProject),
+            Self::Sessions => tr(lang, MessageKey::ColSessions),
+            Self::Sources => tr(lang, MessageKey::ColSources),
+            Self::Models => tr(lang, MessageKey::ColModels),
+            Self::Input => tr(lang, MessageKey::ColInput),
+            Self::Output => tr(lang, MessageKey::ColOutput),
+            Self::CacheRead => tr(lang, MessageKey::ColCacheRead),
+            Self::CacheWrite => tr(lang, MessageKey::ColCacheWrite),
+            Self::CacheHit => tr(lang, MessageKey::ColCacheHit),
+            Self::Total => tr(lang, MessageKey::ColTotal),
+            Self::Cost => tr(lang, MessageKey::ColCost),
+            Self::LastActive => tr(lang, MessageKey::ColLastActive),
         }
     }
 
@@ -306,12 +303,13 @@ fn sources_label(p: &ProjectUsage) -> String {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Projects ",
+            format!(" {} ", tr(lang, MessageKey::TabProjects)),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -326,7 +324,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let projects = app.get_sorted_projects();
     if projects.is_empty() {
-        let empty_msg = Paragraph::new("No project usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoProjectData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -368,22 +366,25 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|c| {
                 let indicator = c.sort_field().map(sort_indicator).unwrap_or("");
-                format!("{}{}", c.header(), indicator)
+                format!("{}{}", c.header(lang), indicator)
             })
             .collect()
     } else {
-        ["Project", "Cost"]
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = if i == 1 {
-                    sort_indicator(SortField::Cost)
-                } else {
-                    ""
-                };
-                format!("{}{}", h, indicator)
-            })
-            .collect()
+        [
+            tr(lang, MessageKey::ColProject),
+            tr(lang, MessageKey::ColCost),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let indicator = if i == 1 {
+                sort_indicator(SortField::Cost)
+            } else {
+                ""
+            };
+            format!("{}{}", h, indicator)
+        })
+        .collect()
     };
 
     let header = Row::new(header_cells.into_iter().map(Cell::from).collect::<Vec<_>>())
@@ -608,6 +609,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = TuiLanguage::En;
         app.terminal_width = width;
         app.current_tab = Tab::Projects;
         app.sort_field = SortField::Cost;
@@ -761,7 +763,7 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    !header.contains(column.header()),
+                    !header.contains(column.header(TuiLanguage::En)),
                     "{column:?} header showed at width {width}\n{header}"
                 );
             }
@@ -777,10 +779,10 @@ mod tests {
         let header = header_line(&mut app, 200);
         for c in WIDE_ORDER {
             assert!(
-                header.contains(c.header()),
+                header.contains(c.header(TuiLanguage::En)),
                 "wide header is missing {:?} ({:?})",
                 c,
-                c.header()
+                c.header(TuiLanguage::En)
             );
         }
     }
@@ -808,7 +810,7 @@ mod tests {
         let header = body.lines().nth(1).unwrap();
         let row = body.lines().nth(2).unwrap();
         for column in WIDE_ORDER {
-            assert!(header.contains(column.header()), "{header}");
+            assert!(header.contains(column.header(TuiLanguage::En)), "{header}");
         }
         let last_active = ms_to_local_naive(last_ms)
             .unwrap()
@@ -860,7 +862,7 @@ mod tests {
                 let header = header_line(&mut app, width);
                 if admit_and_distribute(width - 2).chosen.contains(&column) {
                     assert!(
-                        header.contains(&format!("{} ▾", column.header())),
+                        header.contains(&format!("{} ▾", column.header(TuiLanguage::En))),
                         "{field:?} ▾ clipped at width {width}\n{header}"
                     );
                 } else {

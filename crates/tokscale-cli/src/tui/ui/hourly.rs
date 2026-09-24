@@ -8,6 +8,7 @@ use super::widgets::{
     format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
+use crate::tui::i18n::{tr, MessageKey};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.hourly_view_mode {
@@ -17,12 +18,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Hourly Usage ",
+            tr(lang, MessageKey::TitleHourlyUsage),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -43,7 +45,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let hourly = app.get_sorted_hourly();
     if hourly.is_empty() {
-        let empty_msg = Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoHourlyData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -68,23 +70,56 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let now = Local::now().naive_local();
     let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
 
+    let lang = app.settings.tui_language;
     let header_cells = if is_very_narrow {
-        vec!["Hour", "Cost"]
+        vec![tr(lang, MessageKey::ColHour), tr(lang, MessageKey::ColCost)]
     } else if is_narrow {
         if has_turn_data {
-            vec!["Hour", "Source", "Turn", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColHour),
+                tr(lang, MessageKey::ColSource),
+                tr(lang, MessageKey::ColTurn),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         } else {
-            vec!["Hour", "Source", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColHour),
+                tr(lang, MessageKey::ColSource),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         }
     } else if has_turn_data {
         vec![
-            "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕",
-            "Total", "Cost", "Cost/1M",
+            tr(lang, MessageKey::ColHour),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColTurn),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     } else {
         vec![
-            "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
-            "Cost", "Cost/1M",
+            tr(lang, MessageKey::ColHour),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     };
 
@@ -386,6 +421,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app.terminal_width = width;
         app.current_tab = Tab::Hourly;
         app.sort_field = SortField::Date;

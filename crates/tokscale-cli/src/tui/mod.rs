@@ -7,6 +7,7 @@ pub mod config;
 pub mod data;
 mod event;
 mod export;
+pub mod i18n;
 mod keymap;
 pub(crate) mod privacy;
 pub mod remote;

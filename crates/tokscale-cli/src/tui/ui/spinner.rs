@@ -81,13 +81,14 @@ pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-pub fn get_phase_message(phase: &str) -> &'static str {
+pub fn get_phase_message(phase: &str, lang: crate::tui::i18n::TuiLanguage) -> &'static str {
+    use crate::tui::i18n::{tr, MessageKey};
     match phase {
-        "idle" => "Initializing...",
-        "parsing-sources" => "Scanning session data...",
-        "loading-pricing" => "Loading pricing data...",
-        "finalizing-report" => "Finalizing report...",
-        "complete" => "Complete",
-        _ => "Loading data...",
+        "idle" => tr(lang, MessageKey::PhaseInitializing),
+        "parsing-sources" => tr(lang, MessageKey::PhaseScanningSessions),
+        "loading-pricing" => tr(lang, MessageKey::PhaseLoadingPricing),
+        "finalizing-report" => tr(lang, MessageKey::PhaseFinalizingReport),
+        "complete" => tr(lang, MessageKey::PhaseComplete),
+        _ => tr(lang, MessageKey::PhaseLoadingData),
     }
 }

@@ -7,14 +7,16 @@ use super::widgets::{
     viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::i18n::{tr, MessageKey};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Minutely Usage ",
+            tr(lang, MessageKey::TitleMinutelyUsage),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -29,7 +31,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let minutely = app.get_sorted_minutely();
     if minutely.is_empty() {
-        let empty_msg = Paragraph::new("No minutely usage data found. Press 'r' to refresh.")
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoMinutelyData))
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -57,23 +59,57 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .and_hms_opt(now.hour(), now.minute(), 0)
         .unwrap_or(now);
 
+    let lang = app.settings.tui_language;
     let header_cells = if is_very_narrow {
-        vec!["Minute", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColMinute),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else if is_narrow {
         if has_turn_data {
-            vec!["Minute", "Source", "Turn", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColMinute),
+                tr(lang, MessageKey::ColSource),
+                tr(lang, MessageKey::ColTurn),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         } else {
-            vec!["Minute", "Source", "Msgs", "Tokens", "Cost"]
+            vec![
+                tr(lang, MessageKey::ColMinute),
+                tr(lang, MessageKey::ColSource),
+                tr(lang, MessageKey::ColMessages),
+                tr(lang, MessageKey::ColTokens),
+                tr(lang, MessageKey::ColCost),
+            ]
         }
     } else if has_turn_data {
         vec![
-            "Minute", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕",
-            "Total", "Cost",
+            tr(lang, MessageKey::ColMinute),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColTurn),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
         ]
     } else {
         vec![
-            "Minute", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache✕", "Total",
-            "Cost",
+            tr(lang, MessageKey::ColMinute),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColMessages),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColCost),
         ]
     };
 

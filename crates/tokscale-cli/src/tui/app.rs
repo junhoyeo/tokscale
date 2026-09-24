@@ -22,10 +22,11 @@ use super::data::{
     AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, MonthlyUsage,
     ProjectUsage, SessionUsage, TokenBreakdown, UsageData,
 };
+use super::i18n::{tr, MessageKey, TuiLanguage};
 use super::privacy::looks_like_email;
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
-use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack};
+use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack, LanguagePickerDialog};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
@@ -88,36 +89,48 @@ impl Tab {
         ]
     }
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Tab::Overview => "Overview",
-            Tab::Usage => "Usage",
-            Tab::Models => "Models",
-            Tab::Daily => "Daily",
-            Tab::Hourly => "Hourly",
-            Tab::Minutely => "Minutely",
-            Tab::Monthly => "Monthly",
-            Tab::Sessions => "Sessions",
-            Tab::Projects => "Projects",
-            Tab::Stats => "Stats",
-            Tab::Agents => "Agents",
-        }
+        self.localized_name(TuiLanguage::En)
     }
 
+    pub fn localized_name(&self, lang: TuiLanguage) -> &'static str {
+        let key = match self {
+            Tab::Overview => MessageKey::TabOverview,
+            Tab::Usage => MessageKey::TabUsage,
+            Tab::Models => MessageKey::TabModels,
+            Tab::Daily => MessageKey::TabDaily,
+            Tab::Hourly => MessageKey::TabHourly,
+            Tab::Minutely => MessageKey::TabMinutely,
+            Tab::Monthly => MessageKey::TabMonthly,
+            Tab::Sessions => MessageKey::TabSessions,
+            Tab::Projects => MessageKey::TabProjects,
+            Tab::Stats => MessageKey::TabStats,
+            Tab::Agents => MessageKey::TabAgents,
+        };
+        tr(lang, key)
+    }
+
+    #[allow(dead_code)]
     pub fn short_name(&self) -> &'static str {
-        match self {
-            Tab::Overview => "Ovw",
-            Tab::Usage => "Use",
-            Tab::Models => "Mod",
-            Tab::Daily => "Day",
-            Tab::Hourly => "Hr",
-            Tab::Minutely => "Min",
-            Tab::Monthly => "Mon",
-            Tab::Sessions => "Ses",
-            Tab::Projects => "Prj",
-            Tab::Stats => "Sta",
-            Tab::Agents => "Agt",
-        }
+        self.localized_short_name(TuiLanguage::En)
+    }
+
+    pub fn localized_short_name(&self, lang: TuiLanguage) -> &'static str {
+        let key = match self {
+            Tab::Overview => MessageKey::TabOverviewShort,
+            Tab::Usage => MessageKey::TabUsageShort,
+            Tab::Models => MessageKey::TabModelsShort,
+            Tab::Daily => MessageKey::TabDailyShort,
+            Tab::Hourly => MessageKey::TabHourlyShort,
+            Tab::Minutely => MessageKey::TabMinutelyShort,
+            Tab::Monthly => MessageKey::TabMonthlyShort,
+            Tab::Sessions => MessageKey::TabSessionsShort,
+            Tab::Projects => MessageKey::TabProjectsShort,
+            Tab::Stats => MessageKey::TabStatsShort,
+            Tab::Agents => MessageKey::TabAgentsShort,
+        };
+        tr(lang, key)
     }
 
     pub fn next(self) -> Tab {
@@ -358,6 +371,8 @@ pub struct App {
     pub dialog_stack: DialogStack,
 
     pub dialog_needs_reload: Rc<RefCell<bool>>,
+    pub dialog_language_selected: Rc<RefCell<TuiLanguage>>,
+    pub dialog_needs_save_language: Rc<RefCell<bool>>,
 
     pub hourly_view_mode: HourlyViewMode,
 
@@ -454,6 +469,8 @@ impl App {
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let dialog_language_selected = Rc::new(RefCell::new(settings.tui_language));
+        let dialog_needs_save_language = Rc::new(RefCell::new(false));
         let confirmed_codex_use_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_remove_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_reset_account_id = Rc::new(RefCell::new(None));
@@ -508,6 +525,8 @@ impl App {
             needs_reload: false,
             dialog_stack,
             dialog_needs_reload,
+            dialog_language_selected,
+            dialog_needs_save_language,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
             subscription_usage: {
@@ -657,6 +676,25 @@ impl App {
         if *self.dialog_needs_reload.borrow() {
             *self.dialog_needs_reload.borrow_mut() = false;
             self.needs_reload = true;
+        }
+
+        if *self.dialog_needs_save_language.borrow() {
+            *self.dialog_needs_save_language.borrow_mut() = false;
+            let new_lang = *self.dialog_language_selected.borrow();
+            self.settings.tui_language = new_lang;
+            if let Err(e) = Settings::update_and_save("tuiLanguage", new_lang.code()) {
+                self.set_status(&format!(
+                    "Language: {} (save failed: {})",
+                    new_lang.native_name(),
+                    e
+                ));
+            } else {
+                self.set_status(&format!(
+                    "{} {}",
+                    tr(new_lang, MessageKey::StatusLanguageChanged),
+                    new_lang.native_name()
+                ));
+            }
         }
 
         // Poll background usage fetch
@@ -926,6 +964,9 @@ impl App {
             }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
+            }
+            KeyCode::Char('k') => {
+                self.open_language_picker();
             }
             // Only meaningful while workspace rows are on screen; leaving `w`
             // inert elsewhere keeps it free for other tabs later.
@@ -1934,6 +1975,7 @@ impl App {
         let dialog = ClientPickerDialog::new(
             self.enabled_clients.clone(),
             self.dialog_needs_reload.clone(),
+            self.settings.tui_language,
         );
         self.dialog_stack.show(Box::new(dialog));
     }
@@ -1967,8 +2009,20 @@ impl App {
 
     fn open_group_by_picker(&mut self) {
         use super::ui::dialog::GroupByPickerDialog;
-        let dialog =
-            GroupByPickerDialog::new(self.group_by.clone(), self.dialog_needs_reload.clone());
+        let dialog = GroupByPickerDialog::new(
+            self.group_by.clone(),
+            self.dialog_needs_reload.clone(),
+            self.settings.tui_language,
+        );
+        self.dialog_stack.show(Box::new(dialog));
+    }
+
+    pub fn open_language_picker(&mut self) {
+        *self.dialog_language_selected.borrow_mut() = self.settings.tui_language;
+        let dialog = LanguagePickerDialog::new(
+            self.dialog_language_selected.clone(),
+            self.dialog_needs_save_language.clone(),
+        );
         self.dialog_stack.show(Box::new(dialog));
     }
 
@@ -3113,7 +3167,9 @@ mod tests {
             initial_tab: None,
             ..Default::default()
         };
-        App::new_with_cached_data(config, None).unwrap()
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = TuiLanguage::En;
+        app
     }
 
     fn usage_output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
@@ -5523,5 +5579,36 @@ mod tests {
             app.model_color_for("github-copilot", "claude-fable-5"),
             app.theme.color(get_provider_shade("github-copilot", 0))
         );
+    }
+
+    #[test]
+    fn test_language_picker_hotkey_and_change() {
+        if !settings_test_runs_in_child("test_language_picker_hotkey_and_change") {
+            return;
+        }
+
+        let mut app = make_app();
+        assert_eq!(app.settings.tui_language, TuiLanguage::En);
+        assert!(!app.dialog_stack.is_active());
+
+        // Press 'k' to open language picker
+        app.handle_key_event(key(KeyCode::Char('k')));
+        assert!(app.dialog_stack.is_active());
+
+        // Down arrow to Korean (2nd option), Enter to select
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(!app.dialog_stack.is_active());
+
+        // Process tick to apply language change
+        app.on_tick();
+        assert_eq!(app.settings.tui_language, TuiLanguage::Ko);
+
+        // Header tab names should reflect Korean
+        assert_eq!(
+            Tab::Overview.localized_name(app.settings.tui_language),
+            "개요"
+        );
+        assert_eq!(Tab::Daily.localized_name(app.settings.tui_language), "일별");
     }
 }

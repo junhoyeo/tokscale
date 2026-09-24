@@ -7,6 +7,7 @@ use crate::commands::usage::{
 };
 use crate::tui::app::{App, ClickAction};
 use crate::tui::codex_login::CodexLoginOutcome;
+use crate::tui::i18n::{tr, MessageKey};
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     get_provider_shade, light_ratio_bar_spans, truncate_ellipsis as truncate_string,
@@ -50,12 +51,13 @@ struct UsageRowView<'a> {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Usage ",
+            format!(" {} ", tr(lang, MessageKey::TabUsage)),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -619,12 +621,13 @@ fn render_compact_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: 
 }
 
 fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageOutput]) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Usage Summary ",
+            tr(lang, MessageKey::TitleUsageSummary),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1147,7 +1150,10 @@ fn render_selected_account(
     selected: &UsageOutput,
     outputs: &[UsageOutput],
 ) {
-    let title = format!(" Selected Account  {} ", output_display_name(app, selected));
+    let lang = app.settings.tui_language;
+    let title_prefix =
+        crate::tui::i18n::tr(lang, crate::tui::i18n::MessageKey::TitleSelectedAccount).trim();
+    let title = format!(" {}  {} ", title_prefix, output_display_name(app, selected));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
@@ -1674,12 +1680,13 @@ fn metric_label_width(width: usize) -> usize {
 }
 
 fn render_accounts_table(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageOutput]) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Accounts ",
+            tr(lang, MessageKey::TitleAccounts),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -2619,6 +2626,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app.current_tab = Tab::Usage;
         app
     }

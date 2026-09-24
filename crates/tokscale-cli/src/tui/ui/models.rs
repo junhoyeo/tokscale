@@ -8,6 +8,7 @@ use super::widgets::{
     viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::i18n::{tr, MessageKey};
 use tokscale_core::GroupBy;
 
 /// Width the Workspace column gets when the row has no spare cells: what every
@@ -111,12 +112,13 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(AMBIENT_STABLE_BORDER_SET)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Models ",
+            format!(" {} ", tr(lang, MessageKey::TabModels)),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -145,41 +147,58 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let metric_cache_write_style = app.theme.metric_cache_write_style();
     let striped_row_style = app.theme.striped_row_style();
 
+    let lang = app.settings.tui_language;
     let models = app.get_sorted_models();
     if models.is_empty() {
-        let empty_msg = Paragraph::new(
-            "No usage data found. Press 'r' to refresh, 's' for sources, 'g' for grouping.",
-        )
-        .style(Style::default().fg(theme_muted))
-        .alignment(Alignment::Center);
+        let empty_msg = Paragraph::new(tr(lang, MessageKey::EmptyNoUsageData))
+            .style(Style::default().fg(theme_muted))
+            .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
         return;
     }
 
     let header_cells = if is_very_narrow {
-        vec!["Model", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else if is_narrow {
-        vec!["Model", "Tokens", "Cost"]
+        vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+        ]
     } else if group_by == GroupBy::WorkspaceModel {
         vec![
-            "#",
-            "Workspace",
-            "Model",
-            "Provider",
-            "Source",
-            "Input",
-            "Output",
-            "Cache Read",
-            "Cache Write",
-            "Total",
-            "ms/1K",
-            "Cost",
-            "Cost/1M",
+            tr(lang, MessageKey::ColRank),
+            tr(lang, MessageKey::ColWorkspace),
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColProvider),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColMsPer1k),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     } else {
         vec![
-            "#", "Model", "Provider", "Source", "Input", "Output", "Cache R", "Cache W", "Cache✕",
-            "Total", "ms/1K", "Cost", "Cost/1M",
+            tr(lang, MessageKey::ColRank),
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColProvider),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColCacheHit),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColMsPer1k),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
         ]
     };
 
@@ -633,6 +652,7 @@ mod tests {
             None,
         )
         .unwrap();
+        app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
 
         let width = 200u16;
         app.terminal_width = width;
