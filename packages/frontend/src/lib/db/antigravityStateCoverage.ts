@@ -3,6 +3,7 @@ import {
   modelsForHighWater,
   PARSER_HIGH_WATER_STATE_VERSION,
   type DeviceParserStates,
+  type ParserAggregateHighWater,
 } from "./parserHighWater";
 import { ownValue } from "../safeRecord";
 
@@ -77,6 +78,64 @@ function maximum(left: CoverageSummary, right: CoverageSummary): CoverageSummary
   return summary;
 }
 
+function sameCoverage(left: Coverage, right: Coverage): boolean {
+  return COVERAGE_FIELDS.every((field) => left[field] === right[field]);
+}
+
+/**
+ * Combine the legacy per-client parser ledgers of the family.
+ *
+ * Legacy ledgers can overlap or be disjoint. A device that submitted the same
+ * response from two surfaces before the family existed holds it in both
+ * ledgers, while separate sessions are distinct credited usage. Summing
+ * freezes the overlap case forever; a per-field max silently drops the
+ * disjoint case on replace. Neither is sound alone, so the overlap has to be
+ * proven: an identical (date, model) cell in more than one ledger is the
+ * signature of one response credited twice and counts once. Every other cell
+ * is distinct usage and is summed. A ledger's aggregate excess beyond its own
+ * day cells cannot be attributed to a cell, so it is also summed. Anything
+ * unproven therefore stays conservative and freezes rather than replaces.
+ */
+function legacyLedgerCoverage(
+  ledgers: Array<{
+    days: Record<string, ClientBreakdownData>;
+    aggregate: ParserAggregateHighWater;
+  }>,
+): { summary: CoverageSummary; unverifiable: boolean } {
+  const cellsByDateModel = new Map<string, Coverage[]>();
+  const summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+  let unverifiable = false;
+
+  for (const ledger of ledgers) {
+    for (const [date, cell] of Object.entries(ledger.days)) {
+      for (const [modelId, model] of Object.entries(modelsForHighWater(cell))) {
+        const vector = emptyCoverage();
+        addCoverage(vector, model);
+        const key = `${date}\u0000${modelId}`;
+        const seen = cellsByDateModel.get(key) ?? [];
+        if (seen.some((existing) => sameCoverage(existing, vector))) continue;
+        seen.push(vector);
+        cellsByDateModel.set(key, seen);
+        addCoverage(summary.total, vector);
+        const modelCoverage = summary.models.get(modelId) ?? emptyCoverage();
+        addCoverage(modelCoverage, vector);
+        summary.models.set(modelId, modelCoverage);
+      }
+    }
+
+    const daysTotal = coverage(Object.values(ledger.days)).total;
+    for (const field of COVERAGE_FIELDS) {
+      const aggregate = ledger.aggregate[field];
+      if (!Number.isSafeInteger(aggregate) || aggregate < 0) {
+        unverifiable = true;
+        continue;
+      }
+      summary.total[field] += Math.max(0, aggregate - daysTotal[field]);
+    }
+  }
+  return { summary, unverifiable };
+}
+
 /** Combine the stored family ledger and legacy per-client parser ledgers. */
 export function antigravityPriorCoverage(
   existingDays: PriorDay[],
@@ -90,14 +149,7 @@ export function antigravityPriorCoverage(
       ANTIGRAVITY_FAMILY.map((client) => ownValue(breakdown, client)),
     ),
   );
-  // Legacy per-client parser ledgers are interchangeable evidence of the same
-  // credited lifetime: devices that submitted the same response from two
-  // family surfaces pre-transition hold that response in BOTH ledgers, so
-  // summing the ledgers would demand 2x coverage and freeze the family
-  // channel forever (or double-credit on replace). Take the per-field max
-  // across them instead -- the same reconciliation maximum() applies to
-  // stored-vs-ledger.
-  let parserLedger: CoverageSummary | null = null;
+  const ledgers: Parameters<typeof legacyLedgerCoverage>[0] = [];
   let unverifiable = false;
 
   for (const client of ANTIGRAVITY_FAMILY) {
@@ -113,24 +165,10 @@ export function antigravityPriorCoverage(
       unverifiable = true;
       continue;
     }
-
-    const clientLedger = coverage(Object.values(state.days));
-    for (const field of COVERAGE_FIELDS) {
-      const aggregate = state.aggregate[field];
-      if (!Number.isSafeInteger(aggregate) || aggregate < 0) {
-        unverifiable = true;
-        continue;
-      }
-      clientLedger.total[field] = Math.max(clientLedger.total[field], aggregate);
-    }
-    parserLedger = parserLedger
-      ? maximum(parserLedger, clientLedger)
-      : clientLedger;
+    ledgers.push({ days: state.days, aggregate: state.aggregate });
   }
 
-  const combined = maximum(
-    stored,
-    parserLedger ?? { total: emptyCoverage(), models: new Map() },
-  );
-  return { ...combined, unverifiable };
+  const legacy = legacyLedgerCoverage(ledgers);
+  const combined = maximum(stored, legacy.summary);
+  return { ...combined, unverifiable: unverifiable || legacy.unverifiable };
 }
