@@ -122,7 +122,7 @@ const PRIME_LINEAGE_HEADER_KEYS: &[&str] = &["parentSession", "rlmDepth"];
 /// replacement-bearing spelling that may be a damaged Prime lineage key.
 ///
 /// Valid U+FFFD characters are not inherently damage: unrelated extension
-/// keys, including `rlmDepth`, remain valid. Invalid UTF-8 is tracked
+/// keys, including `rlmDepth\u{FFFD}`, remain valid. Invalid UTF-8 is tracked
 /// separately because a replacement immediately beside a complete structural
 /// key may have replaced rather than extended that key.
 pub(crate) fn raw_json_has_damaged_lineage_header_key(raw: &[u8]) -> bool {

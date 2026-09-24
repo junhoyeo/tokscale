@@ -6704,14 +6704,15 @@ mod tests {
     }
 
     #[test]
-    fn test_micode_metadata_keeps_exact_generic_entry_bytes() {
+    fn test_micode_metadata_keeps_exact_current_entry_bytes() {
         let source = write_temp_file(b"{}\n");
         let identity = CacheIdentity::for_client(ClientId::Claude);
         let entry = test_entry(identity, source.path(), "session")
             .with_micode_metadata(vec![micode_test_metadata()]);
-        // Bincode struct fields are positional. This tuple is the exact v8
-        // generic layout; the serde-skipped field stays outside that payload.
-        let v7 = (
+        // Bincode struct fields are positional. This tuple is the exact
+        // current entry layout, proving the serde-skipped in-memory
+        // micode_metadata field contributes no bytes to the payload.
+        let current = (
             &entry.parser_namespace,
             entry.parser_version,
             &entry.path,
@@ -6723,7 +6724,7 @@ mod tests {
             &entry.opencode_incremental,
         );
         let bytes = bincode::options().serialize(&entry).unwrap();
-        assert_eq!(bytes, bincode::options().serialize(&v7).unwrap());
+        assert_eq!(bytes, bincode::options().serialize(&current).unwrap());
         let decoded: CachedSourceEntry = bincode::options().deserialize(&bytes).unwrap();
         assert!(decoded.micode_metadata.is_none());
         assert_eq!(decoded.messages[0].session_id, "session");
