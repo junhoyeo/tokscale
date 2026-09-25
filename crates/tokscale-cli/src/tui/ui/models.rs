@@ -8,7 +8,7 @@ use super::widgets::{
     viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
-use crate::tui::i18n::{tr, MessageKey};
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use tokscale_core::GroupBy;
 
 /// Width the Workspace column gets when the row has no spare cells: what every
@@ -65,6 +65,121 @@ fn workspace_granted_width(widths: &[u16], index: usize) -> usize {
         .get(index)
         .copied()
         .unwrap_or(WORKSPACE_COLUMN_BASE_WIDTH) as usize
+}
+
+/// The Models table's header labels for a layout, in display order.
+///
+/// A function rather than an inline `vec!` so
+/// `every_language_renders_its_full_header_once_the_layout_fits` asserts against
+/// the labels the renderer actually writes. A test that restates the label set
+/// passes while the renderer uses a different one, which is how the Korean
+/// `메시지` clip in `sessions.rs` survived a header test that already existed.
+///
+/// `GroupBy::WorkspaceModel` has its own wide layout: it gains a Workspace
+/// column and drops Cache✕, so the two wide branches are not interchangeable.
+fn header_labels(
+    lang: TuiLanguage,
+    is_narrow: bool,
+    is_very_narrow: bool,
+    group_by: &GroupBy,
+) -> Vec<&'static str> {
+    if is_very_narrow {
+        return vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColCost),
+        ];
+    }
+    if is_narrow {
+        return vec![
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+        ];
+    }
+    if *group_by == GroupBy::WorkspaceModel {
+        return vec![
+            tr(lang, MessageKey::ColRank),
+            tr(lang, MessageKey::ColWorkspace),
+            tr(lang, MessageKey::ColModel),
+            tr(lang, MessageKey::ColProvider),
+            tr(lang, MessageKey::ColSource),
+            tr(lang, MessageKey::ColInput),
+            tr(lang, MessageKey::ColOutput),
+            tr(lang, MessageKey::ColCacheRead),
+            tr(lang, MessageKey::ColCacheWrite),
+            tr(lang, MessageKey::ColTotal),
+            tr(lang, MessageKey::ColMsPer1k),
+            tr(lang, MessageKey::ColCost),
+            tr(lang, MessageKey::ColCostPer1M),
+        ];
+    }
+    vec![
+        tr(lang, MessageKey::ColRank),
+        tr(lang, MessageKey::ColModel),
+        tr(lang, MessageKey::ColProvider),
+        tr(lang, MessageKey::ColSource),
+        tr(lang, MessageKey::ColInput),
+        tr(lang, MessageKey::ColOutput),
+        tr(lang, MessageKey::ColCacheRead),
+        tr(lang, MessageKey::ColCacheWrite),
+        tr(lang, MessageKey::ColCacheHit),
+        tr(lang, MessageKey::ColTotal),
+        tr(lang, MessageKey::ColMsPer1k),
+        tr(lang, MessageKey::ColCost),
+        tr(lang, MessageKey::ColCostPer1M),
+    ]
+}
+
+/// The Models table's column widths, index-aligned with [`header_labels`].
+///
+/// A function rather than an inline `vec!` so
+/// `no_header_overflows_its_budget_in_any_language` checks the widths the
+/// renderer actually lays out with, not a copy of them. The narrow layouts are
+/// percentage-based and have no declared budget; the wide ones are `Length`
+/// (plus one flexible Model or Workspace column), so a header longer than its
+/// `Length` is a clip the arithmetic can name.
+///
+/// `inner_width` only matters for the workspace layout, whose Workspace column
+/// widens once the row has surplus cells — see [`workspace_column_width`].
+fn header_widths(
+    is_narrow: bool,
+    is_very_narrow: bool,
+    group_by: &GroupBy,
+    inner_width: u16,
+) -> Vec<Constraint> {
+    if is_very_narrow {
+        return vec![Constraint::Percentage(70), Constraint::Percentage(30)];
+    }
+    if is_narrow {
+        return vec![
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ];
+    }
+    if *group_by == GroupBy::WorkspaceModel {
+        // Same shape as the default layout, with a wider Workspace column once the
+        // row has surplus cells to give it. Model keeps the flexible slot so the
+        // workspace column can never widen at Cost's expense. Shared with
+        // `workspace_column_granted_width` so the label is truncated to the width
+        // this very layout hands out.
+        return workspace_column_constraints(inner_width);
+    }
+    vec![
+        Constraint::Length(3),
+        Constraint::Min(20),
+        Constraint::Length(18),
+        Constraint::Length(14),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ]
 }
 
 /// The workspace layout's column constraints for a row of `total` cells.
@@ -157,50 +272,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let header_cells = if is_very_narrow {
-        vec![
-            tr(lang, MessageKey::ColModel),
-            tr(lang, MessageKey::ColCost),
-        ]
-    } else if is_narrow {
-        vec![
-            tr(lang, MessageKey::ColModel),
-            tr(lang, MessageKey::ColTokens),
-            tr(lang, MessageKey::ColCost),
-        ]
-    } else if group_by == GroupBy::WorkspaceModel {
-        vec![
-            tr(lang, MessageKey::ColRank),
-            tr(lang, MessageKey::ColWorkspace),
-            tr(lang, MessageKey::ColModel),
-            tr(lang, MessageKey::ColProvider),
-            tr(lang, MessageKey::ColSource),
-            tr(lang, MessageKey::ColInput),
-            tr(lang, MessageKey::ColOutput),
-            tr(lang, MessageKey::ColCacheRead),
-            tr(lang, MessageKey::ColCacheWrite),
-            tr(lang, MessageKey::ColTotal),
-            tr(lang, MessageKey::ColMsPer1k),
-            tr(lang, MessageKey::ColCost),
-            tr(lang, MessageKey::ColCostPer1M),
-        ]
-    } else {
-        vec![
-            tr(lang, MessageKey::ColRank),
-            tr(lang, MessageKey::ColModel),
-            tr(lang, MessageKey::ColProvider),
-            tr(lang, MessageKey::ColSource),
-            tr(lang, MessageKey::ColInput),
-            tr(lang, MessageKey::ColOutput),
-            tr(lang, MessageKey::ColCacheRead),
-            tr(lang, MessageKey::ColCacheWrite),
-            tr(lang, MessageKey::ColCacheHit),
-            tr(lang, MessageKey::ColTotal),
-            tr(lang, MessageKey::ColMsPer1k),
-            tr(lang, MessageKey::ColCost),
-            tr(lang, MessageKey::ColCostPer1M),
-        ]
-    };
+    let header_cells = header_labels(lang, is_narrow, is_very_narrow, &group_by);
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -370,38 +442,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(70), Constraint::Percentage(30)]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ]
-    } else if group_by == GroupBy::WorkspaceModel {
-        // Same shape as the default layout, with a wider Workspace column once the
-        // row has surplus cells to give it. Model keeps the flexible slot so the
-        // workspace column can never widen at Cost's expense. Shared with
-        // `workspace_column_granted_width` so the label is truncated to the width
-        // this very layout hands out.
-        workspace_column_constraints(inner.width)
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(20),
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    };
+    let widths = header_widths(is_narrow, is_very_narrow, &group_by, inner.width);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -429,6 +470,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::ui::header_budget::{assert_header_layout_fits, assert_headers_render_in_full};
 
     /// Column widths the solver grants the workspace layout. Calls the production
     /// helper rather than restating the constraints, so a change to the layout
@@ -695,5 +737,175 @@ mod tests {
             !screen.contains("ea-world-s…") && !screen.contains("ea-world-s..."),
             "label must not be truncated at this width, got:\n{screen}"
         );
+    }
+
+    /// Width at and above which an all-`Length` layout (plus one flexible column
+    /// at its floor) gets every cell it asked for, block borders included.
+    ///
+    /// `fixed_layout_width` returns `None` for a layout containing a `Min`, and
+    /// both wide Models layouts have one, so the `Min`'s floor is summed the way
+    /// `daily.rs`'s detail test does.
+    fn layout_fitting_width(widths: &[Constraint]) -> u16 {
+        let fixed: u16 = widths
+            .iter()
+            .map(|constraint| match constraint {
+                Constraint::Length(cells) => *cells,
+                // The sole `Min`: Model's floor in both wide layouts.
+                Constraint::Min(cells) => *cells,
+                other => unreachable!("unexpected constraint {other:?}"),
+            })
+            .sum();
+        // + one separator between each pair, + 2 for the block borders.
+        fixed + widths.len().saturating_sub(1) as u16 + 2
+    }
+
+    fn make_table_app(width: u16, group_by: GroupBy) -> App {
+        use crate::tui::app::{Tab, TuiConfig};
+        use crate::tui::data::ModelUsage;
+
+        let mut app = App::new_with_cached_data(
+            TuiConfig {
+                theme: "blue".to_string(),
+                refresh: 0,
+                sessions_path: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        app.settings.tui_language = TuiLanguage::En;
+        app.terminal_width = width;
+        app.current_tab = Tab::Models;
+        app.sort_field = SortField::Tokens;
+        app.sort_direction = SortDirection::Descending;
+        *app.group_by.borrow_mut() = group_by;
+        app.data.models = vec![ModelUsage {
+            model: "claude-opus-5".to_string(),
+            color_key: "claude-opus-5".to_string(),
+            provider: "anthropic".to_string(),
+            client: "claude".to_string(),
+            workspace_key: Some("/Users/z/tokscale".to_string()),
+            workspace_label: Some("tokscale ⑃ main".to_string()),
+            tokens: Default::default(),
+            cost: 12.5,
+            performance: Default::default(),
+            session_count: 1,
+        }];
+        app
+    }
+
+    /// The rendered header row of the Models table.
+    fn header_for(lang: TuiLanguage, width: u16, group_by: GroupBy) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = make_table_app(width, group_by);
+        app.settings.tui_language = lang;
+        let backend = TestBackend::new(width, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, Rect::new(0, 0, width, 10)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .get(1)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Which wide-layout columns carry a sort arrow, index-aligned with
+    /// `header_labels`. Read straight off the `sort_indicator` match in `render`:
+    /// in the wide branch (`!is_narrow`) only `9 => Tokens` and `11 => Cost`
+    /// match. Both wide layouts put Total at 9 and Cost at 11 — the workspace
+    /// layout gains Workspace at 1 and drops Cache✕, which cancel out — so one
+    /// flag vector serves both.
+    const WIDE_SORTABLE: [bool; 13] = [
+        false, false, false, false, false, false, false, false, false, true, false, true, false,
+    ];
+
+    /// No header label exceeds the `Constraint::Length` its own layout declares,
+    /// in any language, in either wide grouping.
+    ///
+    /// #1367 translated every header without re-checking the budgets these
+    /// layouts were solved against, and in `sessions.rs` that shipped Korean
+    /// `메시지` clipped to `메시` — a truncated word with no ellipsis, in the one
+    /// column whose job is saying how many messages a row has. Nothing here
+    /// overflows today; this test is what keeps it that way when the next
+    /// language or the next relabelling lands.
+    ///
+    /// Labels and widths both come from the renderer's own helpers, never
+    /// restated here: a test that keeps its own copy of either passes while the
+    /// renderer uses something else. `GroupBy::WorkspaceModel` is checked
+    /// separately because it has its own layout, and at both Workspace column
+    /// widths because that column widens once the row has surplus cells.
+    #[test]
+    fn no_header_overflows_its_budget_in_any_language() {
+        for lang in TuiLanguage::ALL {
+            assert_header_layout_fits(
+                "models/wide",
+                lang,
+                &header_labels(lang, false, false, &GroupBy::Model),
+                &header_widths(false, false, &GroupBy::Model, 200),
+                &WIDE_SORTABLE,
+            );
+            // Below and above the surplus threshold, i.e. Workspace at 18 cells
+            // and at 44.
+            for inner in [WORKSPACE_SURPLUS_MIN_WIDTH - 1, WORKSPACE_SURPLUS_MIN_WIDTH] {
+                assert_header_layout_fits(
+                    &format!("models/wide-workspace(inner={inner})"),
+                    lang,
+                    &header_labels(lang, false, false, &GroupBy::WorkspaceModel),
+                    &header_widths(false, false, &GroupBy::WorkspaceModel, inner),
+                    &WIDE_SORTABLE,
+                );
+            }
+        }
+    }
+
+    /// At and above the width its own constraints add up to, each wide layout gets
+    /// every cell it asked for, so every header must render in full — in every
+    /// language, in both groupings. Below that ratatui shrinks every column and
+    /// clips English headers too, which is the pre-existing #964-class over-ask
+    /// this tab never solved, not a localization defect.
+    #[test]
+    fn every_language_renders_its_full_header_once_the_layout_fits() {
+        for group_by in [GroupBy::Model, GroupBy::WorkspaceModel] {
+            // Measured at a width above the Workspace surplus threshold, which is
+            // the wider of the two workspace layouts and therefore the binding
+            // one; the default layout does not vary with width at all.
+            let fitting = layout_fitting_width(&header_widths(false, false, &group_by, 240));
+            // 240 rather than 200: the wide Workspace column alone needs 195, so
+            // 200 leaves no room for the +20 step to mean anything.
+            for width in [fitting, fitting + 20, 240] {
+                // The layout solved at this very width really does fit it, so the
+                // claim below is about translation and not about shrinking.
+                assert!(
+                    width
+                        >= layout_fitting_width(&header_widths(false, false, &group_by, width - 2)),
+                    "{width} cols does not fit the {group_by:?} layout"
+                );
+                for lang in TuiLanguage::ALL {
+                    assert_headers_render_in_full(
+                        &format!("models(width={width},group={group_by:?})"),
+                        lang,
+                        &header_for(lang, width, group_by.clone()),
+                        &header_labels(lang, false, false, &group_by),
+                    );
+                }
+            }
+        }
     }
 }

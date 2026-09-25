@@ -542,6 +542,7 @@ mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
+    use crate::tui::ui::header_budget::{assert_header_fits, assert_headers_render_in_full};
     use ratatui::{backend::TestBackend, Terminal};
     use unicode_width::UnicodeWidthStr;
 
@@ -871,6 +872,69 @@ mod tests {
                         "{field:?} drew ▾ with its column unadmitted at width {width}\n{header}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Every column's header fits its own budget in every language, arrow
+    /// included, plus the same claim through the renderer.
+    ///
+    /// #1367 translated every header without re-checking the budgets the
+    /// layouts were solved against, and in `sessions.rs` that clipped Korean
+    /// `메시지` to `메시` — a truncated word with no ellipsis. This tab's
+    /// budgets happen to hold, so this test is the guard that keeps them
+    /// holding: the next translation fails here with the overflow named in
+    /// cells rather than shipping a clipped header.
+    #[test]
+    fn header_labels_fit_their_budget_in_every_language() {
+        for lang in TuiLanguage::ALL {
+            for column in ALL {
+                assert_header_fits(
+                    "projects/wide",
+                    &format!("{column:?}"),
+                    lang,
+                    column.header(lang),
+                    column.natural(),
+                    column.sort_field().is_some(),
+                );
+            }
+        }
+    }
+
+    /// The rendered counterpart, over the whole width sweep. `natural()` is the
+    /// *declared* budget; this is the one ratatui hands out. It also covers the
+    /// very-narrow percentage layout, which has no `natural()` to check.
+    #[test]
+    fn rendered_headers_survive_every_language_at_every_width() {
+        for lang in TuiLanguage::ALL {
+            for width in 30u16..=200 {
+                let mut app = make_app(width);
+                app.settings.tui_language = lang;
+                app.data.projects = vec![project("tokscale", 12.3456, 1_736_000_000_000)];
+                let header = header_line(&mut app, width);
+                // Asked of the renderer's own solver, never restated here.
+                let labels: Vec<&str> = if width >= 60 {
+                    let chosen = admit_and_distribute(width - 2).chosen;
+                    if chosen.is_empty() {
+                        vec![
+                            tr(lang, MessageKey::ColProject),
+                            tr(lang, MessageKey::ColCost),
+                        ]
+                    } else {
+                        chosen.iter().map(|c| c.header(lang)).collect()
+                    }
+                } else {
+                    vec![
+                        tr(lang, MessageKey::ColProject),
+                        tr(lang, MessageKey::ColCost),
+                    ]
+                };
+                assert_headers_render_in_full(
+                    &format!("projects(width={width})"),
+                    lang,
+                    &header,
+                    &labels,
+                );
             }
         }
     }

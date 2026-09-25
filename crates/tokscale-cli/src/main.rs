@@ -5910,21 +5910,29 @@ fn submit_imported_graph(payload: &TsTokenContributionData) -> Result<()> {
 /// scan also reports, and return them. A device-less backfill is summed with
 /// the scanned device, so an export of history that is still on disk (the
 /// usual `ccusage` case) would otherwise be counted twice. History submitted
-/// earlier whose files are gone can't be seen from here.
+/// earlier whose files are gone can't be seen from here — including the days
+/// the local recovery overlay reconstructs, which submission never sends and
+/// which therefore must not count as coverage.
 fn drop_locally_scanned_usage(
     graph: &mut tokscale_core::GraphResult,
     imported_clients: &[String],
 ) -> Result<Vec<(String, String)>> {
-    use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
+    use tokscale_core::{generate_source_graph_report, GroupBy, ReportOptions};
 
     // This scan only feeds overlap detection, which reads (date, client)
     // identities and non-zero token flags — never costs — so the lenient local
     // report (optional pricing) is the right generator: a cold pricing cache
     // must not abort the whole import over a scan whose costs nobody reads.
     // The imported costs come from the export itself.
+    //
+    // Source-only, not `generate_local_graph_report`: the question here is
+    // "does `tokscale submit` already report this row?", and submission reads
+    // source messages alone. The local recovery overlay is never submitted, so
+    // counting it as coverage would drop an imported row that nothing else ever
+    // uploads (#1364).
     let rt = tokio::runtime::Runtime::new()?;
     let local = rt
-        .block_on(generate_local_graph_report(ReportOptions {
+        .block_on(generate_source_graph_report(ReportOptions {
             home_dir: None,
             use_env_roots: true,
             clients: Some(imported_clients.to_vec()),

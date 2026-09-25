@@ -1960,6 +1960,189 @@ fn test_import_submit_stops_when_the_local_scan_covers_every_row() {
     );
 }
 
+/// Write a local recovery ledger (`recovered-usage-v1.json`) into the sandbox
+/// config dir `cmd_with_home` points the child at, restoring one request row
+/// for a session that is no longer on disk.
+///
+/// `home` must be the same string the child gets as `HOME`: `recovery::apply`
+/// ignores a ledger whose `home` names a different directory.
+fn write_recovery_ledger(home: &Path, client: &str, date: &str, timestamp_ms: i64, input: i64) {
+    let dir = sandbox_config_dir(home);
+    fs::create_dir_all(&dir).unwrap();
+    let ledger = serde_json::json!({
+        "version": 1,
+        "home": home.to_str().unwrap(),
+        "messages": [{
+            "client": client,
+            "model_id": "gpt-5.5",
+            "provider_id": "openai",
+            "session_id": "wiped-session",
+            "workspace_key": null,
+            "workspace_label": null,
+            "timestamp": timestamp_ms,
+            "date": date,
+            "tokens": {
+                "input": input,
+                "output": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "reasoning": 0
+            },
+            "cost": 0.0,
+            "agent": null,
+            "dedup_key": "wiped-session-row"
+        }]
+    });
+    fs::write(
+        dir.join("recovered-usage-v1.json"),
+        serde_json::to_string(&ledger).unwrap(),
+    )
+    .unwrap();
+}
+
+/// One clawdboard day for `codex` on 2026-05-01: 100 input + 50 output tokens
+/// and $1.00, the row both recovery-overlay tests import.
+fn write_single_day_codex_export(home: &Path) -> std::path::PathBuf {
+    let export_path = home.join("export.json");
+    fs::write(
+        &export_path,
+        r#"{
+          "dailyAggregates": [
+            {
+              "date": "2026-05-01",
+              "source": "codex",
+              "machineId": "m1",
+              "inputTokens": 100,
+              "outputTokens": 50,
+              "cacheCreationTokens": 0,
+              "cacheReadTokens": 0,
+              "totalCost": "1.00",
+              "modelsUsed": ["gpt-5.5"],
+              "modelBreakdowns": [
+                { "modelName": "gpt-5.5", "cost": 1.0, "inputTokens": 100,
+                  "outputTokens": 50, "cacheReadTokens": 0, "cacheCreationTokens": 0 }
+              ]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+    export_path
+}
+
+/// Midday UTC, so the day a fixture lands on is the same in every host zone
+/// the bucketer might auto-pin to.
+const RECOVERY_OVERLAY_DAY_MS: i64 = 1_777_636_800_000; // 2026-05-01T12:00:00Z
+
+#[test]
+fn test_import_submit_keeps_a_day_only_the_recovery_overlay_covers() {
+    // The overlap pass drops an imported (date, client) row that this machine's
+    // own scan already reports, because `tokscale submit` sends that day. The
+    // local recovery ledger is the one thing a local report shows that
+    // submission never sends: it is explicitly local-only. Scanning through the
+    // lenient *local* report therefore counted a recovery-only day as already
+    // covered, dropped the imported row for it, and left the usage on no path
+    // to the leaderboard at all — the exact case the ledger exists for (wiped
+    // transcripts). The scan must read source messages only.
+    let home = TempDir::new().unwrap();
+    // No sessions anywhere under this home: the ledger is the sole reason a
+    // local report would show 2026-05-01 codex usage.
+    write_recovery_ledger(
+        home.path(),
+        "codex",
+        "2026-05-01",
+        RECOVERY_OVERLAY_DAY_MS,
+        150,
+    );
+    let export_path = write_single_day_codex_export(home.path());
+
+    let output = cmd_with_home(home.path())
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--submit",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Left out"),
+        "a day only the local-only recovery overlay covers is not covered by \
+         `tokscale submit`, so the imported row must not be dropped: {stderr}"
+    );
+    assert!(
+        stderr.contains("To submit as imported history (clawdboard): 1 days, 150 tokens, $1.00"),
+        "the recovery-only day must reach the submission summary: {stderr}"
+    );
+    assert!(!stderr.contains("Nothing left to submit."), "{stderr}");
+}
+
+#[test]
+fn test_import_submit_still_drops_a_day_a_real_transcript_covers() {
+    // Control for the test above: narrowing the overlap scan to source messages
+    // must not weaken double-count protection. Same ledger, same export, but a
+    // real codex transcript for that (date, client) is on disk — `tokscale
+    // submit` does report it, so the imported row still has to go.
+    let home = TempDir::new().unwrap();
+    write_recovery_ledger(
+        home.path(),
+        "codex",
+        "2026-05-01",
+        RECOVERY_OVERLAY_DAY_MS,
+        150,
+    );
+    let sessions = home.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("session-recovery-control.jsonl"),
+        concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-4o-mini"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-01T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50}}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let export_path = write_single_day_codex_export(home.path());
+    let payload_path = home.path().join("payload.json");
+
+    let output = cmd_with_home(home.path())
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--submit",
+            "--dry-run",
+            "--output",
+            payload_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Left out 1 day/client row(s)") && stderr.contains("2026-05-01 codex"),
+        "a real transcript for the same day/client must still drop the imported \
+         row: {stderr}"
+    );
+    assert!(stderr.contains("Nothing left to submit."), "{stderr}");
+    assert!(
+        !payload_path.exists(),
+        "no payload may be written for an empty backfill"
+    );
+}
+
 #[test]
 fn test_import_does_not_leak_local_mcp_servers() {
     // Reusing the graph/submit converter must not embed the local

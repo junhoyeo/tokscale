@@ -7,7 +7,102 @@ use super::widgets::{
     viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, SortDirection, SortField};
-use crate::tui::i18n::{tr, MessageKey};
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
+
+/// The Minutely table's header labels for a layout, in display order.
+///
+/// A function rather than an inline `vec!` so
+/// `every_language_renders_its_full_header_once_the_layout_fits` asserts against
+/// the labels the renderer actually writes. A test that restates the label set
+/// passes while the renderer uses a different one, which is how the Korean
+/// `메시지` clip in `sessions.rs` survived a header test that already existed.
+fn header_labels(
+    lang: TuiLanguage,
+    is_narrow: bool,
+    is_very_narrow: bool,
+    has_turn_data: bool,
+) -> Vec<&'static str> {
+    if is_very_narrow {
+        return vec![
+            tr(lang, MessageKey::ColMinute),
+            tr(lang, MessageKey::ColCost),
+        ];
+    }
+
+    let mut labels = vec![
+        tr(lang, MessageKey::ColMinute),
+        tr(lang, MessageKey::ColSource),
+    ];
+    if has_turn_data {
+        labels.push(tr(lang, MessageKey::ColTurn));
+    }
+    labels.push(tr(lang, MessageKey::ColMessages));
+    if is_narrow {
+        labels.extend([
+            tr(lang, MessageKey::ColTokens),
+            tr(lang, MessageKey::ColCost),
+        ]);
+        return labels;
+    }
+    labels.extend([
+        tr(lang, MessageKey::ColInput),
+        tr(lang, MessageKey::ColOutput),
+        tr(lang, MessageKey::ColCacheRead),
+        tr(lang, MessageKey::ColCacheWrite),
+        tr(lang, MessageKey::ColCacheHit),
+        tr(lang, MessageKey::ColTotal),
+        tr(lang, MessageKey::ColCost),
+    ]);
+    labels
+}
+
+/// The Minutely table's column widths, index-aligned with [`header_labels`].
+///
+/// A function rather than an inline `vec!` so
+/// `no_header_overflows_its_budget_in_any_language` checks the widths the
+/// renderer actually lays out with, not a copy of them. The narrow layouts are
+/// percentage-based and have no declared budget; the wide ones are `Length`, so
+/// a header longer than its `Length` is a clip the arithmetic can name.
+fn header_widths(is_narrow: bool, is_very_narrow: bool, has_turn_data: bool) -> Vec<Constraint> {
+    if is_very_narrow {
+        return vec![Constraint::Percentage(60), Constraint::Percentage(40)];
+    }
+    if is_narrow {
+        return if has_turn_data {
+            vec![
+                Constraint::Percentage(32),
+                Constraint::Percentage(18),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(32),
+                Constraint::Percentage(23),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+            ]
+        };
+    }
+    let mut widths = vec![Constraint::Length(18), Constraint::Length(14)];
+    if has_turn_data {
+        widths.push(Constraint::Length(6));
+    }
+    widths.extend([
+        Constraint::Length(6),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ]);
+    widths
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
@@ -61,58 +156,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(now);
 
     let lang = app.settings.tui_language;
-    let header_cells = if is_very_narrow {
-        vec![
-            tr(lang, MessageKey::ColMinute),
-            tr(lang, MessageKey::ColCost),
-        ]
-    } else if is_narrow {
-        if has_turn_data {
-            vec![
-                tr(lang, MessageKey::ColMinute),
-                tr(lang, MessageKey::ColSource),
-                tr(lang, MessageKey::ColTurn),
-                tr(lang, MessageKey::ColMessages),
-                tr(lang, MessageKey::ColTokens),
-                tr(lang, MessageKey::ColCost),
-            ]
-        } else {
-            vec![
-                tr(lang, MessageKey::ColMinute),
-                tr(lang, MessageKey::ColSource),
-                tr(lang, MessageKey::ColMessages),
-                tr(lang, MessageKey::ColTokens),
-                tr(lang, MessageKey::ColCost),
-            ]
-        }
-    } else if has_turn_data {
-        vec![
-            tr(lang, MessageKey::ColMinute),
-            tr(lang, MessageKey::ColSource),
-            tr(lang, MessageKey::ColTurn),
-            tr(lang, MessageKey::ColMessages),
-            tr(lang, MessageKey::ColInput),
-            tr(lang, MessageKey::ColOutput),
-            tr(lang, MessageKey::ColCacheRead),
-            tr(lang, MessageKey::ColCacheWrite),
-            tr(lang, MessageKey::ColCacheHit),
-            tr(lang, MessageKey::ColTotal),
-            tr(lang, MessageKey::ColCost),
-        ]
-    } else {
-        vec![
-            tr(lang, MessageKey::ColMinute),
-            tr(lang, MessageKey::ColSource),
-            tr(lang, MessageKey::ColMessages),
-            tr(lang, MessageKey::ColInput),
-            tr(lang, MessageKey::ColOutput),
-            tr(lang, MessageKey::ColCacheRead),
-            tr(lang, MessageKey::ColCacheWrite),
-            tr(lang, MessageKey::ColCacheHit),
-            tr(lang, MessageKey::ColTotal),
-            tr(lang, MessageKey::ColCost),
-        ]
-    };
+    let header_cells = header_labels(lang, is_narrow, is_very_narrow, has_turn_data);
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -266,53 +310,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow && has_turn_data {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(18),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(23),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if has_turn_data {
-        vec![
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    } else {
-        vec![
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    };
+    let widths = header_widths(is_narrow, is_very_narrow, has_turn_data);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -334,5 +332,161 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::{Tab, TuiConfig};
+    use crate::tui::data::{MinutelyUsage, TokenBreakdown};
+    use crate::tui::ui::header_budget::{
+        assert_header_layout_fits, assert_headers_render_in_full, fixed_layout_width,
+    };
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn minute(date: NaiveDate, h: u32, m: u32) -> MinutelyUsage {
+        let mut clients = BTreeSet::new();
+        clients.insert("claude".to_string());
+        MinutelyUsage {
+            datetime: date.and_hms_opt(h, m, 0).unwrap(),
+            tokens: TokenBreakdown::default(),
+            cost: 1.0,
+            clients,
+            models: BTreeMap::new(),
+            message_count: 5,
+            turn_count: 2,
+        }
+    }
+
+    /// App with two minute buckets, sorted newest-first like the live default.
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+            ..Default::default()
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.tui_language = TuiLanguage::En;
+        app.terminal_width = width;
+        app.current_tab = Tab::Minutely;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        app.data.minutely = vec![minute(date, 14, 31), minute(date, 14, 30)];
+        app
+    }
+
+    fn render_body(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The rendered header row of the Minutely table.
+    fn header_for(lang: TuiLanguage, width: u16, has_turn: bool) -> String {
+        let mut app = make_app(width);
+        app.settings.tui_language = lang;
+        for m in &mut app.data.minutely {
+            m.turn_count = if has_turn { 2 } else { 0 };
+        }
+        render_body(&mut app, width, 12)
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Which wide-layout columns carry a sort arrow, index-aligned with
+    /// `header_labels`. Read straight off the `sort_indicator` match in `render`:
+    /// `(0, _, _) => Date` always, then Tokens and Cost at `(9, 10)` when the
+    /// Turn column is present and at `(8, 9)` when it is not — i.e. the Total and
+    /// Cost columns, whichever indices they land on. This table has no Cost/1M
+    /// column, so Cost is the last one.
+    fn sortable_flags(has_turn: bool) -> Vec<bool> {
+        // Minute, Source
+        let mut flags = vec![true, false];
+        if has_turn {
+            flags.push(false); // Turn
+        }
+        // Msgs, Input, Output, Cache R, Cache W, Cache✕
+        flags.extend([false; 6]);
+        // Total, Cost
+        flags.extend([true, true]);
+        flags
+    }
+
+    /// No header label exceeds the `Constraint::Length` its own layout declares,
+    /// in any language.
+    ///
+    /// #1367 translated every header without re-checking the budgets these
+    /// layouts were solved against, and in `sessions.rs` that shipped Korean
+    /// `메시지` clipped to `메시` — a truncated word with no ellipsis, in the one
+    /// column whose job is saying how many messages a row has. Nothing here
+    /// overflows today; this test is what keeps it that way when the next
+    /// language or the next relabelling lands.
+    ///
+    /// Labels and widths both come from the renderer's own helpers, never
+    /// restated here: a test that keeps its own copy of either passes while the
+    /// renderer uses something else.
+    #[test]
+    fn no_header_overflows_its_budget_in_any_language() {
+        for lang in TuiLanguage::ALL {
+            for has_turn in [true, false] {
+                assert_header_layout_fits(
+                    &format!("minutely/wide(turn={has_turn})"),
+                    lang,
+                    &header_labels(lang, false, false, has_turn),
+                    &header_widths(false, false, has_turn),
+                    &sortable_flags(has_turn),
+                );
+            }
+        }
+    }
+
+    /// At and above the width its own `Length`s add up to, the wide layout gets
+    /// every cell it asked for, so every header must render in full — in every
+    /// language. Below that ratatui shrinks every column and clips English
+    /// headers too, which is the pre-existing #964-class over-ask this tab never
+    /// solved, not a localization defect.
+    #[test]
+    fn every_language_renders_its_full_header_once_the_layout_fits() {
+        for has_turn in [true, false] {
+            let widths = header_widths(false, false, has_turn);
+            let needed = fixed_layout_width(&widths, 1).expect("wide layout is all Length");
+            // +2 for the block borders the table draws inside.
+            for width in [needed + 2, needed + 22, 200] {
+                for lang in TuiLanguage::ALL {
+                    assert_headers_render_in_full(
+                        &format!("minutely(width={width},turn={has_turn})"),
+                        lang,
+                        &header_for(lang, width, has_turn),
+                        &header_labels(lang, false, false, has_turn),
+                    );
+                }
+            }
+        }
     }
 }

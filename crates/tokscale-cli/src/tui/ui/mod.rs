@@ -4,6 +4,9 @@ mod daily;
 pub mod dialog;
 mod footer;
 mod header;
+/// Test-only header-budget assertions, shared by every table module.
+#[cfg(test)]
+pub(crate) mod header_budget;
 mod hourly;
 mod hourly_profile;
 mod minutely;
