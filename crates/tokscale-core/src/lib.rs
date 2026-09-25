@@ -4446,6 +4446,17 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 #[derive(Clone, Copy)]
 enum GraphPricingRequirement {
     Lenient,
+    /// Lenient pricing, source messages only: no local recovery overlay.
+    ///
+    /// Priced exactly like [`GraphPricingRequirement::Lenient`] — it shares
+    /// that arm everywhere pricing is decided. The single difference is that it
+    /// does not take the recovery-overlay path in
+    /// [`generate_graph_with_loaded_pricing`], so the graph contains only the
+    /// source messages on disk. Callers that compare a local scan against what
+    /// `tokscale submit` would send need this: the overlay is local-only and is
+    /// never submitted, so counting it as "already reported" drops usage that
+    /// nothing ever uploads.
+    LenientSourceOnly,
     Submission,
 }
 
@@ -4479,7 +4490,9 @@ async fn generate_graph_with_loaded_pricing(
         && recovery::applicable(&home_dir)
     {
         // Local recovery requires native-session reconciliation. Submission
-        // always streams only the verifiable source messages.
+        // always streams only the verifiable source messages, and so does
+        // `LenientSourceOnly`, whose callers compare against what submission
+        // sends and must not see the never-submitted overlay.
         for message in parse_all_messages_with_pricing_with_env_strategy(
             &home_dir,
             &clients,
@@ -4567,7 +4580,10 @@ impl<'a> GraphSink<'a> {
         let batch = std::mem::take(&mut self.buffer);
 
         let batch = match self.requirement {
-            GraphPricingRequirement::Lenient => batch,
+            // `LenientSourceOnly` differs from `Lenient` only in which messages
+            // reach the sink (no recovery overlay), never in how they are
+            // priced, so the two share this arm.
+            GraphPricingRequirement::Lenient | GraphPricingRequirement::LenientSourceOnly => batch,
             GraphPricingRequirement::Submission => {
                 let (mut submitted, zeroed, unpriced_usage, incomplete_cost_dates) =
                     prepare_submission_pricing(batch, self.pricing);
@@ -4928,6 +4944,25 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
         options,
         pricing.as_deref(),
         GraphPricingRequirement::Lenient,
+    )
+    .await
+}
+
+/// Local graph built from source messages only: exactly what submission reads.
+///
+/// Identical to [`generate_local_graph_report`] — same optional pricing, same
+/// lenient pricing rules — except that it never merges the local recovery
+/// overlay (`recovered-usage-v1.json`). That overlay is local-only and
+/// `tokscale submit` never sends it, so any caller that asks "does this machine
+/// already report this usage?" must not see it. Treating a recovery-only day as
+/// already reported drops the imported row for it while submission never
+/// uploads that day either, and the usage disappears (#1364).
+pub async fn generate_source_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = load_pricing_for_local_parse().await;
+    generate_graph_with_loaded_pricing(
+        options,
+        pricing.as_deref(),
+        GraphPricingRequirement::LenientSourceOnly,
     )
     .await
 }
