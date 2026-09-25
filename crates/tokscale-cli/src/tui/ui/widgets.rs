@@ -567,12 +567,16 @@ pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
 
 /// [`truncate_ellipsis`] measured in terminal cells instead of code points.
 ///
-/// Same one-cell `…` marker, so a pure-ASCII string comes out byte-identical to
-/// what [`truncate_ellipsis`] produces — but a string holding full-width
-/// graphemes is cut against the width ratatui will actually draw it at. A
-/// code-point budget lets `활성 · 한도부족` (9 code points, 15 cells) through a
-/// 14-cell column untouched, and ratatui then clips it at the panel edge with
-/// no marker at all, which is the failure this exists to prevent.
+/// A string holding full-width graphemes is cut against the width ratatui will
+/// actually draw it at. A code-point budget lets `활성 · 한도부족` (9 code
+/// points, 15 cells) through a 14-cell column untouched, and ratatui then clips
+/// it at the panel edge with no marker at all, which is the failure this exists
+/// to prevent.
+///
+/// The marker is [`MIDDLE_ELLIPSIS`], not U+2026 `…`: U+2026 is
+/// East-Asian-Ambiguous and draws two cells in a CJK-locale terminal, which is
+/// exactly where the translated text this helper fits is read. A one-cell
+/// budget has to stay one cell there too.
 pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
     if max_cells == 0 {
         return String::new();
@@ -581,9 +585,9 @@ pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
         return s.to_string();
     }
     if max_cells == 1 {
-        return "…".to_string();
+        return MIDDLE_ELLIPSIS.to_string();
     }
-    format!("{}…", prefix_to_width(s, max_cells - 1))
+    format!("{}{MIDDLE_ELLIPSIS}", prefix_to_width(s, max_cells - 1))
 }
 
 /// Pad `s` with trailing spaces until it occupies `cells` terminal cells.
@@ -1044,11 +1048,11 @@ mod tests {
         }
     }
 
-    /// The cell-based twin agrees with the code-point one on ASCII — which is
-    /// what keeps `en` byte-identical — and disagrees exactly where a
-    /// code-point budget is wrong.
+    /// On pure ASCII the cell version cuts at the same place as the code-point
+    /// version and differs only in its marker: `⋯` instead of the
+    /// East-Asian-Ambiguous `…`, so the marker is one cell in every terminal.
     #[test]
-    fn truncate_ellipsis_to_width_matches_the_char_version_on_ascii() {
+    fn truncate_ellipsis_to_width_cuts_ascii_where_the_char_version_does() {
         for budget in 0..=24 {
             for s in [
                 "Active · Watch",
@@ -1058,7 +1062,7 @@ mod tests {
             ] {
                 assert_eq!(
                     truncate_ellipsis_to_width(s, budget),
-                    truncate_ellipsis(s, budget),
+                    truncate_ellipsis(s, budget).replace('…', MIDDLE_ELLIPSIS),
                     "{s:?} at {budget} cells"
                 );
             }
@@ -1076,7 +1080,10 @@ mod tests {
         );
         let fitted = truncate_ellipsis_to_width(wide, 14);
         assert!(display_width(&fitted) <= 14, "{fitted:?}");
-        assert!(fitted.ends_with('…'), "the cut must be marked: {fitted:?}");
+        assert!(
+            fitted.ends_with(MIDDLE_ELLIPSIS),
+            "the cut must be marked: {fitted:?}"
+        );
 
         for budget in 0..=20 {
             for s in [wide, "残量わずか · 残量少", "配额不足", "ascii state"] {
@@ -1087,7 +1094,7 @@ mod tests {
                 );
                 if display_width(s) > budget && budget > 0 {
                     assert!(
-                        out.ends_with('…'),
+                        out.ends_with(MIDDLE_ELLIPSIS),
                         "{s:?} was cut without a marker at {budget}"
                     );
                 }

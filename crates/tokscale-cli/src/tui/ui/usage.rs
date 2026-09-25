@@ -4933,7 +4933,7 @@ mod tests {
                     );
                     if display_width(&state) > state_width {
                         assert!(
-                            fitted.ends_with('…'),
+                            fitted.ends_with(crate::tui::ui::widgets::MIDDLE_ELLIPSIS),
                             "{} at {frame_width}: state {state:?} was cut to {fitted:?} \
                              with no marker",
                             lang.code(),
@@ -5052,7 +5052,7 @@ mod tests {
                 );
                 if !text.contains(&full) {
                     assert!(
-                        text.ends_with('…'),
+                        text.ends_with(crate::tui::ui::widgets::MIDDLE_ELLIPSIS),
                         "{} count={count}: the expiry text was cut with no marker: {text:?}",
                         lang.code(),
                     );
