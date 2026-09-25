@@ -2074,7 +2074,8 @@ fn test_import_submit_keeps_a_day_only_the_recovery_overlay_covers() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("Left out"),
-        "a day only the local-only recovery overlay covers is not covered by          `tokscale submit`, so the imported row must not be dropped: {stderr}"
+        "a day only the local-only recovery overlay covers is not covered by \
+         `tokscale submit`, so the imported row must not be dropped: {stderr}"
     );
     assert!(
         stderr.contains("To submit as imported history (clawdboard): 1 days, 150 tokens, $1.00"),
