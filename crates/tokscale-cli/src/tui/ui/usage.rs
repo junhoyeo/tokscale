@@ -623,34 +623,44 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
         },
     );
 
-    let mut header_spans = vec![
-        Span::styled(
-            format!(" {} ", tr(lang, MessageKey::CodexLoginTitle)),
-            Style::default()
-                .fg(app.theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(status.to_string(), app.theme.subtle_text_style()),
-    ];
-    if app.is_codex_login_running() || app.codex_login_outcome.is_some() {
-        let action_label = tr(
-            lang,
-            if app.is_codex_login_running() {
-                MessageKey::CodexLoginCancel
-            } else {
-                MessageKey::CodexLoginDismiss
-            },
-        );
+    let title_style = Style::default()
+        .fg(app.theme.foreground)
+        .add_modifier(Modifier::BOLD);
+    let title = format!(" {} ", tr(lang, MessageKey::CodexLoginTitle));
+    let action_label =
+        (app.is_codex_login_running() || app.codex_login_outcome.is_some()).then(|| {
+            tr(
+                lang,
+                if app.is_codex_login_running() {
+                    MessageKey::CodexLoginCancel
+                } else {
+                    MessageKey::CodexLoginDismiss
+                },
+            )
+        });
+    let mut header_spans = Vec::new();
+    if let Some(action_label) = action_label {
         // Display cells, not `chars`: `[取消]` is 4 chars but draws 8 cells, so
         // counting chars mis-positioned the click area and the padding.
-        let action_width = unicode_width::UnicodeWidthStr::width(action_label) as u16;
+        let action_width = unicode_width::UnicodeWidthStr::width(action_label);
+        let area_width = area.width as usize;
+        // Reserve the action first, with one separating cell, and fit the
+        // title and status into what is left. Otherwise a long translated
+        // status pushes the action past the edge while its click area stays at
+        // the edge, so the visible button and the clickable one disagree.
+        let budget = area_width.saturating_sub(action_width + 1);
+        let title = truncate_string(&title, budget);
+        let status = truncate_string(status, budget.saturating_sub(display_width(&title)));
+        header_spans.push(Span::styled(title, title_style));
+        header_spans.push(Span::styled(status, app.theme.subtle_text_style()));
         let used_width = Line::from(header_spans.clone()).width();
-        let padding = (area.width as usize).saturating_sub(used_width + action_width as usize);
+        let padding = area_width.saturating_sub(used_width + action_width);
         header_spans.push(Span::raw(" ".repeat(padding)));
         header_spans.push(Span::styled(
             action_label,
             Style::default().fg(app.theme.accent),
         ));
+        let action_width = action_width as u16;
         let x = area
             .x
             .saturating_add(area.width.saturating_sub(action_width));
@@ -658,6 +668,12 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
             Rect::new(x, area.y, action_width.min(area.width), 1),
             ClickAction::CodexDismissLogin,
         );
+    } else {
+        header_spans.push(Span::styled(title, title_style));
+        header_spans.push(Span::styled(
+            status.to_string(),
+            app.theme.subtle_text_style(),
+        ));
     }
     lines.push(Line::from(header_spans));
 
@@ -4448,6 +4464,54 @@ mod tests {
         assert!(!body.contains("secret@example.com"), "{body}");
         assert!(body.contains("[hidden email]"), "{body}");
         assert!(body.contains("Account acct_s...6789"), "{body}");
+    }
+
+    /// The login header's action button stays fully drawn exactly where its
+    /// click area is, in every language and at narrow widths: the title and
+    /// status give way first. A long translated status used to push the
+    /// button past the edge while the click area stayed at the edge.
+    #[test]
+    fn login_header_action_is_drawn_where_it_is_clickable_in_every_language() {
+        for lang in TuiLanguage::ALL {
+            for width in 16u16..=90 {
+                let mut app = make_app();
+                app.settings.tui_language = lang;
+                app.codex_login_lines = vec!["open browser".to_string()];
+                app.codex_login_outcome = Some(CodexLoginOutcome::Failed("expired".to_string()));
+                let backend = TestBackend::new(width, 14);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| render(frame, &mut app, Rect::new(0, 0, width, 14)))
+                    .unwrap();
+                let label = tr(lang, MessageKey::CodexLoginDismiss);
+                let area = app
+                    .click_areas
+                    .iter()
+                    .find(|area| matches!(area.action, ClickAction::CodexDismissLogin))
+                    .unwrap_or_else(|| panic!("{} at {width}: no dismiss click area", lang.code()))
+                    .rect;
+                if display_width(label) > width as usize {
+                    continue;
+                }
+                assert_eq!(
+                    area.width as usize,
+                    display_width(label),
+                    "{} at {width}: click area width",
+                    lang.code()
+                );
+                let buffer = terminal.backend().buffer();
+                let drawn: String = (area.x..area.x + area.width)
+                    .map(|x| buffer[(x, area.y)].symbol().to_string())
+                    .collect::<String>()
+                    .replace(' ', "");
+                assert_eq!(
+                    drawn,
+                    label.replace(' ', ""),
+                    "{} at {width}: the clickable cells do not show the action",
+                    lang.code()
+                );
+            }
+        }
     }
 
     #[test]
