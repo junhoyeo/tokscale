@@ -508,10 +508,47 @@ fn narrow_header_labels(
     }
     labels.extend([
         tr(lang, MessageKey::ColMessages),
-        tr(lang, MessageKey::ColTokens),
+        // The Tokens column gets ~9 cells here and carries the sort arrow, so
+        // it needs a label that fits with ` ▾` (ja `トークン ▾` is 10 cells).
+        tr(lang, MessageKey::ColTokensShort),
         tr(lang, MessageKey::ColCost),
     ]);
     labels
+}
+
+/// Header cells for the narrow layouts: [`narrow_header_labels`] plus the sort
+/// arrow on the Tokens or Cost column. Shared by the renderer and its tests so
+/// the arrow a test expects is the arrow the renderer draws.
+fn narrow_header_cells(
+    lang: TuiLanguage,
+    is_very_narrow: bool,
+    has_turn_data: bool,
+    sort_indicator: impl Fn(SortField) -> &'static str,
+) -> Vec<String> {
+    let labels = narrow_header_labels(lang, is_very_narrow, has_turn_data);
+    // The narrow layouts keep their hand-picked indices, and `usize::MAX`
+    // still stands for "this sort has no column here".
+    let (total_idx, cost_idx) = if is_very_narrow {
+        (usize::MAX, 1)
+    } else if has_turn_data {
+        (4, 5)
+    } else {
+        (3, 4)
+    };
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let indicator = if i == total_idx {
+                sort_indicator(SortField::Tokens)
+            } else if i == cost_idx {
+                sort_indicator(SortField::Cost)
+            } else {
+                ""
+            };
+            format!("{}{}", h, indicator)
+        })
+        .collect()
 }
 
 /// The human-readable title when the source client stored one, falling back to
@@ -620,30 +657,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             })
             .collect()
     } else {
-        let labels = narrow_header_labels(lang, is_very_narrow, has_turn_data);
-        // The narrow layouts keep their hand-picked indices, and `usize::MAX`
-        // still stands for "this sort has no column here".
-        let (total_idx, cost_idx) = if is_very_narrow {
-            (usize::MAX, 1)
-        } else if has_turn_data {
-            (4, 5)
-        } else {
-            (3, 4)
-        };
-        labels
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = if i == total_idx {
-                    sort_indicator(SortField::Tokens)
-                } else if i == cost_idx {
-                    sort_indicator(SortField::Cost)
-                } else {
-                    ""
-                };
-                format!("{}{}", h, indicator)
-            })
-            .collect()
+        narrow_header_cells(lang, is_very_narrow, has_turn_data, sort_indicator)
     };
 
     let header = Row::new(header_cells.into_iter().map(Cell::from).collect::<Vec<_>>())
@@ -1417,33 +1431,59 @@ mod tests {
         for lang in TuiLanguage::ALL {
             for width in 40u16..=SWEEP_MAX {
                 for has_turn in [true, false] {
-                    let mut s = fat_session();
-                    if !has_turn {
-                        s.turn_count = 0;
-                    }
-                    let mut app = app_with(width, vec![s]);
-                    app.settings.tui_language = lang;
-                    let header = header_line(&mut app, width);
-                    let ctx = wide_ctx(has_turn);
-                    // Asked of the renderer's own helpers, never restated
-                    // here: a test that keeps its own copy of the label set
-                    // passes while the renderer uses a different one.
-                    let labels: Vec<&str> = if width >= 80 {
-                        admit_and_distribute(width - 2, &ctx)
-                            .chosen
-                            .iter()
-                            .map(|c| c.header(lang))
-                            .collect()
-                    } else {
-                        narrow_header_labels(lang, width < 60, has_turn)
-                    };
+                    // Every sortable field in both directions, so a header
+                    // whose sort arrow clips fails even when its label fits.
+                    for (field, direction) in [
+                        (SortField::Cost, SortDirection::Descending),
+                        (SortField::Cost, SortDirection::Ascending),
+                        (SortField::Tokens, SortDirection::Descending),
+                        (SortField::Tokens, SortDirection::Ascending),
+                        (SortField::Date, SortDirection::Descending),
+                        (SortField::Date, SortDirection::Ascending),
+                    ] {
+                        let mut s = fat_session();
+                        if !has_turn {
+                            s.turn_count = 0;
+                        }
+                        let mut app = app_with(width, vec![s]);
+                        app.settings.tui_language = lang;
+                        app.sort_field = field;
+                        app.sort_direction = direction;
+                        let header = header_line(&mut app, width);
+                        let ctx = wide_ctx(has_turn);
+                        let arrow = |f: SortField| -> &'static str {
+                            match (f == field, direction) {
+                                (false, _) => "",
+                                (true, SortDirection::Ascending) => " ▴",
+                                (true, SortDirection::Descending) => " ▾",
+                            }
+                        };
+                        // Asked of the renderer's own helpers, never restated
+                        // here: a test that keeps its own copy of the label set
+                        // passes while the renderer uses a different one.
+                        let cells: Vec<String> = if width >= 80 {
+                            admit_and_distribute(width - 2, &ctx)
+                                .chosen
+                                .iter()
+                                .map(|c| {
+                                    let indicator = c.sort_field().map(arrow).unwrap_or("");
+                                    format!("{}{}", c.header(lang), indicator)
+                                })
+                                .collect()
+                        } else {
+                            narrow_header_cells(lang, width < 60, has_turn, arrow)
+                        };
+                        let labels: Vec<&str> = cells.iter().map(String::as_str).collect();
 
-                    assert_headers_render_in_full(
-                        &format!("sessions(width={width},turn={has_turn})"),
-                        lang,
-                        &header,
-                        &labels,
-                    );
+                        assert_headers_render_in_full(
+                            &format!(
+                                "sessions(width={width},turn={has_turn},sort={field:?} {direction:?})"
+                            ),
+                            lang,
+                            &header,
+                            &labels,
+                        );
+                    }
                 }
             }
         }

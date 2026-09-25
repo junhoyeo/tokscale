@@ -98,6 +98,7 @@ pub enum MessageKey {
     /// `ColClient` for the percentage-width narrow tables, where the full word
     /// does not fit in CJK. See `tr_ja`'s note.
     ColClientShort,
+    ColTokensShort,
     ColProvider,
     ColSource,
     ColMessages,
@@ -508,6 +509,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ColModel => "Model",
         MessageKey::ColClient => "Client",
         MessageKey::ColClientShort => "Client",
+        MessageKey::ColTokensShort => "Tokens",
         MessageKey::ColProvider => "Provider",
         MessageKey::ColSource => "Source",
         MessageKey::ColMessages => "Msgs",
@@ -898,6 +900,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         // (`claude-code`, `codex`, `opencode`), so `도구` ("tool") named the
         // wrong thing and `CLI` would name only half of them.
         MessageKey::ColClientShort => "클라",
+        MessageKey::ColTokensShort => "토큰",
         MessageKey::ColProvider => "공급자",
         MessageKey::ColSource => "소스",
         MessageKey::ColMessages => "메시지",
@@ -1305,6 +1308,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         // word with no ellipsis. The column names the coding tool the session
         // came from, which is what `ツール` says in 6 cells.
         MessageKey::ColClientShort => "ツール",
+        MessageKey::ColTokensShort => "Token",
         MessageKey::ColProvider => "プロバイダ",
         MessageKey::ColSource => "ソース",
         MessageKey::ColMessages => "件数",
@@ -1698,6 +1702,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColClient => "客户端",
         // 6 cells, same as the full label, which already fits.
         MessageKey::ColClientShort => "客户端",
+        MessageKey::ColTokensShort => "Token",
         MessageKey::ColProvider => "供应商",
         MessageKey::ColSource => "来源",
         MessageKey::ColMessages => "消息",
@@ -2077,6 +2082,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColModel => "Modèle",
         MessageKey::ColClient => "Client",
         MessageKey::ColClientShort => "Client",
+        MessageKey::ColTokensShort => "Jetons",
         MessageKey::ColProvider => "Fournisseur",
         MessageKey::ColSource => "Source",
         MessageKey::ColMessages => "Msgs",
@@ -2604,6 +2610,7 @@ mod tests {
             MessageKey::ColModel,
             MessageKey::ColClient,
             MessageKey::ColClientShort,
+            MessageKey::ColTokensShort,
             MessageKey::ColProvider,
             MessageKey::ColSource,
             MessageKey::ColMessages,
