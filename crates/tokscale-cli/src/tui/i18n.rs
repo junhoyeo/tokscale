@@ -2431,7 +2431,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::UsageFetchingLong => "Récupération de l'abonnement...",
 
         // Usage: compact (<48 columns) action-bar labels
-        MessageKey::ActionRefreshSyncingShort => "r Sync",
+        MessageKey::ActionRefreshSyncingShort => "r Synchro",
         MessageKey::ActionAddingCodexShort => "a Ajout",
         MessageKey::ActionAddCodexShort => "a Ajout",
         MessageKey::ActionShowEmailsShort => "m Voir",
