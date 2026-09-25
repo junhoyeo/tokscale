@@ -162,7 +162,12 @@ impl SessionColumn {
             Self::Client => tr(lang, MessageKey::ColClient),
             Self::Model => tr(lang, MessageKey::ColModel),
             Self::Turn => tr(lang, MessageKey::ColTurn),
-            Self::Msgs => tr(lang, MessageKey::ColMessages),
+            // The short label, because this column's budget is 5 cells with
+            // turn data and the full `ColMessages` label is 6 in Korean —
+            // ratatui clipped `메시지` to `메시`, a truncated word with no
+            // ellipsis. `header_labels_fit_their_budget_in_every_language`
+            // pins the rest.
+            Self::Msgs => tr(lang, MessageKey::ColMessagesShort),
             Self::Input => tr(lang, MessageKey::ColInput),
             Self::Output => tr(lang, MessageKey::ColOutput),
             Self::CacheRead => tr(lang, MessageKey::ColCacheRead),
@@ -471,6 +476,44 @@ fn admit_and_distribute(available: u16, ctx: &WideCtx) -> WideLayout {
     }
 }
 
+/// The narrow and very-narrow layouts' header labels, in display order.
+///
+/// A function rather than an inline `vec!` so the budget test asserts against
+/// the labels the renderer actually writes. A test that restates the label set
+/// passes while the renderer uses a different one — which is how the Korean
+/// `클라이언트` clip survived a header test that had already been written.
+///
+/// These layouts are percentage-width, so no `natural()` budget exists to check
+/// arithmetically: `rendered_headers_survive_every_language_at_every_width` has
+/// to read the drawn row. The short `Client` label is what makes the CJK
+/// translations fit the roughly 9 cells the percentages grant at 60–80 columns.
+fn narrow_header_labels(
+    lang: TuiLanguage,
+    is_very_narrow: bool,
+    has_turn_data: bool,
+) -> Vec<&'static str> {
+    if is_very_narrow {
+        return vec![
+            tr(lang, MessageKey::ColSession),
+            tr(lang, MessageKey::ColCost),
+        ];
+    }
+
+    let mut labels = vec![
+        tr(lang, MessageKey::ColSession),
+        tr(lang, MessageKey::ColClientShort),
+    ];
+    if has_turn_data {
+        labels.push(tr(lang, MessageKey::ColTurn));
+    }
+    labels.extend([
+        tr(lang, MessageKey::ColMessages),
+        tr(lang, MessageKey::ColTokens),
+        tr(lang, MessageKey::ColCost),
+    ]);
+    labels
+}
+
 /// The human-readable title when the source client stored one, falling back to
 /// the session ID for clients that don't.
 fn session_label(s: &SessionUsage) -> &str {
@@ -577,29 +620,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             })
             .collect()
     } else {
-        let labels: Vec<&str> = if is_very_narrow {
-            vec![
-                tr(lang, MessageKey::ColSession),
-                tr(lang, MessageKey::ColCost),
-            ]
-        } else if has_turn_data {
-            vec![
-                tr(lang, MessageKey::ColSession),
-                tr(lang, MessageKey::ColClient),
-                tr(lang, MessageKey::ColTurn),
-                tr(lang, MessageKey::ColMessages),
-                tr(lang, MessageKey::ColTokens),
-                tr(lang, MessageKey::ColCost),
-            ]
-        } else {
-            vec![
-                tr(lang, MessageKey::ColSession),
-                tr(lang, MessageKey::ColClient),
-                tr(lang, MessageKey::ColMessages),
-                tr(lang, MessageKey::ColTokens),
-                tr(lang, MessageKey::ColCost),
-            ]
-        };
+        let labels = narrow_header_labels(lang, is_very_narrow, has_turn_data);
         // The narrow layouts keep their hand-picked indices, and `usize::MAX`
         // still stands for "this sort has no column here".
         let (total_idx, cost_idx) = if is_very_narrow {
@@ -864,6 +885,7 @@ mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
+    use crate::tui::ui::header_budget::{assert_header_fits, assert_headers_render_in_full};
     use ratatui::{backend::TestBackend, Terminal};
     use tokscale_core::ClientId;
     use unicode_width::UnicodeWidthStr;
@@ -1343,6 +1365,84 @@ mod tests {
                         !row.contains(&expected_value(column)),
                         "{:?} value showed at width {width} (turn={has_turn})\n{row}",
                         column
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every column's header fits its own budget in every language, arrow
+    /// included. #1367 translated the labels without re-checking the budgets
+    /// the layout was solved against, and Korean `ColMessages` (`메시지`, 6
+    /// cells) landed in `Msgs`'s 5-cell budget: ratatui clipped it to `메시`,
+    /// a truncated word with no ellipsis — the exact failure this module's doc
+    /// comment says it exists to prevent. English was unaffected (`Msgs` is 4
+    /// cells) and every other test here pins `TuiLanguage::En`, so nothing
+    /// caught it.
+    ///
+    /// Arithmetic against `natural()` rather than a rendered frame, so a new
+    /// translation fails at authoring time with the overflow named in cells
+    /// instead of only at whichever width admits the column.
+    #[test]
+    fn header_labels_fit_their_budget_in_every_language() {
+        for lang in TuiLanguage::ALL {
+            for has_turn in [true, false] {
+                let ctx = wide_ctx(has_turn);
+                for column in ALL {
+                    if !column.available(&ctx) {
+                        continue;
+                    }
+                    assert_header_fits(
+                        &format!("sessions/wide(turn={has_turn})"),
+                        &format!("{column:?}"),
+                        lang,
+                        column.header(lang),
+                        column.natural(&ctx),
+                        column.sort_field().is_some(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same claim through the renderer, in every language and across the
+    /// whole width sweep. `natural()` is the *declared* budget; this is the one
+    /// ratatui actually hands out, so the two together catch both a too-long
+    /// translation and a layout that stops honouring its own budget.
+    ///
+    /// Narrow and very-narrow widths are included, which the arithmetic test
+    /// cannot cover: those layouts are percentage-based and have no `natural()`.
+    #[test]
+    fn rendered_headers_survive_every_language_at_every_width() {
+        for lang in TuiLanguage::ALL {
+            for width in 40u16..=SWEEP_MAX {
+                for has_turn in [true, false] {
+                    let mut s = fat_session();
+                    if !has_turn {
+                        s.turn_count = 0;
+                    }
+                    let mut app = app_with(width, vec![s]);
+                    app.settings.tui_language = lang;
+                    let header = header_line(&mut app, width);
+                    let ctx = wide_ctx(has_turn);
+                    // Asked of the renderer's own helpers, never restated
+                    // here: a test that keeps its own copy of the label set
+                    // passes while the renderer uses a different one.
+                    let labels: Vec<&str> = if width >= 80 {
+                        admit_and_distribute(width - 2, &ctx)
+                            .chosen
+                            .iter()
+                            .map(|c| c.header(lang))
+                            .collect()
+                    } else {
+                        narrow_header_labels(lang, width < 60, has_turn)
+                    };
+
+                    assert_headers_render_in_full(
+                        &format!("sessions(width={width},turn={has_turn})"),
+                        lang,
+                        &header,
+                        &labels,
                     );
                 }
             }

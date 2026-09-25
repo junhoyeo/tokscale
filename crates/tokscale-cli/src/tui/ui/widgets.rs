@@ -565,6 +565,46 @@ pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// [`truncate_ellipsis`] measured in terminal cells instead of code points.
+///
+/// Same one-cell `…` marker, so a pure-ASCII string comes out byte-identical to
+/// what [`truncate_ellipsis`] produces — but a string holding full-width
+/// graphemes is cut against the width ratatui will actually draw it at. A
+/// code-point budget lets `활성 · 한도부족` (9 code points, 15 cells) through a
+/// 14-cell column untouched, and ratatui then clips it at the panel edge with
+/// no marker at all, which is the failure this exists to prevent.
+pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
+    if max_cells == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_cells {
+        return s.to_string();
+    }
+    if max_cells == 1 {
+        return "…".to_string();
+    }
+    format!("{}…", prefix_to_width(s, max_cells - 1))
+}
+
+/// Pad `s` with trailing spaces until it occupies `cells` terminal cells.
+///
+/// The cell-counting replacement for `format!("{:<cells$}", s)`, which pads by
+/// **code points**: `한도부족` is 4 code points and 8 cells, so `{:<11}` grew it
+/// to 15 cells and every wide row started its next column somewhere else.
+/// Already-too-wide text is returned unchanged — pad, never truncate, so the
+/// caller keeps deciding how a cut is marked.
+pub(crate) fn pad_to_width(s: &str, cells: usize) -> String {
+    let mut out = s.to_string();
+    out.push_str(&" ".repeat(cells.saturating_sub(display_width(s))));
+    out
+}
+
+/// Right-aligned twin of [`pad_to_width`], replacing `format!("{:>cells$}", s)`.
+pub(crate) fn pad_start_to_width(s: &str, cells: usize) -> String {
+    let padding = " ".repeat(cells.saturating_sub(display_width(s)));
+    format!("{padding}{s}")
+}
+
 pub fn get_model_color(model: &str) -> Color {
     get_provider_shade(get_provider_from_model(model), 0)
 }
@@ -1002,6 +1042,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The cell-based twin agrees with the code-point one on ASCII — which is
+    /// what keeps `en` byte-identical — and disagrees exactly where a
+    /// code-point budget is wrong.
+    #[test]
+    fn truncate_ellipsis_to_width_matches_the_char_version_on_ascii() {
+        for budget in 0..=24 {
+            for s in [
+                "Active · Watch",
+                "Quota Low",
+                "nearest expires 2031-01-01 09:00",
+                "",
+            ] {
+                assert_eq!(
+                    truncate_ellipsis_to_width(s, budget),
+                    truncate_ellipsis(s, budget),
+                    "{s:?} at {budget} cells"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_ellipsis_to_width_never_exceeds_its_budget_and_marks_the_cut() {
+        // 9 code points, 15 cells: the case a `{:>14}` column got wrong.
+        let wide = "활성 · 한도부족";
+        assert_eq!(
+            truncate_ellipsis(wide, 14),
+            wide,
+            "code points say it fits a 14-cell column"
+        );
+        let fitted = truncate_ellipsis_to_width(wide, 14);
+        assert!(display_width(&fitted) <= 14, "{fitted:?}");
+        assert!(fitted.ends_with('…'), "the cut must be marked: {fitted:?}");
+
+        for budget in 0..=20 {
+            for s in [wide, "残量わずか · 残量少", "配额不足", "ascii state"] {
+                let out = truncate_ellipsis_to_width(s, budget);
+                assert!(
+                    display_width(&out) <= budget,
+                    "{s:?} overflowed a {budget}-cell budget as {out:?}"
+                );
+                if display_width(s) > budget && budget > 0 {
+                    assert!(
+                        out.ends_with('…'),
+                        "{s:?} was cut without a marker at {budget}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pad_to_width_pads_in_cells_not_code_points() {
+        // `{:<11}` on this 4-code-point / 8-cell label produced 15 cells.
+        assert_eq!(display_width(&pad_to_width("한도부족", 11)), 11);
+        assert_eq!(display_width(&pad_start_to_width("한도부족", 11)), 11);
+        // ASCII is unchanged relative to `format!`, which is what keeps `en`
+        // byte-identical.
+        assert_eq!(pad_to_width("Watch", 11), format!("{:<11}", "Watch"));
+        assert_eq!(pad_start_to_width("Watch", 11), format!("{:>11}", "Watch"));
+        // Too-wide text is returned untouched, never cut.
+        assert_eq!(pad_to_width("한도부족", 4), "한도부족");
+        assert_eq!(pad_start_to_width("한도부족", 4), "한도부족");
     }
 
     #[test]

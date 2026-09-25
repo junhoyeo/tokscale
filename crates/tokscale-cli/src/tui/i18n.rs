@@ -95,6 +95,9 @@ pub enum MessageKey {
     ColTokens,
     ColModel,
     ColClient,
+    /// `ColClient` for the percentage-width narrow tables, where the full word
+    /// does not fit in CJK. See `tr_ja`'s note.
+    ColClientShort,
     ColProvider,
     ColSource,
     ColMessages,
@@ -344,6 +347,123 @@ pub enum MessageKey {
     ColLimit,
     ColReset,
     UsageAccountOrStatus,
+    // Usage: empty and failure states
+    UsageEmptyNoData,
+    UsageEmptyNotLoadedTitle,
+    UsageEmptyNotLoadedHint,
+    UsageFetchFailed,
+    UsageEmptyNoSubscriptionData,
+    UsageNoAttentionNeeded,
+
+    // Usage: overall state vocabulary (the `State` row's value)
+    StateSwitchRecommended,
+    StateReady,
+    StateReadyWithWarnings,
+    StateQuotaLow,
+    StateUnknown,
+
+    // Usage: per-account readiness, which also fills the `Health` column
+    HealthReady,
+    HealthWatch,
+    HealthQuotaLow,
+    HealthUnknown,
+
+    // Usage: summary K/V row labels, padded to 12 cells by `push_kv_styled`
+    LabelState,
+    LabelActiveAccount,
+    LabelCapacity,
+    LabelFallback,
+    LabelNextReset,
+    LabelAction,
+
+    // Usage: summary K/V row values
+    UsageNoActiveAccount,
+    UsageNoReadyFallback,
+    UsageNoResetData,
+    UsagePercentLeft,
+    CapacityReady,
+    CapacityWatch,
+    CapacityCritical,
+    CapacityUnknown,
+
+    // Usage: the recommended next action
+    ActionChooseActive,
+    ActionRefreshUnknownLimits,
+    ActionKeepCurrent,
+    ActionMonitorQuota,
+    ActionUsePrefix,
+    ActionWaitForReset,
+    ActionRefreshActive,
+
+    // Usage: account state, which also fills the `Auth` column
+    AuthActive,
+    AuthSaved,
+    AuthManaged,
+    StateAuthenticated,
+    LabelUnknown,
+
+    // Usage: "+N more ..." counters
+    UsageMoreIssues,
+    UsageMoreIssuesPlural,
+    UsageMoreAtRisk,
+    UsageMoreAtRiskPlural,
+
+    // Usage: row-action buttons
+    ButtonUseAccount,
+    ButtonRemove,
+    ButtonReset,
+
+    // Usage: limits, metrics and the snapshot line
+    UsageNoLimits,
+    UsageNoQuotaMetrics,
+    UsageNoQuotaMetricsReturned,
+    UsageSnapshot,
+    UsageAtRisk,
+    UsageEmailsHidden,
+
+    // Usage: credit-bank expiry rows and counters
+    CreditExpiryUnknown,
+    CreditExpiresPrefix,
+    CreditNearestExpires,
+    CreditMoreResetCredits,
+    CreditMoreResetCreditsPlural,
+    CreditCountSingular,
+    CreditCountPlural,
+    CreditAvailableSingular,
+    CreditAvailablePlural,
+    CreditAvailableAcrossAccounts,
+    UsageNoResetCredits,
+
+    // Usage: the Codex login panel
+    CodexLoginTitle,
+    CodexLoginImported,
+    CodexLoginFailed,
+    CodexLoginRunning,
+    CodexLoginIdle,
+    CodexLoginCancel,
+    CodexLoginDismiss,
+    CodexLoginWaiting,
+    CodexLoginImportedPrefix,
+
+    // Usage: the fetching spinner
+    UsageFetchingShort,
+    UsageFetchingLong,
+
+    // Usage: compact (<48 columns) action-bar labels
+    ActionRefreshSyncingShort,
+    ActionAddingCodexShort,
+    ActionAddCodexShort,
+    ActionShowEmailsShort,
+    ActionHideEmailsShort,
+
+    // Usage: credential provenance wording
+    CredentialSavedActive,
+    CredentialSaved,
+    CredentialManagedByPrefix,
+    CredentialManagedExternally,
+    UsageCurrentAccount,
+    UsageManagedByPrefix,
+    UsageManagedExternally,
 }
 
 pub fn tr(lang: TuiLanguage, key: MessageKey) -> &'static str {
@@ -387,6 +507,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ColTokens => "Tokens",
         MessageKey::ColModel => "Model",
         MessageKey::ColClient => "Client",
+        MessageKey::ColClientShort => "Client",
         MessageKey::ColProvider => "Provider",
         MessageKey::ColSource => "Source",
         MessageKey::ColMessages => "Msgs",
@@ -617,6 +738,125 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ColLimit => "Limit",
         MessageKey::ColReset => "Reset",
         MessageKey::UsageAccountOrStatus => "Account / Status",
+
+        // Usage: empty and failure states
+        MessageKey::UsageEmptyNoData => "No usage data",
+        MessageKey::UsageEmptyNotLoadedTitle => "No subscription data loaded",
+        MessageKey::UsageEmptyNotLoadedHint => "Use Refresh to sync provider usage, or Add Codex to save another account.",
+        MessageKey::UsageFetchFailed => "Usage fetch failed",
+        MessageKey::UsageEmptyNoSubscriptionData => "No subscription data available",
+        MessageKey::UsageNoAttentionNeeded => "No accounts need attention",
+
+        // Usage: overall state vocabulary
+        MessageKey::StateSwitchRecommended => "Switch recommended",
+        MessageKey::StateReady => "Ready",
+        MessageKey::StateReadyWithWarnings => "Ready with warnings",
+        MessageKey::StateQuotaLow => "Quota low",
+        MessageKey::StateUnknown => "Unknown",
+
+        // Usage: per-account readiness / the Health column
+        MessageKey::HealthReady => "Ready",
+        MessageKey::HealthWatch => "Watch",
+        MessageKey::HealthQuotaLow => "Quota Low",
+        MessageKey::HealthUnknown => "Unknown",
+
+        // Usage: summary K/V row labels
+        MessageKey::LabelState => "State",
+        MessageKey::LabelActiveAccount => "Active",
+        MessageKey::LabelCapacity => "Capacity",
+        MessageKey::LabelFallback => "Fallback",
+        MessageKey::LabelNextReset => "Next Reset",
+        MessageKey::LabelAction => "Action",
+
+        // Usage: summary K/V row values
+        MessageKey::UsageNoActiveAccount => "No active account",
+        MessageKey::UsageNoReadyFallback => "No ready fallback",
+        MessageKey::UsageNoResetData => "No reset data",
+        MessageKey::UsagePercentLeft => "% left",
+        MessageKey::CapacityReady => "ready",
+        MessageKey::CapacityWatch => "watch",
+        MessageKey::CapacityCritical => "critical",
+        MessageKey::CapacityUnknown => "unknown",
+
+        // Usage: recommended next action
+        MessageKey::ActionChooseActive => "Choose an active account",
+        MessageKey::ActionRefreshUnknownLimits => "Refresh accounts with unknown limits",
+        MessageKey::ActionKeepCurrent => "Keep current account",
+        MessageKey::ActionMonitorQuota => "Monitor active quota",
+        MessageKey::ActionUsePrefix => "Use",
+        MessageKey::ActionWaitForReset => "Wait for reset or refresh",
+        MessageKey::ActionRefreshActive => "Refresh active account",
+
+        // Usage: account state / the Auth column
+        MessageKey::AuthActive => "Active",
+        MessageKey::AuthSaved => "Saved",
+        MessageKey::AuthManaged => "Managed",
+        MessageKey::StateAuthenticated => "Authenticated",
+        MessageKey::LabelUnknown => "Unknown",
+
+        // Usage: "+N more ..." counters
+        MessageKey::UsageMoreIssues => "more issue",
+        MessageKey::UsageMoreIssuesPlural => "more issues",
+        MessageKey::UsageMoreAtRisk => "more at risk",
+        MessageKey::UsageMoreAtRiskPlural => "more at risk",
+
+        // Usage: row-action buttons
+        MessageKey::ButtonUseAccount => "Use Account",
+        MessageKey::ButtonRemove => "Remove",
+        MessageKey::ButtonReset => "Reset",
+
+        // Usage: limits, metrics and the snapshot line
+        MessageKey::UsageNoLimits => "No limits",
+        MessageKey::UsageNoQuotaMetrics => "No quota metrics",
+        MessageKey::UsageNoQuotaMetricsReturned => "No quota metrics returned",
+        MessageKey::UsageSnapshot => "Snapshot",
+        MessageKey::UsageAtRisk => "at risk",
+        MessageKey::UsageEmailsHidden => "emails hidden",
+
+        // Usage: credit-bank expiry rows and counters
+        MessageKey::CreditExpiryUnknown => "expiry unknown",
+        MessageKey::CreditExpiresPrefix => "expires",
+        MessageKey::CreditNearestExpires => "nearest expires",
+        MessageKey::CreditMoreResetCredits => "more reset credit",
+        MessageKey::CreditMoreResetCreditsPlural => "more reset credits",
+        MessageKey::CreditCountSingular => "credit",
+        MessageKey::CreditCountPlural => "credits",
+        MessageKey::CreditAvailableSingular => "available",
+        MessageKey::CreditAvailablePlural => "available",
+        MessageKey::CreditAvailableAcrossAccounts => "available across accounts",
+        MessageKey::UsageNoResetCredits => "No reset credits",
+
+        // Usage: the Codex login panel
+        MessageKey::CodexLoginTitle => "Codex Login",
+        MessageKey::CodexLoginImported => "Imported",
+        MessageKey::CodexLoginFailed => "Failed",
+        MessageKey::CodexLoginRunning => "Running",
+        MessageKey::CodexLoginIdle => "Idle",
+        MessageKey::CodexLoginCancel => "[Cancel]",
+        MessageKey::CodexLoginDismiss => "[Dismiss]",
+        MessageKey::CodexLoginWaiting => "Waiting for codex output...",
+        MessageKey::CodexLoginImportedPrefix => "Imported",
+
+        // Usage: the fetching spinner
+        MessageKey::UsageFetchingShort => "Fetching usage...",
+        MessageKey::UsageFetchingLong => "Fetching subscription data...",
+
+        // Usage: compact (<48 columns) action-bar labels
+        MessageKey::ActionRefreshSyncingShort => "r Sync",
+        MessageKey::ActionAddingCodexShort => "a Adding",
+        MessageKey::ActionAddCodexShort => "a Add",
+        MessageKey::ActionShowEmailsShort => "m Show",
+        MessageKey::ActionHideEmailsShort => "m Hide",
+
+        // Usage: credential provenance wording
+        MessageKey::CredentialSavedActive => "saved store, current Codex login",
+        MessageKey::CredentialSaved => "saved store",
+        MessageKey::CredentialManagedByPrefix => "managed by",
+        MessageKey::CredentialManagedExternally => "managed externally",
+        MessageKey::UsageCurrentAccount => "Current account",
+        MessageKey::UsageManagedByPrefix => "Managed by",
+        MessageKey::UsageManagedExternally => "Managed externally",
+
     }
 }
 
@@ -651,10 +891,22 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColTokens => "토큰",
         MessageKey::ColModel => "모델",
         MessageKey::ColClient => "클라이언트",
+        // 4 cells. `클라이언트` is 10 and the narrow Sessions table grants this
+        // column about 9, so it rendered as `클라이언`. `클라` is the ordinary
+        // Korean clipping of `클라이언트` and keeps the wide and narrow layouts
+        // reading as the same word; the column holds CLI *and* desktop clients
+        // (`claude-code`, `codex`, `opencode`), so `도구` ("tool") named the
+        // wrong thing and `CLI` would name only half of them.
+        MessageKey::ColClientShort => "클라",
         MessageKey::ColProvider => "공급자",
         MessageKey::ColSource => "소스",
         MessageKey::ColMessages => "메시지",
-        MessageKey::ColMessagesShort => "메시지",
+        // 4 cells, because `SessionColumn::Msgs` budgets 5 when the wide
+        // Sessions table also shows Turn and `메시지` is 6 — it rendered as
+        // `메시`, a truncated word with no ellipsis. `건수` ("number of
+        // items") is the count-column wording Korean tables use, and it
+        // matches the Japanese short label `件数`.
+        MessageKey::ColMessagesShort => "건수",
         MessageKey::ColInput => "입력",
         MessageKey::ColOutput => "출력",
         MessageKey::ColCacheRead => "캐시 읽기",
@@ -870,7 +1122,11 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::LabelEmail => "이메일",
         MessageKey::LabelCredential => "자격 증명",
         MessageKey::LabelCredits => "크레딧",
-        MessageKey::LabelResetBank => "초기화 보관함",
+        // 8 cells. `초기화 보관함` is 13 and `push_kv_styled` pads its key to
+        // 12, so the longer label pushed this row's value out of line with
+        // every other row in the panel. `초기화권` is the voucher reading of a
+        // reset credit.
+        MessageKey::LabelResetBank => "초기화권",
 
         MessageKey::ColAccount => "계정",
         MessageKey::ColPlan => "요금제",
@@ -879,6 +1135,137 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColLimit => "한도",
         MessageKey::ColReset => "초기화",
         MessageKey::UsageAccountOrStatus => "계정 / 상태",
+
+        // Usage: empty and failure states
+        MessageKey::UsageEmptyNoData => "사용량 데이터 없음",
+        MessageKey::UsageEmptyNotLoadedTitle => "구독 데이터가 로드되지 않음",
+        MessageKey::UsageEmptyNotLoadedHint => "새로고침으로 공급자 사용량을 동기화하거나, Codex 추가로 다른 계정을 저장하세요.",
+        MessageKey::UsageFetchFailed => "사용량 조회 실패",
+        MessageKey::UsageEmptyNoSubscriptionData => "사용 가능한 구독 데이터가 없습니다",
+        MessageKey::UsageNoAttentionNeeded => "주의가 필요한 계정이 없습니다",
+
+        // Usage: overall state vocabulary
+        MessageKey::StateSwitchRecommended => "전환 권장",
+        MessageKey::StateReady => "정상",
+        MessageKey::StateReadyWithWarnings => "정상 (주의 있음)",
+        MessageKey::StateQuotaLow => "한도 부족",
+        // `미확인`, matching `HealthUnknown` and `CapacityUnknown`: the State
+        // row and the Health column are visible on the same frame, so the same
+        // concept must not be `알 수 없음` in one and `미확인` in the other.
+        MessageKey::StateUnknown => "미확인",
+
+        // Usage: per-account readiness / the Health column. The 8-cell column
+        // forces short forms, so these must read as *deliberate* short forms of
+        // the `State` row's words rather than as typos: `부족` is visibly the
+        // clipped form of `한도 부족`, where the previous `한도부족` differed from
+        // it only by a missing space.
+        MessageKey::HealthReady => "정상",
+        MessageKey::HealthWatch => "주의",
+        MessageKey::HealthQuotaLow => "부족",
+        MessageKey::HealthUnknown => "미확인",
+
+        // Usage: summary K/V row labels
+        MessageKey::LabelState => "상태",
+        MessageKey::LabelActiveAccount => "활성 계정",
+        MessageKey::LabelCapacity => "잔여 용량",
+        MessageKey::LabelFallback => "대체 계정",
+        MessageKey::LabelNextReset => "다음 초기화",
+        MessageKey::LabelAction => "조치",
+
+        // Usage: summary K/V row values
+        MessageKey::UsageNoActiveAccount => "활성 계정 없음",
+        MessageKey::UsageNoReadyFallback => "사용 가능한 대체 계정 없음",
+        MessageKey::UsageNoResetData => "초기화 정보 없음",
+        MessageKey::UsagePercentLeft => "% 남음",
+        MessageKey::CapacityReady => "정상",
+        MessageKey::CapacityWatch => "주의",
+        MessageKey::CapacityCritical => "위험",
+        MessageKey::CapacityUnknown => "미확인",
+
+        // Usage: recommended next action
+        MessageKey::ActionChooseActive => "활성 계정을 선택하세요",
+        MessageKey::ActionRefreshUnknownLimits => "한도를 알 수 없는 계정을 새로고침하세요",
+        MessageKey::ActionKeepCurrent => "현재 계정 유지",
+        MessageKey::ActionMonitorQuota => "활성 계정 한도를 확인하세요",
+        MessageKey::ActionUsePrefix => "전환:",
+        MessageKey::ActionWaitForReset => "초기화를 기다리거나 새로고침하세요",
+        MessageKey::ActionRefreshActive => "활성 계정을 새로고침하세요",
+
+        // Usage: account state / the Auth column
+        MessageKey::AuthActive => "활성",
+        MessageKey::AuthSaved => "저장됨",
+        MessageKey::AuthManaged => "관리됨",
+        MessageKey::StateAuthenticated => "인증됨",
+        // Same `Unknown` concept as `StateUnknown`/`HealthUnknown`, so the same
+        // word.
+        MessageKey::LabelUnknown => "미확인",
+
+        // Usage: "+N more ..." counters. These are rendered as `{n}{word}`
+        // (see `more_count_label`), so the Korean measure word belongs at the
+        // head of the value: `+2건의 문제 더`, `+2개 위험 계정 더`.
+        MessageKey::UsageMoreIssues => "건의 문제 더",
+        MessageKey::UsageMoreIssuesPlural => "건의 문제 더",
+        MessageKey::UsageMoreAtRisk => "개 위험 계정 더",
+        MessageKey::UsageMoreAtRiskPlural => "개 위험 계정 더",
+
+        // Usage: row-action buttons
+        MessageKey::ButtonUseAccount => "이 계정 사용",
+        MessageKey::ButtonRemove => "삭제",
+        MessageKey::ButtonReset => "초기화",
+
+        // Usage: limits, metrics and the snapshot line
+        MessageKey::UsageNoLimits => "한도 정보 없음",
+        MessageKey::UsageNoQuotaMetrics => "한도 지표 없음",
+        MessageKey::UsageNoQuotaMetricsReturned => "한도 지표가 반환되지 않았습니다",
+        MessageKey::UsageSnapshot => "요약",
+        MessageKey::UsageAtRisk => "위험",
+        MessageKey::UsageEmailsHidden => "이메일 숨김",
+
+        // Usage: credit-bank expiry rows and counters
+        MessageKey::CreditExpiryUnknown => "만료일 미확인",
+        MessageKey::CreditExpiresPrefix => "만료",
+        MessageKey::CreditNearestExpires => "가장 빠른 만료",
+        MessageKey::CreditMoreResetCredits => "개 초기화권 더",
+        MessageKey::CreditMoreResetCreditsPlural => "개 초기화권 더",
+        MessageKey::CreditCountSingular => "개 초기화권",
+        MessageKey::CreditCountPlural => "개 초기화권",
+        MessageKey::CreditAvailableSingular => "개 사용 가능",
+        MessageKey::CreditAvailablePlural => "개 사용 가능",
+        MessageKey::CreditAvailableAcrossAccounts => "개 계정 전체 사용 가능",
+        MessageKey::UsageNoResetCredits => "초기화권 없음",
+
+        // Usage: the Codex login panel
+        MessageKey::CodexLoginTitle => "Codex 로그인",
+        MessageKey::CodexLoginImported => "가져옴",
+        MessageKey::CodexLoginFailed => "실패",
+        MessageKey::CodexLoginRunning => "진행 중",
+        MessageKey::CodexLoginIdle => "대기",
+        MessageKey::CodexLoginCancel => "[취소]",
+        MessageKey::CodexLoginDismiss => "[닫기]",
+        MessageKey::CodexLoginWaiting => "codex 출력을 기다리는 중...",
+        MessageKey::CodexLoginImportedPrefix => "가져옴:",
+
+        // Usage: the fetching spinner
+        MessageKey::UsageFetchingShort => "사용량 조회 중...",
+        MessageKey::UsageFetchingLong => "구독 데이터 조회 중...",
+
+        // Usage: compact (<48 columns) action-bar labels
+        MessageKey::ActionRefreshSyncingShort => "r 동기화",
+        MessageKey::ActionAddingCodexShort => "a 추가 중",
+        MessageKey::ActionAddCodexShort => "a 추가",
+        MessageKey::ActionShowEmailsShort => "m 표시",
+        MessageKey::ActionHideEmailsShort => "m 숨김",
+
+        // Usage: credential provenance wording
+        MessageKey::CredentialSavedActive => "저장소, 현재 Codex 로그인",
+        MessageKey::CredentialSaved => "저장소",
+        MessageKey::CredentialManagedByPrefix => "관리 주체:",
+        MessageKey::CredentialManagedExternally => "외부에서 관리됨",
+        MessageKey::UsageCurrentAccount => "현재 계정",
+        MessageKey::UsageManagedByPrefix => "관리 주체:",
+        MessageKey::UsageManagedExternally => "외부에서 관리됨",
+
+
     })
 }
 
@@ -913,6 +1300,11 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColTokens => "トークン",
         MessageKey::ColModel => "モデル",
         MessageKey::ColClient => "クライアント",
+        // 6 cells. `クライアント` is 12 and the narrow Sessions table grants
+        // this column about 9, so it rendered as `クライアン` — a truncated
+        // word with no ellipsis. The column names the coding tool the session
+        // came from, which is what `ツール` says in 6 cells.
+        MessageKey::ColClientShort => "ツール",
         MessageKey::ColProvider => "プロバイダ",
         MessageKey::ColSource => "ソース",
         MessageKey::ColMessages => "件数",
@@ -1130,7 +1522,8 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::LabelEmail => "メール",
         MessageKey::LabelCredential => "認証情報",
         MessageKey::LabelCredits => "クレジット",
-        MessageKey::LabelResetBank => "リセットバンク",
+        // 10 cells; `リセットバンク` is 14 and overflowed the 12-cell gutter.
+        MessageKey::LabelResetBank => "リセット枠",
 
         MessageKey::ColAccount => "アカウント",
         MessageKey::ColPlan => "プラン",
@@ -1139,6 +1532,136 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColLimit => "制限",
         MessageKey::ColReset => "リセット",
         MessageKey::UsageAccountOrStatus => "アカウント / 状態",
+
+        // Usage: empty and failure states
+        MessageKey::UsageEmptyNoData => "使用量データなし",
+        MessageKey::UsageEmptyNotLoadedTitle => "サブスクリプションデータ未ロード",
+        MessageKey::UsageEmptyNotLoadedHint => "更新でプロバイダーの使用量を同期するか、Codex 追加で別のアカウントを保存してください。",
+        MessageKey::UsageFetchFailed => "使用量の取得に失敗しました",
+        MessageKey::UsageEmptyNoSubscriptionData => "利用できるサブスクリプションデータがありません",
+        MessageKey::UsageNoAttentionNeeded => "注意が必要なアカウントはありません",
+
+        // Usage: overall state vocabulary
+        MessageKey::StateSwitchRecommended => "切り替え推奨",
+        MessageKey::StateReady => "正常",
+        MessageKey::StateReadyWithWarnings => "正常（注意あり）",
+        // `残量少`, the same word as `HealthQuotaLow`: both are visible on the
+        // same frame and 6 cells fits the State row, so there is no reason for
+        // two spellings of one concept.
+        MessageKey::StateQuotaLow => "残量少",
+        MessageKey::StateUnknown => "不明",
+
+        // Usage: per-account readiness / the Health column
+        MessageKey::HealthReady => "正常",
+        MessageKey::HealthWatch => "注意",
+        MessageKey::HealthQuotaLow => "残量少",
+        MessageKey::HealthUnknown => "不明",
+
+        // Usage: summary K/V row labels
+        MessageKey::LabelState => "状態",
+        MessageKey::LabelActiveAccount => "使用中",
+        MessageKey::LabelCapacity => "残量",
+        MessageKey::LabelFallback => "代替",
+        // `次回リセット` is exactly 12 cells, which left `push_kv_styled`'s
+        // 12-cell gutter with zero padding and collided with its value.
+        // `リセット日` ("reset date") is 10 and keeps a separating space.
+        MessageKey::LabelNextReset => "リセット日",
+        MessageKey::LabelAction => "対応",
+
+        // Usage: summary K/V row values
+        MessageKey::UsageNoActiveAccount => "使用中のアカウントなし",
+        MessageKey::UsageNoReadyFallback => "利用可能な代替なし",
+        MessageKey::UsageNoResetData => "リセット情報なし",
+        MessageKey::UsagePercentLeft => "% 残り",
+        MessageKey::CapacityReady => "正常",
+        MessageKey::CapacityWatch => "注意",
+        MessageKey::CapacityCritical => "危険",
+        MessageKey::CapacityUnknown => "不明",
+
+        // Usage: recommended next action
+        MessageKey::ActionChooseActive => "使用するアカウントを選択してください",
+        MessageKey::ActionRefreshUnknownLimits => "制限が不明なアカウントを更新してください",
+        MessageKey::ActionKeepCurrent => "現在のアカウントを継続",
+        MessageKey::ActionMonitorQuota => "使用中の残量を監視してください",
+        MessageKey::ActionUsePrefix => "切り替え:",
+        MessageKey::ActionWaitForReset => "リセットを待つか更新してください",
+        MessageKey::ActionRefreshActive => "使用中のアカウントを更新してください",
+
+        // Usage: account state / the Auth column
+        MessageKey::AuthActive => "有効",
+        MessageKey::AuthSaved => "保存済",
+        MessageKey::AuthManaged => "管理中",
+        MessageKey::StateAuthenticated => "認証済み",
+        MessageKey::LabelUnknown => "不明",
+
+        // Usage: "+N more ..." counters
+        MessageKey::UsageMoreIssues => "件の問題",
+        MessageKey::UsageMoreIssuesPlural => "件の問題",
+        MessageKey::UsageMoreAtRisk => "件が危険",
+        MessageKey::UsageMoreAtRiskPlural => "件が危険",
+
+        // Usage: row-action buttons
+        MessageKey::ButtonUseAccount => "このアカウントを使用",
+        MessageKey::ButtonRemove => "削除",
+        MessageKey::ButtonReset => "リセット",
+
+        // Usage: limits, metrics and the snapshot line
+        MessageKey::UsageNoLimits => "制限なし",
+        MessageKey::UsageNoQuotaMetrics => "残量指標なし",
+        MessageKey::UsageNoQuotaMetricsReturned => "残量指標が返されませんでした",
+        MessageKey::UsageSnapshot => "スナップショット",
+        MessageKey::UsageAtRisk => "危険",
+        MessageKey::UsageEmailsHidden => "メール非表示",
+
+        // Usage: credit-bank expiry rows and counters
+        MessageKey::CreditExpiryUnknown => "有効期限不明",
+        MessageKey::CreditExpiresPrefix => "有効期限",
+        MessageKey::CreditNearestExpires => "最短の有効期限",
+        MessageKey::CreditMoreResetCredits => "件のリセット枠",
+        MessageKey::CreditMoreResetCreditsPlural => "件のリセット枠",
+        // `枠` ("slot/allowance"), not a bare `件`: `3件` is a counter with no
+        // noun where English says `3 credits` and this panel's own heading says
+        // `リセット枠`. `3枠` carries the noun in the counter, the way Japanese
+        // counts allowances.
+        MessageKey::CreditCountSingular => "枠",
+        MessageKey::CreditCountPlural => "枠",
+        MessageKey::CreditAvailableSingular => "件利用可能",
+        MessageKey::CreditAvailablePlural => "件利用可能",
+        MessageKey::CreditAvailableAcrossAccounts => "件が全アカウントで利用可能",
+        MessageKey::UsageNoResetCredits => "リセット枠なし",
+
+        // Usage: the Codex login panel
+        MessageKey::CodexLoginTitle => "Codex ログイン",
+        MessageKey::CodexLoginImported => "取り込み完了",
+        MessageKey::CodexLoginFailed => "失敗",
+        MessageKey::CodexLoginRunning => "実行中",
+        MessageKey::CodexLoginIdle => "待機",
+        MessageKey::CodexLoginCancel => "[中止]",
+        MessageKey::CodexLoginDismiss => "[閉じる]",
+        MessageKey::CodexLoginWaiting => "codex の出力を待機中...",
+        MessageKey::CodexLoginImportedPrefix => "取り込み完了:",
+
+        // Usage: the fetching spinner
+        MessageKey::UsageFetchingShort => "使用量を取得中...",
+        MessageKey::UsageFetchingLong => "サブスクリプションデータを取得中...",
+
+        // Usage: compact (<48 columns) action-bar labels
+        MessageKey::ActionRefreshSyncingShort => "r 同期",
+        MessageKey::ActionAddingCodexShort => "a 追加中",
+        MessageKey::ActionAddCodexShort => "a 追加",
+        MessageKey::ActionShowEmailsShort => "m 表示",
+        MessageKey::ActionHideEmailsShort => "m 非表示",
+
+        // Usage: credential provenance wording
+        MessageKey::CredentialSavedActive => "保存済み、現在の Codex ログイン",
+        MessageKey::CredentialSaved => "保存済み",
+        MessageKey::CredentialManagedByPrefix => "管理元:",
+        MessageKey::CredentialManagedExternally => "外部で管理",
+        MessageKey::UsageCurrentAccount => "使用中のアカウント",
+        MessageKey::UsageManagedByPrefix => "管理元:",
+        MessageKey::UsageManagedExternally => "外部で管理",
+
+
     })
 }
 
@@ -1173,6 +1696,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColTokens => "Token",
         MessageKey::ColModel => "模型",
         MessageKey::ColClient => "客户端",
+        // 6 cells, same as the full label, which already fits.
+        MessageKey::ColClientShort => "客户端",
         MessageKey::ColProvider => "供应商",
         MessageKey::ColSource => "来源",
         MessageKey::ColMessages => "消息",
@@ -1284,8 +1809,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::TitleDailyBreakdown => " 每日明细 ",
         MessageKey::TitleDailyBreakdownPrefix => " 每日明细: ",
 
-        MessageKey::ChartTokensPerDay => "每日代币",
-        MessageKey::ChartTokens => "代币",
+        MessageKey::ChartTokensPerDay => "每日 Token",
+        MessageKey::ChartTokens => "Token",
 
         MessageKey::EmptyNoDailyData => "未找到每日用量数据。按 'r' 刷新。",
         MessageKey::EmptyNoMonthlyData => "未找到每月用量数据。按 'r' 刷新。",
@@ -1308,8 +1833,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::StatsFavoriteModel => "常用模型:",
         MessageKey::StatsFavoriteModelShort => "模型:",
-        MessageKey::StatsTotalTokens => "总代币:",
-        MessageKey::StatsTokensShort => "代币:",
+        MessageKey::StatsTotalTokens => "Token 总数:",
+        MessageKey::StatsTokensShort => "Token:",
         MessageKey::StatsSessions => "会话数:",
         MessageKey::StatsTotalCost => "总费用:",
         MessageKey::StatsCostShort => "费用:",
@@ -1341,7 +1866,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ProfileLegend => "图例: ",
         MessageKey::ProfileLow => "低",
         MessageKey::ProfileHigh => "高",
-        MessageKey::ProfileTotalTokens => "总代币",
+        MessageKey::ProfileTotalTokens => "Token 总数",
         MessageKey::ProfileTotalCost => "总费用",
         MessageKey::PeriodMorning => "早晨",
         MessageKey::PeriodDaytime => "白天",
@@ -1397,6 +1922,126 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColLimit => "限制",
         MessageKey::ColReset => "重置",
         MessageKey::UsageAccountOrStatus => "账户 / 状态",
+
+        // Usage: empty and failure states
+        MessageKey::UsageEmptyNoData => "无用量数据",
+        MessageKey::UsageEmptyNotLoadedTitle => "尚未加载订阅数据",
+        MessageKey::UsageEmptyNotLoadedHint => "用“刷新”同步提供商用量，或用“添加 Codex”保存其他账户。",
+        MessageKey::UsageFetchFailed => "用量获取失败",
+        MessageKey::UsageEmptyNoSubscriptionData => "没有可用的订阅数据",
+        MessageKey::UsageNoAttentionNeeded => "没有需要注意的账户",
+
+        // Usage: overall state vocabulary
+        MessageKey::StateSwitchRecommended => "建议切换账户",
+        MessageKey::StateReady => "正常",
+        MessageKey::StateReadyWithWarnings => "正常（有警告）",
+        MessageKey::StateQuotaLow => "配额不足",
+        MessageKey::StateUnknown => "未知",
+
+        // Usage: per-account readiness / the Health column
+        MessageKey::HealthReady => "正常",
+        MessageKey::HealthWatch => "注意",
+        MessageKey::HealthQuotaLow => "配额不足",
+        MessageKey::HealthUnknown => "未知",
+
+        // Usage: summary K/V row labels
+        MessageKey::LabelState => "状态",
+        MessageKey::LabelActiveAccount => "当前账户",
+        MessageKey::LabelCapacity => "余量",
+        MessageKey::LabelFallback => "备用",
+        MessageKey::LabelNextReset => "下次重置",
+        MessageKey::LabelAction => "操作",
+
+        // Usage: summary K/V row values
+        MessageKey::UsageNoActiveAccount => "没有当前账户",
+        MessageKey::UsageNoReadyFallback => "没有可用备用账户",
+        MessageKey::UsageNoResetData => "没有重置信息",
+        MessageKey::UsagePercentLeft => "% 剩余",
+        MessageKey::CapacityReady => "正常",
+        MessageKey::CapacityWatch => "注意",
+        MessageKey::CapacityCritical => "紧急",
+        MessageKey::CapacityUnknown => "未知",
+
+        // Usage: recommended next action
+        MessageKey::ActionChooseActive => "请选择一个当前账户",
+        MessageKey::ActionRefreshUnknownLimits => "刷新限制未知的账户",
+        MessageKey::ActionKeepCurrent => "保持当前账户",
+        MessageKey::ActionMonitorQuota => "关注当前账户配额",
+        MessageKey::ActionUsePrefix => "切换到",
+        MessageKey::ActionWaitForReset => "等待重置或刷新",
+        MessageKey::ActionRefreshActive => "刷新当前账户",
+
+        // Usage: account state / the Auth column
+        MessageKey::AuthActive => "活跃",
+        MessageKey::AuthSaved => "已保存",
+        MessageKey::AuthManaged => "托管",
+        MessageKey::StateAuthenticated => "已认证",
+        MessageKey::LabelUnknown => "未知",
+
+        // Usage: "+N more ..." counters
+        MessageKey::UsageMoreIssues => "个问题",
+        MessageKey::UsageMoreIssuesPlural => "个问题",
+        MessageKey::UsageMoreAtRisk => "个有风险",
+        MessageKey::UsageMoreAtRiskPlural => "个有风险",
+
+        // Usage: row-action buttons
+        MessageKey::ButtonUseAccount => "使用此账户",
+        MessageKey::ButtonRemove => "移除",
+        MessageKey::ButtonReset => "重置",
+
+        // Usage: limits, metrics and the snapshot line
+        MessageKey::UsageNoLimits => "无限制信息",
+        MessageKey::UsageNoQuotaMetrics => "无配额指标",
+        MessageKey::UsageNoQuotaMetricsReturned => "未返回配额指标",
+        MessageKey::UsageSnapshot => "概览",
+        MessageKey::UsageAtRisk => "有风险",
+        MessageKey::UsageEmailsHidden => "已隐藏邮箱",
+
+        // Usage: credit-bank expiry rows and counters
+        MessageKey::CreditExpiryUnknown => "有效期未知",
+        MessageKey::CreditExpiresPrefix => "到期",
+        MessageKey::CreditNearestExpires => "最近到期",
+        MessageKey::CreditMoreResetCredits => "个重置额度",
+        MessageKey::CreditMoreResetCreditsPlural => "个重置额度",
+        MessageKey::CreditCountSingular => "个额度",
+        MessageKey::CreditCountPlural => "个额度",
+        MessageKey::CreditAvailableSingular => "个可用",
+        MessageKey::CreditAvailablePlural => "个可用",
+        MessageKey::CreditAvailableAcrossAccounts => "个可用（所有账户）",
+        MessageKey::UsageNoResetCredits => "无重置额度",
+
+        // Usage: the Codex login panel
+        MessageKey::CodexLoginTitle => "Codex 登录",
+        MessageKey::CodexLoginImported => "已导入",
+        MessageKey::CodexLoginFailed => "失败",
+        MessageKey::CodexLoginRunning => "进行中",
+        MessageKey::CodexLoginIdle => "空闲",
+        MessageKey::CodexLoginCancel => "[取消]",
+        MessageKey::CodexLoginDismiss => "[关闭]",
+        MessageKey::CodexLoginWaiting => "正在等待 codex 输出...",
+        MessageKey::CodexLoginImportedPrefix => "已导入:",
+
+        // Usage: the fetching spinner
+        MessageKey::UsageFetchingShort => "正在获取用量...",
+        MessageKey::UsageFetchingLong => "正在获取订阅数据...",
+
+        // Usage: compact (<48 columns) action-bar labels
+        MessageKey::ActionRefreshSyncingShort => "r 同步",
+        MessageKey::ActionAddingCodexShort => "a 添加中",
+        MessageKey::ActionAddCodexShort => "a 添加",
+        MessageKey::ActionShowEmailsShort => "m 显示",
+        MessageKey::ActionHideEmailsShort => "m 隐藏",
+
+        // Usage: credential provenance wording
+        MessageKey::CredentialSavedActive => "已保存，当前 Codex 登录",
+        MessageKey::CredentialSaved => "已保存",
+        MessageKey::CredentialManagedByPrefix => "托管方:",
+        MessageKey::CredentialManagedExternally => "外部托管",
+        MessageKey::UsageCurrentAccount => "当前账户",
+        MessageKey::UsageManagedByPrefix => "托管方:",
+        MessageKey::UsageManagedExternally => "外部托管",
+
+
     })
 }
 
@@ -1431,6 +2076,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColTokens => "Jetons",
         MessageKey::ColModel => "Modèle",
         MessageKey::ColClient => "Client",
+        MessageKey::ColClientShort => "Client",
         MessageKey::ColProvider => "Fournisseur",
         MessageKey::ColSource => "Source",
         MessageKey::ColMessages => "Msgs",
@@ -1650,7 +2296,10 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::LabelEmail => "E-mail",
         MessageKey::LabelCredential => "Identifiant",
         MessageKey::LabelCredits => "Crédits",
-        MessageKey::LabelResetBank => "Banque de réinit.",
+        // `Crédits`, the heading's own noun: `HeadingCreditBank` is `Banque de
+        // crédits` and both are on screen together, so `Réserve` read as a
+        // second name for one pool. 7 cells, inside the 11-cell gutter.
+        MessageKey::LabelResetBank => "Crédits",
 
         MessageKey::ColAccount => "Compte",
         MessageKey::ColPlan => "Forfait",
@@ -1659,6 +2308,139 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ColLimit => "Limite",
         MessageKey::ColReset => "Réinit.",
         MessageKey::UsageAccountOrStatus => "Compte / Statut",
+
+        // Usage: empty and failure states
+        MessageKey::UsageEmptyNoData => "Aucune donnée",
+        MessageKey::UsageEmptyNotLoadedTitle => "Aucune donnée d'abonnement chargée",
+        MessageKey::UsageEmptyNotLoadedHint => "Utilisez Actualiser pour synchroniser l'utilisation, ou Ajouter Codex pour enregistrer un autre compte.",
+        MessageKey::UsageFetchFailed => "Échec de récupération de l'utilisation",
+        MessageKey::UsageEmptyNoSubscriptionData => "Aucune donnée d'abonnement disponible",
+        MessageKey::UsageNoAttentionNeeded => "Aucun compte ne nécessite d'attention",
+
+        // Usage: overall state vocabulary
+        MessageKey::StateSwitchRecommended => "Changement conseillé",
+        MessageKey::StateReady => "Prêt",
+        MessageKey::StateReadyWithWarnings => "Prêt avec avertissements",
+        MessageKey::StateQuotaLow => "Quota faible",
+        MessageKey::StateUnknown => "Inconnu",
+
+        // Usage: per-account readiness / the Health column
+        MessageKey::HealthReady => "Prêt",
+        MessageKey::HealthWatch => "À suivre",
+        MessageKey::HealthQuotaLow => "Faible",
+        MessageKey::HealthUnknown => "Inconnu",
+
+        // Usage: summary K/V row labels
+        MessageKey::LabelState => "Statut",
+        // `Compte actif` is exactly 12 cells, and `push_kv_styled` pads its key
+        // to 12: the padding came out empty and the value was jammed against
+        // the label with no separating space. 5 cells leaves the gutter intact.
+        MessageKey::LabelActiveAccount => "Actif",
+        MessageKey::LabelCapacity => "Capacité",
+        MessageKey::LabelFallback => "Secours",
+        MessageKey::LabelNextReset => "Réinit.",
+        MessageKey::LabelAction => "Action",
+
+        // Usage: summary K/V row values
+        MessageKey::UsageNoActiveAccount => "Aucun compte actif",
+        MessageKey::UsageNoReadyFallback => "Aucun secours disponible",
+        MessageKey::UsageNoResetData => "Aucune donnée de réinit.",
+        MessageKey::UsagePercentLeft => "% restants",
+        MessageKey::CapacityReady => "prêt",
+        MessageKey::CapacityWatch => "à suivre",
+        MessageKey::CapacityCritical => "critique",
+        MessageKey::CapacityUnknown => "inconnu",
+
+        // Usage: recommended next action
+        MessageKey::ActionChooseActive => "Choisissez un compte actif",
+        MessageKey::ActionRefreshUnknownLimits => "Actualisez les comptes aux limites inconnues",
+        MessageKey::ActionKeepCurrent => "Conserver le compte actuel",
+        MessageKey::ActionMonitorQuota => "Surveillez le quota actif",
+        MessageKey::ActionUsePrefix => "Basculer vers",
+        MessageKey::ActionWaitForReset => "Attendez la réinit. ou actualisez",
+        MessageKey::ActionRefreshActive => "Actualisez le compte actif",
+
+        // Usage: account state / the Auth column
+        MessageKey::AuthActive => "Actif",
+        MessageKey::AuthSaved => "Enreg.",
+        MessageKey::AuthManaged => "Géré",
+        MessageKey::StateAuthenticated => "Authentifié",
+        MessageKey::LabelUnknown => "Inconnu",
+
+        // Usage: "+N more ..." counters
+        MessageKey::UsageMoreIssues => "autre problème",
+        MessageKey::UsageMoreIssuesPlural => "autres problèmes",
+        MessageKey::UsageMoreAtRisk => "autre à risque",
+        MessageKey::UsageMoreAtRiskPlural => "autres à risque",
+
+        // Usage: row-action buttons
+        MessageKey::ButtonUseAccount => "Utiliser ce compte",
+        MessageKey::ButtonRemove => "Supprimer",
+        MessageKey::ButtonReset => "Réinitialiser",
+
+        // Usage: limits, metrics and the snapshot line
+        MessageKey::UsageNoLimits => "Aucune limite",
+        MessageKey::UsageNoQuotaMetrics => "Aucun indicateur",
+        MessageKey::UsageNoQuotaMetricsReturned => "Aucun indicateur renvoyé",
+        MessageKey::UsageSnapshot => "Aperçu",
+        MessageKey::UsageAtRisk => "à risque",
+        MessageKey::UsageEmailsHidden => "e-mails masqués",
+
+        // Usage: credit-bank expiry rows and counters
+        MessageKey::CreditExpiryUnknown => "expiration inconnue",
+        MessageKey::CreditExpiresPrefix => "expire le",
+        MessageKey::CreditNearestExpires => "prochaine expiration",
+        MessageKey::CreditMoreResetCredits => "autre crédit de réinit.",
+        MessageKey::CreditMoreResetCreditsPlural => "autres crédits de réinit.",
+        MessageKey::CreditCountSingular => "crédit",
+        MessageKey::CreditCountPlural => "crédits",
+        MessageKey::CreditAvailableSingular => "disponible",
+        MessageKey::CreditAvailablePlural => "disponibles",
+        MessageKey::CreditAvailableAcrossAccounts => "disponibles sur les comptes",
+        MessageKey::UsageNoResetCredits => "Aucun crédit de réinit.",
+
+        // Usage: the Codex login panel
+        MessageKey::CodexLoginTitle => "Connexion Codex",
+        MessageKey::CodexLoginImported => "Importé",
+        MessageKey::CodexLoginFailed => "Échec",
+        MessageKey::CodexLoginRunning => "En cours",
+        MessageKey::CodexLoginIdle => "Inactif",
+        MessageKey::CodexLoginCancel => "[Annuler]",
+        MessageKey::CodexLoginDismiss => "[Fermer]",
+        MessageKey::CodexLoginWaiting => "En attente de la sortie codex...",
+        MessageKey::CodexLoginImportedPrefix => "Importé :",
+
+        // Usage: the fetching spinner
+        // 15 cells. `render_fetching` takes the short branch below width 40 and
+        // draws `{spinner} {message}`, so this form must fit `width - 2` at the
+        // narrowest width the Usage tab renders at. `Récupération de
+        // l'utilisation...` was 32 and clipped with no marker below 34 —
+        // exactly the A5 defect the long form had, in the branch that exists to
+        // avoid it. Every other language's short form is 15-17 cells.
+        MessageKey::UsageFetchingShort => "Récupération...",
+        // 31 cells. `render_fetching` takes this branch from width 40, and the
+        // line it draws is `{spinner} {message}`, so a 40-cell message needed
+        // 42 and was clipped at 40-41 with no marker. Every other language's
+        // long form fits inside 38.
+        MessageKey::UsageFetchingLong => "Récupération de l'abonnement...",
+
+        // Usage: compact (<48 columns) action-bar labels
+        MessageKey::ActionRefreshSyncingShort => "r Sync",
+        MessageKey::ActionAddingCodexShort => "a Ajout",
+        MessageKey::ActionAddCodexShort => "a Ajout",
+        MessageKey::ActionShowEmailsShort => "m Voir",
+        MessageKey::ActionHideEmailsShort => "m Masq.",
+
+        // Usage: credential provenance wording
+        MessageKey::CredentialSavedActive => "stockage local, connexion Codex actuelle",
+        MessageKey::CredentialSaved => "stockage local",
+        MessageKey::CredentialManagedByPrefix => "géré par",
+        MessageKey::CredentialManagedExternally => "géré en externe",
+        MessageKey::UsageCurrentAccount => "Compte actuel",
+        MessageKey::UsageManagedByPrefix => "Géré par",
+        MessageKey::UsageManagedExternally => "Géré en externe",
+
+
     })
 }
 
@@ -1672,6 +2454,122 @@ mod tests {
             assert!(!lang.code().is_empty());
             assert!(!lang.native_name().is_empty());
             assert_eq!(TuiLanguage::from_code(lang.code()), Some(lang));
+        }
+    }
+
+    /// One concept, one wording per screen.
+    ///
+    /// The `State` row and the `Health` column hold the same vocabulary and are
+    /// visible on the same frame, so a concept translated two ways there reads
+    /// as a typo rather than as a deliberate short form. #1367 shipped ko
+    /// `한도 부족` (State) against `한도부족` (Health) — the same four syllables
+    /// differing only by a space — and ko `알 수 없음` against `미확인` for one
+    /// `Unknown`.
+    ///
+    /// The Health column is `Constraint::Length(8)`, so a *shorter* form there
+    /// is allowed and expected; what is not allowed is a form that differs only
+    /// cosmetically, or a second word for a concept that fits in both places.
+    #[test]
+    fn one_concept_is_worded_one_way_per_screen() {
+        let normalize = |s: &str| s.replace([' ', '\u{3000}'], "");
+
+        for lang in TuiLanguage::ALL {
+            // `Unknown` is short in every language, so State, Health, Capacity
+            // and the plan fallback all say the same word.
+            let unknown = tr(lang, MessageKey::HealthUnknown);
+            for key in [
+                MessageKey::StateUnknown,
+                MessageKey::LabelUnknown,
+                MessageKey::CapacityUnknown,
+            ] {
+                assert!(
+                    tr(lang, key).eq_ignore_ascii_case(unknown),
+                    "{}: {key:?} is {:?} but HealthUnknown is {unknown:?}; one `Unknown` \
+                     concept, on one frame, must not have two words",
+                    lang.code(),
+                    tr(lang, key),
+                );
+            }
+
+            // `Quota low` may be abbreviated for the 8-cell Health column, but
+            // the short form must be visibly shorter, not the same word with a
+            // space removed.
+            let state = tr(lang, MessageKey::StateQuotaLow);
+            let health = tr(lang, MessageKey::HealthQuotaLow);
+            assert!(
+                state.eq_ignore_ascii_case(health) || normalize(state) != normalize(health),
+                "{}: StateQuotaLow {state:?} and HealthQuotaLow {health:?} differ only by \
+                 whitespace, which reads as a typo; make them identical or genuinely \
+                 shorter",
+                lang.code(),
+            );
+        }
+
+        // The credit pool has one name in the space-separated languages: the
+        // `Reset Bank` K/V label must reuse a word from the `Credit Bank`
+        // heading, not introduce a second noun for the same pool. fr shipped
+        // `Réserve` against the heading `Banque de crédits`.
+        //
+        // Scoped to en/fr on purpose. The CJK catalogs shorten by dropping
+        // characters rather than words (ko `크레딧 보관함` -> `초기화권`), so a
+        // word-overlap rule does not describe them and is not what those
+        // catalogs were reviewed against.
+        for lang in [TuiLanguage::En, TuiLanguage::Fr] {
+            let heading = tr(lang, MessageKey::HeadingCreditBank).to_lowercase();
+            let label = tr(lang, MessageKey::LabelResetBank).to_lowercase();
+            let shares_a_word = label.split_whitespace().any(|word| {
+                let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+                word.chars().count() > 3
+                    && heading
+                        .split_whitespace()
+                        .any(|other| other.starts_with(word) || word.starts_with(other))
+            });
+            assert!(
+                shares_a_word,
+                "{}: LabelResetBank {:?} shares no word with HeadingCreditBank {:?}; \
+                 the same pool must not have two names on one screen",
+                lang.code(),
+                tr(lang, MessageKey::LabelResetBank),
+                tr(lang, MessageKey::HeadingCreditBank),
+            );
+        }
+    }
+
+    /// The narrow `Client` column names the client program, and the wide one
+    /// spells it out, so the short form must fit its column and must not be a
+    /// *different word*.
+    ///
+    /// ko shipped `도구` ("tool"), which is not "client" and does not connect to
+    /// the wide layout's `클라이언트`; `클라` is the ordinary Korean clipping and
+    /// is 4 cells. ja `ツール` is idiomatic for CLI tooling and stays, so the
+    /// prefix rule is asserted only for the languages whose short form is
+    /// derived by clipping.
+    #[test]
+    fn the_short_client_header_fits_and_names_the_client() {
+        for lang in TuiLanguage::ALL {
+            let short = tr(lang, MessageKey::ColClientShort);
+            let width = unicode_width::UnicodeWidthStr::width(short);
+            assert!(
+                width <= 9,
+                "{}: ColClientShort {short:?} is {width} cells; the narrow Sessions \
+                 layout grants about 9",
+                lang.code(),
+            );
+        }
+        for lang in [
+            TuiLanguage::En,
+            TuiLanguage::Ko,
+            TuiLanguage::ZhCn,
+            TuiLanguage::Fr,
+        ] {
+            let long = tr(lang, MessageKey::ColClient);
+            let short = tr(lang, MessageKey::ColClientShort);
+            assert!(
+                long.to_lowercase().starts_with(&short.to_lowercase()),
+                "{}: ColClientShort {short:?} is not a clipping of ColClient {long:?}; \
+                 the two layouts must name the same thing",
+                lang.code(),
+            );
         }
     }
 
@@ -1705,6 +2603,7 @@ mod tests {
             MessageKey::ColTokens,
             MessageKey::ColModel,
             MessageKey::ColClient,
+            MessageKey::ColClientShort,
             MessageKey::ColProvider,
             MessageKey::ColSource,
             MessageKey::ColMessages,
@@ -1903,6 +2802,94 @@ mod tests {
             MessageKey::ColLimit,
             MessageKey::ColReset,
             MessageKey::UsageAccountOrStatus,
+            MessageKey::UsageEmptyNoData,
+            MessageKey::UsageEmptyNotLoadedTitle,
+            MessageKey::UsageEmptyNotLoadedHint,
+            MessageKey::UsageFetchFailed,
+            MessageKey::UsageEmptyNoSubscriptionData,
+            MessageKey::UsageNoAttentionNeeded,
+            MessageKey::StateSwitchRecommended,
+            MessageKey::StateReady,
+            MessageKey::StateReadyWithWarnings,
+            MessageKey::StateQuotaLow,
+            MessageKey::StateUnknown,
+            MessageKey::HealthReady,
+            MessageKey::HealthWatch,
+            MessageKey::HealthQuotaLow,
+            MessageKey::HealthUnknown,
+            MessageKey::LabelState,
+            MessageKey::LabelActiveAccount,
+            MessageKey::LabelCapacity,
+            MessageKey::LabelFallback,
+            MessageKey::LabelNextReset,
+            MessageKey::LabelAction,
+            MessageKey::UsageNoActiveAccount,
+            MessageKey::UsageNoReadyFallback,
+            MessageKey::UsageNoResetData,
+            MessageKey::UsagePercentLeft,
+            MessageKey::CapacityReady,
+            MessageKey::CapacityWatch,
+            MessageKey::CapacityCritical,
+            MessageKey::CapacityUnknown,
+            MessageKey::ActionChooseActive,
+            MessageKey::ActionRefreshUnknownLimits,
+            MessageKey::ActionKeepCurrent,
+            MessageKey::ActionMonitorQuota,
+            MessageKey::ActionUsePrefix,
+            MessageKey::ActionWaitForReset,
+            MessageKey::ActionRefreshActive,
+            MessageKey::AuthActive,
+            MessageKey::AuthSaved,
+            MessageKey::AuthManaged,
+            MessageKey::StateAuthenticated,
+            MessageKey::LabelUnknown,
+            MessageKey::UsageMoreIssues,
+            MessageKey::UsageMoreIssuesPlural,
+            MessageKey::UsageMoreAtRisk,
+            MessageKey::UsageMoreAtRiskPlural,
+            MessageKey::ButtonUseAccount,
+            MessageKey::ButtonRemove,
+            MessageKey::ButtonReset,
+            MessageKey::UsageNoLimits,
+            MessageKey::UsageNoQuotaMetrics,
+            MessageKey::UsageNoQuotaMetricsReturned,
+            MessageKey::UsageSnapshot,
+            MessageKey::UsageAtRisk,
+            MessageKey::UsageEmailsHidden,
+            MessageKey::CreditExpiryUnknown,
+            MessageKey::CreditExpiresPrefix,
+            MessageKey::CreditNearestExpires,
+            MessageKey::CreditMoreResetCredits,
+            MessageKey::CreditMoreResetCreditsPlural,
+            MessageKey::CreditCountSingular,
+            MessageKey::CreditCountPlural,
+            MessageKey::CreditAvailableSingular,
+            MessageKey::CreditAvailablePlural,
+            MessageKey::CreditAvailableAcrossAccounts,
+            MessageKey::UsageNoResetCredits,
+            MessageKey::CodexLoginTitle,
+            MessageKey::CodexLoginImported,
+            MessageKey::CodexLoginFailed,
+            MessageKey::CodexLoginRunning,
+            MessageKey::CodexLoginIdle,
+            MessageKey::CodexLoginCancel,
+            MessageKey::CodexLoginDismiss,
+            MessageKey::CodexLoginWaiting,
+            MessageKey::CodexLoginImportedPrefix,
+            MessageKey::UsageFetchingShort,
+            MessageKey::UsageFetchingLong,
+            MessageKey::ActionRefreshSyncingShort,
+            MessageKey::ActionAddingCodexShort,
+            MessageKey::ActionAddCodexShort,
+            MessageKey::ActionShowEmailsShort,
+            MessageKey::ActionHideEmailsShort,
+            MessageKey::CredentialSavedActive,
+            MessageKey::CredentialSaved,
+            MessageKey::CredentialManagedByPrefix,
+            MessageKey::CredentialManagedExternally,
+            MessageKey::UsageCurrentAccount,
+            MessageKey::UsageManagedByPrefix,
+            MessageKey::UsageManagedExternally,
         ];
 
         for lang in TuiLanguage::ALL {
