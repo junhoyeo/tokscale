@@ -147,6 +147,7 @@ fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
             output: row.output.max(0),
             cache_read: row.cache_read.max(0),
             cache_write: row.cache_write.max(0),
+            cache_write_1h: 0,
             reasoning: row.reasoning.max(0),
         },
         row.cost.max(0.0),

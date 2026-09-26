@@ -225,6 +225,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 output: m.output_tokens.unwrap_or(0).max(0),
                 cache_read: m.cache_read_tokens.unwrap_or(0).max(0),
                 cache_write: m.cache_creation_tokens.unwrap_or(0).max(0),
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             None => TokenBreakdown::default(),
@@ -559,6 +560,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
                     output,
                     cache_read,
                     cache_write,
+                    cache_write_1h: 0,
                     reasoning: 0,
                 },
             },
@@ -576,6 +578,7 @@ pub fn parse_devin_desktop_ndjson_with_lookup(
             output: usage.output,
             cache_read: usage.cache_read,
             cache_write: usage.cache_write,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         if tokens.total() == 0 {

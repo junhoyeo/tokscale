@@ -205,6 +205,7 @@ pub fn parse_freebuff_file(path: &Path) -> Vec<UnifiedMessage> {
                 output,
                 cache_read: 0,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             0.0,

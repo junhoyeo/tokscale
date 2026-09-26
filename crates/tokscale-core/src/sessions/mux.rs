@@ -123,6 +123,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                     output,
                     cache_read: cached,
                     cache_write: cache_create,
+                    cache_write_1h: 0,
                     reasoning,
                 },
                 source_cost,

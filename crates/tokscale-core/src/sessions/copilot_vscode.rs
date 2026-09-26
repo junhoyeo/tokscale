@@ -339,6 +339,7 @@ fn request_to_message(
         output: completion_tokens.max(0),
         cache_read: 0,
         cache_write: 0,
+        cache_write_1h: 0,
         reasoning: reasoning_tokens.max(0),
     };
 

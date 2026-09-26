@@ -132,6 +132,7 @@ pub fn parse_hindsight_file(path: &Path) -> Vec<UnifiedMessage> {
                 output,
                 cache_read,
                 cache_write,
+                cache_write_1h: 0,
                 reasoning,
             };
 

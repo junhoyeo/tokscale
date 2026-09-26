@@ -280,6 +280,7 @@ impl PiUsage {
             output: self.output.unwrap_or(0).max(0),
             cache_read: self.cache_read.unwrap_or(0).max(0),
             cache_write: self.cache_write.unwrap_or(0).max(0),
+            cache_write_1h: 0,
             reasoning: 0,
         }
     }

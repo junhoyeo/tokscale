@@ -246,6 +246,7 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                 output: clamp_i64(agg.output_tokens, &mut negative_values_clamped),
                 cache_read: clamp_i64(agg.cache_read_tokens, &mut negative_values_clamped),
                 cache_write: clamp_i64(agg.cache_creation_tokens, &mut negative_values_clamped),
+                cache_write_1h: 0,
                 reasoning: 0,
             };
             if cost > 0.0 && tokens.total() == 0 && !is_cursor_legacy_tokenless(&client, &model) {
@@ -265,6 +266,7 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                     output: clamp_i64(mb.output_tokens, &mut negative_values_clamped),
                     cache_read: clamp_i64(mb.cache_read_tokens, &mut negative_values_clamped),
                     cache_write: clamp_i64(mb.cache_creation_tokens, &mut negative_values_clamped),
+                    cache_write_1h: 0,
                     reasoning: 0,
                 };
                 let raw_cost = sanitize_cost(mb.cost, &mut non_finite_cost_rows);
@@ -579,6 +581,7 @@ fn ccusage_token_breakdown(
         output: output.saturating_sub(reasoning),
         cache_read: clamp_i64(cache_read, clamped),
         cache_write: clamp_i64(cache_write, clamped),
+        cache_write_1h: 0,
         reasoning,
     }
 }

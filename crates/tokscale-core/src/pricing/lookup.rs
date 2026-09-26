@@ -1877,6 +1877,7 @@ impl PricingLookup {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             reasoning,
         };
         self.calculate_cost_with_provider(model_id, None, &usage)
@@ -1911,7 +1912,12 @@ impl PricingLookup {
     /// Only buckets the hinted row cannot price are filled, so a reseller row
     /// keeps its own markup rather than silently repricing to the author's
     /// cheaper rate. If the filled row still cannot cover the usage, the
-    /// hinted row is returned unchanged and the usage stays unpriced.
+    /// hinted row is returned unchanged and the usage stays unpriced. A row
+    /// that covers the usage at the 5-minute cache-write rate but omits the
+    /// 1-hour rate still falls through to the canonical borrow below, so a
+    /// provider-scoped row (OpenRouter never publishes the 1-hour rate) can
+    /// pick up the canonical row's `cache_creation_input_token_cost_above_1hr`
+    /// instead of silently under-pricing every 1-hour cache write.
     pub(super) fn resolve_for_usage(
         &self,
         model_id: &str,
@@ -1919,7 +1925,12 @@ impl PricingLookup {
         usage: &TokenBreakdown,
     ) -> Option<LookupResult> {
         let hinted = self.lookup_with_provider(model_id, provider_id)?;
-        if normalize_provider_hint(provider_id).is_none() || hinted.pricing.covers_usage(usage) {
+        if normalize_provider_hint(provider_id).is_none() {
+            return Some(hinted);
+        }
+        if hinted.pricing.covers_usage(usage)
+            && !hinted.pricing.lacks_1h_cache_write_rate_for(usage)
+        {
             return Some(hinted);
         }
 
@@ -1936,6 +1947,9 @@ impl PricingLookup {
             .pricing
             .with_missing_rates_from(&canonical.pricing, usage);
         if !filled.covers_usage(usage) {
+            return Some(hinted);
+        }
+        if hinted.pricing.covers_usage(usage) && filled.lacks_1h_cache_write_rate_for(usage) {
             return Some(hinted);
         }
 
@@ -2146,6 +2160,8 @@ fn uses_xai_full_request_200k_pricing(result: &LookupResult, provider_id: Option
     let has_cache_write_pricing = [
         pricing.cache_creation_input_token_cost,
         pricing.cache_creation_input_token_cost_above_200k_tokens,
+        pricing.cache_creation_input_token_cost_above_1hr,
+        pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
     ]
     .into_iter()
     .any(|rate| rate.is_some_and(is_valid_price_value));
@@ -2180,6 +2196,7 @@ fn compute_xai_full_request_200k_cost(result: &LookupResult, usage: &TokenBreakd
         usage.output,
         usage.cache_read,
         usage.cache_write,
+        usage.cache_write_1h,
         usage.reasoning,
     )
 }
@@ -2196,6 +2213,7 @@ fn compute_cost_for_lookup(
             usage.output,
             usage.cache_read,
             usage.cache_write,
+            usage.cache_write_1h,
             usage.reasoning,
         )
     };
@@ -2285,6 +2303,7 @@ pub fn compute_cost(
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    cache_write_1h: i64,
     reasoning: i64,
 ) -> f64 {
     let safe_price = |opt: Option<f64>| opt.filter(|v| is_valid_price_value(*v)).unwrap_or(0.0);
@@ -2319,6 +2338,8 @@ pub fn compute_cost(
     let output_clamped = output.max(0).saturating_add(reasoning.max(0)) as f64;
     let cache_read_clamped = cache_read.max(0) as f64;
     let cache_write_clamped = cache_write.max(0) as f64;
+    let cache_write_1h_clamped = cache_write_1h.max(0).min(cache_write.max(0)) as f64;
+    let cache_write_5m_clamped = cache_write_clamped - cache_write_1h_clamped;
 
     let input_cost = tiered_cost(
         input_clamped,
@@ -2388,16 +2409,42 @@ pub fn compute_cost(
             ),
         ],
     );
-    let cache_write_cost = tiered_cost(
-        cache_write_clamped,
-        pricing.cache_creation_input_token_cost,
-        &[(
-            TIERED_PRICING_THRESHOLD_200K_TOKENS,
-            pricing.cache_creation_input_token_cost_above_200k_tokens,
-        )],
-    );
+    // Without a 1-hour rate the whole amount shares one 200k tier boundary.
+    let has_1h_rate = pricing
+        .cache_creation_input_token_cost_above_1hr
+        .filter(|rate| is_valid_price_value(*rate))
+        .is_some();
+    let (cache_write_5m_cost, cache_write_1h_cost) = if has_1h_rate {
+        let five_minute = tiered_cost(
+            cache_write_5m_clamped,
+            pricing.cache_creation_input_token_cost,
+            &[(
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.cache_creation_input_token_cost_above_200k_tokens,
+            )],
+        );
+        let one_hour = tiered_cost(
+            cache_write_1h_clamped,
+            pricing.cache_creation_input_token_cost_above_1hr,
+            &[(
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
+            )],
+        );
+        (five_minute, one_hour)
+    } else {
+        let whole = tiered_cost(
+            cache_write_clamped,
+            pricing.cache_creation_input_token_cost,
+            &[(
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.cache_creation_input_token_cost_above_200k_tokens,
+            )],
+        );
+        (whole, 0.0)
+    };
 
-    input_cost + output_cost + cache_read_cost + cache_write_cost
+    input_cost + output_cost + cache_read_cost + cache_write_5m_cost + cache_write_1h_cost
 }
 
 fn extract_model_family(model_id: &str) -> String {
@@ -4677,6 +4724,7 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -6720,6 +6768,7 @@ mod tests {
             output: 50,
             cache_read: 20,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -6786,6 +6835,7 @@ mod tests {
             output: 50,
             cache_read: 20,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -6796,6 +6846,167 @@ mod tests {
         assert_eq!(resolved.pricing.cache_read_input_token_cost, Some(5e-7));
         assert!(resolved.evidence.is_submission_safe());
         assert!(resolved.pricing.covers_usage(&usage));
+    }
+
+    fn lookup_with_claude_fable_5_1(
+        hinted: ModelPricing,
+        canonical: ModelPricing,
+    ) -> PricingLookup {
+        let litellm = HashMap::from([
+            ("azure_ai/claude-fable-5-1".to_string(), hinted),
+            ("claude-fable-5-1".to_string(), canonical),
+        ]);
+        PricingLookup::new(litellm, HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn resolve_for_usage_borrows_the_1hr_cache_write_rate_only_when_usage_has_a_1hr_write() {
+        let lookup = lookup_with_claude_fable_5_1(
+            ModelPricing {
+                input_cost_per_token: Some(1e-05),
+                output_cost_per_token: Some(5e-05),
+                cache_creation_input_token_cost: Some(1.25e-05),
+                ..Default::default()
+            },
+            ModelPricing {
+                input_cost_per_token: Some(1e-05),
+                output_cost_per_token: Some(5e-05),
+                cache_creation_input_token_cost: Some(1.25e-05),
+                cache_creation_input_token_cost_above_1hr: Some(2e-05),
+                ..Default::default()
+            },
+        );
+
+        let usage_with_1hr_write = TokenBreakdown {
+            cache_write: 200_000,
+            cache_write_1h: 100_000,
+            ..Default::default()
+        };
+        let resolved = lookup
+            .resolve_for_usage("claude-fable-5-1", Some("azure"), &usage_with_1hr_write)
+            .expect("the hinted row resolves");
+        assert_eq!(
+            resolved.pricing.cache_creation_input_token_cost_above_1hr,
+            Some(2e-05),
+            "the hinted row must borrow the canonical row's 1-hour rate"
+        );
+        let cost = lookup.calculate_cost_with_provider(
+            "claude-fable-5-1",
+            Some("azure"),
+            &usage_with_1hr_write,
+        );
+        assert!((cost - 3.25).abs() < 1e-9, "cost was {cost}");
+
+        let usage_without_1hr_write = TokenBreakdown {
+            cache_write: 200_000,
+            ..Default::default()
+        };
+        let resolved = lookup
+            .resolve_for_usage("claude-fable-5-1", Some("azure"), &usage_without_1hr_write)
+            .expect("the hinted row resolves");
+        assert_eq!(resolved.matched_key, "azure_ai/claude-fable-5-1");
+        assert_eq!(
+            resolved.pricing.cache_creation_input_token_cost_above_1hr,
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_for_usage_does_not_borrow_a_paid_1hr_rate_for_an_all_zero_hinted_row() {
+        let lookup = lookup_with_claude_fable_5_1(
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_creation_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_creation_input_token_cost: Some(0.0),
+                cache_creation_input_token_cost_above_1hr: Some(2e-05),
+                ..Default::default()
+            },
+        );
+        let usage = TokenBreakdown {
+            cache_write: 100_000,
+            cache_write_1h: 100_000,
+            ..Default::default()
+        };
+
+        let resolved = lookup
+            .resolve_for_usage("claude-fable-5-1", Some("azure"), &usage)
+            .expect("the hinted row resolves");
+        assert_eq!(
+            resolved.pricing.cache_creation_input_token_cost_above_1hr, None,
+            "an all-zero hinted row must not borrow the canonical row's paid 1-hour rate"
+        );
+
+        let cost = lookup.calculate_cost_with_provider("claude-fable-5-1", Some("azure"), &usage);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn resolve_for_usage_keeps_the_hinted_row_when_the_ambiguous_canonical_row_also_lacks_a_1hr_rate(
+    ) {
+        let disputed_cache_read_row = |cache_read: f64| ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            cache_creation_input_token_cost: Some(1.25e-6),
+            cache_read_input_token_cost: Some(cache_read),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            (
+                "azure_ai/claude-fable-5-1".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    cache_creation_input_token_cost: Some(1.25e-6),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vendor-a/claude-fable-5-1-preview".to_string(),
+                disputed_cache_read_row(5e-7),
+            ),
+            (
+                "vendor-b/claude-fable-5-1-beta".to_string(),
+                disputed_cache_read_row(9e-7),
+            ),
+        ]);
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            cache_write: 100_000,
+            cache_write_1h: 50_000,
+            ..Default::default()
+        };
+
+        let hinted = lookup
+            .lookup_with_provider("claude-fable-5-1", Some("azure"))
+            .expect("the provider-hinted row resolves deterministically");
+        assert!(hinted.pricing.covers_usage(&usage));
+        assert!(hinted.evidence.is_submission_safe());
+
+        let canonical = lookup
+            .lookup_with_provider("claude-fable-5-1", None)
+            .expect("the unhinted lookup falls back to a fuzzy estimate");
+        assert!(!canonical.evidence.is_submission_safe());
+        assert_eq!(
+            canonical.pricing.cache_creation_input_token_cost_above_1hr,
+            None
+        );
+
+        let resolved = lookup
+            .resolve_for_usage("claude-fable-5-1", Some("azure"), &usage)
+            .expect("the hinted row still resolves");
+
+        assert_eq!(resolved.matched_key, hinted.matched_key);
+        assert_eq!(resolved.evidence, hinted.evidence);
+        assert_eq!(
+            resolved.pricing.cache_creation_input_token_cost_above_1hr,
+            None
+        );
     }
 
     #[test]
@@ -7029,7 +7240,7 @@ mod tests {
         )
         .unwrap();
 
-        let cost = compute_cost(&pricing, 200_000, 200_000, 0, 0, 0);
+        let cost = compute_cost(&pricing, 200_000, 200_000, 0, 0, 0, 0);
         let expected = 200_000.0 * 0.000001 + 200_000.0 * 0.000003;
 
         assert!((cost - expected).abs() < 1e-12);
@@ -7047,7 +7258,7 @@ mod tests {
         )
         .unwrap();
 
-        let cost = compute_cost(&pricing, 200_001, 200_001, 0, 0, 0);
+        let cost = compute_cost(&pricing, 200_001, 200_001, 0, 0, 0, 0);
         let expected =
             (200_000.0 * 0.000001 + 1.0 * 0.000002) + (200_000.0 * 0.000003 + 1.0 * 0.000004);
 
@@ -7068,7 +7279,7 @@ mod tests {
         )
         .unwrap();
 
-        let cost = compute_cost(&pricing, 272_001, 272_001, 272_001, 0, 0);
+        let cost = compute_cost(&pricing, 272_001, 272_001, 272_001, 0, 0, 0);
         let expected = (272_000.0 * 0.000005 + 1.0 * 0.000010)
             + (272_000.0 * 0.000030 + 1.0 * 0.000045)
             + (272_000.0 * 0.0000005 + 1.0 * 0.000001);
@@ -7088,7 +7299,7 @@ mod tests {
         )
         .unwrap();
 
-        let cost = compute_cost(&pricing, 300_000, 0, 0, 0, 0);
+        let cost = compute_cost(&pricing, 300_000, 0, 0, 0, 0, 0);
         let expected = (128_000.0 * 0.000001)
             + (128_000.0 * 0.000002)
             + (16_000.0 * 0.000003)
@@ -7268,6 +7479,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         let cost =
@@ -7517,6 +7729,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -7636,6 +7849,7 @@ mod tests {
                 output: 10_000,
                 cache_read: 1_000,
                 cache_write: 500,
+                cache_write_1h: 0,
                 reasoning: 0,
             };
             let expected = 272_001.0 * long_input_rate
@@ -7662,7 +7876,7 @@ mod tests {
         )
         .unwrap();
 
-        let cost = compute_cost(&pricing, 200_001, 200_000, 0, 0, 0);
+        let cost = compute_cost(&pricing, 200_001, 200_000, 0, 0, 0, 0);
         let expected = (200_000.0 * 0.000001 + 1.0 * 0.000002) + (200_000.0 * 0.000003);
 
         assert!((cost - expected).abs() < 1e-12);
@@ -7677,8 +7891,8 @@ mod tests {
         )
         .unwrap();
 
-        let at_threshold = compute_cost(&pricing, 200_000, 0, 0, 0, 0);
-        let above_threshold = compute_cost(&pricing, 200_001, 0, 0, 0, 0);
+        let at_threshold = compute_cost(&pricing, 200_000, 0, 0, 0, 0, 0);
+        let above_threshold = compute_cost(&pricing, 200_001, 0, 0, 0, 0, 0);
 
         assert_eq!(at_threshold, 0.0);
         assert!((above_threshold - 0.000002).abs() < 1e-12);
@@ -7694,8 +7908,8 @@ mod tests {
         )
         .unwrap();
 
-        let at_threshold = compute_cost(&pricing, 0, 0, 200_000, 0, 0);
-        let above_threshold = compute_cost(&pricing, 0, 0, 200_001, 0, 0);
+        let at_threshold = compute_cost(&pricing, 0, 0, 200_000, 0, 0, 0);
+        let above_threshold = compute_cost(&pricing, 0, 0, 200_001, 0, 0, 0);
 
         assert!((at_threshold - (200_000.0 * 0.0000001)).abs() < 1e-12);
         assert!((above_threshold - (200_000.0 * 0.0000001 + 0.0000002)).abs() < 1e-12);
@@ -7711,11 +7925,41 @@ mod tests {
         )
         .unwrap();
 
-        let at_threshold = compute_cost(&pricing, 0, 0, 0, 200_000, 0);
-        let above_threshold = compute_cost(&pricing, 0, 0, 0, 200_001, 0);
+        let at_threshold = compute_cost(&pricing, 0, 0, 0, 200_000, 0, 0);
+        let above_threshold = compute_cost(&pricing, 0, 0, 0, 200_001, 0, 0);
 
         assert!((at_threshold - (200_000.0 * 0.0000003)).abs() < 1e-12);
         assert!((above_threshold - (200_000.0 * 0.0000003 + 0.0000004)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compute_cost_prices_1h_cache_writes_at_the_1hr_rate() {
+        let pricing = ModelPricing {
+            input_cost_per_token: Some(1e-05),
+            cache_creation_input_token_cost: Some(1.25e-05),
+            cache_creation_input_token_cost_above_1hr: Some(2e-05),
+            ..Default::default()
+        };
+
+        let cost = compute_cost(&pricing, 0, 0, 0, 200_000, 100_000, 0);
+
+        assert!((cost - 3.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_cost_without_1h_rate_tiers_the_combined_cache_write_once() {
+        let pricing = ModelPricing {
+            cache_creation_input_token_cost: Some(0.0000003),
+            cache_creation_input_token_cost_above_200k_tokens: Some(0.0000004),
+            ..Default::default()
+        };
+
+        let cost = compute_cost(&pricing, 0, 0, 0, 250_000, 150_000, 0);
+
+        assert!(
+            (cost - 0.080).abs() < 1e-12,
+            "expected the pre-split 0.080, got {cost}"
+        );
     }
 
     #[test]
@@ -7725,7 +7969,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cost = compute_cost(&pricing, 250_000, 0, 0, 0, 0);
+        let cost = compute_cost(&pricing, 250_000, 0, 0, 0, 0, 0);
 
         assert!((cost - (250_000.0 * 0.000001)).abs() < 1e-12);
     }
@@ -7749,9 +7993,9 @@ mod tests {
         };
 
         let expected = 200_001.0 * 0.000001;
-        assert!((compute_cost(&pricing_negative, 200_001, 0, 0, 0, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_infinite, 200_001, 0, 0, 0, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_nan, 200_001, 0, 0, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_negative, 200_001, 0, 0, 0, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_infinite, 200_001, 0, 0, 0, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_nan, 200_001, 0, 0, 0, 0, 0) - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -7762,7 +8006,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cost = compute_cost(&pricing, 0, 199_999, 0, 0, 1);
+        let cost = compute_cost(&pricing, 0, 199_999, 0, 0, 0, 1);
         let expected = 200_000.0 * 0.000003;
 
         assert!((cost - expected).abs() < 1e-12);
@@ -7787,9 +8031,9 @@ mod tests {
         };
 
         let expected = 200_001.0 * 0.000003;
-        assert!((compute_cost(&pricing_negative, 0, 199_999, 0, 0, 2) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_infinite, 0, 199_999, 0, 0, 2) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_nan, 0, 199_999, 0, 0, 2) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_negative, 0, 199_999, 0, 0, 0, 2) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_infinite, 0, 199_999, 0, 0, 0, 2) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_nan, 0, 199_999, 0, 0, 0, 2) - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -7811,9 +8055,9 @@ mod tests {
         };
 
         let expected = 200_001.0 * 0.0000001;
-        assert!((compute_cost(&pricing_negative, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_infinite, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_nan, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_negative, 0, 0, 200_001, 0, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_infinite, 0, 0, 200_001, 0, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_nan, 0, 0, 200_001, 0, 0, 0) - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -7835,9 +8079,9 @@ mod tests {
         };
 
         let expected = 200_001.0 * 0.0000003;
-        assert!((compute_cost(&pricing_negative, 0, 0, 0, 200_001, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_infinite, 0, 0, 0, 200_001, 0) - expected).abs() < 1e-12);
-        assert!((compute_cost(&pricing_nan, 0, 0, 0, 200_001, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_negative, 0, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_infinite, 0, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
+        assert!((compute_cost(&pricing_nan, 0, 0, 0, 200_001, 0, 0) - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -8207,6 +8451,7 @@ mod tests {
                 output: 1_000,
                 cache_read: 0,
                 cache_write: 1_000,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
         );
@@ -8787,6 +9032,7 @@ mod tests {
             output: 100,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 

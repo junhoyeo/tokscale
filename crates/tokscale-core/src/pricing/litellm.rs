@@ -20,6 +20,8 @@ pub struct ModelPricing {
     pub output_cost_per_token_above_272k_tokens: Option<f64>,
     pub cache_creation_input_token_cost: Option<f64>,
     pub cache_creation_input_token_cost_above_200k_tokens: Option<f64>,
+    pub cache_creation_input_token_cost_above_1hr: Option<f64>,
+    pub cache_creation_input_token_cost_above_1hr_above_200k_tokens: Option<f64>,
     pub cache_read_input_token_cost: Option<f64>,
     pub cache_read_input_token_cost_above_200k_tokens: Option<f64>,
     pub cache_read_input_token_cost_above_272k_tokens: Option<f64>,
@@ -35,7 +37,7 @@ impl ModelPricing {
     /// Leaving that to a comment is not safe enough for
     /// `quotes_zero_for_every_published_rate`, where an overlooked rate is
     /// treated as zero and a new paid tier would read as free.
-    pub(crate) fn all_rates(&self) -> [Option<f64>; 15] {
+    pub(crate) fn all_rates(&self) -> [Option<f64>; 17] {
         let Self {
             input_cost_per_token,
             input_cost_per_token_above_128k_tokens,
@@ -49,6 +51,8 @@ impl ModelPricing {
             output_cost_per_token_above_272k_tokens,
             cache_creation_input_token_cost,
             cache_creation_input_token_cost_above_200k_tokens,
+            cache_creation_input_token_cost_above_1hr,
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens,
             cache_read_input_token_cost,
             cache_read_input_token_cost_above_200k_tokens,
             cache_read_input_token_cost_above_272k_tokens,
@@ -67,6 +71,8 @@ impl ModelPricing {
             output_cost_per_token_above_272k_tokens,
             cache_creation_input_token_cost,
             cache_creation_input_token_cost_above_200k_tokens,
+            cache_creation_input_token_cost_above_1hr,
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens,
             cache_read_input_token_cost,
             cache_read_input_token_cost_above_200k_tokens,
             cache_read_input_token_cost_above_272k_tokens,
@@ -149,10 +155,27 @@ impl ModelPricing {
 
         let valid_rate =
             |rate: Option<f64>| rate.is_some_and(|rate| rate.is_finite() && rate >= 0.0);
+        let cache_write_5m = usage.cache_write.saturating_sub(usage.cache_write_1h);
+        let has_5m_rate = valid_rate(self.cache_creation_input_token_cost);
+        let has_1h_rate = valid_rate(self.cache_creation_input_token_cost_above_1hr);
         (usage.input <= 0 || valid_rate(self.input_cost_per_token))
             && (usage.output <= 0 && usage.reasoning <= 0 || valid_rate(self.output_cost_per_token))
             && (usage.cache_read <= 0 || valid_rate(self.cache_read_input_token_cost))
-            && (usage.cache_write <= 0 || valid_rate(self.cache_creation_input_token_cost))
+            && (cache_write_5m <= 0 || has_5m_rate)
+            && (usage.cache_write_1h <= 0 || has_5m_rate || has_1h_rate)
+    }
+
+    /// Whether `usage` bills a 1-hour cache write that this row cannot price
+    /// at the 1-hour rate. `covers_usage` treats the 5-minute rate as enough,
+    /// so `resolve_for_usage` asks this separately before skipping the
+    /// canonical borrow.
+    pub(crate) fn lacks_1h_cache_write_rate_for(&self, usage: &crate::TokenBreakdown) -> bool {
+        if self.quotes_zero_for_every_published_rate() {
+            return false;
+        }
+        let valid_rate =
+            |rate: Option<f64>| rate.is_some_and(|rate| rate.is_finite() && rate >= 0.0);
+        usage.cache_write_1h > 0 && !valid_rate(self.cache_creation_input_token_cost_above_1hr)
     }
 
     /// A copy of this row with rates taken from `fallback` for the buckets
@@ -248,6 +271,18 @@ impl ModelPricing {
             );
         }
 
+        if usage.cache_write_1h > 0
+            && !valid_rate(filled.cache_creation_input_token_cost_above_1hr)
+            && valid_rate(fallback.cache_creation_input_token_cost_above_1hr)
+        {
+            filled.cache_creation_input_token_cost_above_1hr =
+                fallback.cache_creation_input_token_cost_above_1hr;
+            filled.cache_creation_input_token_cost_above_1hr_above_200k_tokens = valid_or_fallback(
+                filled.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
+                fallback.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
+            );
+        }
+
         filled
     }
 
@@ -276,6 +311,7 @@ mod pricing_row_tests {
             output: 0,
             cache_read: 10,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         }
     }
@@ -365,6 +401,7 @@ mod pricing_row_tests {
             output: 500,
             cache_read: 2_000,
             cache_write: 300,
+            cache_write_1h: 0,
             reasoning: 200,
         }
     }
@@ -435,6 +472,7 @@ mod pricing_row_tests {
             output: 0,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         }));
     }
@@ -468,11 +506,40 @@ mod pricing_row_tests {
             usage.output,
             usage.cache_read,
             usage.cache_write,
+            usage.cache_write_1h,
             usage.reasoning,
         );
 
         assert_eq!(cost, 0.0);
         assert!(cost.is_finite());
+    }
+
+    #[test]
+    fn a_row_with_only_a_1hr_cache_write_rate_covers_usage_that_is_entirely_1hr() {
+        let hourly_only = ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(1e-5),
+            cache_creation_input_token_cost_above_1hr: Some(2e-5),
+            ..Default::default()
+        };
+        let usage = TokenBreakdown {
+            cache_write: 100_000,
+            cache_write_1h: 100_000,
+            ..Default::default()
+        };
+
+        assert!(hourly_only.covers_usage(&usage));
+
+        let cost = crate::pricing::lookup::compute_cost(
+            &hourly_only,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.cache_write_1h,
+            usage.reasoning,
+        );
+        assert!((cost - (100_000.0 * 2e-5)).abs() < 1e-9, "cost was {cost}");
     }
 
     // A bucket the usage does not touch is never filled.

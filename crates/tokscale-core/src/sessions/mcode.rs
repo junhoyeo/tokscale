@@ -187,6 +187,7 @@ fn tokens_from_usage(usage: &Value) -> TokenBreakdown {
         output: int_field(usage, "outputTokens"),
         cache_read: int_field(usage, "cacheReadTokens"),
         cache_write: int_field(usage, "cacheWriteTokens"),
+        cache_write_1h: 0,
         reasoning: 0,
     }
 }

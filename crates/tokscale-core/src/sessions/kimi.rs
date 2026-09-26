@@ -73,6 +73,7 @@ impl TokenUsage {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             // Kimi wire protocols do not expose reasoning tokens; all reasoning included in output
             reasoning: 0,
         })

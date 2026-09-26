@@ -111,6 +111,7 @@ pub fn parse_reasonix_file(path: &Path) -> Vec<UnifiedMessage> {
                 output: non_negative(record.completion).saturating_sub(reasoning),
                 cache_read,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning,
             };
             let mut message = UnifiedMessage::new_with_dedup(

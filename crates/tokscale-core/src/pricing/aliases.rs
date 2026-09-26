@@ -436,6 +436,7 @@ mod tests {
             output: 100_000,
             cache_read: 50_000,
             cache_write: 10_000,
+            cache_write_1h: 0,
             reasoning: 5_000,
         };
 
@@ -506,6 +507,7 @@ mod tests {
             output: 100,
             cache_read: 500,
             cache_write: 200,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 

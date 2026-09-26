@@ -201,8 +201,10 @@ fn merge_streaming_component(records: &[UsageRecord], indices: &[usize]) -> Unif
         merged.tokens.output = merged.tokens.output.max(tokens.output);
         merged.tokens.cache_read = merged.tokens.cache_read.max(tokens.cache_read);
         merged.tokens.cache_write = merged.tokens.cache_write.max(tokens.cache_write);
+        merged.tokens.cache_write_1h = merged.tokens.cache_write_1h.max(tokens.cache_write_1h);
         merged.tokens.reasoning = merged.tokens.reasoning.max(tokens.reasoning);
     }
+    merged.tokens.cache_write_1h = merged.tokens.cache_write_1h.min(merged.tokens.cache_write);
 
     merged
 }
@@ -266,7 +268,10 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
         let Some(message) = record.get("message").and_then(Value::as_object) else {
             return;
         };
-        let Some(usage) = message.get("usage").and_then(Value::as_object) else {
+        let Some(usage_value) = message.get("usage") else {
+            return;
+        };
+        let Some(usage) = usage_value.as_object() else {
             return;
         };
 
@@ -301,6 +306,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .max(0);
+        let cache_write_1h = super::utils::extract_cache_write_1h(usage_value).min(cache_creation);
         let total = input
             .saturating_add(output)
             .saturating_add(cache_read)
@@ -352,6 +358,7 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
             output,
             cache_read,
             cache_write: cache_creation,
+            cache_write_1h,
             reasoning: 0,
         };
 
@@ -464,6 +471,23 @@ mod tests {
         assert_eq!(message.tokens.cache_write, 5);
         assert_eq!(message.tokens.output, 300);
         assert_eq!(message.timestamp, 1_777_298_343_000);
+    }
+
+    #[test]
+    fn reads_the_1h_cache_write_bucket_from_a_claude_code_transcript() {
+        let dir = tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "session.jsonl",
+            &[
+                r#"{"type":"assistant","requestId":"request-1","timestamp":"2026-04-27T13:59:02.000Z","message":{"id":"message-1","model":"claude-sonnet-4","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100000,"cache_creation":{"ephemeral_1h_input_tokens":100000}}}}"#,
+            ],
+        );
+
+        let messages = parse_cherrystudio_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100000);
+        assert_eq!(messages[0].tokens.cache_write_1h, 100000);
     }
 
     #[test]

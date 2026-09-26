@@ -598,6 +598,7 @@ impl PricingService {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             reasoning,
         };
         self.calculate_cost_with_provider(model_id, None, &usage)
@@ -616,6 +617,7 @@ impl PricingService {
                 usage.output,
                 usage.cache_read,
                 usage.cache_write,
+                usage.cache_write_1h,
                 usage.reasoning,
             );
         }
@@ -695,6 +697,37 @@ mod tests {
         }
     }
 
+    fn pricing_row_with_1hr_cache_write_rate() -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: Some(1e-05),
+            output_cost_per_token: Some(5e-05),
+            cache_creation_input_token_cost: Some(1.25e-05),
+            cache_creation_input_token_cost_above_1hr: Some(2e-05),
+            cache_read_input_token_cost: Some(2.5e-07),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn calculate_cost_with_provider_prices_1h_cache_writes_at_the_1hr_rate() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-fable-5-1".to_string(),
+            pricing_row_with_1hr_cache_write_rate(),
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            cache_write: 200_000,
+            cache_write_1h: 100_000,
+            ..Default::default()
+        };
+
+        let cost =
+            service.calculate_cost_with_provider("claude-fable-5-1", Some("anthropic"), &usage);
+
+        assert!((cost - 3.25).abs() < 1e-9, "cost was {cost}");
+    }
+
     fn custom_service(
         custom: HashMap<String, ModelPricing>,
         litellm: HashMap<String, ModelPricing>,
@@ -728,6 +761,7 @@ mod tests {
             output: 1_000_000,
             cache_read: 1_000_000,
             cache_write: 1_000_000,
+            cache_write_1h: 0,
             reasoning: 0,
         }
     }
@@ -811,6 +845,7 @@ mod tests {
                 output: 1_000_000,
                 cache_read: 1_000_000,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             };
 
@@ -884,6 +919,7 @@ mod tests {
             output: 1_000_000,
             cache_read: 1_000_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -924,6 +960,7 @@ mod tests {
                 output: 1_000_000,
                 cache_read: 1_000_000,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             }
         }
@@ -1176,6 +1213,7 @@ mod tests {
             output: 1_000_000,
             cache_read: 1_000_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -1239,6 +1277,7 @@ mod tests {
             output: 10_000,
             cache_read: 50_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -1267,6 +1306,7 @@ mod tests {
             output: 10_000,
             cache_read: 50_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         let cost = service.calculate_cost_with_provider("grok-4.6", Some("openrouter"), &usage);
@@ -1282,6 +1322,7 @@ mod tests {
             output: 0,
             cache_read: 1_000_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         }
     }
@@ -1586,6 +1627,7 @@ mod tests {
             output: 50,
             cache_read: 25,
             cache_write: 10,
+            cache_write_1h: 0,
             reasoning: 5,
         };
 
@@ -1626,6 +1668,25 @@ mod tests {
             Some("azure"),
             &cache_read_usage()
         ));
+    }
+
+    #[test]
+    fn custom_pricing_override_honours_the_1hr_cache_write_rate() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "custom-1hr-model".to_string(),
+            pricing_row_with_1hr_cache_write_rate(),
+        );
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            cache_write: 200_000,
+            cache_write_1h: 100_000,
+            ..Default::default()
+        };
+
+        let cost = service.calculate_cost_with_provider("custom-1hr-model", None, &usage);
+
+        assert!((cost - 3.25).abs() < 1e-9, "cost was {cost}");
     }
 
     // Regression: #1002. A LiteLLM fetch failure used to propagate out of
@@ -1792,6 +1853,7 @@ mod tests {
             output: 100_000,
             cache_read: 50_000,
             cache_write: 20_000,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -2658,6 +2720,7 @@ mod tests {
             output: 50,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -2698,6 +2761,7 @@ mod tests {
             output: 50,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -2760,6 +2824,7 @@ mod tests {
             output: 50,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -2789,6 +2854,7 @@ mod tests {
             output: 1_000_000,
             cache_read: 1_000_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 
@@ -2855,6 +2921,7 @@ mod tests {
             output: 1_000_000,
             cache_read: 1_000_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
 

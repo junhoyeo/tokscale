@@ -98,6 +98,7 @@ impl ZcodeUsage {
             output: net_output,
             cache_read: raw_cache_read,
             cache_write: raw_cache_write,
+            cache_write_1h: 0,
             reasoning: raw_reasoning,
         })
     }
@@ -169,6 +170,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         output,
                         cache_read: 0,
                         cache_write: 0,
+                        cache_write_1h: 0,
                         reasoning: 0,
                     }
                 };
@@ -447,6 +449,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             output: net_output,
             cache_read: raw_cache_read.max(0),
             cache_write: raw_cache_write.max(0),
+            cache_write_1h: 0,
             reasoning: raw_reasoning.max(0),
         };
 

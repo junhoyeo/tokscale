@@ -259,6 +259,7 @@ impl CodexTotals {
             output: (self.output.max(0) - clamped_reasoning).max(0),
             cache_read: clamped_cached,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: clamped_reasoning,
         }
     }
@@ -1519,6 +1520,7 @@ fn parse_codex_headless_line(
                 output: usage.output.max(0),
                 cache_read: usage.cached.max(0),
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             0.0,

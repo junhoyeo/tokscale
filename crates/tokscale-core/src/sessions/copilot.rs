@@ -936,6 +936,7 @@ pub(crate) fn normalize_input_tokens(
         output: output.max(0),
         cache_read: cache_read.max(0),
         cache_write: cache_write.max(0),
+        cache_write_1h: 0,
         reasoning: reasoning.max(0),
     }
 }
@@ -1929,6 +1930,7 @@ mod tests {
                 output: 2,
                 cache_read: 30,
                 cache_write: 4,
+                cache_write_1h: 0,
                 reasoning: 5,
             },
             dedup_key: "same-key".to_string(),
@@ -1952,6 +1954,7 @@ mod tests {
                 output: 1,
                 cache_read: 40,
                 cache_write: 8,
+                cache_write_1h: 0,
                 reasoning: 6,
             },
             dedup_key: "same-key".to_string(),

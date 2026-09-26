@@ -5,8 +5,8 @@
 //! (see `ClientId::Claude` in `clients.rs`).
 
 use super::utils::{
-    estimate_tokens, extract_i64, extract_string, file_modified_timestamp_ms,
-    parse_timestamp_value, read_file_or_none, AnthropicUsage,
+    estimate_tokens, extract_cache_write_1h, extract_i64, extract_string,
+    file_modified_timestamp_ms, parse_timestamp_value, read_file_or_none, AnthropicUsage,
 };
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
@@ -700,12 +700,16 @@ pub fn parse_claude_file_with_cache_and_home(
                     provider_choice.id,
                     session_id.clone(),
                     timestamp,
-                    TokenBreakdown {
-                        input: usage.input_tokens.unwrap_or(0).max(0),
-                        output: usage.output_tokens.unwrap_or(0).max(0),
-                        cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
-                        reasoning: 0,
+                    {
+                        let cache_write = usage.cache_creation_input_tokens.unwrap_or(0).max(0);
+                        TokenBreakdown {
+                            input: usage.input_tokens.unwrap_or(0).max(0),
+                            output: usage.output_tokens.unwrap_or(0).max(0),
+                            cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                            cache_write,
+                            cache_write_1h: usage.cache_write_1h_raw().min(cache_write),
+                            reasoning: 0,
+                        }
                     },
                     0.0,
                     dedup_key,
@@ -898,6 +902,10 @@ fn merge_claude_duplicate(
     t.cache_write = t
         .cache_write
         .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+    t.cache_write_1h = t
+        .cache_write_1h
+        .max(usage.cache_write_1h_raw())
+        .min(t.cache_write);
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
@@ -931,6 +939,11 @@ pub(crate) fn merge_message_completeness(
         .tokens
         .cache_write
         .max(candidate.tokens.cache_write);
+    existing.tokens.cache_write_1h = existing
+        .tokens
+        .cache_write_1h
+        .max(candidate.tokens.cache_write_1h)
+        .min(existing.tokens.cache_write);
     existing.tokens.reasoning = existing.tokens.reasoning.max(candidate.tokens.reasoning);
     existing.duration_ms = match (existing.duration_ms, candidate.duration_ms) {
         (Some(left), Some(right)) => Some(left.max(right)),
@@ -1103,6 +1116,7 @@ fn extract_claude_tool_result_message(
             output: 0,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         },
         0.0,
@@ -1319,6 +1333,7 @@ struct ClaudeHeadlessState {
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    cache_write_1h: i64,
     timestamp_ms: Option<i64>,
     /// A local Claude Code notice uses `<synthetic>` as its model. Ignore all
     /// stream deltas until its matching stop event so they cannot leak into the
@@ -1478,16 +1493,20 @@ fn extract_claude_headless_message(
         provider_id,
         session_id.to_string(),
         timestamp,
-        TokenBreakdown {
-            input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
-            output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
-            cache_read: extract_i64(usage.get("cache_read_input_tokens"))
+        {
+            let cache_write = extract_i64(usage.get("cache_creation_input_tokens"))
                 .unwrap_or(0)
-                .max(0),
-            cache_write: extract_i64(usage.get("cache_creation_input_tokens"))
-                .unwrap_or(0)
-                .max(0),
-            reasoning: 0,
+                .max(0);
+            TokenBreakdown {
+                input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
+                output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
+                cache_read: extract_i64(usage.get("cache_read_input_tokens"))
+                    .unwrap_or(0)
+                    .max(0),
+                cache_write,
+                cache_write_1h: extract_cache_write_1h(usage).min(cache_write),
+                reasoning: 0,
+            }
         },
         0.0,
     ))
@@ -1679,6 +1698,7 @@ fn update_claude_usage(state: &mut ClaudeHeadlessState, usage: &Value) {
     if let Some(cache_write) = extract_i64(usage.get("cache_creation_input_tokens")) {
         state.cache_write = state.cache_write.max(cache_write);
     }
+    state.cache_write_1h = state.cache_write_1h.max(extract_cache_write_1h(usage));
 }
 
 fn finalize_headless_state(
@@ -1715,6 +1735,7 @@ fn finalize_headless_state(
             output: state.output.max(0),
             cache_read: state.cache_read.max(0),
             cache_write: state.cache_write.max(0),
+            cache_write_1h: state.cache_write_1h.max(0).min(state.cache_write.max(0)),
             reasoning: 0,
         },
         0.0,
@@ -1847,6 +1868,38 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
         (temp_dir, path)
+    }
+
+    #[test]
+    fn test_cache_creation_splits_5m_and_1h_cache_writes() {
+        let content = r#"{"type":"assistant","timestamp":"2026-09-21T10:00:00.000Z","requestId":"req_5m","sessionId":"repro","message":{"id":"msg_5m","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":100000,"cache_creation":{"ephemeral_5m_input_tokens":100000,"ephemeral_1h_input_tokens":0}}}}
+{"type":"assistant","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_1h","sessionId":"repro","message":{"id":"msg_1h","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":100000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":100000}}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.cache_write, 100000);
+        assert_eq!(messages[0].tokens.cache_write_1h, 0);
+        assert_eq!(messages[1].tokens.cache_write, 100000);
+        assert_eq!(messages[1].tokens.cache_write_1h, 100000);
+
+        let total_cache_write: i64 = messages.iter().map(|m| m.tokens.cache_write).sum();
+        let total_cache_write_1h: i64 = messages.iter().map(|m| m.tokens.cache_write_1h).sum();
+        assert_eq!(total_cache_write, 200000);
+        assert_eq!(total_cache_write_1h, 100000);
+    }
+
+    #[test]
+    fn test_cache_creation_absent_yields_zero_1h_split() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+        assert_eq!(messages[0].tokens.cache_write_1h, 0);
     }
 
     #[test]
@@ -2589,6 +2642,19 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
+    }
+
+    #[test]
+    fn test_headless_stream_cache_write_1h_survives_a_later_event_without_it() {
+        let content = r#"{"type":"message_start","timestamp":"2025-01-01T00:00:00Z","message":{"id":"msg_1","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":100}}}}
+{"type":"message_delta","usage":{"output_tokens":80,"cache_creation_input_tokens":100}}
+{"type":"message_stop"}"#;
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100);
+        assert_eq!(messages[0].tokens.cache_write_1h, 100);
     }
 
     #[test]

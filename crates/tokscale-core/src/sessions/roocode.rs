@@ -127,6 +127,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
                 output: payload.tokens_out,
                 cache_read: payload.cache_reads,
                 cache_write: payload.cache_writes,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             payload.cost,

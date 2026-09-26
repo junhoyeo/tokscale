@@ -1585,6 +1585,7 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
             output: msg.output,
             cache_read: msg.cache_read,
             cache_write: msg.cache_write,
+            cache_write_1h: msg.cache_write_1h,
             reasoning: msg.reasoning,
         },
         msg.service_tier.as_deref(),
@@ -1659,6 +1660,7 @@ mod tests {
             output: 500,
             cache_read: 2_000,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
             duration_ms: None,
             message_count: 1,
@@ -1683,6 +1685,7 @@ mod tests {
                 output: msg.output,
                 cache_read: msg.cache_read,
                 cache_write: msg.cache_write,
+                cache_write_1h: msg.cache_write_1h,
                 reasoning: msg.reasoning,
             },
         );
@@ -1694,6 +1697,32 @@ mod tests {
             canonical > 0.0,
             "expected a positive cost for a known model"
         );
+    }
+
+    #[test]
+    fn compute_msg_cost_prices_the_1h_cache_write_split() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-fable-5-1".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-05),
+                output_cost_per_token: Some(5e-05),
+                cache_creation_input_token_cost: Some(1.25e-05),
+                cache_creation_input_token_cost_above_1hr: Some(2e-05),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new(litellm, HashMap::new());
+        let mut msg = parsed_message("claude-fable-5-1");
+        msg.input = 0;
+        msg.output = 0;
+        msg.cache_read = 0;
+        msg.cache_write = 200_000;
+        msg.cache_write_1h = 100_000;
+
+        let report_cost = compute_msg_cost(&msg, Some(&pricing));
+
+        assert!((report_cost - 3.25).abs() < 1e-9, "cost was {report_cost}");
     }
 
     #[test]

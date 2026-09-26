@@ -498,6 +498,7 @@ mod tests {
                 output: 50,
                 cache_read: 0,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             cost: 0.01,
@@ -554,6 +555,7 @@ mod tests {
                 output: 0,
                 cache_read: i64::MAX,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             };
             message

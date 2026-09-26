@@ -94,6 +94,7 @@ fn usage_row_to_message(row: WorkBuddyUsageRow) -> UnifiedMessage {
             output: 0,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         },
         0.0,

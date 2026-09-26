@@ -162,6 +162,7 @@ impl CommandCodeUsage {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
             reasoning: 0,
         })
     }
@@ -320,6 +321,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                                 output,
                                 cache_read: 0,
                                 cache_write: 0,
+                                cache_write_1h: 0,
                                 reasoning: 0,
                             }
                         });

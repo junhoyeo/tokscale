@@ -306,6 +306,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             output: model_usage.output_tokens.max(0),
             cache_read: model_usage.cache_read_tokens.max(0),
             cache_write: model_usage.cache_write_tokens.max(0),
+            cache_write_1h: 0,
             reasoning: model_usage.reasoning_tokens.unwrap_or(0).max(0),
         };
         if tokens.total() == 0 {
@@ -360,6 +361,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             output: snapshot.output_tokens.max(0),
             cache_read: snapshot.cache_read_tokens.max(0),
             cache_write: snapshot.cache_write_tokens.max(0),
+            cache_write_1h: 0,
             reasoning: snapshot.reasoning_tokens.unwrap_or(0).max(0),
         };
         let request_count = snapshot.request_count.unwrap_or(0).max(0);
@@ -467,6 +469,7 @@ mod tests {
                 output: 441,
                 cache_read: 1069,
                 cache_write: 7,
+                cache_write_1h: 0,
                 reasoning: 3,
             }
         );
@@ -537,6 +540,7 @@ mod tests {
                 output: 800,
                 cache_read: 500,
                 cache_write: 10,
+                cache_write_1h: 0,
                 reasoning: 120,
             }
         );

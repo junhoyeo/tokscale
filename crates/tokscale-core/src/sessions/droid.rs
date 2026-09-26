@@ -476,6 +476,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         output: usage.output_tokens.unwrap_or(0).max(0),
         cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
         cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
+        cache_write_1h: 0,
         reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
     };
 
@@ -523,6 +524,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
                         output: output[index],
                         cache_read: cache_read[index],
                         cache_write: cache_write[index],
+                        cache_write_1h: 0,
                         reasoning: reasoning[index],
                     },
                     0.0,

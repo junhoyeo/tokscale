@@ -384,6 +384,7 @@ impl DayAccumulator {
             output: self.token_breakdown.output.max(0),
             cache_read: self.token_breakdown.cache_read.max(0),
             cache_write: self.token_breakdown.cache_write.max(0),
+            cache_write_1h: self.token_breakdown.cache_write_1h.max(0),
             reasoning: self.token_breakdown.reasoning.max(0),
         };
 
@@ -395,6 +396,7 @@ impl DayAccumulator {
                 s.tokens.output = s.tokens.output.max(0);
                 s.tokens.cache_read = s.tokens.cache_read.max(0);
                 s.tokens.cache_write = s.tokens.cache_write.max(0);
+                s.tokens.cache_write_1h = s.tokens.cache_write_1h.max(0);
                 s.tokens.reasoning = s.tokens.reasoning.max(0);
                 s.cost = s.cost.max(0.0);
                 s
@@ -548,6 +550,7 @@ impl SessionAccumulator {
             output: self.token_breakdown.output.max(0),
             cache_read: self.token_breakdown.cache_read.max(0),
             cache_write: self.token_breakdown.cache_write.max(0),
+            cache_write_1h: self.token_breakdown.cache_write_1h.max(0),
             reasoning: self.token_breakdown.reasoning.max(0),
         };
 
@@ -559,6 +562,7 @@ impl SessionAccumulator {
                 c.tokens.output = c.tokens.output.max(0);
                 c.tokens.cache_read = c.tokens.cache_read.max(0);
                 c.tokens.cache_write = c.tokens.cache_write.max(0);
+                c.tokens.cache_write_1h = c.tokens.cache_write_1h.max(0);
                 c.tokens.reasoning = c.tokens.reasoning.max(0);
                 c.cost = c.cost.max(0.0);
                 c
@@ -670,6 +674,7 @@ mod tests {
                 output: tokens / 2,
                 cache_read: 0,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
             cost,
@@ -757,6 +762,7 @@ mod tests {
             output: 300,
             cache_read: 50,
             cache_write: 40,
+            cache_write_1h: 0,
             reasoning: 10,
         };
 
@@ -1348,6 +1354,7 @@ mod tests {
             output: 50,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         // 10 rows across 3 sessions.
@@ -1493,6 +1500,7 @@ mod tests {
             output: 10,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         let big = TokenBreakdown {
@@ -1500,6 +1508,7 @@ mod tests {
             output: 500,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         let messages = vec![
@@ -1553,6 +1562,7 @@ mod tests {
                 output: 47,
                 cache_read: 1_920,
                 cache_write: 0,
+                cache_write_1h: 0,
                 reasoning: 40,
             },
             clients: vec![ClientContribution {
@@ -1564,6 +1574,7 @@ mod tests {
                     output: 47,
                     cache_read: 1_920,
                     cache_write: 0,
+                    cache_write_1h: 0,
                     reasoning: 40,
                 },
                 cost: 0.0123,

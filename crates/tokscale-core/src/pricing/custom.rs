@@ -60,6 +60,10 @@ struct CustomModelPricing {
     cache_creation_input_token_cost_per_million_tokens_above_200k_tokens: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
     cache_creation_input_token_cost_above_200k_tokens: Option<f64>,
+    cache_creation_input_token_cost_per_million_tokens_above_1hr: Option<f64>,
+    cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens: Option<f64>,
+    cache_creation_input_token_cost_above_1hr: Option<f64>,
+    cache_creation_input_token_cost_above_1hr_above_200k_tokens: Option<f64>,
     cache_read_input_token_cost_per_million_tokens: Option<f64>,
     cache_read_input_token_cost_per_million_tokens_above_200k_tokens: Option<f64>,
     cache_read_input_token_cost_per_million_tokens_above_272k_tokens: Option<f64>,
@@ -161,6 +165,18 @@ impl CustomModelPricing {
                 self.cache_creation_input_token_cost_above_200k_tokens,
                 "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens",
                 "cache_creation_input_token_cost_above_200k_tokens",
+            )?,
+            cache_creation_input_token_cost_above_1hr: price_field(
+                self.cache_creation_input_token_cost_per_million_tokens_above_1hr,
+                self.cache_creation_input_token_cost_above_1hr,
+                "cache_creation_input_token_cost_per_million_tokens_above_1hr",
+                "cache_creation_input_token_cost_above_1hr",
+            )?,
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens: price_field(
+                self.cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens,
+                self.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
+                "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens",
+                "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
             )?,
             cache_read_input_token_cost: price_field(
                 self.cache_read_input_token_cost_per_million_tokens,
@@ -452,6 +468,43 @@ mod tests {
         assert_eq!(pricing.input_cost_per_token, Some(0.000002));
         assert_eq!(pricing.output_cost_per_token, Some(0.000008));
         assert_eq!(pricing.cache_read_input_token_cost, Some(0.0000003));
+    }
+
+    #[test]
+    fn loads_1hr_cache_write_rate_from_per_million_and_per_token_fields() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("custom-pricing.json");
+        fs::write(
+            &path,
+            r#"{
+                "models": {
+                    "per-million": {
+                        "input_cost_per_million_tokens": 10.00,
+                        "output_cost_per_million_tokens": 50.00,
+                        "cache_creation_input_token_cost_per_million_tokens": 12.50,
+                        "cache_creation_input_token_cost_per_million_tokens_above_1hr": 20.00
+                    },
+                    "per-token": {
+                        "input_cost_per_token": 0.00001,
+                        "output_cost_per_token": 0.00005,
+                        "cache_creation_input_token_cost": 0.0000125,
+                        "cache_creation_input_token_cost_above_1hr": 0.00002
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = CustomPricing::load_from_path(&path);
+
+        for key in ["per-million", "per-token"] {
+            let pricing = loaded.lookup(key).unwrap();
+            assert_eq!(
+                pricing.cache_creation_input_token_cost_above_1hr,
+                Some(0.00002),
+                "{key} above_1hr rate"
+            );
+        }
     }
 
     #[test]

@@ -7611,6 +7611,7 @@ mod tests {
             output: 0,
             cache_read: i64::MAX,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         };
         assert_eq!(client_token_total(&tokens), i64::MAX);
@@ -7622,6 +7623,7 @@ mod tests {
             output: 0,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
         }
     }

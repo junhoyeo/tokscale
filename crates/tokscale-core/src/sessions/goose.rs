@@ -114,6 +114,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 output,
                 cache_read: 0,
                 cache_write: 0,
+                cache_write_1h: 0,
                 // INFERRED, not a real field: Goose's schema has no reasoning
                 // token column. We heuristically attribute any gap between the
                 // reported total and (input + output) to reasoning. This is a

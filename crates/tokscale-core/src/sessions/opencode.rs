@@ -110,6 +110,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             output: tokens.output.max(0),
             cache_read: cache_read.max(0),
             cache_write: cache_write.max(0),
+            cache_write_1h: 0,
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         },
         cost,

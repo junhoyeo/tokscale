@@ -95,6 +95,7 @@ fn usage_event_to_message(event: UsageEvent) -> Option<UnifiedMessage> {
         output: event.output_tokens.max(0),
         cache_read,
         cache_write,
+        cache_write_1h: 0,
         reasoning: event.reasoning_tokens.max(0),
     };
 
