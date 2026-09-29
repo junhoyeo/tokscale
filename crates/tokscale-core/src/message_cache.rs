@@ -1516,8 +1516,10 @@ fn parser_version(client: ClientId) -> u32 {
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
         // v1->v2: bring-your-own-key provider threads are now counted instead
-        // of only `zed.dev` rows. An unchanged threads.db would otherwise keep
-        // serving the v1 entry that dropped them.
+        // of only `zed.dev` rows, and thread usage comes from
+        // `cumulative_token_usage` rather than the per-turn latest-request
+        // snapshots. An unchanged threads.db would otherwise keep serving the
+        // v1 entries that dropped or undercounted them.
         ClientId::Zed => 2,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
