@@ -1,13 +1,15 @@
 //! Zed Agent session parser
 //!
-//! Parses hosted Zed Agent thread rows from Zed's SQLite database:
+//! Parses Zed Agent thread rows from Zed's SQLite database:
 //! - Linux/FreeBSD: `$XDG_DATA_HOME/zed/threads/threads.db`
 //! - macOS: `~/Library/Application Support/Zed/threads/threads.db`
 //! - Windows: `%LOCALAPPDATA%\Zed\threads\threads.db`
 //!
-//! Only Zed-hosted model rows (`provider == "zed.dev"`) are counted. External
-//! ACP agents are billed and logged by their own providers/CLIs, and counting
-//! their Zed UI rows would duplicate those sources.
+//! `threads.db` only holds threads from Zed's built-in agent; external ACP
+//! agents are tracked in Zed's separate `sidebar_threads` metadata table, so
+//! they never appear here. Both Zed-hosted (`provider == "zed.dev"`) and
+//! bring-your-own-key provider threads are counted, except providers whose
+//! requests another Tokscale client already logs.
 
 use super::utils::{open_readonly_sqlite, parse_timestamp_str, sqlite_for_each_row_on};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -20,6 +22,9 @@ use std::path::Path;
 use tracing::warn;
 
 pub(crate) const ZED_HOSTED_PROVIDER: &str = "zed.dev";
+// LM Studio's server logs, which the `lmstudio` client parses, already record
+// every request Zed sends to it.
+const PROVIDERS_LOGGED_ELSEWHERE: &[&str] = &["lmstudio"];
 const MAX_ZED_THREAD_JSON_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -140,7 +145,11 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
 
     let model = thread.get("model")?;
     let provider = model.get("provider")?.as_str()?.trim();
-    if !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
+    if provider.is_empty()
+        || PROVIDERS_LOGGED_ELSEWHERE
+            .iter()
+            .any(|logged| provider.eq_ignore_ascii_case(logged))
+    {
         return None;
     }
 
@@ -155,7 +164,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     let mut message = UnifiedMessage::new_with_dedup(
         "zed",
         model_id,
-        ZED_HOSTED_PROVIDER,
+        provider,
         row.id.clone(),
         timestamp,
         tokens,
@@ -459,12 +468,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_zed_sqlite_skips_non_hosted_threads() {
+    fn parse_zed_sqlite_reads_byok_provider_threads() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        for (id, provider, model) in [
+            ("thread-1", "deepseek", "deepseek-v4-flash"),
+            ("thread-2", "anthropic", "claude-sonnet-4-5"),
+        ] {
+            let payload = thread_json(
+                provider,
+                model,
+                json!({
+                    "user-1": {
+                        "input_tokens": 100,
+                        "output_tokens": 20
+                    }
+                }),
+            );
+            insert_thread(
+                &conn,
+                id,
+                &payload,
+                "zstd",
+                "2026-05-01T12:30:00Z",
+                None,
+                None,
+                None,
+            );
+        }
+
+        let mut messages = parse_zed_sqlite(&db_path);
+        messages.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].provider_id, "deepseek");
+        assert_eq!(messages[0].model_id, "deepseek-v4-flash");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[1].provider_id, "anthropic");
+        assert_eq!(messages[1].model_id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn parse_zed_sqlite_skips_providers_logged_by_other_clients() {
         let dir = TempDir::new().unwrap();
         let (db_path, conn) = create_threads_db(&dir);
         let payload = thread_json(
-            "anthropic",
-            "claude-sonnet-4-5",
+            "lmstudio",
+            "qwen3-coder-30b",
             json!({
                 "user-1": {
                     "input_tokens": 100,
