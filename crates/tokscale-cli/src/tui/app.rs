@@ -22,7 +22,7 @@ use super::data::{
     AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, MonthlyUsage,
     ProjectUsage, SessionUsage, TokenBreakdown, UsageData,
 };
-use super::i18n::{tr, MessageKey, TuiLanguage};
+use super::i18n::{format_count, tr, MessageKey, TuiLanguage};
 use super::privacy::looks_like_email;
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
@@ -1000,14 +1000,19 @@ impl App {
             KeyCode::Char('b') if self.current_tab == Tab::Sessions => {
                 self.roll_up_subagents = !self.roll_up_subagents;
                 self.reset_selection();
+                let lang = self.settings.tui_language;
                 let count = self.active_sessions().len();
-                self.set_status(&format!(
-                    "Subagent sessions {} ({count} sessions)",
+                let state = tr(
+                    lang,
                     if self.roll_up_subagents {
-                        "rolled into parents"
+                        MessageKey::StatusSubagentRollupOn
                     } else {
-                        "shown separately"
-                    }
+                        MessageKey::StatusSubagentRollupOff
+                    },
+                );
+                self.set_status(&format!(
+                    "{state}{}",
+                    format_count(lang, count, MessageKey::CountSessions)
                 ));
             }
             KeyCode::Char('a') if self.current_tab == Tab::Usage => {
