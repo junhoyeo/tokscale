@@ -27,6 +27,7 @@
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::clients::ClientId;
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -622,7 +623,12 @@ fn parse_pi_format_file_inner(
     observer: &mut impl PiFormatObserver,
 ) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let parent_session_id = parent_session_id_from_path(path);
+    // The nested `<timestamp>_<uuid>/<Agent>.jsonl` layout is OMP's; Pi,
+    // Kimchi, Senpi, and Prime Agent keep flat transcripts, so only OMP may
+    // read a parent session out of the path.
+    let parent_session_id = (client == ClientId::Omp.as_str())
+        .then(|| parent_session_id_from_path(path))
+        .flatten();
 
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
@@ -1315,7 +1321,7 @@ not valid json
         .unwrap();
 
         // when
-        let messages = parse_pi_file(&path);
+        let messages = parse_pi_format_file(&path, "omp", "omp");
 
         // then
         assert_eq!(messages.len(), 1);
@@ -1324,6 +1330,32 @@ not valid json
             messages[0].parent_session_id.as_deref(),
             Some("019faa79-e9ea-7000-a4cd-be6083d214ab")
         );
+    }
+
+    #[test]
+    fn test_parse_pi_flat_clients_do_not_derive_parent_from_path() {
+        // given: the same nested shape under a client whose transcripts are
+        // flat — the layout belongs to OMP, so no parent link may be invented
+        // for a directory that merely looks like a parent stem.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir
+            .path()
+            .join("2026-07-28T20-45-44-298Z_019faa79-e9ea-7000-a4cd-be6083d214ab");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("Session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"pi_ses_flat","timestamp":"2026-07-28T21:30:19.369Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T21:30:20.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#,
+        )
+        .unwrap();
+
+        // when
+        let messages = parse_pi_file(&path);
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parent_session_id, None);
     }
 
     #[test]
