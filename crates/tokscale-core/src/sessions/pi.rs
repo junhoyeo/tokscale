@@ -859,6 +859,16 @@ fn parse_pi_format_file_inner(
         return Vec::new();
     }
 
+    // A `title_change` after the last message has no later message to retitle,
+    // and a pre-v3 transcript has no header title to fall back on, so the
+    // rename would never surface. The Sessions bucket adopts the latest title
+    // from the latest message, so stamp the final title there.
+    if header_title.is_none() {
+        if let (Some(title), Some(last)) = (rolling_title, messages.last_mut()) {
+            last.session_title = Some(title);
+        }
+    }
+
     messages
 }
 
@@ -1283,6 +1293,27 @@ not valid json
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].session_title, None);
         assert_eq!(messages[1].session_title.as_deref(), Some("Refined title"));
+    }
+
+    #[test]
+    fn test_parse_pi_trailing_title_change_reaches_the_last_message() {
+        // given: no header title, and the session is renamed after its last
+        // message — the trailing change has no later message to retitle, so
+        // the latest message must carry it for the Sessions tab to show it.
+        let content = r#"{"type":"session","id":"pi_ses_t5","timestamp":"2026-07-28T18:22:13.943Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T18:23:00.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}
+{"type":"title_change","id":"3bd94818","parentId":null,"timestamp":"2026-07-28T18:24:59.651Z","title":"Renamed after the fact","source":"auto"}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("Renamed after the fact")
+        );
     }
 
     #[test]
