@@ -1451,8 +1451,10 @@ impl DataLoader {
                 continue;
             };
             let Some(root_entry) = session_rolled_map.get_mut(&root_key) else {
-                // Unreachable: every parent link created its bucket during
-                // the pass. Keep the row rather than drop its usage.
+                // A chain whose intermediate session contributed no surviving
+                // message (a date filter cut its rows, or it emitted no usage)
+                // has no edge to its own parent, so the root cannot be
+                // resolved. Keep the child's row rather than drop its usage.
                 session_rolled_map.insert(child_key.clone(), child_entry);
                 continue;
             };
