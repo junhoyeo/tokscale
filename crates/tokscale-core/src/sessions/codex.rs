@@ -748,6 +748,23 @@ fn parse_codex_reader<R: BufRead>(
                     handled = true;
                 }
 
+                // Some resumed turns emit `task_started` without a following
+                // `turn_context`. Reset the duration cursor at that boundary
+                // so the next token_count cannot include the preceding idle
+                // gap. When present, `started_at` is the turn's Unix-second
+                // timestamp; otherwise use the event timestamp. A later
+                // `turn_context` still replaces this anchor as usual.
+                if entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("task_started")
+                {
+                    let turn_start_ms = payload
+                        .started_at
+                        .map(|timestamp| timestamp.saturating_mul(1_000))
+                        .or_else(|| parse_codex_entry_timestamp(entry.timestamp.as_deref()));
+                    state.current_turn_start_ms = turn_start_ms;
+                    state.last_accepted_token_timestamp_ms = turn_start_ms;
+                }
+
                 // A human `user_message` event starts a new turn. The event
                 // itself carries no tokens, so we defer the flag to the next
                 // token_count-derived message (the assistant's reply). This
@@ -3828,5 +3845,56 @@ mod tests {
             messages[1].is_turn_start,
             "the deferred turn-start marker must still apply"
         );
+    }
+
+    #[test]
+    fn test_task_started_without_turn_context_anchors_at_started_at() {
+        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let line3 = r#"{"timestamp":"1970-01-01T01:00:00.250Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2","started_at":3600}}"#;
+        let line4 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let content = [line1, line2, line3, line4].join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].timestamp, 3_600_000);
+        assert_eq!(messages[1].duration_ms, Some(1_000));
+    }
+
+    #[test]
+    fn test_task_started_without_started_at_falls_back_to_event_timestamp() {
+        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let line3 = r#"{"timestamp":"1970-01-01T01:00:00.250Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}"#;
+        let line4 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let content = [line1, line2, line3, line4].join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].timestamp,
+            parse_codex_entry_timestamp(Some("1970-01-01T01:00:00.250Z")).unwrap()
+        );
+        assert_eq!(messages[1].duration_ms, Some(750));
+    }
+
+    #[test]
+    fn test_task_started_then_turn_context_uses_turn_context_anchor() {
+        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let line3 = r#"{"timestamp":"1970-01-01T01:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2","started_at":3599}}"#;
+        let line4 = r#"{"timestamp":"1970-01-01T01:00:00.500Z","type":"turn_context","payload":{"model":"gpt-5.2","turn_id":"turn-2"}}"#;
+        let line5 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let content = [line1, line2, line3, line4, line5].join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].duration_ms, Some(500));
     }
 }
