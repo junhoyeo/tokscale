@@ -2258,7 +2258,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::StatsLongestStreakShort => "Série max :",
         MessageKey::StatsActiveDays => "Jours actifs :",
         MessageKey::StatsActiveShort => "Actif :",
-        MessageKey::StatsPeakHour => "Heure de pointe :",
+        MessageKey::StatsPeakHour => "Pic :",
         MessageKey::StatsPeakHourShort => "Pic :",
         MessageKey::StatsLess => "Moins",
         MessageKey::StatsMore => "Plus",
