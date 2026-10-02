@@ -1647,6 +1647,8 @@ mod tests {
 
     const CODEX_DURATION_FIXTURE: &str =
         include_str!("../../tests/fixtures/codex_duration_timing.jsonl");
+    const CODEX_TASK_STARTED_DURATION_FIXTURE: &str =
+        include_str!("../../tests/fixtures/codex_task_started_duration.jsonl");
 
     #[test]
     fn codex_human_turn_matches_only_known_system_tags() {
@@ -3848,53 +3850,23 @@ mod tests {
     }
 
     #[test]
-    fn test_task_started_without_turn_context_anchors_at_started_at() {
-        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
-        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let line3 = r#"{"timestamp":"1970-01-01T01:00:00.250Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2","started_at":3600}}"#;
-        let line4 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let content = [line1, line2, line3, line4].join("\n");
-        let file = create_test_file(&content);
+    fn test_task_started_duration_boundaries_from_fixture() {
+        let file = create_test_file(CODEX_TASK_STARTED_DURATION_FIXTURE);
 
         let messages = parse_codex_file(file.path());
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].timestamp, 3_600_000);
-        assert_eq!(messages[1].duration_ms, Some(1_000));
-    }
-
-    #[test]
-    fn test_task_started_without_started_at_falls_back_to_event_timestamp() {
-        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
-        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let line3 = r#"{"timestamp":"1970-01-01T01:00:00.250Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}"#;
-        let line4 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let content = [line1, line2, line3, line4].join("\n");
-        let file = create_test_file(&content);
-
-        let messages = parse_codex_file(file.path());
-
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 4);
         assert_eq!(
-            messages[1].timestamp,
-            parse_codex_entry_timestamp(Some("1970-01-01T01:00:00.250Z")).unwrap()
+            messages
+                .iter()
+                .map(|message| message.duration_ms)
+                .collect::<Vec<_>>(),
+            vec![Some(1_000), Some(1_000), Some(750), Some(500)]
         );
-        assert_eq!(messages[1].duration_ms, Some(750));
-    }
-
-    #[test]
-    fn test_task_started_then_turn_context_uses_turn_context_anchor() {
-        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
-        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let line3 = r#"{"timestamp":"1970-01-01T01:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2","started_at":3599}}"#;
-        let line4 = r#"{"timestamp":"1970-01-01T01:00:00.500Z","type":"turn_context","payload":{"model":"gpt-5.2","turn_id":"turn-2"}}"#;
-        let line5 = r#"{"timestamp":"1970-01-01T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
-        let content = [line1, line2, line3, line4, line5].join("\n");
-        let file = create_test_file(&content);
-
-        let messages = parse_codex_file(file.path());
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].duration_ms, Some(500));
+        assert_eq!(messages[1].timestamp, 2_209_075_200_000);
+        assert_eq!(
+            messages[2].timestamp,
+            parse_codex_entry_timestamp(Some("2040-01-03T00:00:00.250Z")).unwrap()
+        );
     }
 }
