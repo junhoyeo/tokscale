@@ -1554,7 +1554,9 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::CherryStudio => 2,
         ClientId::Mcode => 1,
         ClientId::LmStudio => 1,
-        ClientId::Hindsight => 1,
+        // v1->v2: split cache-inclusive Hindsight input before pricing. Unchanged
+        // monthly ledgers must not replay the old double-counted buckets.
+        ClientId::Hindsight => 2,
         // v2 preserves actual provider identity; v3 clears stale provider
         // metadata when a persisted reset/sentinel snapshot removes it.
         ClientId::Muse => 3,
@@ -4049,6 +4051,66 @@ mod tests {
             ),
             Some(FingerprintStatus::Changed(_))
         ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn hindsight_v1_shards_reparse_cache_inclusive_usage() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_root = TempDir::new().unwrap();
+        let source = source_root.path().join("2026-09.jsonl");
+        std::fs::write(
+            &source,
+            br#"{"id":"cached-request","provider":"openai","model":"gpt-test","started_at":"2026-09-01T08:16:51Z","input_tokens":100,"output_tokens":20,"cached_tokens":40}"#,
+        )
+        .unwrap();
+        let current_identity = CacheIdentity::for_client(ClientId::Hindsight);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 1,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let rebuilt = crate::sessions::hindsight::parse_hindsight_file(&source);
+        let mut stale_messages = rebuilt.clone();
+        stale_messages[0].tokens.input = 100;
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            stale_messages,
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(
+            cache.get(current_identity, &source).is_none(),
+            "v1 cache must not keep double-counted input for an unchanged ledger"
+        );
+        assert_eq!(rebuilt[0].tokens.input, 60);
+        assert_eq!(rebuilt[0].tokens.total(), 120);
+        cache.insert(CachedSourceEntry::new(
+            current_identity,
+            &source,
+            fingerprint,
+            rebuilt.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        let cached = warm.get(current_identity, &source).unwrap();
+        assert_eq!(cached.messages, rebuilt);
     }
 
     #[test]

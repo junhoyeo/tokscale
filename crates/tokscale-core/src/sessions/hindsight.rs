@@ -14,11 +14,12 @@
 //!
 //! # Token Semantics and Provider Behavior
 //!
-//! - **Cached tokens:** `cached_tokens` is `null` on observed Ollama Cloud
-//!   OpenAI-compatible responses because the provider only returns
-//!   `prompt_tokens`, `completion_tokens`, and `total_tokens` with no
-//!   `prompt_tokens_details.cached_tokens`. Missing or null values are treated
-//!   as `0` and never folded into input tokens.
+//! - **Cached tokens:** OpenAI-compatible, Responses API, and Gemini adapters
+//!   report `cached_tokens` inside `input_tokens`; the cached subset is split
+//!   into `cache_read` so totals and pricing count it once. Anthropic reports
+//!   cache reads beside input, so its input is kept unchanged. Providers with
+//!   unverified semantics retain the existing separate buckets. Missing or
+//!   null cached values (including observed Ollama Cloud rows) become `0`.
 //! - **Reasoning tokens:** Reported as `0`. Empirical testing against Ollama
 //!   Cloud verified that `completion_tokens` already includes reasoning output
 //!   (for example, a response with 4 characters of visible content and 409
@@ -112,12 +113,38 @@ pub fn parse_hindsight_file(path: &Path) -> Vec<UnifiedMessage> {
             if input == 0 && output == 0 {
                 return None;
             }
-            // Always null in practice: Ollama Cloud's OpenAI-compatible
-            // response carries no `prompt_tokens_details`, so the provider
-            // never reports a cache hit for Hindsight to record. Kept as its
-            // own bucket rather than folded into input, so a provider that
-            // does report one prices correctly.
             let cache_read = record.cached_tokens.unwrap_or(0).max(0);
+            // Adapter routing in vectorize-io/hindsight at 017b3f5d:
+            // engine/llm_wrapper.py maps these providers to OpenAI-compatible,
+            // Responses API, or Gemini usage with cache-inclusive input.
+            // Anthropic and unknown adapters keep their existing semantics;
+            // a cache count above input is not a valid subset to subtract.
+            let input = if cache_read > 0
+                && cache_read <= input
+                && matches!(
+                    record.provider.to_ascii_lowercase().as_str(),
+                    "openai"
+                        | "groq"
+                        | "ollama"
+                        | "ollama-cloud"
+                        | "lmstudio"
+                        | "minimax"
+                        | "deepseek"
+                        | "volcano"
+                        | "openrouter"
+                        | "requesty"
+                        | "zai"
+                        | "opencode-go"
+                        | "atlas"
+                        | "meta"
+                        | "openai-responses"
+                        | "gemini"
+                        | "vertexai"
+                ) {
+                input - cache_read
+            } else {
+                input
+            };
             let cache_write = 0;
             // Reasoning is already inside `output_tokens`. Hindsight's
             // `TokenUsage` schema documents the field as excluding reasoning,
@@ -321,5 +348,118 @@ mod tests {
             assert!(seen.insert(key.clone()), "duplicate dedup key found: {key}");
         }
         assert_eq!(seen.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod cache_token_tests {
+    use super::*;
+    use crate::pricing::{ModelPricing, PricingService};
+    use std::collections::HashMap;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn parse_usage(provider: &str, input: i64, output: i64, cached: i64) -> UnifiedMessage {
+        let row = serde_json::json!({
+            "id": "cached-request", "provider": provider, "model": "gpt-test",
+            "started_at": "2026-09-01T08:16:51Z", "input_tokens": input,
+            "output_tokens": output, "cached_tokens": cached,
+        });
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{row}").unwrap();
+        let mut messages = parse_hindsight_file(file.path());
+        assert_eq!(messages.len(), 1);
+        messages.pop().unwrap()
+    }
+
+    #[test]
+    fn splits_cache_inclusive_adapter_usage_without_inflating_totals() {
+        for provider in [
+            "openai",
+            "groq",
+            "ollama",
+            "ollama-cloud",
+            "lmstudio",
+            "minimax",
+            "deepseek",
+            "volcano",
+            "openrouter",
+            "requesty",
+            "zai",
+            "opencode-go",
+            "atlas",
+            "meta",
+            "openai-responses",
+            "gemini",
+            "vertexai",
+            "OpenAI",
+        ] {
+            let message = parse_usage(provider, 100, 20, 40);
+            assert_eq!(message.tokens.input, 60, "{provider}");
+            assert_eq!(message.tokens.cache_read, 40, "{provider}");
+            assert_eq!(message.tokens.total(), 120, "{provider}");
+            assert_eq!(message.provider_id, provider);
+        }
+    }
+
+    #[test]
+    fn preserves_anthropic_and_unverified_adapter_usage() {
+        for provider in [
+            "anthropic",
+            "litellm",
+            "bedrock",
+            "fireworks",
+            "unknown",
+            "",
+        ] {
+            let message = parse_usage(provider, 100, 20, 40);
+            assert_eq!(message.tokens.input, 100, "{provider}");
+            assert_eq!(message.tokens.cache_read, 40, "{provider}");
+            assert_eq!(message.tokens.total(), 160, "{provider}");
+        }
+    }
+
+    #[test]
+    fn retains_fully_cached_input_with_no_output() {
+        let message = parse_usage("openai", 100, 0, 100);
+        assert_eq!(message.tokens.input, 0);
+        assert_eq!(message.tokens.cache_read, 100);
+        assert_eq!(message.tokens.total(), 100);
+    }
+
+    #[test]
+    fn preserves_inconsistent_cache_counts_and_clamps_negative_counts() {
+        let inconsistent = parse_usage("openai", 10, 20, 40);
+        assert_eq!(inconsistent.tokens.input, 10);
+        assert_eq!(inconsistent.tokens.cache_read, 40);
+        let negative_cache = parse_usage("openai", 100, 20, -40);
+        assert_eq!(negative_cache.tokens.input, 100);
+        assert_eq!(negative_cache.tokens.cache_read, 0);
+        let negative_input = parse_usage("openai", -10, 20, 40);
+        assert_eq!(negative_input.tokens.input, 0);
+        assert_eq!(negative_input.tokens.cache_read, 40);
+    }
+
+    #[test]
+    fn prices_cached_input_only_at_the_cache_rate() {
+        let message = parse_usage("openai", 100, 20, 40);
+        let pricing = PricingService::new(
+            HashMap::from([(
+                "gpt-test".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    output_cost_per_token: Some(0.02),
+                    cache_read_input_token_cost: Some(0.001),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        let cost = pricing.calculate_cost_with_provider(
+            &message.model_id,
+            Some(&message.provider_id),
+            &message.tokens,
+        );
+        assert!((cost - 1.04).abs() < 1e-9, "cost was {cost}");
     }
 }
