@@ -4,6 +4,17 @@
 //! OMP builds write a `title` metadata record before the `session` header in
 //! newly-created session files; see `PRE_SESSION_METADATA_TYPES`.
 //!
+//! Human-readable session titles resolve in precedence order: the `session`
+//! header's `title` field (v3 headers; OMP rewrites the header in place on
+//! rename, so it holds the latest title), then the most recent `title` or
+//! `title_change` record seen so far (`title` records are read before the
+//! header; afterwards renames arrive as `title_change`). Resolution is
+//! point-in-time: a mid-session rename retitles only the messages that
+//! follow it, so on pre-v3 transcripts (no header title) the early messages
+//! carry the first recorded title. The resolved title is copied onto every
+//! message's `session_title`; the TUI adopts the most recent one, so the
+//! Sessions tab shows the latest rename instead of the UUID.
+//!
 //! Pi descendants reuse this record layout verbatim, so `parse_pi_format_file`
 //! is shared: see `sessions::kimchi` for Kimchi, `sessions::senpi` for Senpi (OmO Native),
 //! `sessions::omp` for Oh My Pi, which owns the `~/.omp/agent/sessions` root, and
@@ -16,6 +27,7 @@
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::clients::ClientId;
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -34,7 +46,7 @@ use std::path::Path;
 /// `message_cache::parser_version()`, while allowing each client to keep its
 /// own client-specific version offset for independent historical invalidations
 /// (e.g. dedup key changes, session metadata).
-pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 1;
+pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 2;
 
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
@@ -46,6 +58,9 @@ pub struct PiSessionHeader {
     pub timestamp: Option<String>,
     #[allow(dead_code)]
     pub cwd: Option<String>,
+    /// v3 OMP headers carry the current session title (rewritten in place on
+    /// auto-rename). Absent in older Pi/OMP files.
+    pub title: Option<String>,
     #[serde(rename = "parentSession")]
     pub parent_session: Option<String>,
     #[serde(rename = "rlmDepth")]
@@ -108,7 +123,7 @@ const PRIME_LINEAGE_HEADER_KEYS: &[&str] = &["parentSession", "rlmDepth"];
 /// replacement-bearing spelling that may be a damaged Prime lineage key.
 ///
 /// Valid U+FFFD characters are not inherently damage: unrelated extension
-/// keys, including `rlmDepth�`, remain valid. Invalid UTF-8 is tracked
+/// keys, including `rlmDepth\u{FFFD}`, remain valid. Invalid UTF-8 is tracked
 /// separately because a replacement immediately beside a complete structural
 /// key may have replaced rather than extended that key.
 pub(crate) fn raw_json_has_damaged_lineage_header_key(raw: &[u8]) -> bool {
@@ -173,6 +188,13 @@ pub(crate) fn raw_json_has_damaged_lineage_header_key(raw: &[u8]) -> bool {
     false
 }
 
+/// Pre-session `title` metadata record written by OMP. Only the title string
+/// is consumed; `v`/`source`/`updatedAt`/`pad` are ignored.
+#[derive(Debug, Deserialize)]
+struct PiTitleRecord {
+    title: Option<String>,
+}
+
 /// Loose type-only probe for a JSONL line, used to identify pre-session
 /// metadata records without requiring their full schema.
 #[derive(Debug, Deserialize)]
@@ -211,6 +233,8 @@ pub struct PiSessionEntry {
     pub timestamp: Option<String>,
     pub message: Option<PiMessage>,
     pub name: Option<String>,
+    /// Present on `title_change` entries.
+    pub title: Option<String>,
     #[serde(rename = "targetId")]
     pub target_id: Option<String>,
     #[serde(rename = "childUsage")]
@@ -326,6 +350,35 @@ fn strip_generated_id(value: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// OMP nests subagent transcripts one level below the workspace dir inside a
+/// directory named after the PARENT session's file stem
+/// (`<timestamp>_<parent-uuid>/<AgentName>.jsonl`, with the parent transcript
+/// at `<timestamp>_<parent-uuid>.jsonl` beside it). Recover the parent
+/// session id from that layout; top-level sessions sit directly in the
+/// workspace dir and return `None`.
+fn parent_session_id_from_path(path: &Path) -> Option<String> {
+    let dir_name = path.parent()?.file_name()?.to_str()?;
+    let (timestamp, uuid) = dir_name.rsplit_once('_')?;
+    // Timestamp stems look like `2026-07-28T20-45-44-298Z` — require the
+    // shape loosely so ordinary workspace dirs never match.
+    if !(timestamp.starts_with(|c: char| c.is_ascii_digit())
+        && timestamp.contains('T')
+        && timestamp.ends_with('Z'))
+    {
+        return None;
+    }
+    is_generated_id(uuid).then(|| uuid.to_string())
+}
+
+/// Trim a raw title, dropping blanks so an empty `title` field never
+/// shadows a real one from another record.
+fn normalized_title(title: Option<&str>) -> Option<String> {
+    title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 fn pi_subagent_name(session_name: &str) -> Option<String> {
@@ -570,6 +623,12 @@ fn parse_pi_format_file_inner(
     observer: &mut impl PiFormatObserver,
 ) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
+    // The nested `<timestamp>_<uuid>/<Agent>.jsonl` layout is OMP's; Pi,
+    // Kimchi, Senpi, and Prime Agent keep flat transcripts, so only OMP may
+    // read a parent session out of the path.
+    let parent_session_id = (client == ClientId::Omp.as_str())
+        .then(|| parent_session_id_from_path(path))
+        .flatten();
 
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
@@ -582,6 +641,12 @@ fn parse_pi_format_file_inner(
     // A header this parser rejects discards the whole transcript, not one
     // record, so the sink stops the scan and nothing is returned.
     let mut malformed_transcript = false;
+    // Title from the v3 `session` header — authoritative latest, since OMP
+    // rewrites the header in place when the title changes.
+    let mut header_title: Option<String> = None;
+    // Latest title seen in a `title`/`title_change` record; used only when
+    // the header carries no title.
+    let mut rolling_title: Option<String> = None;
 
     for_each_json_line_with_bytes(path, &mut |line| {
         // Pi, Senpi and Kimchi keep the byte-strict record skipping of
@@ -609,6 +674,14 @@ fn parse_pi_format_file_inner(
             };
 
             if entry_type != "session" {
+                if entry_type == "title" {
+                    if let Some(record) = parse_json_line::<PiTitleRecord>(trimmed, &mut buffer) {
+                        if let Some(title) = normalized_title(record.title.as_deref()) {
+                            rolling_title = Some(title);
+                        }
+                    }
+                    return ControlFlow::Continue(());
+                }
                 if PRE_SESSION_METADATA_TYPES.contains(&entry_type.as_str()) {
                     return ControlFlow::Continue(());
                 }
@@ -643,6 +716,7 @@ fn parse_pi_format_file_inner(
             workspace_key = clean_cwd.and_then(normalize_workspace_key);
             workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
             is_rlm_subagent = header.rlm_depth.unwrap_or(0) > 0;
+            header_title = normalized_title(header.title.as_deref());
             return ControlFlow::Continue(());
         }
 
@@ -668,6 +742,13 @@ fn parse_pi_format_file_inner(
                     .and_then(pi_subagent_name)
             };
             observer.observe_entry(&entry, None);
+            return ControlFlow::Continue(());
+        }
+
+        if entry.entry_type == "title_change" {
+            if let Some(title) = normalized_title(entry.title.as_deref()) {
+                rolling_title = Some(title);
+            }
             return ControlFlow::Continue(());
         }
 
@@ -766,6 +847,8 @@ fn parse_pi_format_file_inner(
                 unified.dedup_key = Some(format!("{namespace}:{session_id}:{message_id}"));
             }
         }
+        unified.session_title = header_title.clone().or_else(|| rolling_title.clone());
+        unified.parent_session_id = parent_session_id.clone();
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         observer.observe_entry(&entry, Some(&unified));
         messages.push(unified);
@@ -774,6 +857,16 @@ fn parse_pi_format_file_inner(
 
     if malformed_transcript {
         return Vec::new();
+    }
+
+    // A `title_change` after the last message has no later message to retitle,
+    // and a pre-v3 transcript has no header title to fall back on, so the
+    // rename would never surface. The Sessions bucket adopts the latest title
+    // from the latest message, so stamp the final title there.
+    if header_title.is_none() {
+        if let (Some(title), Some(last)) = (rolling_title, messages.last_mut()) {
+            last.session_title = Some(title);
+        }
     }
 
     messages
@@ -1138,15 +1231,19 @@ not valid json
         assert_eq!(messages[0].tokens.input, 2);
         assert_eq!(messages[0].tokens.output, 180);
         assert_eq!(messages[0].tokens.cache_write, 70844);
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("Comment on GitHub issue")
+        );
     }
 
     #[test]
-    fn test_parse_pi_skips_multiple_leading_title_records() {
-        // given: defensive against more than one pre-session metadata line
-        // in a row (e.g. a title record rewritten by a later auto-rename).
+    fn test_parse_pi_uses_last_leading_title_record() {
+        // given: multiple pre-session title records (a title rewritten by a
+        // later auto-rename) — the last one wins.
         let content = r#"{"type":"title","v":1,"title":"first"}
 {"type":"title","v":1,"title":"renamed"}
-{"type":"session","id":"pi_ses_006","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
+{"type":"session","id":"pi_ses_t1","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
 {"type":"message","timestamp":"2026-07-02T18:08:53.229Z","message":{"role":"assistant","model":"gpt-4o-mini","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
         let file = create_test_file(content);
 
@@ -1155,7 +1252,168 @@ not valid json
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "pi_ses_006");
+        assert_eq!(messages[0].session_title.as_deref(), Some("renamed"));
+    }
+
+    #[test]
+    fn test_parse_pi_header_title_is_authoritative() {
+        // given: a v3 OMP header carries the current title — it wins over
+        // both the leading title record and historical title_change entries.
+        let content = r#"{"type":"title","v":1,"title":"Stale record title","source":"auto","updatedAt":"2026-07-28T18:24:59.651Z"}
+{"type":"session","version":3,"id":"pi_ses_t2","timestamp":"2026-07-28T18:22:13.943Z","cwd":"/tmp","title":"Current header title","titleSource":"auto"}
+{"type":"title_change","id":"3bd94818","parentId":null,"timestamp":"2026-07-28T18:24:59.651Z","title":"Historical change","source":"auto"}
+{"type":"message","timestamp":"2026-07-28T18:25:03.877Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("Current header title")
+        );
+    }
+
+    #[test]
+    fn test_parse_pi_title_change_updates_rolling_title() {
+        // given: no header title — title_change entries refine the title as
+        // the session runs; messages after the change carry the new title.
+        let content = r#"{"type":"session","id":"pi_ses_t3","timestamp":"2026-07-28T18:22:13.943Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T18:23:00.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}
+{"type":"title_change","id":"3bd94818","parentId":null,"timestamp":"2026-07-28T18:24:59.651Z","title":"Refined title","source":"auto"}
+{"type":"message","timestamp":"2026-07-28T18:25:03.877Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":20,"output":6,"cacheRead":0,"cacheWrite":0,"totalTokens":26}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].session_title, None);
+        assert_eq!(messages[1].session_title.as_deref(), Some("Refined title"));
+    }
+
+    #[test]
+    fn test_parse_pi_trailing_title_change_reaches_the_last_message() {
+        // given: no header title, and the session is renamed after its last
+        // message — the trailing change has no later message to retitle, so
+        // the latest message must carry it for the Sessions tab to show it.
+        let content = r#"{"type":"session","id":"pi_ses_t5","timestamp":"2026-07-28T18:22:13.943Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T18:23:00.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}
+{"type":"title_change","id":"3bd94818","parentId":null,"timestamp":"2026-07-28T18:24:59.651Z","title":"Renamed after the fact","source":"auto"}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("Renamed after the fact")
+        );
+    }
+
+    #[test]
+    fn test_parse_pi_ignores_blank_titles() {
+        // given: a blank title never shadows a real one from another record.
+        let content = r#"{"type":"title","v":1,"title":"Real title"}
+{"type":"title","v":1,"title":"   "}
+{"type":"session","id":"pi_ses_t4","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-02T18:08:53.229Z","message":{"role":"assistant","model":"gpt-4o-mini","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_title.as_deref(), Some("Real title"));
+    }
+
+    #[test]
+    fn test_parse_pi_nested_subagent_file_derives_parent_session() {
+        // given: OMP nests subagent transcripts inside a directory named
+        // after the parent session's file stem — the parent id must be
+        // recovered so the Sessions tab can roll the child into its parent.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir
+            .path()
+            .join("2026-07-28T20-45-44-298Z_019faa79-e9ea-7000-a4cd-be6083d214ab");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("ScheduleImpl.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"child-019faaa2","timestamp":"2026-07-28T21:30:19.369Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T21:30:20.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#,
+        )
+        .unwrap();
+
+        // when
+        let messages = parse_pi_format_file(&path, "omp", "omp");
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "child-019faaa2");
+        assert_eq!(
+            messages[0].parent_session_id.as_deref(),
+            Some("019faa79-e9ea-7000-a4cd-be6083d214ab")
+        );
+    }
+
+    #[test]
+    fn test_parse_pi_flat_clients_do_not_derive_parent_from_path() {
+        // given: the same nested shape under a client whose transcripts are
+        // flat — the layout belongs to OMP, so no parent link may be invented
+        // for a directory that merely looks like a parent stem.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir
+            .path()
+            .join("2026-07-28T20-45-44-298Z_019faa79-e9ea-7000-a4cd-be6083d214ab");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("Session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"pi_ses_flat","timestamp":"2026-07-28T21:30:19.369Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-28T21:30:20.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#,
+        )
+        .unwrap();
+
+        // when
+        let messages = parse_pi_file(&path);
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parent_session_id, None);
+    }
+
+    #[test]
+    fn test_parent_session_id_from_path_edge_cases() {
+        use std::path::Path;
+        // Workspace dirs and non-uuid suffixes never match.
+        assert_eq!(
+            parent_session_id_from_path(Path::new(
+                "/home/u/.omp/agent/sessions/-go-src-proj--/2026-07-28T20-45-44-298Z_019faa79-e9ea-7000-a4cd-be6083d214ab.jsonl"
+            )),
+            None
+        );
+        assert_eq!(
+            parent_session_id_from_path(Path::new(
+                "/sessions/not-a-timestamp_019faa79-e9ea-7000-a4cd-be6083d214ab/Child.jsonl"
+            )),
+            None
+        );
+        assert_eq!(
+            parent_session_id_from_path(Path::new(
+                "/sessions/2026-07-28T20-45-44-298Z_not-a-uuid/Child.jsonl"
+            )),
+            None
+        );
+        // A top-level file directly in the workspace dir has no parent.
+        let flat = tempfile::NamedTempFile::new().unwrap();
+        assert_eq!(parent_session_id_from_path(flat.path()), None);
     }
 
     #[test]

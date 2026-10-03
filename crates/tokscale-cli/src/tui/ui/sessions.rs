@@ -296,9 +296,11 @@ impl SessionColumn {
         layout: &WideLayout,
     ) -> Cell<'static> {
         match self {
-            Self::Session => Cell::from(truncate_to_width(
-                session_label(s),
+            Self::Session => Cell::from(label_with_rollup_marker(
+                s,
+                app,
                 layout.session_width as usize,
+                truncate_to_width,
             ))
             .style(
                 Style::default()
@@ -559,6 +561,26 @@ fn session_label(s: &SessionUsage) -> &str {
         .filter(|t| !t.is_empty())
         .unwrap_or(&s.session_id)
 }
+/// Session label with the roll-up marker for a parent row that absorbed
+/// subagent sessions. The marker is a PREFIX, never a suffix: table cells
+/// clip at the tail, so a trailing "(+N)" would be cut off long titles at
+/// narrow widths. Its width is reserved before the title is truncated, using
+/// the caller's truncator (`truncate_to_width` on the wide path,
+/// `truncate_text` on the narrow ones); the marker itself is plain ASCII, so
+/// code points and display cells agree for it either way.
+fn label_with_rollup_marker(
+    s: &SessionUsage,
+    app: &App,
+    budget: usize,
+    truncate: fn(&str, usize) -> String,
+) -> String {
+    if !app.roll_up_subagents || s.subagent_count == 0 {
+        return truncate(session_label(s), budget);
+    }
+    let marker = format!("(+{}) ", s.subagent_count);
+    let keep = budget.saturating_sub(marker.chars().count());
+    format!("{}{}", marker, truncate(session_label(s), keep))
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
@@ -692,7 +714,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     .collect()
             } else if is_very_narrow {
                 vec![
-                    Cell::from(truncate_text(session_label(session), 20)).style(
+                    Cell::from(label_with_rollup_marker(session, app, 20, truncate_text)).style(
                         Style::default()
                             .fg(theme_muted)
                             .add_modifier(Modifier::BOLD),
@@ -700,11 +722,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_cost(session.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else {
-                let mut cells = vec![Cell::from(truncate_text(session_label(session), 24)).style(
-                    Style::default()
-                        .fg(theme_muted)
-                        .add_modifier(Modifier::BOLD),
-                )];
+                let mut cells =
+                    vec![
+                        Cell::from(label_with_rollup_marker(session, app, 24, truncate_text))
+                            .style(
+                                Style::default()
+                                    .fg(theme_muted)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                    ];
                 cells.push(
                     Cell::from(get_compact_client_display_name(&session.client))
                         .style(Style::default().fg(theme_muted)),
@@ -1032,6 +1058,7 @@ mod tests {
             turn_count: 2,
             first_active_ms: last_ms.saturating_sub(3_600_000),
             last_active_ms: last_ms,
+            subagent_count: 0,
         }
     }
 
@@ -2002,6 +2029,54 @@ mod tests {
         assert!(
             body.contains("Last Active"),
             "expected last active header\n{body}"
+        );
+    }
+
+    #[test]
+    fn rolled_parent_shows_subagent_count_marker() {
+        let mut app = make_app(200);
+        app.roll_up_subagents = true;
+        let mut s = session("parent-1", "pi", 2.5, 1_736_000_000_000);
+        s.title = Some("Parent session".to_string());
+        s.subagent_count = 3;
+        app.data.sessions_rolled = vec![s];
+        let body = render_body(&mut app, 200, 12);
+        assert!(
+            body.contains("(+3) Parent session"),
+            "expected roll-up marker in body\n{body}"
+        );
+    }
+
+    #[test]
+    fn rolled_marker_survives_truncation() {
+        // A long parent title must not push the "(+N)" marker out of the
+        // truncated label: the marker reserves its width first.
+        for width in [70, 200] {
+            let mut app = make_app(width);
+            app.roll_up_subagents = true;
+            let mut s = session("parent-1", "pi", 2.5, 1_736_000_000_000);
+            s.title = Some("Commit test improvements and codebase audit".to_string());
+            s.subagent_count = 19;
+            app.data.sessions_rolled = vec![s];
+            let body = render_body(&mut app, width, 12);
+            assert!(
+                body.contains("(+19)"),
+                "marker must survive truncation at width {width}\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_view_hides_subagent_count_marker() {
+        let mut app = make_app(200);
+        let mut s = session("parent-1", "pi", 2.5, 1_736_000_000_000);
+        s.title = Some("Parent session".to_string());
+        s.subagent_count = 3; // would only be set in the rolled view
+        app.data.sessions = vec![s];
+        let body = render_body(&mut app, 200, 12);
+        assert!(
+            !body.contains("(+3)"),
+            "flat view must not show the roll-up marker\n{body}"
         );
     }
 

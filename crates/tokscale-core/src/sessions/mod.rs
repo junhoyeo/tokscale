@@ -107,6 +107,13 @@ pub struct UnifiedMessage {
     /// the session ID in that case.
     #[serde(default)]
     pub session_title: Option<String>,
+    /// Session ID of the parent session when this message belongs to a
+    /// subagent session linked to one (e.g. OMP nests subagent transcripts
+    /// under a directory named after the parent session). `None` for
+    /// top-level sessions and clients without subagent linkage. The
+    /// Sessions tab can roll these messages into the parent's row.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -392,6 +399,7 @@ impl UnifiedMessage {
             agent,
             dedup_key,
             session_title: None,
+            parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
         }
