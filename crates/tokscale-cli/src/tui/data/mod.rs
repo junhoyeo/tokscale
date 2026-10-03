@@ -1687,9 +1687,14 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
         entry_totals.1 += entry.cost;
     }
 
+    // HashMap iteration order is random, so a tokens-only max can pick a
+    // different tied hour on each call. Break ties by the earliest hour so
+    // Stats and Hourly Profile agree.
     hour_totals
         .into_iter()
-        .max_by_key(|(_, (tokens, _))| *tokens)
+        .max_by(|(hour_a, (tokens_a, _)), (hour_b, (tokens_b, _))| {
+            tokens_a.cmp(tokens_b).then(hour_b.cmp(hour_a))
+        })
         .map(|(hour, (tokens, cost))| (hour, tokens, cost))
 }
 
@@ -1697,7 +1702,7 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::env;
     use std::fs;
     use tempfile::TempDir;
@@ -1705,6 +1710,32 @@ mod tests {
     use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+
+    #[test]
+    fn find_peak_hour_breaks_token_ties_by_earliest_hour() {
+        let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        let hour = |h: u32, tokens: u64| HourlyUsage {
+            datetime: date.and_hms_opt(h, 0, 0).unwrap(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost: 1.0,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        };
+
+        let early_first = vec![hour(3, 50), hour(18, 50), hour(9, 10)];
+        let late_first = vec![hour(18, 50), hour(3, 50), hour(9, 10)];
+        assert_eq!(find_peak_hour(&early_first).map(|peak| peak.0), Some(3));
+        assert_eq!(find_peak_hour(&late_first).map(|peak| peak.0), Some(3));
+        assert_eq!(
+            find_peak_hour(&[hour(18, 50), hour(3, 80)]).map(|peak| peak.0),
+            Some(3)
+        );
+    }
 
     #[test]
     fn positive_unified_token_total_saturates_instead_of_overflowing() {

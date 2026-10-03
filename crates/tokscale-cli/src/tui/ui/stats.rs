@@ -6,6 +6,7 @@ use super::widgets::{
     get_client_display_name, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
 };
 use crate::tui::app::{App, ClickAction};
+use crate::tui::data::find_peak_hour;
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 
 const CELL_WIDTH: u16 = 2;
@@ -312,6 +313,9 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         .map(|m| app.model_color_for(&m.provider, &m.color_key))
         .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
+    let peak_hour = find_peak_hour(&app.data.hourly)
+        .map(|(hour, _, _)| format!("{:02}:00", hour))
+        .unwrap_or_else(|| "N/A".to_string());
 
     let col1_width = if is_narrow { 36u16 } else { 60u16 };
     let col2_x = inner.x + col1_width;
@@ -454,6 +458,21 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(active_days_line),
         Rect::new(inner.x, y, col1_width, 1),
+    );
+
+    let peak_label = if is_narrow {
+        tr(lang, MessageKey::StatsPeakHourShort)
+    } else {
+        tr(lang, MessageKey::StatsPeakHour)
+    };
+    let peak_hour_line = Line::from(vec![
+        Span::styled(peak_label, Style::default().fg(app.theme.muted)),
+        Span::raw(" "),
+        Span::styled(peak_hour, app.theme.count_style()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(peak_hour_line),
+        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
     );
 
     y += 2;
@@ -870,6 +889,44 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect::<String>();
         assert!(!body.trim().is_empty());
+        assert!(body.contains("Peak hour: N/A"), "{body}");
+    }
+
+    #[test]
+    fn stats_panel_shows_peak_hour() {
+        use crate::tui::data::{HourlyUsage, TokenBreakdown};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut app = make_app();
+        let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        let hour = |h: u32, tokens: u64| HourlyUsage {
+            datetime: date.and_hms_opt(h, 0, 0).unwrap(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost: 1.0,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        };
+        app.data.hourly = vec![hour(9, 10), hour(14, 500), hour(21, 40)];
+
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_stats_panel(frame, &app, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+
+        let body = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<String>();
+        assert!(body.contains("Peak hour: 14:00"), "{body}");
     }
 
     #[test]

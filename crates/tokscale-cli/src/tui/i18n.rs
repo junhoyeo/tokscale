@@ -261,6 +261,8 @@ pub enum MessageKey {
     StatsLongestStreakShort,
     StatsActiveDays,
     StatsActiveShort,
+    StatsPeakHour,
+    StatsPeakHourShort,
     StatsLess,
     StatsMore,
 
@@ -665,6 +667,8 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::StatsLongestStreakShort => "Max streak:",
         MessageKey::StatsActiveDays => "Active days:",
         MessageKey::StatsActiveShort => "Active:",
+        MessageKey::StatsPeakHour => "Peak hour:",
+        MessageKey::StatsPeakHourShort => "Peak:",
         MessageKey::StatsLess => "Less",
         MessageKey::StatsMore => "More",
 
@@ -1062,6 +1066,8 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::StatsLongestStreakShort => "최대 연속:",
         MessageKey::StatsActiveDays => "활동일:",
         MessageKey::StatsActiveShort => "활동:",
+        MessageKey::StatsPeakHour => "피크 시간:",
+        MessageKey::StatsPeakHourShort => "피크:",
         MessageKey::StatsLess => "적음",
         MessageKey::StatsMore => "많음",
 
@@ -1466,6 +1472,8 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::StatsLongestStreakShort => "最大連続:",
         MessageKey::StatsActiveDays => "アクティブ日数:",
         MessageKey::StatsActiveShort => "アクティブ:",
+        MessageKey::StatsPeakHour => "ピーク時間:",
+        MessageKey::StatsPeakHourShort => "ピーク:",
         MessageKey::StatsLess => "少",
         MessageKey::StatsMore => "多",
 
@@ -1861,6 +1869,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::StatsLongestStreakShort => "最大连续:",
         MessageKey::StatsActiveDays => "活跃天数:",
         MessageKey::StatsActiveShort => "活跃:",
+        MessageKey::StatsPeakHour => "高峰时段:",
+        MessageKey::StatsPeakHourShort => "高峰:",
         MessageKey::StatsLess => "少",
         MessageKey::StatsMore => "多",
 
@@ -2248,6 +2258,8 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::StatsLongestStreakShort => "Série max :",
         MessageKey::StatsActiveDays => "Jours actifs :",
         MessageKey::StatsActiveShort => "Actif :",
+        MessageKey::StatsPeakHour => "Pic :",
+        MessageKey::StatsPeakHourShort => "Pic :",
         MessageKey::StatsLess => "Moins",
         MessageKey::StatsMore => "Plus",
 
@@ -2758,6 +2770,8 @@ mod tests {
             MessageKey::StatsLongestStreakShort,
             MessageKey::StatsActiveDays,
             MessageKey::StatsActiveShort,
+            MessageKey::StatsPeakHour,
+            MessageKey::StatsPeakHourShort,
             MessageKey::StatsLess,
             MessageKey::StatsMore,
             MessageKey::DialogCurrentLabel,
