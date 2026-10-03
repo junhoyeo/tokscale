@@ -748,6 +748,23 @@ fn parse_codex_reader<R: BufRead>(
                     handled = true;
                 }
 
+                // Some resumed turns emit `task_started` without a following
+                // `turn_context`. Reset the duration cursor at that boundary
+                // so the next token_count cannot include the preceding idle
+                // gap. When present, `started_at` is the turn's Unix-second
+                // timestamp; otherwise use the event timestamp. A later
+                // `turn_context` still replaces this anchor as usual.
+                if entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("task_started")
+                {
+                    let turn_start_ms = payload
+                        .started_at
+                        .map(|timestamp| timestamp.saturating_mul(1_000))
+                        .or_else(|| parse_codex_entry_timestamp(entry.timestamp.as_deref()));
+                    state.current_turn_start_ms = turn_start_ms;
+                    state.last_accepted_token_timestamp_ms = turn_start_ms;
+                }
+
                 // A human `user_message` event starts a new turn. The event
                 // itself carries no tokens, so we defer the flag to the next
                 // token_count-derived message (the assistant's reply). This
@@ -1630,6 +1647,8 @@ mod tests {
 
     const CODEX_DURATION_FIXTURE: &str =
         include_str!("../../tests/fixtures/codex_duration_timing.jsonl");
+    const CODEX_TASK_STARTED_DURATION_FIXTURE: &str =
+        include_str!("../../tests/fixtures/codex_task_started_duration.jsonl");
 
     #[test]
     fn codex_human_turn_matches_only_known_system_tags() {
@@ -3827,6 +3846,27 @@ mod tests {
         assert!(
             messages[1].is_turn_start,
             "the deferred turn-start marker must still apply"
+        );
+    }
+
+    #[test]
+    fn test_task_started_duration_boundaries_from_fixture() {
+        let file = create_test_file(CODEX_TASK_STARTED_DURATION_FIXTURE);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.duration_ms)
+                .collect::<Vec<_>>(),
+            vec![Some(1_000), Some(1_000), Some(750), Some(500)]
+        );
+        assert_eq!(messages[1].timestamp, 2_209_075_200_000);
+        assert_eq!(
+            messages[2].timestamp,
+            parse_codex_entry_timestamp(Some("2040-01-03T00:00:00.250Z")).unwrap()
         );
     }
 }
