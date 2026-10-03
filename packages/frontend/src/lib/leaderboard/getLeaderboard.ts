@@ -297,14 +297,6 @@ async function fetchAllTimeLeaderboardData(
   search: string,
 ): Promise<LeaderboardData> {
   const parsed = parseSearchDirectives(search);
-  const clientMatch = likeAny(sql`source`, parsed.clients);
-  const modelMatch = likeAny(sql`model`, parsed.models);
-  const sourceFilter = hasDirectives(parsed)
-    ? sql`
-    AND (${parsed.clients.length === 0} OR EXISTS (SELECT 1 FROM unnest(s.sources_used) AS source WHERE ${clientMatch}))
-    AND (${parsed.models.length === 0} OR EXISTS (SELECT 1 FROM unnest(s.models_used) AS model WHERE ${modelMatch}))
-  `
-    : sql``;
   const globalStatsBase = sql`
     SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
       SUM(s.total_tokens) AS total_tokens, SUM(CAST(s.total_cost AS DECIMAL(18,4))) AS total_cost
@@ -312,14 +304,30 @@ async function fetchAllTimeLeaderboardData(
     INNER JOIN users u ON s.user_id = u.id
     GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
   `;
-  const base = sql`
-    SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
-      SUM(s.total_tokens) AS total_tokens, SUM(CAST(s.total_cost AS DECIMAL(18,4))) AS total_cost
-    FROM submissions s
-    INNER JOIN users u ON s.user_id = u.id
-    WHERE TRUE ${sourceFilter}
-    GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
-  `;
+  let base = globalStatsBase;
+
+  if (hasDirectives(parsed)) {
+    const usesModels = parsed.models.length > 0;
+    const selectedBreakdown = usesModels ? sql`model.value` : sql`client.value`;
+    const clientMatch = likeAny(sql`client.key`, parsed.clients);
+    const modelRows = usesModels
+      ? sql`CROSS JOIN LATERAL jsonb_each(COALESCE(client.value->'models', '{}'::jsonb)) AS model(key, value)`
+      : sql``;
+    const modelMatch = usesModels ? sql`AND ${likeAny(sql`model.key`, parsed.models)}` : sql``;
+    base = sql`
+      SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
+        SUM(COALESCE((${selectedBreakdown}->>'tokens')::numeric, 0)) AS total_tokens,
+        SUM(COALESCE((${selectedBreakdown}->>'cost')::numeric, 0)) AS total_cost
+      FROM daily_breakdown d
+      INNER JOIN submissions s ON d.submission_id = s.id
+      INNER JOIN users u ON s.user_id = u.id
+      CROSS JOIN LATERAL jsonb_each(COALESCE(d.source_breakdown, '{}'::jsonb)) AS client(key, value)
+      ${modelRows}
+      WHERE ${clientMatch}
+        ${modelMatch}
+      GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
+    `;
+  }
   const result = await db.execute<LeaderboardQueryResult>(
     resultQuery(
       base,

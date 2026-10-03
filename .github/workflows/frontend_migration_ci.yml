@@ -12,6 +12,8 @@ on:
       - "packages/frontend/drizzle.config.ts"
       - "packages/frontend/scripts/check-migrations.ts"
       - "packages/frontend/src/lib/db/**"
+      - "packages/frontend/src/lib/leaderboard/getLeaderboard.ts"
+      - "packages/frontend/__tests__/integration/leaderboardPostgres.test.ts"
       - "packages/frontend/src/lib/moderation/**"
       - "packages/frontend/__tests__/integration/moderationCandidatesPostgres.test.ts"
       - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
@@ -76,3 +78,8 @@ jobs:
         env:
           MODERATION_CANDIDATES_DB_INTEGRATION: "1"
         run: bun run --cwd packages/frontend test:moderation:db
+
+      - name: Execute leaderboard query against PostgreSQL
+        env:
+          LEADERBOARD_DB_INTEGRATION: "1"
+        run: bun run --cwd packages/frontend test -- __tests__/integration/leaderboardPostgres.test.ts

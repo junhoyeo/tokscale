@@ -115,8 +115,10 @@ describe("all-time leaderboard aggregate query", () => {
       "client:codex model:gpt-5",
     );
     expect(query()).toContain("RANK() OVER (ORDER BY total_tokens DESC)");
-    expect(query()).toContain("unnest(s.sources_used)");
-    expect(query()).toContain("unnest(s.models_used)");
+    expect(query()).toContain("jsonb_each(COALESCE(d.source_breakdown");
+    expect(query()).toContain("jsonb_each(COALESCE(client.value->'models'");
+    expect(query()).toContain("LOWER(client.key) LIKE %codex%");
+    expect(query()).toContain("LOWER(model.key) LIKE %gpt-5%");
   });
 
   it("keeps global headline totals unfiltered by directives and includes hidden users", async () => {
@@ -144,7 +146,7 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("stat_rows AS (");
     expect(query()).toContain("stats AS (");
     expect(query()).toContain("WHERE leaderboard_hidden = false");
-    expect(occurrences(finalQuery(), "unnest(s.sources_used)")).toBe(1);
+    expect(occurrences(finalQuery(), "jsonb_each(COALESCE(d.source_breakdown")).toBe(1);
     expect(occurrences(finalQuery(), "stats AS (")).toBe(1);
     expect(occurrences(finalQuery(), "FROM stat_rows")).toBe(1);
   });
