@@ -1,13 +1,15 @@
 //! Zed Agent session parser
 //!
-//! Parses hosted Zed Agent thread rows from Zed's SQLite database:
+//! Parses Zed Agent thread rows from Zed's SQLite database:
 //! - Linux/FreeBSD: `$XDG_DATA_HOME/zed/threads/threads.db`
 //! - macOS: `~/Library/Application Support/Zed/threads/threads.db`
 //! - Windows: `%LOCALAPPDATA%\Zed\threads\threads.db`
 //!
-//! Only Zed-hosted model rows (`provider == "zed.dev"`) are counted. External
-//! ACP agents are billed and logged by their own providers/CLIs, and counting
-//! their Zed UI rows would duplicate those sources.
+//! `threads.db` only holds threads from Zed's built-in agent; external ACP
+//! agents are tracked in Zed's separate `sidebar_threads` metadata table, so
+//! they never appear here. Both Zed-hosted (`provider == "zed.dev"`) and
+//! bring-your-own-key provider threads are counted, except providers whose
+//! requests another Tokscale client already logs.
 
 use super::utils::{open_readonly_sqlite, parse_timestamp_str, sqlite_for_each_row_on};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -20,6 +22,9 @@ use std::path::Path;
 use tracing::warn;
 
 pub(crate) const ZED_HOSTED_PROVIDER: &str = "zed.dev";
+// LM Studio's server logs, which the `lmstudio` client parses, already record
+// every request Zed sends to it.
+const PROVIDERS_LOGGED_ELSEWHERE: &[&str] = &["lmstudio"];
 const MAX_ZED_THREAD_JSON_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -140,7 +145,11 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
 
     let model = thread.get("model")?;
     let provider = model.get("provider")?.as_str()?.trim();
-    if !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
+    if provider.is_empty()
+        || PROVIDERS_LOGGED_ELSEWHERE
+            .iter()
+            .any(|logged| provider.eq_ignore_ascii_case(logged))
+    {
         return None;
     }
 
@@ -155,7 +164,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     let mut message = UnifiedMessage::new_with_dedup(
         "zed",
         model_id,
-        ZED_HOSTED_PROVIDER,
+        provider,
         row.id.clone(),
         timestamp,
         tokens,
@@ -207,16 +216,21 @@ fn decode_thread_json(data_type: &str, data: &[u8]) -> Result<Vec<u8>, String> {
 
 fn thread_usage(thread: &Value) -> Option<(TokenBreakdown, i32)> {
     let (request_usage, request_count) = sum_request_token_usage(thread.get("request_token_usage"));
-    if request_usage.total() > 0 {
-        return Some((request_usage, request_count.max(1)));
-    }
-
-    let cumulative = token_usage_from_value(thread.get("cumulative_token_usage")?)?;
-    if cumulative.total() > 0 {
-        Some((cumulative, 1))
+    // Zed overwrites each turn's `request_token_usage` entry with the latest
+    // request of that turn's agent loop, while `cumulative_token_usage` adds
+    // every request, so the per-turn map is only a fallback for threads saved
+    // without a cumulative total.
+    let cumulative = thread
+        .get("cumulative_token_usage")
+        .and_then(token_usage_from_value)
+        .unwrap_or_default();
+    let usage = if cumulative.total() > 0 {
+        cumulative
     } else {
-        None
-    }
+        request_usage
+    };
+
+    (usage.total() > 0).then_some((usage, request_count.max(1)))
 }
 
 fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
@@ -349,17 +363,19 @@ mod tests {
         (db_path, conn)
     }
 
-    fn thread_json(provider: &str, model: &str, request_token_usage: Value) -> String {
+    fn thread_json(
+        provider: &str,
+        model: &str,
+        request_token_usage: Value,
+        cumulative_token_usage: Value,
+    ) -> String {
         json!({
             "version": "0.3.0",
             "title": "Test thread",
             "messages": [],
             "updated_at": "2026-05-01T12:30:00Z",
             "request_token_usage": request_token_usage,
-            "cumulative_token_usage": {
-                "input_tokens": 999,
-                "output_tokens": 999
-            },
+            "cumulative_token_usage": cumulative_token_usage,
             "model": {
                 "provider": provider,
                 "model": model
@@ -425,6 +441,12 @@ mod tests {
                     "output_tokens": 7
                 }
             }),
+            json!({
+                "input_tokens": 400,
+                "output_tokens": 60,
+                "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 30
+            }),
         );
         insert_thread(
             &conn,
@@ -449,10 +471,10 @@ mod tests {
             message.timestamp,
             parse_timestamp_str("2026-05-01T12:00:00Z").unwrap()
         );
-        assert_eq!(message.tokens.input, 150);
-        assert_eq!(message.tokens.output, 27);
+        assert_eq!(message.tokens.input, 400);
+        assert_eq!(message.tokens.output, 60);
         assert_eq!(message.tokens.cache_write, 5);
-        assert_eq!(message.tokens.cache_read, 10);
+        assert_eq!(message.tokens.cache_read, 30);
         assert_eq!(message.message_count, 2);
         assert_eq!(message.workspace_key.as_deref(), Some("/workspace/b"));
         assert_eq!(message.workspace_label.as_deref(), Some("b"));
@@ -460,17 +482,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_zed_sqlite_skips_non_hosted_threads() {
+    fn parse_zed_sqlite_reads_byok_provider_threads() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        for (id, provider, model) in [
+            ("thread-1", "deepseek", "deepseek-v4-flash"),
+            ("thread-2", "anthropic", "claude-sonnet-4-5"),
+        ] {
+            let payload = thread_json(
+                provider,
+                model,
+                json!({
+                    "user-1": {
+                        "input_tokens": 100,
+                        "output_tokens": 20
+                    }
+                }),
+                json!({
+                    "input_tokens": 100,
+                    "output_tokens": 20
+                }),
+            );
+            insert_thread(
+                &conn,
+                id,
+                &payload,
+                "zstd",
+                "2026-05-01T12:30:00Z",
+                None,
+                None,
+                None,
+            );
+        }
+
+        let mut messages = parse_zed_sqlite(&db_path);
+        messages.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].provider_id, "deepseek");
+        assert_eq!(messages[0].model_id, "deepseek-v4-flash");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[1].provider_id, "anthropic");
+        assert_eq!(messages[1].model_id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn parse_zed_sqlite_skips_providers_logged_by_other_clients() {
         let dir = TempDir::new().unwrap();
         let (db_path, conn) = create_threads_db(&dir);
         let payload = thread_json(
-            "anthropic",
-            "claude-sonnet-4-5",
+            "lmstudio",
+            "qwen3-coder-30b",
             json!({
                 "user-1": {
                     "input_tokens": 100,
                     "output_tokens": 20
                 }
+            }),
+            json!({
+                "input_tokens": 100,
+                "output_tokens": 20
             }),
         );
         insert_thread(
@@ -532,6 +604,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_zed_sqlite_falls_back_to_request_usage_without_cumulative_total() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        let payload = thread_json(
+            ZED_HOSTED_PROVIDER,
+            "gpt-5.2",
+            json!({
+                "user-1": {
+                    "input_tokens": 100,
+                    "output_tokens": 20
+                },
+                "user-2": {
+                    "input_tokens": 50,
+                    "output_tokens": 7
+                }
+            }),
+            json!({}),
+        );
+        insert_thread(
+            &conn,
+            "thread-1",
+            &payload,
+            "zstd",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+
+        let messages = parse_zed_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 150);
+        assert_eq!(messages[0].tokens.output, 27);
+        assert_eq!(messages[0].message_count, 2);
+    }
+
+    #[test]
     fn parse_zed_sqlite_supports_pre_created_at_schema() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("threads.db");
@@ -556,6 +666,10 @@ mod tests {
                     "input_tokens": 12,
                     "output_tokens": 3
                 }
+            }),
+            json!({
+                "input_tokens": 12,
+                "output_tokens": 3
             }),
         );
         let data = zstd::encode_all(payload.as_bytes(), 3).unwrap();

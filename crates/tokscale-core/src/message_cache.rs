@@ -1523,6 +1523,12 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
+        // v1->v2: bring-your-own-key provider threads are now counted instead
+        // of only `zed.dev` rows, and thread usage comes from
+        // `cumulative_token_usage` rather than the per-turn latest-request
+        // snapshots. An unchanged threads.db would otherwise keep serving the
+        // v1 entries that dropped or undercounted them.
+        ClientId::Zed => 2,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating
@@ -1543,7 +1549,6 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Crush => 1,
         ClientId::Goose => 1,
         ClientId::Antigravity => 1,
-        ClientId::Zed => 1,
         ClientId::Trae => 1,
         ClientId::Warp => 1,
         ClientId::Gjc => 1,
