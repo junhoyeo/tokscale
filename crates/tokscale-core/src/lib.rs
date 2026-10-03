@@ -2986,6 +2986,27 @@ fn parse_all_messages_streaming<S: MessageSink>(
             source_cache.insert(entry);
         }
     }
+    // Cherry Studio's built-in chat surfaces record one row per model
+    // invocation in `cherrystudio.sqlite` instead of writing a transcript, so
+    // the same client reports both ledgers. `parse_cherrystudio_sqlite` reads
+    // only the rows the transcript lane cannot see (see its doc comment).
+    if let Some(db_path) = &scan_result.cherrystudio_db {
+        let CachedParseOutcome {
+            messages,
+            cache_entry,
+            ..
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::CherryStudio),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::cherrystudio::parse_cherrystudio_sqlite,
+        );
+        all_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
 
     // DeepSeek Harness (DSH) zstd JSONL transcripts. Every `assistant/message`
     // carries authoritative usage but never a cost, so pricing is the only cost
@@ -5997,8 +6018,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Zcode, zcode_count);
     messages.extend(zcode_msgs);
 
-    // Cherry Studio agent-session transcripts (Claude Code format).
-    let cherrystudio_msgs: Vec<ParsedMessage> = scan_result
+    // Cherry Studio agent-session transcripts (Claude Code format) plus the
+    // chat ledger its built-in surfaces wrote to `cherrystudio.sqlite`. The two
+    // cover disjoint invocations — see `parse_cherrystudio_sqlite` — so they add
+    // up rather than overlapping.
+    let mut cherrystudio_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::CherryStudio)
         .par_iter()
         .flat_map(|path| {
@@ -6008,6 +6032,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
+    if let Some(db_path) = &scan_result.cherrystudio_db {
+        cherrystudio_msgs.extend(
+            sessions::cherrystudio::parse_cherrystudio_sqlite(db_path)
+                .into_iter()
+                .map(|message| unified_to_parsed(&message)),
+        );
+    }
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);

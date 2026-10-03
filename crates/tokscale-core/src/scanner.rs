@@ -112,6 +112,12 @@ pub struct ScanResult {
     pub crush_dbs: Vec<CrushDbSource>,
     /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
     pub zcode_db: Option<PathBuf>,
+    /// Cherry Studio's own per-invocation usage ledger at
+    /// `<appdata>/CherryStudio/Data/cherrystudio.sqlite`. Agent / Claude Code
+    /// mode writes Claude Code transcripts (scanned as ordinary files above);
+    /// Cherry Studio's built-in chat surfaces only ever wrote this database.
+    /// See `sessions::cherrystudio::parse_cherrystudio_sqlite`.
+    pub cherrystudio_db: Option<PathBuf>,
     /// Per-agent OpenClaw transcript databases,
     /// `<agents root>/<agentId>/agent/openclaw-agent.sqlite`, discovered under
     /// every OpenClaw agents root the scan covers (default, legacy rebrand
@@ -146,6 +152,7 @@ impl Default for ScanResult {
             kiro_db: None,
             crush_dbs: Vec::new(),
             zcode_db: None,
+            cherrystudio_db: None,
             openclaw_dbs: Vec::new(),
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
@@ -2646,6 +2653,17 @@ fn scan_all_clients_with_env_strategy_inner(
                 cherry_v2,
                 "*.jsonl",
             );
+        }
+
+        // Cherry Studio's own usage ledger holds the invocations its built-in
+        // chat surfaces made; those never reach a transcript. Derive the path
+        // from the same resolved base as the transcript roots so a redirected
+        // home keeps both targets together (see `app_data_follows_home`).
+        if let Some(cherry_base) = Path::new(&cherry_projects).parent().and_then(Path::parent) {
+            let cherry_db_path = cherry_base.join("Data").join("cherrystudio.sqlite");
+            if cherry_db_path.is_file() {
+                result.cherrystudio_db = Some(cherry_db_path);
+            }
         }
     }
 

@@ -26,14 +26,23 @@
 //! `input_tokens` (cache miss), `cache_read_input_tokens` (cache hit),
 //! `cache_creation_input_tokens` (cache write) and `output_tokens`.
 
-use super::utils::{file_modified_timestamp_ms, for_each_json_line, parse_timestamp_str};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::utils::{
+    file_modified_timestamp_ms, for_each_json_line, open_readonly_sqlite_opt, parse_timestamp_str,
+    sqlite_for_each_row_on,
+};
+use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::TokenBreakdown;
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const CLIENT_ID: &str = "cherrystudio";
+
+/// The `message_kind` value Cherry Studio stamps on a built-in chat turn, as
+/// opposed to `agent-session` (Agent / Claude Code mode, which the transcript
+/// parser already covers).
+const CHAT_MESSAGE_KIND: &str = "chat";
 
 /// A valid usage row held until every alias in the transcript has been seen.
 ///
@@ -383,6 +392,392 @@ pub fn parse_cherrystudio_file(path: &Path) -> Vec<UnifiedMessage> {
         });
     });
     dedupe_usage_records(records)
+}
+
+/// One `ai_usage_record` row, in the column order [`build_usage_query`] emits.
+struct CherryChatRow {
+    id: String,
+    message_id: Option<String>,
+    /// Conversation title, resolved through the optional `message`/`topic` join.
+    session_title: Option<String>,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
+    reasoning_tokens: Option<i64>,
+    /// The ledger's own uncached share of the prompt, when the build has it.
+    /// This is exactly the bucket `TokenBreakdown::input` models, so it is
+    /// preferred over re-deriving it by subtraction.
+    no_cache_tokens: Option<i64>,
+    cost: Option<f64>,
+    created_at: Option<i64>,
+    message_kind: Option<String>,
+}
+
+/// Column names present on `ai_usage_record` in this database.
+///
+/// Cherry Studio has shipped several spellings of this table. Naming a column
+/// that a given build does not have makes the whole statement fail to prepare,
+/// which would silently take the lane to zero, so the query is assembled from
+/// what the file actually has instead of from one assumed schema.
+fn usage_table_columns(conn: &Connection) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(mut stmt) = conn.prepare("SELECT name FROM pragma_table_info('ai_usage_record')") else {
+        return names;
+    };
+    let Ok(mut rows) = stmt.query([]) else {
+        return names;
+    };
+    while let Ok(Some(row)) = rows.next() {
+        if let Ok(name) = row.get::<_, String>(0) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Whether `name` exists on `table` in this database.
+fn table_has_column(conn: &Connection, table: &str, name: &str) -> bool {
+    let Ok(mut stmt) = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+    else {
+        return false;
+    };
+    let Ok(mut rows) = stmt.query([]) else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next() {
+        if row.get::<_, String>(0).is_ok_and(|column| column == name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Assemble the usage query for the schema this database actually has.
+///
+/// Returns `None` when the table is missing the columns the lane cannot work
+/// without, and the SQL otherwise. Column order here is the contract the row
+/// mapping in [`parse_cherrystudio_sqlite`] depends on.
+fn build_usage_query(conn: &Connection) -> Option<String> {
+    let columns = usage_table_columns(conn);
+    let has = |name: &str| columns.iter().any(|column| column == name);
+    if !has("id") || !has("created_at") {
+        return None;
+    }
+
+    // Conversation identity lives on `message` (and its title on `topic`);
+    // joining them is what lets a row name the conversation it belongs to.
+    let link_topic = has("message_id") && table_has_column(conn, "message", "topic_id");
+    let message_id_column = if has("message_id") {
+        "r.message_id".to_string()
+    } else {
+        "NULL".to_string()
+    };
+    // Session titles came with `topic.name`; older builds have no `topic` table.
+    let title_column = if link_topic && table_has_column(conn, "topic", "name") {
+        "t.name".to_string()
+    } else {
+        "NULL".to_string()
+    };
+    // The cache-write bucket was renamed; either spelling may be present.
+    let cache_write_column = if has("cache_write_tokens") {
+        "r.cache_write_tokens".to_string()
+    } else if has("cache_creation_tokens") {
+        "r.cache_creation_tokens".to_string()
+    } else {
+        "NULL".to_string()
+    };
+    // The ledger's own uncached-input count. Naming a column the build lacks
+    // would fail the whole statement to prepare and take the lane to zero, so
+    // it is probed like every other optional column and falls back to
+    // subtraction in the row mapping.
+    let no_cache_column = if has("no_cache_tokens") {
+        "r.no_cache_tokens"
+    } else {
+        "NULL"
+    };
+    // Provider and model are the row's identity, but a build that spells them
+    // differently must still degrade to "no usage" for those columns rather
+    // than to no rows at all.
+    let provider_column = if has("provider_id") {
+        "r.provider_id"
+    } else {
+        "NULL"
+    };
+    let model_column = if has("model_id") {
+        "r.model_id"
+    } else {
+        "NULL"
+    };
+
+    // `message_kind` separates the two surfaces. A build without it cannot
+    // tell them apart, so it must report every row: the caller's dedup key
+    // still keeps each invocation distinct, and guessing would be worse.
+    let (kind_column, kind_filter) = if has("message_kind") {
+        (
+            "r.message_kind".to_string(),
+            " AND (r.message_kind IS NULL OR r.message_kind = 'chat')".to_string(),
+        )
+    } else {
+        ("NULL".to_string(), String::new())
+    };
+
+    // `legacy-aggregate` rows are pre-summed history for the same calls, so
+    // reading them beside the per-invocation rows would double count.
+    let record_kind_filter = if has("record_kind") {
+        "r.record_kind = 'invocation'"
+    } else {
+        "1 = 1"
+    };
+
+    let joins = if link_topic {
+        "LEFT JOIN message m ON m.id = r.message_id\n            LEFT JOIN topic t ON t.id = m.topic_id"
+    } else {
+        ""
+    };
+
+    Some(format!(
+        "SELECT
+            r.id,
+            {message_id_column},
+            {title_column},
+            {provider_column},
+            {model_column},
+            {input},
+            {output},
+            {cache_read},
+            {cache_write},
+            {reasoning},
+            {cost},
+            r.created_at,
+            {kind_column},
+            {no_cache}
+        FROM ai_usage_record r
+            {joins}
+        WHERE {record_kind_filter}{kind_filter}
+        ORDER BY r.created_at, r.id",
+        message_id_column = message_id_column,
+        provider_column = provider_column,
+        model_column = model_column,
+        no_cache = no_cache_column,
+        input = if has("input_tokens") {
+            "r.input_tokens"
+        } else {
+            "NULL"
+        },
+        output = if has("output_tokens") {
+            "r.output_tokens"
+        } else {
+            "NULL"
+        },
+        cache_read = if has("cache_read_tokens") {
+            "r.cache_read_tokens"
+        } else {
+            "NULL"
+        },
+        cache_write = cache_write_column,
+        reasoning = if has("reasoning_tokens") {
+            "r.reasoning_tokens"
+        } else {
+            "NULL"
+        },
+        cost = if has("cost") { "r.cost" } else { "NULL" },
+    ))
+}
+
+/// Parse Cherry Studio's own usage ledger, `CherryStudio/Data/cherrystudio.sqlite`.
+///
+/// Cherry Studio keeps two unrelated ledgers. Its Agent / Claude Code mode
+/// writes standard Claude Code transcripts, which `parse_cherrystudio_file`
+/// already reads; its built-in chat surfaces (assistant conversations, and the
+/// helper features that call a provider directly) instead record one row per
+/// model invocation in `ai_usage_record`. Those rows never produce a
+/// transcript, which is why chat usage was untracked before this parser.
+///
+/// Reads are strictly read-only, and the query is assembled from the columns
+/// the file actually has so a build with a different schema degrades to
+/// "no usage" instead of failing to prepare. Only `record_kind = 'invocation'`
+/// rows are read: `legacy-aggregate` rows are pre-summed totals that would
+/// otherwise double count the same calls.
+///
+/// # Token buckets
+///
+/// The ledger's `input_tokens` and `output_tokens` are inclusive: the prompt
+/// count already contains both cache buckets and the completion count already
+/// contains reasoning. `TokenBreakdown` expects five non-overlapping buckets,
+/// so the cache reads, cache writes and reasoning tokens are moved out of
+/// input/output rather than added on top of them; otherwise `total()` counts
+/// every cache write and reasoning token twice. Cost comes from the ledger's
+/// own `cost` column and is marked provider-reported, so pricing cannot
+/// re-estimate it.
+///
+/// # Why `agent-session` rows are excluded
+///
+/// `message_kind` distinguishes the two surfaces, and rows tagged
+/// `agent-session` are the *same billed calls* the transcript parser already
+/// reports. Measured on a real profile, that tag matches the transcripts
+/// almost exactly — 2026-09-11: 11 rows / 348,476 tokens in SQLite against 11
+/// deduplicated calls / 348,476 tokens in the transcripts (ratio 1.000);
+/// 2026-09-13: ratio 1.004; 2026-09-28: 37 calls against 35 calls. Reading
+/// them here would count Agent mode twice. `chat` rows and rows predating the
+/// column carry no transcript, so they are the ones this parser adds.
+pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+        return Vec::new();
+    };
+    let Some(query) = build_usage_query(&conn) else {
+        // No `ai_usage_record` table, or too few columns to be this ledger.
+        return Vec::new();
+    };
+
+    // A live Cherry Studio instance holds the database open and keeps recent
+    // commits in the `-wal` sidecar. Reading the main file with SQLite's
+    // ordinary read-only flags still replays that log, because read-only
+    // forbids writing, not recovering; rows therefore cover
+    // committed-but-not-checkpointed chat turns too.
+    let fallback_timestamp = file_modified_timestamp_ms(db_path);
+    let mut rows: Vec<CherryChatRow> = Vec::new();
+    let scan = sqlite_for_each_row_on(&conn, db_path, &query, None, &mut |row| {
+        let message_kind: Option<String> = row.get(12)?;
+        rows.push(CherryChatRow {
+            id: row.get(0)?,
+            message_id: row.get(1)?,
+            session_title: row.get(2)?,
+            provider_id: row.get(3)?,
+            model_id: row.get(4)?,
+            input_tokens: row.get(5)?,
+            output_tokens: row.get(6)?,
+            cache_read_tokens: row.get(7)?,
+            cache_write_tokens: row.get(8)?,
+            reasoning_tokens: row.get(9)?,
+            cost: row.get(10)?,
+            created_at: row.get(11)?,
+            message_kind,
+            no_cache_tokens: row.get(13)?,
+        });
+        Ok(())
+    });
+    if !scan.prepared() {
+        return Vec::new();
+    }
+
+    // `message_id` -> conversation title, when this schema carries the join.
+    let titles: HashMap<String, Option<String>> = rows
+        .iter()
+        .filter_map(|row| {
+            let message_id = clean_optional(row.message_id.as_deref())?;
+            Some((message_id, row.session_title.clone()))
+        })
+        .collect();
+
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Belt and braces: the filter runs in SQL when the column exists, but a
+        // future `message_kind` spelling must not silently slip through and
+        // re-count Agent mode.
+        if row
+            .message_kind
+            .as_deref()
+            .is_some_and(|kind| kind != CHAT_MESSAGE_KIND)
+        {
+            continue;
+        }
+
+        let model = clean_optional(row.model_id.as_deref()).unwrap_or_default();
+        let provider = clean_optional(row.provider_id.as_deref())
+            .unwrap_or_else(|| provider_for_model(&model).to_string());
+
+        // The ledger records `input_tokens` as the *whole* prompt and
+        // `output_tokens` as the whole completion, with the cache and
+        // reasoning shares counted again in their own columns: Cherry Studio
+        // derives its uncached input as
+        // `inputTokens - cacheReadTokens - cacheWriteTokens` and its text
+        // output as `outputTokens - reasoningTokens`
+        // (`AiUsageRecordService.ts`). `TokenBreakdown` instead models five
+        // non-overlapping buckets -- the same shape mismatch documented in
+        // `zcode::normalize_zcode_input_and_output` -- so feeding the raw
+        // columns through double counts every cache write and every reasoning
+        // token in `total()`.
+        let cache_read = row.cache_read_tokens.unwrap_or(0).max(0);
+        let cache_write = row.cache_write_tokens.unwrap_or(0).max(0);
+        let reasoning = row.reasoning_tokens.unwrap_or(0).max(0);
+        // Prefer the ledger's own uncached count; otherwise subtract both cache
+        // buckets, which is the arithmetic Cherry Studio itself uses.
+        let input = match row.no_cache_tokens.map(|tokens| tokens.max(0)) {
+            Some(no_cache) => no_cache,
+            None => row
+                .input_tokens
+                .unwrap_or(0)
+                .max(0)
+                .saturating_sub(cache_read)
+                .saturating_sub(cache_write),
+        };
+        // `output_tokens` already contains the reasoning share.
+        let output = row
+            .output_tokens
+            .unwrap_or(0)
+            .max(0)
+            .saturating_sub(reasoning);
+        let tokens = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: 0,
+            reasoning,
+        };
+        if tokens.total() == 0 {
+            continue;
+        }
+
+        // The provider is the grouping key that keeps turns together in the
+        // Sessions view; most rows name neither a topic nor a conversation.
+        let session_id = provider.clone();
+        let timestamp = row
+            .created_at
+            .filter(|created_at| *created_at > 0)
+            .unwrap_or(fallback_timestamp);
+
+        let cost = row.cost.unwrap_or(0.0);
+        let mut message = UnifiedMessage::new(
+            CLIENT_ID, model, provider, session_id, timestamp, tokens, cost,
+        );
+        // The ledger computes this cost itself, so it must survive caching. A
+        // present `cost` is authoritative even when it is exactly zero: this
+        // schema treats explicit zero as observed data ("explicit zero-cost
+        // rows remain priced"), so re-estimating it would invent a charge for
+        // a free or local model. Only a NULL `cost` -- the ledger's "not
+        // available" -- is left to tokscale's own pricing.
+        message.cost_source = if row.cost.is_some() {
+            CostSource::ProviderReported
+        } else {
+            CostSource::Estimated
+        };
+        // The title comes from the conversation join, not from this row.
+        let row_title = row
+            .message_id
+            .as_deref()
+            .and_then(|message_id| titles.get(message_id))
+            .and_then(|title| title.clone());
+        message.session_title = row_title;
+        // `ai_usage_record.id` is the ledger's own primary key, so it is a
+        // stable identity even when `created_at` collides.
+        message.dedup_key = Some(format!("cherrystudio-sqlite:{}", row.id));
+        messages.push(message);
+    }
+
+    messages
+}
+
+/// Strip null/blank spellings so an empty column degrades to `None` instead of
+/// becoming an empty model or provider id.
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -792,5 +1187,321 @@ mod tests {
         // The third row has the same signature as the first, but is not
         // consecutive, so it is a distinct call and must be kept.
         assert_eq!(messages.len(), 3);
+    }
+
+    /// An `ai_usage_record` row: id, provider, model, input, output, and the
+    /// optional `message_kind` tag.
+    type UsageRow<'a> = (&'a str, &'a str, &'a str, i64, i64, Option<&'a str>);
+
+    /// Build a database shaped like a real Cherry Studio install: the ledger
+    /// plus the `message`/`topic` tables its conversation join needs.
+    ///
+    /// Every row is written with `record_kind = 'invocation'`; the tests that
+    /// care about aggregates flip one afterwards.
+    fn write_usage_db(dir: &std::path::Path, rows: &[UsageRow<'_>]) -> std::path::PathBuf {
+        let path = dir.join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, topic_id TEXT);
+             CREATE TABLE topic (id TEXT PRIMARY KEY, name TEXT);
+             CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY,
+                 record_kind TEXT,
+                 message_kind TEXT,
+                 message_id TEXT,
+                 provider_id TEXT,
+                 model_id TEXT,
+                 input_tokens INTEGER,
+                 output_tokens INTEGER,
+                 cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER,
+                 reasoning_tokens INTEGER,
+                 cost REAL,
+                 created_at INTEGER
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO topic (id, name) VALUES ('topic-1', 'A conversation')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, topic_id) VALUES ('message-1', 'topic-1')",
+            [],
+        )
+        .unwrap();
+        for (index, (id, provider, model, input, output, kind)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO ai_usage_record (id, record_kind, message_kind, message_id, provider_id, model_id,
+                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, created_at)
+                 VALUES (?1, 'invocation', ?2, 'message-1', ?3, ?4, ?5, ?6, 0, 0, 0, ?7, ?8)",
+                rusqlite::params![
+                    id,
+                    kind,
+                    provider,
+                    model,
+                    input,
+                    output,
+                    0.01_f64,
+                    1_780_000_000_000_i64 + index as i64
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        path
+    }
+
+    #[test]
+    fn sqlite_lane_reads_chat_rows_and_skips_agent_session_rows() {
+        // Agent-mode calls also land in `ai_usage_record` as `agent-session`,
+        // and the transcript parser already reports those. Counting them here
+        // would report Agent mode twice, so the SQLite lane must skip them.
+        let dir = tempdir().unwrap();
+        let path = write_usage_db(
+            dir.path(),
+            &[
+                (
+                    "chat-1",
+                    "deepseek",
+                    "deepseek-flash",
+                    1000,
+                    200,
+                    Some("chat"),
+                ),
+                (
+                    "agent-1",
+                    "deepseek",
+                    "deepseek-flash",
+                    5000,
+                    500,
+                    Some("agent-session"),
+                ),
+                ("legacy-1", "cherryai", "qwen", 10, 5, Some("chat")),
+            ],
+        );
+        // `legacy-aggregate` rows are pre-summed history for the same calls, so
+        // reading them beside the invocations would double count.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE ai_usage_record SET record_kind = 'legacy-aggregate' WHERE id = 'legacy-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(
+            messages.len(),
+            1,
+            "only the chat invocation is this lane's to report"
+        );
+        assert_eq!(messages[0].client, CLIENT_ID);
+        assert_eq!(messages[0].model_id, "deepseek-flash");
+        assert_eq!(messages[0].provider_id, "deepseek");
+        assert_eq!(messages[0].session_id, "deepseek");
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("A conversation"),
+            "the conversation join supplies the title"
+        );
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(
+            messages[0].cost_source,
+            CostSource::ProviderReported,
+            "a provider-reported cost must not be re-estimated"
+        );
+    }
+
+    #[test]
+    fn sqlite_lane_moves_cache_and_reasoning_shares_out_of_the_inclusive_totals() {
+        // The ledger's `input_tokens` is the whole prompt (cached part
+        // included) and `output_tokens` is the whole completion (reasoning
+        // included). `TokenBreakdown` has five non-overlapping buckets, so
+        // both shares must leave input/output instead of being added beside
+        // them -- otherwise `total()` counts every cache write and reasoning
+        // token twice.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY, record_kind TEXT, message_kind TEXT, message_id TEXT,
+                 provider_id TEXT, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 cost REAL, created_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_usage_record VALUES
+                ('r1','invocation','chat',NULL,'deepseek','deepseek-flash',1000,200,800,50,25,0.01,1780000000000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(messages.len(), 1);
+        let tokens = &messages[0].tokens;
+        // Both the cache-read and the cache-write share leave the input bucket.
+        assert_eq!(tokens.input, 150);
+        // The reasoning share leaves the output bucket.
+        assert_eq!(tokens.output, 175);
+        assert_eq!(tokens.cache_read, 800);
+        assert_eq!(tokens.cache_write, 50);
+        assert_eq!(tokens.reasoning, 25);
+        // The invariant that catches the double counting: the buckets must
+        // still add up to the ledger's own `input_tokens + output_tokens`.
+        assert_eq!(tokens.total(), 1000 + 200);
+    }
+
+    #[test]
+    fn sqlite_lane_prefers_the_ledgers_own_no_cache_tokens() {
+        // When the build carries `no_cache_tokens`, that column is the ledger
+        // stating the uncached share outright, so it wins over re-deriving it.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY, record_kind TEXT, message_kind TEXT, message_id TEXT,
+                 provider_id TEXT, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                 total_tokens INTEGER, no_cache_tokens INTEGER, cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 cost REAL, created_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_usage_record VALUES
+                ('r1','invocation','chat',NULL,'deepseek','deepseek-flash',
+                 10000,1000,11000,2000,7500,500,400,0.01,1780000000000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(messages.len(), 1);
+        let tokens = &messages[0].tokens;
+        assert_eq!(tokens.input, 2000, "no_cache_tokens is used verbatim");
+        assert_eq!(tokens.output, 600, "reasoning leaves the output bucket");
+        assert_eq!(tokens.total(), 11000, "buckets sum to total_tokens");
+    }
+
+    #[test]
+    fn sqlite_lane_keeps_an_explicit_zero_cost() {
+        // A zero in `cost` is observed data ("explicit zero-cost rows remain
+        // priced"), not a missing value: re-estimating it would invent a
+        // charge for a free or local model. Only a NULL cost is tokscale's to
+        // price.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY, record_kind TEXT, message_kind TEXT, message_id TEXT,
+                 provider_id TEXT, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 cost REAL, created_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_usage_record VALUES
+                ('free','invocation','chat',NULL,'ollama','llama3',100,10,0,0,0,0.0,1780000000000),
+                ('unpriced','invocation','chat',NULL,'deepseek','deepseek-flash',100,10,0,0,0,NULL,1780000000000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(messages.len(), 2);
+        let free = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("cherrystudio-sqlite:free"))
+            .expect("the zero-cost row is reported");
+        let unpriced = messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("cherrystudio-sqlite:unpriced"))
+            .expect("the NULL-cost row is reported");
+        // An explicit zero cost is authoritative, not a missing value.
+        assert_eq!(free.cost_source, CostSource::ProviderReported);
+        assert_eq!(free.cost, 0.0);
+        // A NULL cost is left for tokscale's own pricing to estimate.
+        assert_eq!(unpriced.cost_source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn sqlite_lane_falls_back_to_the_file_mtime_when_created_at_is_unusable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY, record_kind TEXT, message_kind TEXT, message_id TEXT,
+                 provider_id TEXT, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 cost REAL, created_at INTEGER);",
+        )
+        .unwrap();
+        // A zero timestamp is the ledger's "no usable time" sentinel.
+        conn.execute(
+            "INSERT INTO ai_usage_record VALUES
+                ('r1','invocation','chat',NULL,'deepseek','deepseek-flash',100,10,0,0,0,0,0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].timestamp > 0,
+            "an unusable created_at must fall back to the file mtime, not epoch zero"
+        );
+        // With no topic the provider doubles as the session grouping key.
+        assert_eq!(messages[0].session_id, "deepseek");
+    }
+
+    #[test]
+    fn sqlite_lane_tolerates_a_schema_without_message_kind() {
+        // Pre-`message_kind` builds recorded invocations without naming the
+        // surface. The lane must still read them instead of failing to prepare.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_record (
+                 id TEXT PRIMARY KEY, record_kind TEXT, message_id TEXT,
+                 provider_id TEXT, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 cost REAL, created_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_usage_record VALUES
+                ('r1','invocation',NULL,'deepseek','deepseek-flash',100,10,0,0,0,0,1780000000000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_cherrystudio_sqlite(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+    }
+
+    #[test]
+    fn sqlite_lane_reports_nothing_for_a_database_without_the_usage_table() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cherrystudio.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id TEXT);")
+            .unwrap();
+        drop(conn);
+
+        assert!(parse_cherrystudio_sqlite(&path).is_empty());
     }
 }
