@@ -628,6 +628,22 @@ pub struct AnthropicUsage {
 }
 
 impl AnthropicUsage {
+    /// Whether this usage object describes the prompt/caching split, rather than
+    /// being a bare snapshot of the whole prompt.
+    ///
+    /// Anthropic's own responses always carry both cache keys, so their
+    /// `input_tokens` is the uncached remainder and can be compared with another
+    /// entry's. Some third-party models behind Claude Code instead emit one
+    /// content block per response and omit the cache keys entirely; there
+    /// `input_tokens` is the whole prompt, so it is not comparable.
+    ///
+    /// Key presence is the signal, not the value: a short prompt that never
+    /// reached the cache minimum is reported as an explicit `0`, and that is
+    /// still a genuine split.
+    pub fn reports_cache_split(&self) -> bool {
+        self.cache_read_input_tokens.is_some() || self.cache_creation_input_tokens.is_some()
+    }
+
     /// Token breakdown with every field clamped at zero. This block carries no
     /// reasoning bucket, so `reasoning` is always 0.
     pub fn to_breakdown(&self) -> TokenBreakdown {

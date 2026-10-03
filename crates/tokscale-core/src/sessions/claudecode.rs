@@ -487,6 +487,10 @@ pub fn parse_claude_file_with_cache_and_home(
     // We merge duplicates using per-field max to always keep the highest value seen
     // for each token type, ensuring we capture the most complete record.
     let mut processed_hashes: HashMap<String, usize> = HashMap::new();
+    // Dedup keys whose stored `input` came from a usage object that reports the
+    // prompt/caching split, and is therefore safe to max against. See
+    // `merge_claude_duplicate`.
+    let mut split_reporting_dedup_keys: HashSet<String> = HashSet::new();
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     // Tracks whether the previous entry was a user message,
@@ -634,7 +638,11 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                split_reporting_dedup_keys.contains(&hash),
                             );
+                            if usage.reports_cache_split() {
+                                split_reporting_dedup_keys.insert(hash);
+                            }
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
                                     &mut messages[existing_idx].provider_id,
@@ -653,7 +661,11 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                split_reporting_dedup_keys.contains(&hash),
                             );
+                            if usage.reports_cache_split() {
+                                split_reporting_dedup_keys.insert(hash);
+                            }
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
                                     &mut messages[existing_idx].provider_id,
@@ -692,6 +704,9 @@ pub fn parse_claude_file_with_cache_and_home(
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
                     processed_hashes.insert(hash.clone(), messages.len());
+                    if usage.reports_cache_split() {
+                        split_reporting_dedup_keys.insert(hash.clone());
+                    }
                 });
 
                 let mut unified = UnifiedMessage::new_with_dedup(
@@ -891,10 +906,35 @@ fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &AnthropicUsage,
     parsed_timestamp: Option<i64>,
+    existing_input_is_split: bool,
 ) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
-    t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
+    // `input` is the exception. `input_tokens` is only comparable across entries
+    // when each one reports the prompt/caching split: Anthropic counts the
+    // uncached remainder there, so the max of two genuine entries is the larger
+    // remainder. An entry that omits the cache keys is a bare prompt snapshot,
+    // and max-ing its whole-prompt figure against a sibling's remainder leaves
+    // `input` describing one prompt while `cache_read` describes another.
+    //
+    // So when only one side describes the split, that side wins outright instead
+    // of being compared. When both or neither do, the units agree and the max
+    // stands.
+    match (usage.reports_cache_split(), existing_input_is_split) {
+        // The entry describes the split, so its remainder supersedes a snapshot.
+        // A cache-key-bearing entry can still be silent about input_tokens
+        // though, and silence is not a claim of zero, so leave the stored value
+        // alone unless the entry actually states one.
+        (true, false) => {
+            if let Some(input) = usage.input_tokens {
+                t.input = input.max(0);
+            }
+        }
+        (false, true) => {}
+        (true, true) | (false, false) => {
+            t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
+        }
+    }
     t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
     t.cache_read = t
         .cache_read
@@ -3535,5 +3575,100 @@ mod tests {
             Some("Executor".to_string()),
             "Second agent should be executor"
         );
+    }
+
+    #[test]
+    fn test_deduplication_prefers_split_over_prompt_snapshot() {
+        // A response carrying a thinking block is written as one entry per
+        // content block. The thinking entry has no cache keys and counts the
+        // whole prompt as input_tokens; the text entry has the real split. The
+        // uncached remainder must win, otherwise `input` describes the whole
+        // prompt while `cache_read` describes only the cached part of it.
+        let content = r#"{"type":"assistant","apiBlockIndex":0,"timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","content":[{"type":"thinking","thinking":"..."}],"usage":{"input_tokens":42494,"output_tokens":0}}}
+{"type":"assistant","apiBlockIndex":1,"timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","content":[{"type":"text","text":"..."}],"usage":{"input_tokens":265,"output_tokens":120,"cache_read_input_tokens":42000,"cache_creation_input_tokens":0}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1, "Duplicates should collapse to one entry");
+        assert_eq!(
+            messages[0].tokens.input, 265,
+            "input should be the uncached remainder, not the snapshot's whole prompt"
+        );
+        assert_eq!(messages[0].tokens.cache_read, 42000);
+        assert_eq!(messages[0].tokens.output, 120);
+    }
+
+    #[test]
+    fn test_deduplication_prefers_split_over_prompt_snapshot_when_snapshot_is_last() {
+        // Same pair as above with the entries swapped. The result must not depend
+        // on which content block the transcript happens to write first.
+        let content = r#"{"type":"assistant","apiBlockIndex":1,"timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","content":[{"type":"text","text":"..."}],"usage":{"input_tokens":265,"output_tokens":120,"cache_read_input_tokens":42000,"cache_creation_input_tokens":0}}}
+{"type":"assistant","apiBlockIndex":0,"timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","content":[{"type":"thinking","thinking":"..."}],"usage":{"input_tokens":42494,"output_tokens":0}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1, "Duplicates should collapse to one entry");
+        assert_eq!(
+            messages[0].tokens.input, 265,
+            "A later cache-less snapshot must not raise input"
+        );
+        assert_eq!(messages[0].tokens.cache_read, 42000);
+        assert_eq!(messages[0].tokens.output, 120);
+    }
+
+    #[test]
+    fn test_deduplication_keeps_max_input_when_no_entry_reports_cache_split() {
+        // No entry reports the split, so there is nothing to prefer and the
+        // per-field max still decides. Providers that never report cache keys
+        // must keep their streaming behaviour.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"some-local-model","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"some-local-model","usage":{"input_tokens":50,"output_tokens":5}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].tokens.input, 50,
+            "Without a reported split the max should still win"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_treats_zero_valued_cache_keys_as_a_reported_split() {
+        // A prompt that never reached the cache minimum is reported with
+        // explicit zeroes, not nulls. Those entries do describe the split, so
+        // the per-field max stays in charge.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":30,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":30,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 30);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_deduplication_keeps_input_when_a_split_entry_omits_input_tokens() {
+        // The second entry reports the cache split but says nothing about
+        // input_tokens. Silence is not a claim of a zero remainder, so the
+        // stored value stands rather than being overwritten with 0.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":42494,"output_tokens":0}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"output_tokens":120,"cache_read_input_tokens":42000,"cache_creation_input_tokens":0}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].tokens.input, 42494,
+            "An entry that omits input_tokens must not zero the stored value"
+        );
+        assert_eq!(messages[0].tokens.cache_read, 42000);
+        assert_eq!(messages[0].tokens.output, 120);
     }
 }
