@@ -412,6 +412,7 @@ struct CherryChatRow {
     /// preferred over re-deriving it by subtraction.
     no_cache_tokens: Option<i64>,
     cost: Option<f64>,
+    cost_currency: Option<String>,
     created_at: Option<i64>,
     message_kind: Option<String>,
 }
@@ -469,14 +470,18 @@ fn build_usage_query(conn: &Connection) -> Option<String> {
 
     // Conversation identity lives on `message` (and its title on `topic`);
     // joining them is what lets a row name the conversation it belongs to.
-    let link_topic = has("message_id") && table_has_column(conn, "message", "topic_id");
+    let link_topic = has("message_id")
+        && table_has_column(conn, "message", "id")
+        && table_has_column(conn, "message", "topic_id")
+        && table_has_column(conn, "topic", "id")
+        && table_has_column(conn, "topic", "name");
     let message_id_column = if has("message_id") {
         "r.message_id".to_string()
     } else {
         "NULL".to_string()
     };
     // Session titles came with `topic.name`; older builds have no `topic` table.
-    let title_column = if link_topic && table_has_column(conn, "topic", "name") {
+    let title_column = if link_topic {
         "t.name".to_string()
     } else {
         "NULL".to_string()
@@ -553,7 +558,8 @@ fn build_usage_query(conn: &Connection) -> Option<String> {
             {cost},
             r.created_at,
             {kind_column},
-            {no_cache}
+            {no_cache},
+            {cost_currency}
         FROM ai_usage_record r
             {joins}
         WHERE {record_kind_filter}{kind_filter}
@@ -584,6 +590,11 @@ fn build_usage_query(conn: &Connection) -> Option<String> {
             "NULL"
         },
         cost = if has("cost") { "r.cost" } else { "NULL" },
+        cost_currency = if has("cost_currency") {
+            "r.cost_currency"
+        } else {
+            "NULL"
+        },
     ))
 }
 
@@ -610,8 +621,9 @@ fn build_usage_query(conn: &Connection) -> Option<String> {
 /// so the cache reads, cache writes and reasoning tokens are moved out of
 /// input/output rather than added on top of them; otherwise `total()` counts
 /// every cache write and reasoning token twice. Cost comes from the ledger's
-/// own `cost` column and is marked provider-reported, so pricing cannot
-/// re-estimate it.
+/// own `cost` column when denominated in USD (or explicitly zero in any
+/// currency), and is marked provider-reported so pricing cannot re-estimate
+/// it. Nonzero amounts in other or unknown currencies are left to pricing.
 ///
 /// # Why `agent-session` rows are excluded
 ///
@@ -656,6 +668,7 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             created_at: row.get(11)?,
             message_kind,
             no_cache_tokens: row.get(13)?,
+            cost_currency: row.get(14)?,
         });
         Ok(())
     });
@@ -712,14 +725,16 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 .unwrap_or(0)
                 .max(0)
                 .saturating_sub(cache_read)
-                .saturating_sub(cache_write),
+                .saturating_sub(cache_write)
+                .max(0),
         };
         // `output_tokens` already contains the reasoning share.
         let output = row
             .output_tokens
             .unwrap_or(0)
             .max(0)
-            .saturating_sub(reasoning);
+            .saturating_sub(reasoning)
+            .max(0);
         let tokens = TokenBreakdown {
             input,
             output,
@@ -728,7 +743,17 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             cache_write_1h: 0,
             reasoning,
         };
-        if tokens.total() == 0 {
+        // The ledger's nullable cost_currency has no USD default. Missing
+        // columns and NULL currencies therefore cannot identify a nonzero USD
+        // charge. Explicit zero is authoritative in every currency.
+        let reported_cost = row.cost.filter(|cost| {
+            *cost == 0.0
+                || row
+                    .cost_currency
+                    .as_deref()
+                    .is_some_and(|currency| currency.eq_ignore_ascii_case("USD"))
+        });
+        if tokens.total() == 0 && !reported_cost.is_some_and(|cost| cost > 0.0) {
             continue;
         }
 
@@ -740,17 +765,14 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .filter(|created_at| *created_at > 0)
             .unwrap_or(fallback_timestamp);
 
-        let cost = row.cost.unwrap_or(0.0);
+        let cost = reported_cost.unwrap_or(0.0);
         let mut message = UnifiedMessage::new(
             CLIENT_ID, model, provider, session_id, timestamp, tokens, cost,
         );
-        // The ledger computes this cost itself, so it must survive caching. A
-        // present `cost` is authoritative even when it is exactly zero: this
-        // schema treats explicit zero as observed data ("explicit zero-cost
-        // rows remain priced"), so re-estimating it would invent a charge for
-        // a free or local model. Only a NULL `cost` -- the ledger's "not
-        // available" -- is left to tokscale's own pricing.
-        message.cost_source = if row.cost.is_some() {
+        // Preserve reported USD charges and explicit zero through caching.
+        // Nonzero amounts in other/unknown currencies must not be copied as
+        // USD; leave their USD cost for tokscale's token-based pricing.
+        message.cost_source = if reported_cost.is_some() {
             CostSource::ProviderReported
         } else {
             CostSource::Estimated
@@ -1217,6 +1239,7 @@ mod tests {
                  cache_write_tokens INTEGER,
                  reasoning_tokens INTEGER,
                  cost REAL,
+                 cost_currency TEXT,
                  created_at INTEGER
              );",
         )
@@ -1234,8 +1257,8 @@ mod tests {
         for (index, (id, provider, model, input, output, kind)) in rows.iter().enumerate() {
             conn.execute(
                 "INSERT INTO ai_usage_record (id, record_kind, message_kind, message_id, provider_id, model_id,
-                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, created_at)
-                 VALUES (?1, 'invocation', ?2, 'message-1', ?3, ?4, ?5, ?6, 0, 0, 0, ?7, ?8)",
+                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, cost_currency, created_at)
+                 VALUES (?1, 'invocation', ?2, 'message-1', ?3, ?4, ?5, ?6, 0, 0, 0, ?7, 'USD', ?8)",
                 rusqlite::params![
                     id,
                     kind,
@@ -1376,7 +1399,7 @@ mod tests {
         conn.execute(
             "INSERT INTO ai_usage_record VALUES
                 ('r1','invocation','chat',NULL,'deepseek','deepseek-flash',
-                 10000,1000,11000,2000,7500,500,400,0.01,1780000000000)",
+                 10000,1000,11100,2100,7500,500,400,0.01,1780000000000)",
             [],
         )
         .unwrap();
@@ -1385,9 +1408,11 @@ mod tests {
         let messages = parse_cherrystudio_sqlite(&path);
         assert_eq!(messages.len(), 1);
         let tokens = &messages[0].tokens;
-        assert_eq!(tokens.input, 2000, "no_cache_tokens is used verbatim");
+        // Deliberately differs from 10000 - 7500 - 500 = 2000, so deriving
+        // the bucket instead of honoring the explicit value fails this test.
+        assert_eq!(tokens.input, 2100, "no_cache_tokens is used verbatim");
         assert_eq!(tokens.output, 600, "reasoning leaves the output bucket");
-        assert_eq!(tokens.total(), 11000, "buckets sum to total_tokens");
+        assert_eq!(tokens.total(), 11100, "buckets sum to total_tokens");
     }
 
     #[test]
@@ -1503,5 +1528,160 @@ mod tests {
         drop(conn);
 
         assert!(parse_cherrystudio_sqlite(&path).is_empty());
+    }
+
+    #[test]
+    fn sqlite_lane_only_treats_usd_or_explicit_zero_as_authoritative() {
+        for currency in [Some("USD"), Some("usd"), Some("CNY"), None] {
+            for cost in [Some(7.0), Some(0.0), None] {
+                let dir = tempdir().unwrap();
+                let path = write_usage_db(
+                    dir.path(),
+                    &[("r1", "deepseek", "deepseek-chat", 100, 10, Some("chat"))],
+                );
+                let conn = Connection::open(&path).unwrap();
+                conn.execute(
+                    "UPDATE ai_usage_record SET cost = ?1, cost_currency = ?2",
+                    rusqlite::params![cost, currency],
+                )
+                .unwrap();
+                drop(conn);
+
+                let messages = parse_cherrystudio_sqlite(&path);
+                assert_eq!(messages.len(), 1);
+                let authoritative = cost.is_some()
+                    && (cost == Some(0.0)
+                        || currency.is_some_and(|value| value.eq_ignore_ascii_case("USD")));
+                assert_eq!(
+                    messages[0].cost_source,
+                    if authoritative {
+                        CostSource::ProviderReported
+                    } else {
+                        CostSource::Estimated
+                    },
+                    "cost={cost:?}, currency={currency:?}"
+                );
+                assert_eq!(
+                    messages[0].cost,
+                    if authoritative { cost.unwrap() } else { 0.0 }
+                );
+                assert_eq!(messages[0].tokens.total(), 110);
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_lane_missing_currency_does_not_default_nonzero_cost_to_usd() {
+        for cost in [7.0, 0.0] {
+            let dir = tempdir().unwrap();
+            let path = write_usage_db(
+                dir.path(),
+                &[("r1", "deepseek", "deepseek-chat", 100, 10, Some("chat"))],
+            );
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE ai_usage_record DROP COLUMN cost_currency;")
+                .unwrap();
+            conn.execute("UPDATE ai_usage_record SET cost = ?1", [cost])
+                .unwrap();
+            drop(conn);
+
+            let messages = parse_cherrystudio_sqlite(&path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].cost, 0.0);
+            assert_eq!(
+                messages[0].cost_source,
+                if cost == 0.0 {
+                    CostSource::ProviderReported
+                } else {
+                    CostSource::Estimated
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_lane_clamps_derived_buckets_for_partial_or_inconsistent_usage() {
+        for (input, output) in [(None, None), (Some(10), Some(10)), (Some(0), Some(0))] {
+            let dir = tempdir().unwrap();
+            let path = write_usage_db(
+                dir.path(),
+                &[("r1", "deepseek", "deepseek-chat", 100, 10, Some("chat"))],
+            );
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE ai_usage_record SET input_tokens = ?1, output_tokens = ?2,
+                    cache_read_tokens = 80, cache_write_tokens = 30, reasoning_tokens = 20",
+                rusqlite::params![input, output],
+            )
+            .unwrap();
+            drop(conn);
+
+            let messages = parse_cherrystudio_sqlite(&path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.input, 0);
+            assert_eq!(messages[0].tokens.output, 0);
+            assert_eq!(messages[0].tokens.cache_read, 80);
+            assert_eq!(messages[0].tokens.cache_write, 30);
+            assert_eq!(messages[0].tokens.reasoning, 20);
+            assert_eq!(messages[0].tokens.total(), 130);
+        }
+    }
+
+    #[test]
+    fn sqlite_lane_keeps_cost_only_calls_with_authoritative_charges() {
+        for currency in [Some("USD"), Some("usd"), Some("CNY"), None] {
+            for cost in [Some(0.25), Some(0.0), None] {
+                let dir = tempdir().unwrap();
+                let path = write_usage_db(
+                    dir.path(),
+                    &[("r1", "deepseek", "deepseek-chat", 100, 10, Some("chat"))],
+                );
+                let conn = Connection::open(&path).unwrap();
+                conn.execute(
+                    "UPDATE ai_usage_record SET input_tokens = NULL, output_tokens = NULL,
+                        cost = ?1, cost_currency = ?2",
+                    rusqlite::params![cost, currency],
+                )
+                .unwrap();
+                drop(conn);
+
+                let messages = parse_cherrystudio_sqlite(&path);
+                let should_keep = cost == Some(0.25)
+                    && currency.is_some_and(|value| value.eq_ignore_ascii_case("USD"));
+                assert_eq!(messages.len(), usize::from(should_keep));
+                if should_keep {
+                    assert_eq!(messages[0].cost, 0.25);
+                    assert_eq!(messages[0].cost_source, CostSource::ProviderReported);
+                    assert_eq!(messages[0].tokens.total(), 0);
+                    assert_eq!(messages[0].message_count, 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_lane_keeps_usage_when_optional_title_join_dependencies_are_missing() {
+        for schema_change in [
+            "DROP TABLE topic",
+            "DROP TABLE message",
+            "ALTER TABLE topic DROP COLUMN name",
+            "ALTER TABLE message DROP COLUMN topic_id",
+            "ALTER TABLE topic RENAME COLUMN id TO other_id",
+            "ALTER TABLE message RENAME COLUMN id TO other_id",
+        ] {
+            let dir = tempdir().unwrap();
+            let path = write_usage_db(
+                dir.path(),
+                &[("r1", "deepseek", "deepseek-chat", 100, 10, Some("chat"))],
+            );
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema_change).unwrap();
+            drop(conn);
+
+            let messages = parse_cherrystudio_sqlite(&path);
+            assert_eq!(messages.len(), 1, "{schema_change}");
+            assert_eq!(messages[0].tokens.total(), 110);
+            assert_eq!(messages[0].session_title, None);
+        }
     }
 }
