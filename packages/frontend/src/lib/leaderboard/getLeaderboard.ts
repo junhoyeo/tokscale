@@ -48,6 +48,18 @@ type RankedLeaderboardDbRow = {
   totalCost: number | string | null;
 };
 
+type ScopedAllTimeAggregateRow = {
+  userId: string;
+  totalTokens: string;
+  totalCost: string;
+};
+
+type ScopedAllTimeAggregateCachePayload =
+  | { kind: "rows"; rows: ScopedAllTimeAggregateRow[] }
+  | { kind: "oversized" };
+
+const SCOPED_ALL_TIME_CACHE_MAX_BYTES = 1024 * 1024;
+
 function toUtcDateString(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
@@ -192,6 +204,10 @@ function escapeLeaderboardLike(value: string): string {
   return value.replace(/[!%_]/g, "!$&");
 }
 
+function normalizeDirectiveValues(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.toLowerCase()))).sort();
+}
+
 function resultQuery(
   base: ReturnType<typeof sql>,
   page: number,
@@ -294,6 +310,104 @@ async function fetchPeriodLeaderboardData(
   return buildLeaderboardData(result[0], page, limit, period, sortBy);
 }
 
+function scopedAllTimeAggregateQuery(
+  clients: string[],
+  models: string[],
+): ReturnType<typeof sql> {
+  const usesModels = models.length > 0;
+  const selectedBreakdown = usesModels ? sql`model.value` : sql`client.value`;
+  const clientMatch = likeAny(sql`client.key`, clients);
+  const modelRows = usesModels
+    ? sql`CROSS JOIN LATERAL jsonb_each(COALESCE(client.value->'models', '{}'::jsonb)) AS model(key, value)`
+    : sql``;
+  const modelFilter = usesModels ? sql`WHERE ${likeAny(sql`model.key`, models)}` : sql``;
+
+  return sql`
+    SELECT
+      s.user_id AS "userId",
+      SUM(COALESCE((${selectedBreakdown}->>'tokens')::numeric, 0))::text AS "totalTokens",
+      SUM(COALESCE((${selectedBreakdown}->>'cost')::numeric, 0))::text AS "totalCost"
+    FROM daily_breakdown d
+    INNER JOIN submissions s ON d.submission_id = s.id
+    CROSS JOIN LATERAL (
+      SELECT client.key, client.value
+      FROM jsonb_each(COALESCE(d.source_breakdown, '{}'::jsonb)) AS client(key, value)
+      WHERE ${clientMatch}
+    ) AS client
+    ${modelRows}
+    ${modelFilter}
+    GROUP BY s.user_id
+  `;
+}
+
+async function fetchScopedAllTimeAggregateRows(
+  clients: string[],
+  models: string[],
+): Promise<ScopedAllTimeAggregateRow[]> {
+  return db.execute<ScopedAllTimeAggregateRow>(
+    scopedAllTimeAggregateQuery(clients, models),
+  );
+}
+
+async function fetchScopedAllTimeAggregateCachePayload(
+  clients: string[],
+  models: string[],
+): Promise<ScopedAllTimeAggregateCachePayload> {
+  const rows = await fetchScopedAllTimeAggregateRows(clients, models);
+  const serialized = JSON.stringify(rows);
+  // Keep Next's incremental-cache entry comfortably below its per-entry size guard.
+  if (new TextEncoder().encode(serialized).byteLength > SCOPED_ALL_TIME_CACHE_MAX_BYTES) {
+    return { kind: "oversized" };
+  }
+  return { kind: "rows", rows };
+}
+
+function getCachedScopedAllTimeAggregate(
+  clients: string[],
+  models: string[],
+): Promise<ScopedAllTimeAggregateCachePayload> {
+  return unstable_cache(
+    () => fetchScopedAllTimeAggregateCachePayload(clients, models),
+    [`leaderboard:all:scoped:${JSON.stringify([clients, models])}`],
+    { tags: ["leaderboard", "leaderboard:all"], revalidate: 300 },
+  )();
+}
+
+function scopedAllTimeDirectBase(
+  clients: string[],
+  models: string[],
+): ReturnType<typeof sql> {
+  const aggregate = scopedAllTimeAggregateQuery(clients, models);
+  return sql`
+    SELECT
+      scoped."userId" AS user_id,
+      u.username,
+      u.display_name,
+      u.avatar_url,
+      u.leaderboard_hidden,
+      scoped."totalTokens"::numeric AS total_tokens,
+      scoped."totalCost"::numeric AS total_cost
+    FROM (${aggregate}) AS scoped
+    INNER JOIN users u ON scoped."userId" = u.id
+  `;
+}
+
+function scopedAllTimeCachedBase(rows: ScopedAllTimeAggregateRow[]): ReturnType<typeof sql> {
+  return sql`
+    SELECT
+      scoped."userId" AS user_id,
+      u.username,
+      u.display_name,
+      u.avatar_url,
+      u.leaderboard_hidden,
+      scoped."totalTokens" AS total_tokens,
+      scoped."totalCost" AS total_cost
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+      AS scoped("userId" uuid, "totalTokens" numeric, "totalCost" numeric)
+    INNER JOIN users u ON scoped."userId" = u.id
+  `;
+}
+
 async function fetchAllTimeLeaderboardData(
   page: number,
   limit: number,
@@ -311,26 +425,12 @@ async function fetchAllTimeLeaderboardData(
   let base = globalStatsBase;
 
   if (hasDirectives(parsed)) {
-    const usesModels = parsed.models.length > 0;
-    const selectedBreakdown = usesModels ? sql`model.value` : sql`client.value`;
-    const clientMatch = likeAny(sql`client.key`, parsed.clients);
-    const modelRows = usesModels
-      ? sql`CROSS JOIN LATERAL jsonb_each(COALESCE(client.value->'models', '{}'::jsonb)) AS model(key, value)`
-      : sql``;
-    const modelMatch = usesModels ? sql`AND ${likeAny(sql`model.key`, parsed.models)}` : sql``;
-    base = sql`
-      SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
-        SUM(COALESCE((${selectedBreakdown}->>'tokens')::numeric, 0)) AS total_tokens,
-        SUM(COALESCE((${selectedBreakdown}->>'cost')::numeric, 0)) AS total_cost
-      FROM daily_breakdown d
-      INNER JOIN submissions s ON d.submission_id = s.id
-      INNER JOIN users u ON s.user_id = u.id
-      CROSS JOIN LATERAL jsonb_each(COALESCE(d.source_breakdown, '{}'::jsonb)) AS client(key, value)
-      ${modelRows}
-      WHERE ${clientMatch}
-        ${modelMatch}
-      GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
-    `;
+    const clients = normalizeDirectiveValues(parsed.clients);
+    const models = normalizeDirectiveValues(parsed.models);
+    const scopedPayload = await getCachedScopedAllTimeAggregate(clients, models);
+    base = scopedPayload.kind === "rows"
+      ? scopedAllTimeCachedBase(scopedPayload.rows)
+      : scopedAllTimeDirectBase(clients, models);
   }
   const result = await db.execute<LeaderboardQueryResult>(
     resultQuery(

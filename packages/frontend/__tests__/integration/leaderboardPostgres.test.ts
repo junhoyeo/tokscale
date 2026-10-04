@@ -194,7 +194,7 @@ describeWithPostgres("leaderboard PostgreSQL integration", () => {
     ]);
     expect(scoped.users.some((user) => user.username === ids.cara.username)).toBe(false);
     expect(scoped.users.some((user) => user.username === ids.eve.username)).toBe(false);
-    expect(scoped.stats).toEqual({ totalTokens: 116_000_500, totalCost: 1165, uniqueUsers: 6 });
+    expect(scoped.stats).toEqual({ totalTokens: 109_000_500, totalCost: 1095, uniqueUsers: 5 });
 
     const modelOnly = await getLeaderboardData("all", 1, 50, "tokens", "model:gpt-5");
     expect(modelOnly.users.map((user) => [user.username, user.totalTokens])).toEqual([

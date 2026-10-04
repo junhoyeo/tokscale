@@ -3,8 +3,23 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cteBody } from "../support/sqlCte";
 
 const state = vi.hoisted(() => {
+  function renderSql(value: unknown): string {
+    if (!value || typeof value !== "object") return String(value ?? "");
+    const q = value as { strings?: string[]; values?: unknown[] };
+    return q.strings
+      ? q.strings.reduce(
+          (s, p, i) =>
+            `${s}${p}${i < q.values!.length ? renderSql(q.values![i]) : ""}`,
+          "",
+        )
+      : "";
+  }
+
   const results: Array<unknown> = [];
+  const scopedResults: Array<unknown> = [];
   const queries: Array<{ strings: string[]; values: unknown[] }> = [];
+  const cacheCalls: Array<{ keyParts: string[]; options: unknown }> = [];
+  const cacheStore = new Map<string, unknown>();
   const sql = Object.assign(
     vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = { strings: Array.from(strings), values, as: () => ({}) };
@@ -18,6 +33,23 @@ const state = vi.hoisted(() => {
       }),
     },
   );
+  const execute = vi.fn((statement: unknown) => {
+    const rendered = renderSql(statement);
+    if (rendered.includes("FROM daily_breakdown d") && !rendered.includes("WITH aggregated AS")) {
+      return Promise.resolve(scopedResults.shift() ?? []);
+    }
+    return Promise.resolve(results.shift() ?? []);
+  });
+  const unstableCache = vi.fn((fn: () => unknown, keyParts: string[], options: unknown) => {
+    cacheCalls.push({ keyParts, options });
+    return async () => {
+      const key = JSON.stringify(keyParts);
+      if (!cacheStore.has(key)) {
+        cacheStore.set(key, await fn());
+      }
+      return cacheStore.get(key);
+    };
+  });
   const select = vi.fn(() => {
     const builder = {
       from: () => builder,
@@ -37,20 +69,29 @@ const state = vi.hoisted(() => {
   });
   return {
     results,
+    scopedResults,
     queries,
+    cacheCalls,
+    execute,
     sql,
     select,
+    unstableCache,
     reset: () => {
       results.length = 0;
+      scopedResults.length = 0;
       queries.length = 0;
+      cacheCalls.length = 0;
+      cacheStore.clear();
+      execute.mockClear();
       select.mockClear();
+      unstableCache.mockClear();
     },
   };
 });
-vi.mock("next/cache", () => ({ unstable_cache: (fn: () => unknown) => fn }));
+vi.mock("next/cache", () => ({ unstable_cache: state.unstableCache }));
 vi.mock("@/lib/db", () => ({
   db: {
-    execute: vi.fn(() => Promise.resolve(state.results.shift() ?? [])),
+    execute: state.execute,
     select: state.select,
   },
   users: {
@@ -91,6 +132,25 @@ function finalQuery() {
 function occurrences(value: string, needle: string) {
   return value.split(needle).length - 1;
 }
+function executedSql() {
+  return state.execute.mock.calls.map(([statement]) => text(statement)).join("\n");
+}
+function scopedScanCount() {
+  return state.execute.mock.calls.filter(([statement]) =>
+    text(statement).includes("FROM daily_breakdown d"),
+  ).length;
+}
+function leaderboardRow(totalTokens = 0, totalCost = 0) {
+  return [
+    {
+      users: [],
+      totalUsers: 0,
+      totalTokens,
+      totalCost,
+      uniqueUsers: 0,
+    },
+  ];
+}
 beforeAll(
   async () =>
     ({ getLeaderboardData, getUserRank } =
@@ -121,6 +181,7 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("jsonb_each(COALESCE(client.value->'models'");
     expect(query()).toContain("LOWER(client.key) LIKE %codex%");
     expect(query()).toContain("LOWER(model.key) LIKE %gpt-5%");
+    expect(finalQuery()).toContain("jsonb_to_recordset");
   });
 
   it("keeps global headline totals unfiltered by directives and excludes hidden users", async () => {
@@ -153,9 +214,83 @@ describe("all-time leaderboard aggregate query", () => {
     expect(cteBody(finalQuery(), "rankable", "filtered")).toContain(
       "WHERE leaderboard_hidden = false",
     );
-    expect(occurrences(finalQuery(), "jsonb_each(COALESCE(d.source_breakdown")).toBe(1);
+    expect(occurrences(executedSql(), "jsonb_each(COALESCE(d.source_breakdown")).toBe(1);
+    expect(finalQuery()).toContain("jsonb_to_recordset");
     expect(occurrences(finalQuery(), "stats AS (")).toBe(1);
     expect(occurrences(finalQuery(), "FROM stat_rows")).toBe(1);
+  });
+
+  it("caches scoped all-time aggregates by canonical directives, not text or pagination", async () => {
+    state.scopedResults.push(
+      [{ userId: "user-a", totalTokens: "100", totalCost: "1" }],
+      [{ userId: "user-b", totalTokens: "200", totalCost: "2" }],
+      [{ userId: "user-c", totalTokens: "300", totalCost: "3" }],
+      [{ userId: "user-d", totalTokens: "400", totalCost: "4" }],
+    );
+    state.results.push(
+      leaderboardRow(100, 1),
+      leaderboardRow(100, 1),
+      leaderboardRow(100, 1),
+      leaderboardRow(100, 1),
+      leaderboardRow(100, 1),
+      leaderboardRow(100, 1),
+      leaderboardRow(200, 2),
+      leaderboardRow(300, 3),
+      leaderboardRow(400, 4),
+    );
+
+    await getLeaderboardData("all", 1, 50, "tokens", "client:codex model:gpt-5");
+    await getLeaderboardData("all", 1, 50, "tokens", "client:codex model:gpt-5");
+    await getLeaderboardData("all", 1, 50, "tokens", "model:GPT-5 client:CODEX");
+    await getLeaderboardData("all", 1, 50, "tokens", "client:codex model:gpt-5 alice");
+    await getLeaderboardData("all", 2, 50, "tokens", "client:codex model:gpt-5");
+    await getLeaderboardData("all", 1, 50, "cost", "client:codex model:gpt-5");
+    await getLeaderboardData("all", 1, 50, "tokens", "client:codex client:codex model:gpt-5");
+
+    expect(scopedScanCount()).toBe(1);
+
+    await getLeaderboardData("all", 1, 50, "tokens", "client:claude model:gpt-5");
+
+    expect(scopedScanCount()).toBe(2);
+
+    await getLeaderboardData("all", 1, 50, "tokens", "client:a:b model:c");
+    await getLeaderboardData("all", 1, 50, "tokens", "client:a model:b:c");
+
+    expect(scopedScanCount()).toBe(4);
+    const scopedCacheCalls = state.cacheCalls.filter(({ keyParts }) =>
+      keyParts[0]?.startsWith("leaderboard:all:scoped:"),
+    );
+    expect(new Set(scopedCacheCalls.map(({ keyParts }) => keyParts[0]))).toEqual(
+      new Set([
+        'leaderboard:all:scoped:[["codex"],["gpt-5"]]',
+        'leaderboard:all:scoped:[["claude"],["gpt-5"]]',
+        'leaderboard:all:scoped:[["a:b"],["c"]]',
+        'leaderboard:all:scoped:[["a"],["b:c"]]',
+      ]),
+    );
+    expect(scopedCacheCalls[0]?.options).toEqual({
+      tags: ["leaderboard", "leaderboard:all"],
+      revalidate: 300,
+    });
+  });
+
+  it("caches an oversized scoped aggregate sentinel and preserves results through the direct path", async () => {
+    const oversizedRows = Array.from({ length: 15_000 }, (_, index) => ({
+      userId: `00000000-0000-0000-0000-${index.toString().padStart(12, "0")}`,
+      totalTokens: "10000000000000000000",
+      totalCost: "1000000000000.0000",
+    }));
+    state.scopedResults.push(oversizedRows);
+    state.results.push(leaderboardRow(300, 3), leaderboardRow(300, 3));
+
+    const first = await getLeaderboardData("all", 1, 50, "tokens", "client:codex");
+    const second = await getLeaderboardData("all", 1, 50, "tokens", "client:codex alice");
+
+    expect(first.stats.totalTokens).toBe(300);
+    expect(second.stats.totalCost).toBe(3);
+    expect(scopedScanCount()).toBe(3);
+    expect(finalQuery()).toContain("FROM daily_breakdown d");
+    expect(finalQuery()).not.toContain("jsonb_to_recordset");
   });
 
   it("aggregates duplicate submission rows into one ranked user before counting", async () => {
