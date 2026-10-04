@@ -34,10 +34,10 @@ export const users = pgTable(
     avatarUrl: text("avatar_url"),
     email: varchar("email", { length: 255 }),
     /**
-     * Excludes the user from leaderboard RANKINGS only. Their profile, badge
-     * and embeds stay public, and their usage still counts toward site-wide
-     * totals — see lib/leaderboard/getLeaderboard.ts for exactly which queries
-     * honour this and which deliberately do not.
+     * Excludes the user from leaderboard rankings AND from the leaderboard's
+     * site-wide totals (tokens, cost, user count). Their profile, badge and
+     * embeds stay public. See lib/leaderboard/getLeaderboard.ts: the `stats`
+     * and `rankable` CTEs both filter on this column.
      *
      * Reversible by design: moderation_actions keeps the full hide/unhide
      * history, so this column is current state, not the record.

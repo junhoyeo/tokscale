@@ -291,6 +291,12 @@ impl ModelPricing {
             self.input_cost_per_token,
             self.output_cost_per_token,
             self.cache_creation_input_token_cost,
+            // A row whose only published rate is the plain 1-hour cache-write
+            // price can still price usage that is entirely 1-hour writes;
+            // dropping it here made the cached loader retain nothing and the
+            // usage priced as $0 (#1374 review). High-only tiers stay out:
+            // a row with no base of any kind is not a usable row.
+            self.cache_creation_input_token_cost_above_1hr,
             self.cache_read_input_token_cost,
         ]
         .into_iter()
@@ -540,6 +546,27 @@ mod pricing_row_tests {
             usage.reasoning,
         );
         assert!((cost - (100_000.0 * 2e-5)).abs() < 1e-9, "cost was {cost}");
+    }
+
+    #[test]
+    fn a_row_with_only_a_1hr_cache_write_rate_has_a_usable_base_rate() {
+        // Retention (`has_any_usable_base_rate`) discarded such rows, so a
+        // cached catalog where a model publishes only the 1-hour cache-write
+        // price priced its entirely-hourly usage as $0 (#1374 review).
+        let hourly_only = ModelPricing {
+            cache_creation_input_token_cost_above_1hr: Some(6e-6),
+            ..Default::default()
+        };
+        assert!(hourly_only.has_any_usable_base_rate());
+
+        // High tiers alone are still not a usable base: without any base the
+        // first 200k tokens of a bucket would read as free.
+        let high_only = ModelPricing {
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens: Some(12e-6),
+            ..Default::default()
+        };
+        assert!(!high_only.has_any_usable_base_rate());
+        assert!(!ModelPricing::default().has_any_usable_base_rate());
     }
 
     // A bucket the usage does not touch is never filled.

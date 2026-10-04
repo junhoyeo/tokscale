@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { cteBody } from "../support/sqlCte";
+
 const state = vi.hoisted(() => {
   const results: Array<unknown> = [];
   const queries: Array<{ strings: string[]; values: unknown[] }> = [];
@@ -113,22 +115,29 @@ describe("period leaderboard aggregate query", () => {
     expect(finalSql()).not.toContain("stat_rows AS");
   });
 
-  it("keeps hidden users in totals while excluding them before rank and page", async () => {
+  it("excludes hidden users from the totals as well as the rank and page", async () => {
     state.results.push(
       row([], {
         totalUsers: 1,
         totalTokens: 300,
         totalCost: 30,
-        uniqueUsers: 2,
+        uniqueUsers: 1,
       }),
     );
     const data = await getLeaderboardData("week", 1, 50);
     expect(data.stats).toEqual({
       totalTokens: 300,
       totalCost: 30,
-      uniqueUsers: 2,
+      uniqueUsers: 1,
     });
-    expect(allSql()).toContain("WHERE leaderboard_hidden = false");
+    // Each CTE is checked on its own: a single filter anywhere in the
+    // statement would satisfy a whole-query toContain.
+    expect(cteBody(finalSql(), "stats", "rankable")).toContain(
+      "WHERE leaderboard_hidden = false",
+    );
+    expect(cteBody(finalSql(), "rankable", "filtered")).toContain(
+      "WHERE leaderboard_hidden = false",
+    );
   });
 
   it("scopes client and model directives in the same JSON client entry", async () => {

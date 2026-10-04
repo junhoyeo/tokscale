@@ -1698,3 +1698,202 @@ describe("submission date range aggregate", () => {
     expect(migration).toContain('"date_end" date NOT NULL');
   });
 });
+
+describe("POST /api/submit Antigravity family cost floors", () => {
+  function familySnapshotBody(
+    days: Array<{
+      date: string;
+      costIsComplete: boolean;
+      models: Array<{ client: string; modelId: string; tokens: number; cost: number; messages: number }>;
+    }>,
+  ) {
+    const body = submissionBody("antigravity", []);
+    const dates = days.map(({ date }) => date).sort();
+    const clients = [...new Set(days.flatMap((day) => day.models.map((model) => model.client)))];
+    return {
+      ...body,
+      meta: { ...body.meta, dateRange: { start: dates[0], end: dates[dates.length - 1] } },
+      summary: { clients },
+      contributions: days.map((day) => ({
+        date: day.date,
+        totals: { costIsComplete: day.costIsComplete },
+        clients: day.models.map((model) => ({
+          client: model.client,
+          modelId: model.modelId,
+          tokens: { input: model.tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          cost: model.cost,
+          messages: model.messages,
+        })),
+      })),
+    };
+  }
+
+  async function submitFamily(store: Store, body: ReturnType<typeof familySnapshotBody>) {
+    installTx(store);
+    mockSubmit(body);
+    const response = await post(body);
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  it("credits Antigravity tokens when a full-family scan contains an unpriced model", async () => {
+    const store = newStore();
+    const unpricedSnapshot = (flashTokens: number) =>
+      familySnapshotBody([
+        {
+          date: "2026-08-07",
+          costIsComplete: false,
+          models: [
+            { client: "antigravity-cli", modelId: "gemini-3-pro", tokens: 1_000_000_000, cost: 0, messages: 5 },
+            { client: "antigravity-extension", modelId: "gemini-3-flash", tokens: flashTokens, cost: 21, messages: 7 },
+          ],
+        },
+      ]);
+
+    const first = await submitFamily(store, unpricedSnapshot(2_100_000_000));
+    expect(first.metrics.totalTokens).toBe(3_100_000_000);
+    expect(storedTokens(store)).toBe(3_100_000_000);
+    // The known partial cost is kept as-is; no price is invented for the
+    // unpriced model.
+    expect(storedCost(store)).toBeCloseTo(21, 8);
+    // Incompleteness is visible on every stored family cell's provenance.
+    expect(
+      store.days.every((day) =>
+        Object.values(day.sourceBreakdown).every(
+          (cell) => cell.provenance?.costIsComplete === false,
+        ),
+      ),
+    ).toBe(true);
+
+    // An identical replay credits nothing again.
+    await submitFamily(store, unpricedSnapshot(2_100_000_000));
+    expect(storedTokens(store)).toBe(3_100_000_000);
+    expect(storedCost(store)).toBeCloseTo(21, 8);
+
+    // Growth on a later full-history snapshot that still contains the
+    // unpriced history must not stay frozen.
+    await submitFamily(store, unpricedSnapshot(2_200_000_000));
+    expect(storedTokens(store)).toBe(3_200_000_000);
+  });
+
+  it("preserves the Antigravity family cost floor when unpriced usage moves source and date", async () => {
+    const store = newStore();
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-07", costIsComplete: true, models: [
+        { client: "antigravity", modelId: "gemini-3-pro", tokens: 100, cost: 10, messages: 2 },
+      ] },
+    ]));
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+
+    // The same usage moves to the IDE extension on a new date, unpriced.
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 100, cost: 0, messages: 2 },
+      ] },
+    ]));
+    expect(storedTokens(store)).toBe(100);
+    expect(store.days).toHaveLength(1);
+    expect(store.days[0].date).toBe("2026-08-08");
+    // The credited lifetime spend survived the source move.
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+    expect(
+      store.days[0].sourceBreakdown["antigravity-extension"]?.provenance
+        ?.costIsComplete,
+    ).toBe(false);
+
+    // Replay: the floor is restored once, not compounded.
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 100, cost: 0, messages: 2 },
+      ] },
+    ]));
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+  });
+
+  it("floors the family lifetime once: known per-model spend is not stacked", async () => {
+    const store = newStore();
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-07", costIsComplete: true, models: [
+        { client: "antigravity", modelId: "gemini-3-pro", tokens: 100, cost: 10, messages: 2 },
+      ] },
+    ]));
+
+    // The replacement reports the old model unpriced (incomplete, $0) plus a
+    // newly priced model at $5. The family floor is a LIFETIME scalar, not a
+    // per-model preservation: the known total $10 stands, the $5 counts
+    // toward it, and the $5 deficit lands on the incomplete cell. Per-model
+    // floors would stack to $15.
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { client: "antigravity-cli", modelId: "gemini-3-pro", tokens: 60, cost: 0, messages: 1 },
+      ] },
+      { date: "2026-08-09", costIsComplete: true, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 40, cost: 5, messages: 1 },
+      ] },
+    ]));
+    expect(storedTokens(store)).toBe(100);
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+    const cliDay = store.days.find((day) => day.sourceBreakdown["antigravity-cli"])!;
+    expect(cliDay.sourceBreakdown["antigravity-cli"]!.cost).toBeCloseTo(5, 8);
+    const extensionDay = store.days.find((day) => day.sourceBreakdown["antigravity-extension"])!;
+    expect(extensionDay.sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(5, 8);
+  });
+
+  it("keeps complete Antigravity cells exact while flooring only incomplete cells", async () => {
+    const store = newStore();
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-07", costIsComplete: true, models: [
+        { client: "antigravity", modelId: "gemini-3-pro", tokens: 100, cost: 10, messages: 2 },
+      ] },
+    ]));
+
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-07", costIsComplete: true, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 60, cost: 7, messages: 1 },
+      ] },
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { client: "antigravity-cli", modelId: "gemini-3-pro", tokens: 40, cost: 0, messages: 1 },
+      ] },
+    ]));
+
+    const complete = store.days.find((day) => day.date === "2026-08-07")!;
+    const incomplete = store.days.find((day) => day.date === "2026-08-08")!;
+    expect(complete.sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(7, 8);
+    // The $3 deficit lands on the incomplete cell only.
+    expect(incomplete.sourceBreakdown["antigravity-cli"]!.cost).toBeCloseTo(3, 8);
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+  });
+
+  it("clears the Antigravity cost floor when full pricing recovers", async () => {
+    const store = newStore();
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-07", costIsComplete: true, models: [
+        { client: "antigravity", modelId: "gemini-3-pro", tokens: 100, cost: 10, messages: 2 },
+      ] },
+    ]));
+    await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-08", costIsComplete: false, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 100, cost: 0, messages: 2 },
+      ] },
+    ]));
+    expect(storedCost(store)).toBeCloseTo(10, 8);
+
+    // A fully priced snapshot of the same coverage replaces exactly,
+    // including downward, and clears the incompleteness.
+    const recovered = await submitFamily(store, familySnapshotBody([
+      { date: "2026-08-09", costIsComplete: true, models: [
+        { client: "antigravity-extension", modelId: "gemini-3-pro", tokens: 100, cost: 6, messages: 2 },
+      ] },
+    ]));
+    expect(recovered.metrics.totalCost).toBeCloseTo(6, 8);
+    expect(storedCost(store)).toBeCloseTo(6, 8);
+    expect(storedTokens(store)).toBe(100);
+    expect(
+      store.days.every((day) =>
+        Object.values(day.sourceBreakdown).every(
+          (cell) => cell.provenance?.costIsComplete !== false,
+        ),
+      ),
+    ).toBe(true);
+  });
+});

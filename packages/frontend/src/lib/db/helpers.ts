@@ -452,6 +452,34 @@ function addClientCostFloor(
 }
 
 /**
+ * Spread a lifetime cost deficit over the incomplete cells that must absorb
+ * it. Rounded proportional shares can exhaust the deficit before the last
+ * cell, so each allocation is capped and the remainder never goes negative.
+ * Zero-token cells share equally. Shares land on the nested model costs via
+ * `addClientCostFloor`, keeping client = Σ models by construction.
+ */
+function allocateCostDeficit(
+  incompleteCells: ClientBreakdownData[],
+  deficit: number
+): void {
+  const tokenTotal = incompleteCells.reduce((sum, cell) => sum + (cell.tokens || 0), 0);
+  let assigned = 0;
+  for (let i = 0; i < incompleteCells.length; i++) {
+    const remaining = quantizeCost(deficit - assigned);
+    const share = Math.min(
+      remaining,
+      i === incompleteCells.length - 1
+        ? remaining
+        : tokenTotal > 0
+          ? quantizeCost((deficit * (incompleteCells[i].tokens || 0)) / tokenTotal)
+          : quantizeCost(deficit / incompleteCells.length)
+    );
+    addClientCostFloor(incompleteCells[i], share);
+    assigned = quantizeCost(assigned + share);
+  }
+}
+
+/**
  * Reconcile exact replacement cells against the pre-rewrite client lifetime
  * cost. Same-day/model floors would duplicate spend when usage moves between
  * dates; only the lifetime deficit may be added to the incoming layout.
@@ -477,24 +505,46 @@ export function reapplyReplaceLayoutCostFloors(
     const incompleteCells = cells.filter(
       (cell) => cell.provenance?.costIsComplete === false
     );
-    const tokenTotal = incompleteCells.reduce((sum, cell) => sum + (cell.tokens || 0), 0);
-    let assigned = 0;
-    for (let i = 0; i < incompleteCells.length; i++) {
-      // Rounded proportional shares can exhaust the deficit before the last
-      // cell. Cap each allocation so the remainder never goes negative.
-      const remaining = quantizeCost(deficit - assigned);
-      const share = Math.min(
-        remaining,
-        i === incompleteCells.length - 1
-          ? remaining
-          : tokenTotal > 0
-            ? quantizeCost((deficit * incompleteCells[i].tokens) / tokenTotal)
-            : quantizeCost(deficit / incompleteCells.length)
-      );
-      addClientCostFloor(incompleteCells[i], share);
-      assigned = quantizeCost(assigned + share);
+    allocateCostDeficit(incompleteCells, deficit);
+  }
+}
+
+/**
+ * Reconcile an atomic source family (Antigravity desktop, CLI, and IDE
+ * extension) against the family's pre-rewrite lifetime cost.
+ *
+ * The family replaces as one unit: usage moves between its sources as
+ * providers relabel responses, so per-client floors lose the credited spend
+ * the moment the source that carried it disappears, and independent sibling
+ * floors can double-count a cost that already moved into a complete cell.
+ * The floor is therefore computed and applied once across the whole family,
+ * over the family's current total (complete cells included), and only
+ * incomplete cells can absorb the deficit. A fully priced replacement keeps
+ * its exact total — the floor is not a ratchet.
+ */
+export function reapplyReplaceFamilyCostFloor(
+  rows: Array<{ sourceBreakdown: Record<string, ClientBreakdownData> }>,
+  family: readonly string[],
+  floor: number
+): void {
+  // Deterministic order: rows arrive date-sorted; within a row, the fixed
+  // family member order. Replay must place rounding residuals identically.
+  const cells: ClientBreakdownData[] = [];
+  for (const row of rows) {
+    for (const client of family) {
+      const cell = ownValue(row.sourceBreakdown, client);
+      if (cell) cells.push(cell);
     }
   }
+  if (cells.length === 0) return;
+  const current = cells.reduce((sum, cell) => sum + (cell.cost || 0), 0);
+  const deficit = quantizeCost(floor - current);
+  if (deficit <= 0) return;
+  const incompleteCells = cells.filter(
+    (cell) => cell.provenance?.costIsComplete === false
+  );
+  if (incompleteCells.length === 0) return;
+  allocateCostDeficit(incompleteCells, deficit);
 }
 
 export function clientContributionToBreakdownData(

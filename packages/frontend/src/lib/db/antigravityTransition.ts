@@ -149,16 +149,12 @@ export function planAntigravityTransition(args: {
     return freeze("all three sources must declare the supported generation in a full-history scan");
   }
 
-  if (
-    args.contributions.some(
-      (day) =>
-        day.clients.some((cell) =>
-          ANTIGRAVITY_FAMILY.some((client) => cell.client === client)
-        ) && day.totals?.costIsComplete === false
-    )
-  ) {
-    return freeze("the Antigravity family snapshot has incomplete pricing");
-  }
+  // Incomplete pricing no longer vetoes the family's tokens: a permanently
+  // unpriced historic model would otherwise freeze every later full-history
+  // submit, silently dropping all growth. Tokens are reconciled below and the
+  // route floors the family's lifetime cost (see
+  // `reapplyReplaceFamilyCostFloor`), so spend survives source moves while the
+  // cells stay tagged incomplete until a fully priced snapshot replaces them.
 
   const layouts = Object.fromEntries(
     ANTIGRAVITY_FAMILY.map((client) => [
@@ -187,10 +183,19 @@ export function planAntigravityTransition(args: {
     return freeze("the full snapshot does not cover this device's credited Antigravity family usage");
   }
 
+  const pricingIncomplete = args.contributions.some(
+    (day) =>
+      day.clients.some((cell) =>
+        ANTIGRAVITY_FAMILY.some((client) => cell.client === client)
+      ) && day.totals?.costIsComplete === false
+  );
+
   return {
     mode: "replace",
     parserVersions,
     layouts,
-    warning: "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again.",
+    warning: pricingIncomplete
+      ? "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again. Some models could not be priced: tokens are credited, costs stay partial and floored at the credited lifetime until a fully priced snapshot replaces them."
+      : "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again.",
   };
 }

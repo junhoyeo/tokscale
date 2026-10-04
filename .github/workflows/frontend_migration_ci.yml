@@ -18,6 +18,8 @@ on:
       - "packages/frontend/__tests__/integration/moderationCandidatesPostgres.test.ts"
       - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
       - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
+      - "packages/frontend/src/lib/leaderboard/getLeaderboard.ts"
+      - "packages/frontend/__tests__/integration/leaderboardTotalsPostgres.test.ts"
       - ".github/workflows/frontend_migration_ci.yml"
   pull_request:
     branches: [main]
@@ -83,3 +85,8 @@ jobs:
         env:
           LEADERBOARD_DB_INTEGRATION: "1"
         run: bun run --cwd packages/frontend test -- __tests__/integration/leaderboardPostgres.test.ts
+
+      - name: Execute leaderboard totals query against PostgreSQL
+        env:
+          LEADERBOARD_TOTALS_DB_INTEGRATION: "1"
+        run: bun run --cwd packages/frontend test:leaderboard:db

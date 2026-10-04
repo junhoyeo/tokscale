@@ -1689,6 +1689,28 @@ mod tests {
         assert!((cost - 3.25).abs() < 1e-9, "cost was {cost}");
     }
 
+    #[test]
+    fn litellm_retention_keeps_a_row_whose_only_rate_is_the_1hr_cache_write() {
+        // Retention runs on fetched AND cached/degraded catalogs, so a cached
+        // hourly-only row that survives the fetch filter must also survive
+        // the cached-load filter. Before the fix the cached loader dropped it
+        // and entirely-hourly usage priced as $0 (#1374 review).
+        let mut data = HashMap::new();
+        data.insert(
+            "hourly-only-model".to_string(),
+            ModelPricing {
+                cache_creation_input_token_cost_above_1hr: Some(6e-6),
+                ..Default::default()
+            },
+        );
+        data.insert("all-zero-model".to_string(), ModelPricing::default());
+
+        let filtered = PricingService::filter_litellm_data(data);
+
+        assert!(filtered.contains_key("hourly-only-model"));
+        assert!(!filtered.contains_key("all-zero-model"));
+    }
+
     // Regression: #1002. A LiteLLM fetch failure used to propagate out of
     // fetch_inner, so `tokscale submit` died with "error decoding response
     // body" even though models.dev and openrouter were both reachable and

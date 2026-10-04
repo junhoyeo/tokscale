@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { cteBody } from "../support/sqlCte";
+
 const state = vi.hoisted(() => {
   const results: Array<unknown> = [];
   const queries: Array<{ strings: string[]; values: unknown[] }> = [];
@@ -121,7 +123,7 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("LOWER(model.key) LIKE %gpt-5%");
   });
 
-  it("keeps global headline totals unfiltered by directives and includes hidden users", async () => {
+  it("keeps global headline totals unfiltered by directives and excludes hidden users", async () => {
     state.results.push([
       {
         users: [],
@@ -145,7 +147,12 @@ describe("all-time leaderboard aggregate query", () => {
     });
     expect(query()).toContain("stat_rows AS (");
     expect(query()).toContain("stats AS (");
-    expect(query()).toContain("WHERE leaderboard_hidden = false");
+    const stats = cteBody(finalQuery(), "stats", "rankable");
+    expect(stats).toContain("FROM stat_rows");
+    expect(stats).toContain("WHERE leaderboard_hidden = false");
+    expect(cteBody(finalQuery(), "rankable", "filtered")).toContain(
+      "WHERE leaderboard_hidden = false",
+    );
     expect(occurrences(finalQuery(), "jsonb_each(COALESCE(d.source_breakdown")).toBe(1);
     expect(occurrences(finalQuery(), "stats AS (")).toBe(1);
     expect(occurrences(finalQuery(), "FROM stat_rows")).toBe(1);

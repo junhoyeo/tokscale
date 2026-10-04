@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyCostCompleteness,
   mergeClientBreakdownsWithRegressionGuard,
+  reapplyReplaceFamilyCostFloor,
   reapplyReplaceLayoutCostFloors,
   type ClientBreakdownData,
 } from "../../src/lib/db/helpers";
@@ -312,5 +313,156 @@ describe("reapplyReplaceLayoutCostFloors", () => {
     expect(cell.models["model-0"].cost).toBe(30);
     expect(cell.models["model-1"].cost).toBe(10);
     expect(cell.cost).toBe(40);
+  });
+});
+
+
+describe("reapplyReplaceFamilyCostFloor", () => {
+  const family = ["antigravity", "antigravity-cli", "antigravity-extension"] as const;
+
+  function cell(
+    tokens: number,
+    cost: number,
+    complete: boolean
+  ): ClientBreakdownData {
+    return {
+      tokens,
+      cost,
+      input: tokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: tokens,
+      models: {
+        "gemini-3-pro": {
+          tokens,
+          cost,
+          input: tokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: tokens,
+        },
+      },
+      ...(complete
+        ? {}
+        : {
+            provenance: {
+              schemaVersion: 2,
+              messageCount: 1,
+              modelCount: 1,
+              costIsComplete: false,
+            },
+          }),
+    };
+  }
+
+  it("restores the family lifetime deficit after the original source disappears", () => {
+    // Prior credited family cost was $10 on the desktop source. The
+    // replacement carries the usage on the extension only, unpriced: without
+    // a family-wide floor the $10 is lost (the per-client floor keyed on the
+    // desktop has no cells to land on).
+    const rows = [
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(100, 0, false),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(rows, family, 10);
+    expect(rows[0].sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(10, 8);
+    expect(
+      rows[0].sourceBreakdown["antigravity-extension"]!.models["gemini-3-pro"]!.cost
+    ).toBeCloseTo(10, 8);
+  });
+
+  it("counts complete sibling cells toward the family total without flooring them", () => {
+    // $10 prior family cost, replacement has a COMPLETE $10 extension cell
+    // plus an INCOMPLETE $0 desktop cell: the family total already reaches
+    // the floor, so nothing is added and the complete cell stays exact.
+    const rows = [
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(60, 10, true),
+          antigravity: cell(40, 0, false),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(rows, family, 10);
+    expect(rows[0].sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(10, 8);
+    expect(rows[0].sourceBreakdown.antigravity!.cost).toBeCloseTo(0, 8);
+  });
+
+  it("spreads the deficit only over incomplete cells, complete cells stay exact", () => {
+    const rows = [
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(60, 7, true),
+          "antigravity-cli": cell(40, 0, false),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(rows, family, 10);
+    // $7 complete stays exact; the $3 deficit lands on the incomplete cell.
+    expect(rows[0].sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(7, 8);
+    expect(rows[0].sourceBreakdown["antigravity-cli"]!.cost).toBeCloseTo(3, 8);
+    expect(
+      rows[0].sourceBreakdown["antigravity-cli"]!.models["gemini-3-pro"]!.cost
+    ).toBeCloseTo(3, 8);
+    expect(
+      rows[0].sourceBreakdown["antigravity-cli"]!.provenance?.costIsComplete
+    ).toBe(false);
+  });
+
+  it("leaves a fully priced replacement alone (the floor is not a ratchet)", () => {
+    const rows = [
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(100, 6, true),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(rows, family, 10);
+    expect(rows[0].sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(6, 8);
+  });
+
+  it("spreads a fractional deficit deterministically across dates and members", () => {
+    const rows: Array<{ sourceBreakdown: Record<string, ClientBreakdownData> }> = [
+      {
+        sourceBreakdown: {
+          "antigravity-cli": cell(10, 0, false),
+        },
+      },
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(30, 0, false),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(rows, family, 0.1);
+    const first = rows[0].sourceBreakdown["antigravity-cli"]!.cost;
+    const second = rows[1].sourceBreakdown["antigravity-extension"]!.cost;
+    expect(first + second).toBeCloseTo(0.1, 8);
+    expect(first).toBeCloseTo(0.025, 8);
+    expect(second).toBeCloseTo(0.075, 8);
+
+    // Replay with the same shapes reproduces the same placement.
+    const replay: Array<{ sourceBreakdown: Record<string, ClientBreakdownData> }> = [
+      {
+        sourceBreakdown: {
+          "antigravity-cli": cell(10, 0, false),
+        },
+      },
+      {
+        sourceBreakdown: {
+          "antigravity-extension": cell(30, 0, false),
+        },
+      },
+    ];
+    reapplyReplaceFamilyCostFloor(replay, family, 0.1);
+    expect(replay[0].sourceBreakdown["antigravity-cli"]!.cost).toBeCloseTo(first, 8);
+    expect(replay[1].sourceBreakdown["antigravity-extension"]!.cost).toBeCloseTo(second, 8);
   });
 });

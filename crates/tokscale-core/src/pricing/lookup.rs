@@ -2409,12 +2409,26 @@ pub fn compute_cost(
             ),
         ],
     );
-    // Without a 1-hour rate the whole amount shares one 200k tier boundary.
-    let has_1h_rate = pricing
+    // Without any published 1-hour rate the whole amount shares one 200k
+    // tier boundary (the pre-split contract, pinned by
+    // `test_compute_cost_without_1h_rate_tiers_the_combined_cache_write_once`).
+    // A row that publishes only the 1-hour high tier still gets hourly
+    // treatment: the ordinary cache-write base stands in for the absent
+    // 1-hour base, so the first 200k hourly tokens are not charged at zero
+    // while the published high tier applies above it (#1374 review).
+    let hourly_high = pricing
+        .cache_creation_input_token_cost_above_1hr_above_200k_tokens
+        .filter(|rate| is_valid_price_value(*rate));
+    let hourly_base = pricing
         .cache_creation_input_token_cost_above_1hr
         .filter(|rate| is_valid_price_value(*rate))
-        .is_some();
-    let (cache_write_5m_cost, cache_write_1h_cost) = if has_1h_rate {
+        .or_else(|| {
+            hourly_high?;
+            pricing
+                .cache_creation_input_token_cost
+                .filter(|rate| is_valid_price_value(*rate))
+        });
+    let (cache_write_5m_cost, cache_write_1h_cost) = if hourly_base.is_some() {
         let five_minute = tiered_cost(
             cache_write_5m_clamped,
             pricing.cache_creation_input_token_cost,
@@ -2425,7 +2439,7 @@ pub fn compute_cost(
         );
         let one_hour = tiered_cost(
             cache_write_1h_clamped,
-            pricing.cache_creation_input_token_cost_above_1hr,
+            hourly_base,
             &[(
                 TIERED_PRICING_THRESHOLD_200K_TOKENS,
                 pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
@@ -7007,6 +7021,48 @@ mod tests {
             resolved.pricing.cache_creation_input_token_cost_above_1hr,
             None
         );
+    }
+
+    #[test]
+    fn compute_cost_applies_a_high_only_hourly_tier_with_the_ordinary_base() {
+        // A row that publishes only the 1-hour above-200k tier (no plain
+        // 1-hour base) used to charge everything through the 5-minute path,
+        // silently ignoring the published hourly high tier. The ordinary
+        // cache-write base stands in for the missing 1-hour base so the
+        // first 200k hourly tokens are not free (#1374 review).
+        let pricing = ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(1e-5),
+            cache_creation_input_token_cost: Some(3.75e-6),
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens: Some(12e-6),
+            ..Default::default()
+        };
+        let cost = compute_cost(&pricing, 0, 0, 0, 300_000, 300_000, 0);
+        let expected = 200_000.0 * 3.75e-6 + 100_000.0 * 12e-6;
+        assert!((cost - expected).abs() < 1e-9, "cost was {cost}");
+    }
+
+    #[test]
+    fn compute_cost_tiers_each_ttl_bucket_against_its_own_200k_boundary() {
+        // Pins the per-bucket semantics: the 5-minute remainder and the
+        // 1-hour subset each cross the 200k progressive boundary
+        // independently, matching the generic per-bucket tiering contract
+        // used for every other rate. A combined boundary for the summed
+        // cache writes would charge the first 250k of this example at base
+        // rates and only the remainder at high rates, which is a different
+        // (request-wide) contract than the one applied here.
+        let pricing = ModelPricing {
+            cache_creation_input_token_cost: Some(3.75e-6),
+            cache_creation_input_token_cost_above_200k_tokens: Some(7.5e-6),
+            cache_creation_input_token_cost_above_1hr: Some(6e-6),
+            cache_creation_input_token_cost_above_1hr_above_200k_tokens: Some(12e-6),
+            ..Default::default()
+        };
+        // 250k 5-minute + 250k 1-hour writes.
+        let cost = compute_cost(&pricing, 0, 0, 0, 500_000, 250_000, 0);
+        let expected =
+            (200_000.0 * 3.75e-6 + 50_000.0 * 7.5e-6) + (200_000.0 * 6e-6 + 50_000.0 * 12e-6);
+        assert!((cost - expected).abs() < 1e-9, "cost was {cost}");
     }
 
     #[test]

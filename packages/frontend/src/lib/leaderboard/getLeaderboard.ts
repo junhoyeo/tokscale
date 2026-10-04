@@ -211,11 +211,15 @@ function resultQuery(
   return sql`
     WITH aggregated AS (${base})${statRows},
     stats AS (
+      -- Hidden users are out of the headline totals as well as the ranking:
+      -- three hidden accounts held 99% of all-time tokens, so counting them
+      -- made the site-wide figure theirs rather than everyone else's.
       SELECT
         COALESCE(SUM(total_tokens), 0) AS total_tokens,
         COALESCE(SUM(total_cost), 0) AS total_cost,
         COUNT(*)::int AS unique_users
       FROM ${statSource}
+      WHERE leaderboard_hidden = false
     ),
     rankable AS (
       SELECT aggregated.*, ${sequentialRanks ? sql`ROW_NUMBER()` : sql`RANK()`} OVER (ORDER BY ${primary} DESC${sequentialRanks ? sql`, ${secondary} DESC, LOWER(username) ASC, user_id ASC` : sql``}) AS rank

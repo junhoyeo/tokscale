@@ -19,6 +19,7 @@ import {
   tagBreakdownCostCompleteness,
   applyCostCompleteness,
   replaceLayoutCostFloors,
+  reapplyReplaceFamilyCostFloor,
   reapplyReplaceLayoutCostFloors,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
@@ -89,6 +90,28 @@ function emptyLayoutDay(date: string): SubmissionData["contributions"][number] {
 
 function isReplacePlan(plan: ParserHighWaterPlan): boolean {
   return plan.mode === "replace";
+}
+
+/**
+ * The family's credited lifetime cost across stored days, read from DB rows
+ * (never incoming or legacy-ledger estimates) before any rewrite can delete
+ * the source that carries it. Feeds `reapplyReplaceFamilyCostFloor`.
+ */
+function quantizeFamilyFloor(
+  existingDays: Array<{ sourceBreakdown: unknown }>,
+  family: readonly string[]
+): number {
+  let cost = 0;
+  for (const day of existingDays) {
+    const breakdown = day.sourceBreakdown as Record<
+      string,
+      ClientBreakdownData
+    > | null;
+    for (const client of family) {
+      cost += ownValue(breakdown ?? {}, client)?.cost ?? 0;
+    }
+  }
+  return cost;
 }
 
 function applyReplaceLayouts(
@@ -918,9 +941,26 @@ export async function POST(request: Request) {
       const replaceClients = [...parserPlans]
         .filter(([, plan]) => isReplacePlan(plan))
         .map(([client]) => client);
+      // The Antigravity family replaces as one atomic unit, so its credited
+      // lifetime cost is one number, captured from the stored rows BEFORE the
+      // rewrite can delete the source that carried it. Individual per-client
+      // floors must not apply inside the family: a source move would lose the
+      // spend to a floor keyed on a client that no longer has cells, and a
+      // complete sibling carrying moved spend would double-count it.
+      const antigravityReplacing = antigravityPlan.mode === "replace";
+      const antigravityFamilyFloor = antigravityReplacing
+        ? quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY)
+        : 0;
+      const individuallyFlooredClients = replaceClients.filter(
+        (client) =>
+          !(
+            antigravityReplacing &&
+            (ANTIGRAVITY_FAMILY as readonly string[]).includes(client)
+          )
+      );
       const replaceCostFloors = replaceLayoutCostFloors(
         existingDeviceDays,
-        replaceClients
+        individuallyFlooredClients
       );
       const incompleteReplaceClients = new Set<string>();
 
@@ -1168,6 +1208,13 @@ export async function POST(request: Request) {
         replaceCostFloors,
         incompleteReplaceClients
       );
+      if (antigravityReplacing && antigravityFamilyFloor > 0) {
+        reapplyReplaceFamilyCostFloor(
+          mergedRows,
+          ANTIGRAVITY_FAMILY,
+          antigravityFamilyFloor
+        );
+      }
       for (const row of mergedRows) {
         const dayTotals = recalculateDayTotals(row.sourceBreakdown);
         row.tokens = dayTotals.tokens;

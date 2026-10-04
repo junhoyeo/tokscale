@@ -707,7 +707,12 @@ pub fn parse_claude_file_with_cache_and_home(
                             output: usage.output_tokens.unwrap_or(0).max(0),
                             cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
                             cache_write,
-                            cache_write_1h: usage.cache_write_1h_raw().min(cache_write),
+                            // Unclamped here on purpose: a snapshot whose
+                            // summed total is missing while the 1-hour split
+                            // is present would otherwise lose the split before
+                            // a later duplicate supplies the total. The
+                            // invariant is restored once per file below.
+                            cache_write_1h: usage.cache_write_1h_raw(),
                             reasoning: 0,
                         }
                     },
@@ -767,6 +772,18 @@ pub fn parse_claude_file_with_cache_and_home(
         let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
         messages.push(message);
         provider_confidences.push(provider_confidence);
+    }
+
+    // Duplicate assembly is done, so the documented invariant
+    // (`cache_write_1h` never exceeds `cache_write`) is restored here. An
+    // initially inconsistent partial record — a 1-hour split arriving before
+    // the summed total — keeps its split through the per-field maxima above
+    // and is only now clamped against the assembled total.
+    for message in &mut messages {
+        message.tokens.cache_write_1h = message
+            .tokens
+            .cache_write_1h
+            .min(message.tokens.cache_write);
     }
 
     messages
@@ -902,10 +919,10 @@ fn merge_claude_duplicate(
     t.cache_write = t
         .cache_write
         .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
-    t.cache_write_1h = t
-        .cache_write_1h
-        .max(usage.cache_write_1h_raw())
-        .min(t.cache_write);
+    // No clamp against the running total here: an intermediate partial total
+    // would discard a larger split before a later duplicate supplies the full
+    // total. The invariant is restored once per file after duplicate assembly.
+    t.cache_write_1h = t.cache_write_1h.max(usage.cache_write_1h_raw());
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
@@ -1900,6 +1917,29 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].tokens.cache_write_1h, 0);
+    }
+
+    #[test]
+    fn test_1h_split_before_the_summed_total_survives_duplicate_assembly() {
+        // A streaming snapshot can record the nested cache_creation split
+        // before the summed cache_creation_input_tokens arrives on the
+        // duplicate completion event. Clamping at construction lost the split;
+        // the clamp belongs after duplicate assembly.
+        let split_first = r#"{"type":"assistant","timestamp":"2026-09-21T10:00:00.000Z","requestId":"req_split","sessionId":"repro","message":{"id":"msg_split","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":100000}}}}
+{"type":"assistant","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_split","sessionId":"repro","message":{"id":"msg_split","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":100000}}}"#;
+        let file = create_test_file(split_first);
+        let messages = parse_claude_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100000);
+        assert_eq!(messages[0].tokens.cache_write_1h, 100000);
+
+        let total_first = r#"{"type":"assistant","timestamp":"2026-09-21T10:00:00.000Z","requestId":"req_total","sessionId":"repro","message":{"id":"msg_total","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":100000}}}
+{"type":"assistant","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_total","sessionId":"repro","message":{"id":"msg_total","role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":100000}}}}"#;
+        let file = create_test_file(total_first);
+        let messages = parse_claude_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100000);
+        assert_eq!(messages[0].tokens.cache_write_1h, 100000);
     }
 
     #[test]
