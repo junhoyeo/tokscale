@@ -4361,10 +4361,12 @@ mod tests {
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         write_shard_with_limit(&shard, predecessor, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
 
-        let parsed = crate::parse_all_messages_with_pricing(
+        let parsed = crate::parse_all_messages_with_pricing_with_env_strategy(
             home.path().to_str().unwrap(),
             &["cline".to_string()],
             None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
         );
         assert_eq!(parsed.len(), 1);
         assert_eq!(
@@ -4380,10 +4382,12 @@ mod tests {
         let rebuilt = cache.get(identity, &path).unwrap();
         assert_eq!(rebuilt.parser_version, identity.parser_version);
         assert_eq!(rebuilt.messages, parsed);
-        let warm = crate::parse_all_messages_with_pricing(
+        let warm = crate::parse_all_messages_with_pricing_with_env_strategy(
             home.path().to_str().unwrap(),
             &["cline".to_string()],
             None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
         );
         assert_eq!(warm, parsed);
         assert_eq!(cache.get(identity, &path).unwrap().messages, parsed);
