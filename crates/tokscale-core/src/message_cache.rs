@@ -1082,6 +1082,13 @@ pub fn parser_generation() -> u64 {
             acc = acc.wrapping_mul(FNV_PRIME);
         }
     }
+    // Claude's retention-preserving rebuilds do not bump its source-cache
+    // version: doing so would discard compacted history. Derived totals must
+    // still refresh when those live transcripts are reparsed.
+    for byte in CLAUDE_RETAINED_PARSE_GENERATION.to_le_bytes() {
+        acc ^= u64::from(byte);
+        acc = acc.wrapping_mul(FNV_PRIME);
+    }
     acc
 }
 
@@ -1644,10 +1651,14 @@ struct CacheShardKey {
 /// [`CachedSourceEntry::needs_retention_provenance_migration`]) or re-parses
 /// every Claude transcript on every scan forever.
 ///
-/// `usize::MAX` is never a real message index, so appending it records
-/// "provenance is present, retained set may be empty" without changing the
-/// serialized layout.
-const CLAUDE_RETENTION_PROVENANCE_MARKER: usize = usize::MAX;
+/// The marker also versions retention-preserving parser rebuilds. Generation 2
+/// reads advisor iterations that generation 1 ignored. The old marker forces
+/// one live reparse through the retaining loader, preserving compacted turns
+/// rather than evicting the whole source cache with a parser-version bump.
+/// Neither marker is a real message index; the serialized layout is unchanged.
+const CLAUDE_RETAINED_PARSE_GENERATION: u32 = 2;
+const CLAUDE_RETENTION_PROVENANCE_MARKER: usize =
+    usize::MAX - (CLAUDE_RETAINED_PARSE_GENERATION as usize - 1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedSourceEntry {
@@ -2322,14 +2333,15 @@ impl CachedSourceEntry {
         self.parser_namespace == ClientId::Claude.as_str()
     }
 
-    /// Whether this Claude entry predates retention provenance.
+    /// Whether this Claude entry needs a retention-preserving parser rebuild.
     ///
     /// Entries written before the provenance marker existed carry retained
     /// turns mixed in with live ones and no way to tell them apart, so reading
     /// one as-is presents a stale copy of a response as if the live transcript
     /// still contained it. The reader rebuilds those entries once (see
     /// `lib.rs`), which re-derives the retained set from the live bytes and
-    /// writes the marker, and this then reports `false` forever after.
+    /// writes the current marker, and this then reports `false` until another
+    /// retention-preserving parser generation is introduced.
     ///
     /// The distinction has to survive on disk, and it cannot be a new struct
     /// field: `CachedSourceEntry` is bincode-encoded without field names, so
@@ -4324,6 +4336,139 @@ mod tests {
         let warm = SourceMessageCache::load();
         let cached = warm.get(current_identity, &source).unwrap();
         assert_eq!(cached.messages, rebuilt);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn advisor_usage_rebuilds_warm_claude_and_mirror_caches_without_losing_history() {
+        use std::sync::atomic::Ordering::Relaxed;
+        for mirror in [false, true] {
+            let cache_home = TempDir::new().unwrap();
+            let _env = sandbox_cache_env(cache_home.path());
+            let source_home = TempDir::new().unwrap();
+            let config = if mirror {
+                let variant = source_home.path().join(".cc-mirror/anthropic-mirror");
+                let config = variant.join("config");
+                std::fs::create_dir_all(&variant).unwrap();
+                std::fs::write(
+                    variant.join("variant.json"),
+                    serde_json::json!({
+                        "name": "anthropic-mirror", "provider": "anthropic", "configDir": config
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                config
+            } else {
+                source_home.path().join(".claude")
+            };
+            let source = config.join("projects/repro/live.jsonl");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            let record = r#"{"type":"assistant","timestamp":"2026-10-02T20:10:51.000Z","requestId":"req_adv","message":{"id":"msg_adv","model":"claude-opus-5-5","usage":{"input_tokens":4,"output_tokens":779,"iterations":[{"type":"advisor_message","model":"claude-fable-5-1","input_tokens":114995,"output_tokens":2343}]}}}"#;
+            std::fs::write(&source, record).unwrap();
+            let parsed = crate::sessions::claudecode::parse_claude_file_with_home(
+                &source,
+                Some(source_home.path()),
+            );
+            let main = parsed[0].clone();
+            let mut compacted = main.clone();
+            compacted.dedup_key = Some("msg_compacted:req_old".to_string());
+            compacted.tokens.input = 7;
+            compacted.tokens.output = 3;
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let fingerprint = SourceFingerprint::from_claude_code_path_with_home(
+                &source,
+                Some(source_home.path()),
+            )
+            .unwrap();
+            // Seed the exact old marker and parent-only output of the prior parser.
+            let entry = CachedSourceEntry::new(
+                identity,
+                &source,
+                fingerprint.clone(),
+                vec![main, compacted],
+                vec![1, usize::MAX],
+                None,
+            );
+            let path = cache_shard_path(identity, &source);
+            ensure_cache_dir(path.parent().unwrap()).unwrap();
+            write_shard_with_limit(&path, identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+            let old = SourceMessageCache::load();
+            let entry = old.get(identity, &source).unwrap();
+            assert!(entry.needs_retention_provenance_migration());
+            assert_eq!(
+                entry.messages.len(),
+                2,
+                "history must remain readable before rebuilding"
+            );
+            let scan = || {
+                let mut messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["claude".to_string()],
+                    None,
+                    false,
+                    &crate::scanner::ScannerSettings::default(),
+                );
+                messages.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
+                messages
+            };
+            let rebuilt = scan();
+            assert_eq!(rebuilt.len(), 3);
+            assert_eq!(rebuilt.iter().map(|m| m.tokens.input).sum::<i64>(), 115006);
+            assert_eq!(rebuilt.iter().map(|m| m.message_count).sum::<i32>(), 2);
+            let advisor = rebuilt
+                .iter()
+                .find(|m| m.model_id == "claude-fable-5-1")
+                .unwrap();
+            assert_eq!(advisor.tokens.output, 2343);
+            assert_eq!(
+                advisor.client,
+                if mirror {
+                    "cc-mirror/anthropic-mirror"
+                } else {
+                    "claude"
+                }
+            );
+            let cache = SourceMessageCache::load();
+            let entry = cache.get(identity, &source).unwrap();
+            assert_eq!(
+                entry.fingerprint, fingerprint,
+                "upgrade must reparse unchanged bytes"
+            );
+            assert!(!entry.needs_retention_provenance_migration());
+            assert_eq!(
+                entry.retained_message_keys(),
+                HashSet::from(["msg_compacted:req_old".to_string()])
+            );
+            let rebuilds = crate::RETENTION_PROVENANCE_REBUILDS.load(Relaxed);
+            assert_eq!(scan(), rebuilt);
+            assert_eq!(
+                crate::RETENTION_PROVENANCE_REBUILDS.load(Relaxed),
+                rebuilds,
+                "subsequent scans must be warm hits"
+            );
+            std::fs::write(source.with_file_name("fork.jsonl"), record).unwrap();
+            let forked = scan();
+            let usage = |messages: &[UnifiedMessage]| {
+                messages
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.dedup_key.clone(),
+                            m.model_id.clone(),
+                            m.tokens.clone(),
+                            m.message_count,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // The first sorted live copy owns session attribution; usage is stable.
+            assert_eq!(
+                usage(&forked),
+                usage(&rebuilt),
+                "fork copies must not count advisors twice"
+            );
+        }
     }
 
     #[test]

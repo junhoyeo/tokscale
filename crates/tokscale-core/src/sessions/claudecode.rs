@@ -627,130 +627,149 @@ pub fn parse_claude_file_with_cache_and_home(
                         .or(metadata_provider_hint),
                 );
 
-                // Build dedup key for global deduplication (messageId:requestId composite).
-                // For streaming responses, merge using per-field max to capture the most
-                // complete token counts across all duplicate entries.
+                // Advisor usage may arrive on a later streaming duplicate. Process it
+                // after assembling the parent, rather than skipping that entire row.
                 let pending_hash = match (&message.id, &entry.request_id) {
-                    (Some(msg_id), Some(req_id)) => {
-                        let hash = format!("{}:{}", msg_id, req_id);
-                        if let Some(&existing_idx) = processed_hashes.get(&hash) {
-                            merge_claude_duplicate(
-                                &mut messages[existing_idx],
-                                &usage,
-                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                split_reporting_dedup_keys.contains(&hash),
-                            );
-                            if usage.reports_cache_split() {
-                                split_reporting_dedup_keys.insert(hash);
-                            }
-                            if let Some(choice) = duplicate_provider_choice {
-                                update_claude_provider_id(
-                                    &mut messages[existing_idx].provider_id,
-                                    &mut provider_confidences[existing_idx],
-                                    choice,
-                                );
-                            }
-                            continue;
-                        }
-                        Some(hash)
-                    }
-                    (Some(msg_id), None) => {
-                        let hash = format!("message:{}", msg_id);
-                        if let Some(&existing_idx) = processed_hashes.get(&hash) {
-                            merge_claude_duplicate(
-                                &mut messages[existing_idx],
-                                &usage,
-                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                split_reporting_dedup_keys.contains(&hash),
-                            );
-                            if usage.reports_cache_split() {
-                                split_reporting_dedup_keys.insert(hash);
-                            }
-                            if let Some(choice) = duplicate_provider_choice {
-                                update_claude_provider_id(
-                                    &mut messages[existing_idx].provider_id,
-                                    &mut provider_confidences[existing_idx],
-                                    choice,
-                                );
-                            }
-                            continue;
-                        }
-                        Some(hash)
-                    }
+                    (Some(msg_id), Some(req_id)) => Some(format!("{msg_id}:{req_id}")),
+                    (Some(msg_id), None) => Some(format!("message:{msg_id}")),
                     _ => None,
                 };
-
-                let raw_model = match message.model {
-                    Some(m) => m,
-                    None => continue,
-                };
-                let provider_choice = claude_provider_choice(
-                    &raw_model,
-                    message
-                        .provider_id
-                        .as_deref()
-                        .or(entry.provider_id.as_deref())
-                        .or(metadata_provider_hint),
-                );
-                let provider_confidence = provider_choice.confidence;
-                let model = canonicalize_claude_model(&raw_model);
-
-                let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
-                let timestamp = pending_request_start_timestamp_ms
-                    .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
-                let duration_ms =
-                    duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
-
-                // Insert dedup index only after all checks pass, right before push
-                let dedup_key = pending_hash.inspect(|hash| {
-                    processed_hashes.insert(hash.clone(), messages.len());
+                let existing_idx = pending_hash
+                    .as_ref()
+                    .and_then(|hash| processed_hashes.get(hash).copied());
+                let parent_idx = if let Some(existing_idx) = existing_idx {
+                    let hash = pending_hash.as_ref().unwrap();
+                    merge_claude_duplicate(
+                        &mut messages[existing_idx],
+                        &usage,
+                        parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                        split_reporting_dedup_keys.contains(hash),
+                    );
                     if usage.reports_cache_split() {
                         split_reporting_dedup_keys.insert(hash.clone());
                     }
-                });
+                    if let Some(choice) = duplicate_provider_choice {
+                        update_claude_provider_id(
+                            &mut messages[existing_idx].provider_id,
+                            &mut provider_confidences[existing_idx],
+                            choice,
+                        );
+                    }
+                    existing_idx
+                } else {
+                    let raw_model = match message.model {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    let provider_choice = claude_provider_choice(
+                        &raw_model,
+                        message
+                            .provider_id
+                            .as_deref()
+                            .or(entry.provider_id.as_deref())
+                            .or(metadata_provider_hint),
+                    );
+                    let provider_confidence = provider_choice.confidence;
+                    let model = canonicalize_claude_model(&raw_model);
 
-                let mut unified = UnifiedMessage::new_with_dedup(
-                    client_id.clone(),
-                    model,
-                    provider_choice.id,
-                    session_id.clone(),
-                    timestamp,
-                    {
-                        let cache_write = usage.cache_creation_input_tokens.unwrap_or(0).max(0);
-                        TokenBreakdown {
-                            input: usage.input_tokens.unwrap_or(0).max(0),
-                            output: usage.output_tokens.unwrap_or(0).max(0),
-                            cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                            cache_write,
-                            // Unclamped here on purpose: a snapshot whose
-                            // summed total is missing while the 1-hour split
-                            // is present would otherwise lose the split before
-                            // a later duplicate supplies the total. The
-                            // invariant is restored once per file below.
-                            cache_write_1h: usage.cache_write_1h_raw(),
-                            reasoning: 0,
+                    let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
+                    let timestamp = pending_request_start_timestamp_ms
+                        .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
+                    let duration_ms =
+                        duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
+
+                    // Insert dedup index only after all checks pass, right before push
+                    let dedup_key = pending_hash.inspect(|hash| {
+                        processed_hashes.insert(hash.clone(), messages.len());
+                        if usage.reports_cache_split() {
+                            split_reporting_dedup_keys.insert(hash.clone());
                         }
-                    },
-                    0.0,
-                    dedup_key,
-                );
-                unified.duration_ms = duration_ms;
-                unified.agent = sidechain_agent.clone();
-                unified.set_workspace(workspace_key.clone(), workspace_label.clone());
-                // Mark the first assistant response after a user message as a turn start
-                if pending_turn_start {
-                    unified.is_turn_start = true;
-                    pending_turn_start = false;
+                    });
+
+                    let mut unified = UnifiedMessage::new_with_dedup(
+                        client_id.clone(),
+                        model,
+                        provider_choice.id,
+                        session_id.clone(),
+                        timestamp,
+                        {
+                            let cache_write = usage.cache_creation_input_tokens.unwrap_or(0).max(0);
+                            TokenBreakdown {
+                                input: usage.input_tokens.unwrap_or(0).max(0),
+                                output: usage.output_tokens.unwrap_or(0).max(0),
+                                cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                                cache_write,
+                                // Unclamped here on purpose: a snapshot whose
+                                // summed total is missing while the 1-hour split
+                                // is present would otherwise lose the split before
+                                // a later duplicate supplies the total. The
+                                // invariant is restored once per file below.
+                                cache_write_1h: usage.cache_write_1h_raw(),
+                                reasoning: 0,
+                            }
+                        },
+                        0.0,
+                        dedup_key,
+                    );
+                    unified.duration_ms = duration_ms;
+                    unified.agent = sidechain_agent.clone();
+                    unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+                    // Mark the first assistant response after a user message as a turn start
+                    if pending_turn_start {
+                        unified.is_turn_start = true;
+                        pending_turn_start = false;
+                    }
+                    messages.push(unified);
+                    provider_confidences.push(provider_confidence);
+                    // Consume the pending request-start timestamp so a back-to-back
+                    // assistant message with no intervening user entry doesn't reuse
+                    // it and report an inflated duration. Streaming duplicates of
+                    // this same message have already been captured in the dedup map
+                    // above, so they merge via merge_claude_duplicate without needing
+                    // the global pending value again.
+                    pending_request_start_timestamp_ms = None;
+                    messages.len() - 1
+                };
+
+                let parent = &messages[parent_idx];
+                let advisors = claude_advisor_messages(&usage, parent);
+                for (mut advisor, advisor_usage) in advisors {
+                    let choice = claude_provider_choice(
+                        &advisor.model_id,
+                        message
+                            .provider_id
+                            .as_deref()
+                            .or(entry.provider_id.as_deref())
+                            .or(metadata_provider_hint),
+                    );
+                    if let Some(ref key) = advisor.dedup_key {
+                        if let Some(&index) = processed_hashes.get(key) {
+                            // An advisor is supplementary usage, not another timed turn.
+                            merge_claude_duplicate(
+                                &mut messages[index],
+                                &advisor_usage,
+                                None,
+                                split_reporting_dedup_keys.contains(key),
+                            );
+                            if advisor_usage.reports_cache_split() {
+                                split_reporting_dedup_keys.insert(key.clone());
+                            }
+                            update_claude_provider_id(
+                                &mut messages[index].provider_id,
+                                &mut provider_confidences[index],
+                                choice,
+                            );
+                            continue;
+                        }
+                        processed_hashes.insert(key.clone(), messages.len());
+                        if advisor_usage.reports_cache_split() {
+                            split_reporting_dedup_keys.insert(key.clone());
+                        }
+                    }
+                    advisor.provider_id = choice.id;
+                    messages.push(advisor);
+                    provider_confidences.push(choice.confidence);
                 }
-                messages.push(unified);
-                provider_confidences.push(provider_confidence);
-                // Consume the pending request-start timestamp so a back-to-back
-                // assistant message with no intervening user entry doesn't reuse
-                // it and report an inflated duration. Streaming duplicates of
-                // this same message have already been captured in the dedup map
-                // above, so they merge via merge_claude_duplicate without needing
-                // the global pending value again.
-                pending_request_start_timestamp_ms = None;
                 handled = true;
             }
         }
@@ -802,6 +821,53 @@ pub fn parse_claude_file_with_cache_and_home(
     }
 
     messages
+}
+
+// Top-level usage already sums the main-model iterations, excluding advisors.
+// Keep each advisor's position in the original array so repeated snapshots and
+// forked transcripts identify the same call, including same-model advisors.
+fn claude_advisor_messages(
+    usage: &AnthropicUsage,
+    parent: &UnifiedMessage,
+) -> Vec<(UnifiedMessage, AnthropicUsage)> {
+    let Some(iterations) = usage.iterations.as_ref().and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    iterations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, iteration)| {
+            if iteration.get("type").and_then(Value::as_str) != Some("advisor_message") {
+                return None;
+            }
+            let model = iteration.get("model").and_then(Value::as_str)?;
+            if model.trim().is_empty() || is_claude_synthetic_placeholder_model(model) {
+                return None;
+            }
+            // A malformed optional iteration must not discard the parent's usage.
+            let usage: AnthropicUsage = serde_json::from_value(iteration.clone()).ok()?;
+            let mut advisor = UnifiedMessage::new_with_dedup(
+                parent.client.clone(),
+                canonicalize_claude_model(model),
+                parent.provider_id.clone(),
+                parent.session_id.clone(),
+                parent.timestamp,
+                TokenBreakdown {
+                    cache_write_1h: usage.cache_write_1h_raw(),
+                    ..usage.to_breakdown()
+                },
+                0.0,
+                parent
+                    .dedup_key
+                    .as_ref()
+                    .map(|key| format!("{key}:advisor:{index}")),
+            );
+            advisor.message_count = 0;
+            advisor.agent.clone_from(&parent.agent);
+            advisor.set_workspace(parent.workspace_key.clone(), parent.workspace_label.clone());
+            Some((advisor, usage))
+        })
+        .collect()
 }
 
 fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -3710,5 +3776,173 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.cache_read, 42000);
         assert_eq!(messages[0].tokens.output, 120);
+    }
+}
+
+#[cfg(test)]
+mod advisor_usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture() -> Value {
+        // Public, trimmed transcript from #1386; main iterations sum to top-level usage.
+        json!({
+            "type": "assistant", "timestamp": "2026-10-02T20:10:51.000Z",
+            "requestId": "req_adv", "sessionId": "repro",
+            "message": {"id": "msg_adv", "model": "claude-opus-5-5", "usage": {
+                "input_tokens": 4, "output_tokens": 779,
+                "cache_read_input_tokens": 224791, "cache_creation_input_tokens": 1763,
+                "iterations": [
+                    {"type": "message", "input_tokens": 2, "output_tokens": 351,
+                     "cache_read_input_tokens": 112066, "cache_creation_input_tokens": 659},
+                    {"type": "advisor_message", "model": "claude-fable-5-1",
+                     "input_tokens": 114995, "output_tokens": 2343,
+                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                    {"type": "message", "input_tokens": 2, "output_tokens": 428,
+                     "cache_read_input_tokens": 112725, "cache_creation_input_tokens": 1104}
+                ]
+            }}
+        })
+    }
+
+    fn parse(records: &[Value]) -> Vec<UnifiedMessage> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".claude/projects/-tmp-repro/repro.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        parse_claude_file(&path)
+    }
+
+    #[test]
+    fn advisor_usage_is_attributed_without_recounting_main_iterations() {
+        let user = json!({"type": "user", "timestamp": "2026-10-02T20:10:50.000Z",
+                          "message": {"content": "review this"}});
+        let messages = parse(&[user, fixture()]);
+        assert_eq!(messages.len(), 2);
+        let main = &messages[0];
+        assert_eq!(
+            (
+                main.tokens.input,
+                main.tokens.output,
+                main.tokens.cache_read,
+                main.tokens.cache_write
+            ),
+            (4, 779, 224791, 1763)
+        );
+        assert_eq!(main.message_count, 1);
+        assert!(main.is_turn_start);
+        assert_eq!(main.duration_ms, Some(1000));
+        let advisor = &messages[1];
+        assert_eq!(advisor.model_id, "claude-fable-5-1");
+        assert_eq!(advisor.provider_id, "anthropic");
+        assert_eq!(
+            (advisor.tokens.input, advisor.tokens.output),
+            (114995, 2343)
+        );
+        assert_eq!(
+            advisor.dedup_key.as_deref(),
+            Some("msg_adv:req_adv:advisor:1")
+        );
+        assert!(dedup_key_is_globally_stable(
+            advisor.dedup_key.as_deref().unwrap()
+        ));
+        assert_eq!(advisor.timestamp, main.timestamp);
+        assert_eq!(advisor.workspace_key, main.workspace_key);
+        assert_eq!(advisor.session_id, main.session_id);
+        assert_eq!(advisor.message_count, 0);
+        assert!(!advisor.is_turn_start);
+        assert_eq!(advisor.duration_ms, None);
+    }
+
+    #[test]
+    fn advisor_usage_on_later_sidechain_duplicate_merges_complete_tokens() {
+        let mut completed = fixture();
+        completed["isSidechain"] = json!(true);
+        let mut first = completed.clone();
+        first["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("iterations");
+        let mut partial = completed.clone();
+        partial["message"]["usage"]["iterations"][1]["output_tokens"] = json!(100);
+        partial["message"]["usage"]["iterations"][1]["cache_creation"] =
+            json!({"ephemeral_1h_input_tokens": 30});
+        completed["message"]["usage"]["iterations"][1]["cache_creation_input_tokens"] = json!(40);
+        let messages = parse(&[first, partial, completed.clone(), completed]);
+        assert_eq!(messages.len(), 2);
+        let advisor = &messages[1];
+        assert_eq!(
+            (
+                advisor.tokens.input,
+                advisor.tokens.output,
+                advisor.tokens.cache_write,
+                advisor.tokens.cache_write_1h
+            ),
+            (114995, 2343, 40, 30)
+        );
+        assert_eq!(advisor.agent, messages[0].agent);
+        assert!(advisor.agent.is_some());
+        assert_eq!(advisor.session_id, "repro");
+        assert_eq!(advisor.duration_ms, None);
+    }
+
+    #[test]
+    fn advisor_usage_keeps_separate_calls_for_same_model_and_missing_request_id() {
+        let mut record = fixture();
+        record.as_object_mut().unwrap().remove("requestId");
+        record["message"]["usage"]["iterations"] = json!([
+            {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 10, "output_tokens": 2},
+            {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 20, "output_tokens": 3}
+        ]);
+        let messages = parse(&[record.clone(), record]);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 34);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 784);
+        assert_eq!(messages.iter().map(|m| m.message_count).sum::<i32>(), 1);
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some("message:msg_adv:advisor:0")
+        );
+        assert_eq!(
+            messages[2].dedup_key.as_deref(),
+            Some("message:msg_adv:advisor:1")
+        );
+    }
+
+    #[test]
+    fn advisor_usage_does_not_invalidate_parent_for_unknown_or_malformed_iterations() {
+        for iterations in [
+            Value::Null,
+            json!({"future": true}),
+            json!([
+                {"type": "message", "input_tokens": "unknown"},
+                {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": "unknown"},
+                {"type": "advisor_message", "input_tokens": 100},
+                {"type": "advisor_message", "model": "<synthetic>", "input_tokens": 100}
+            ]),
+        ] {
+            let mut record = fixture();
+            record["message"]["usage"]["iterations"] = iterations;
+            let messages = parse(&[record]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                (messages[0].tokens.input, messages[0].tokens.output),
+                (4, 779)
+            );
+        }
+        let mut record = fixture();
+        record["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("iterations");
+        assert_eq!(parse(&[record]).len(), 1);
     }
 }
