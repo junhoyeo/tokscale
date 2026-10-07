@@ -6,6 +6,7 @@
 
 use super::utils::{extract_i64, parse_timestamp_str, read_file_or_none};
 use super::UnifiedMessage;
+use crate::provider_identity;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,8 +22,9 @@ use std::path::{Path, PathBuf};
 /// so no member can be left serving stale cache entries.
 ///
 /// v2->v3: `cost` is marked provider-reported so submission keeps it instead of
-/// re-pricing (and zeroing) the row, and OpenAI-protocol `tokensIn` has the
-/// cache buckets it already contains subtracted out.
+/// re-pricing (and zeroing) the row, OpenAI-protocol `tokensIn` has the cache
+/// buckets it already contains subtracted out, and a bare `apiProtocol` no
+/// longer outranks the provider named by the model id.
 pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
@@ -104,21 +106,35 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| model_id.clone());
-        // Provider is the other way around: a nested `apiProtocol`
-        // ("bedrock/anthropic") carries reseller routing that the bare
-        // `modelInfo.providerId` would flatten to its last segment, so the
-        // legacy field keeps precedence whenever it says anything, and
-        // `modelInfo` fills the silence current Cline leaves (#1321).
-        let provider = match provider_from_api_protocol(payload.api_protocol.as_deref()) {
-            protocol if protocol != "unknown" => protocol,
-            _ => entry
-                .model_info
-                .as_ref()
-                .and_then(|info| info.provider_id.clone())
-                .map(|provider| provider.trim().to_string())
-                .filter(|provider| !provider.is_empty())
-                .unwrap_or_else(|| "unknown".to_string()),
-        };
+        // A bare `apiProtocol` ("openai", "anthropic") names the wire format
+        // the extension spoke, not who served the request: Kilo Code's own
+        // gateway logs `openai` for `anthropic/claude-sonnet-4`. So the
+        // provider resolves, in order, from:
+        // 1. a nested `apiProtocol` ("bedrock/anthropic"), which carries
+        //    reseller routing that `modelInfo.providerId` would flatten;
+        // 2. `modelInfo.providerId`, current Cline's per-message identity
+        //    (#1321);
+        // 3. the model id itself: its vendor prefix (`anthropic/...`) or, for
+        //    a bare id, its model family;
+        // 4. the bare `apiProtocol`, as a last resort.
+        let api_protocol = payload
+            .api_protocol
+            .as_deref()
+            .map(str::trim)
+            .filter(|protocol| !protocol.is_empty());
+        let model_info_provider = entry
+            .model_info
+            .as_ref()
+            .and_then(|info| info.provider_id.as_deref())
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty());
+        let provider = api_protocol
+            .filter(|protocol| protocol.contains('/'))
+            .or(model_info_provider)
+            .map(str::to_string)
+            .or_else(|| provider_from_model_id(&model))
+            .or_else(|| api_protocol.map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
 
         // OpenAI-protocol handlers record `prompt_tokens` as `tokensIn`, which
         // already includes the cached prompt; Anthropic-protocol handlers
@@ -307,12 +323,15 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
     })
 }
 
-fn provider_from_api_protocol(api_protocol: Option<&str>) -> String {
-    api_protocol
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown")
-        .to_string()
+fn provider_from_model_id(model: &str) -> Option<String> {
+    if let Some((vendor, rest)) = model.split_once('/') {
+        if !rest.is_empty() {
+            if let Some(provider) = provider_identity::canonical_provider(vendor) {
+                return Some(provider);
+            }
+        }
+    }
+    provider_identity::inferred_provider_from_model(model).map(str::to_string)
 }
 
 #[cfg(test)]

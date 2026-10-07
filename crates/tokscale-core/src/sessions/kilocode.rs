@@ -113,4 +113,39 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure/openai");
     }
+
+    /// Kilo Code's gateway speaks the OpenAI wire format for every model, so
+    /// `apiProtocol` is `openai` even for Anthropic or xAI models; the vendor
+    /// prefix on the model id names the actual provider.
+    #[test]
+    fn test_parse_kilocode_gateway_provider_comes_from_model_id() {
+        let dir = TempDir::new().unwrap();
+        for (task, model) in [
+            ("kilo-task-claude", "anthropic/claude-sonnet-4"),
+            ("kilo-task-grok", "x-ai/grok-code-fast-1"),
+        ] {
+            let task_dir = dir.path().join("tasks").join(task);
+            fs::create_dir_all(&task_dir).unwrap();
+            fs::write(
+                task_dir.join("ui_messages.json"),
+                r#"[{"type":"say","say":"api_req_started","ts":1748038758034,
+                    "text":"{\"cost\":0.01,\"tokensIn\":100,\"tokensOut\":10,\"apiProtocol\":\"openai\"}"}]"#,
+            )
+            .unwrap();
+            fs::write(
+                task_dir.join("api_conversation_history.json"),
+                format!("<environment_details>\n<model>{model}</model>\n</environment_details>"),
+            )
+            .unwrap();
+        }
+
+        let claude =
+            parse_kilocode_file(&dir.path().join("tasks/kilo-task-claude/ui_messages.json"));
+        assert_eq!(claude[0].model_id, "anthropic/claude-sonnet-4");
+        assert_eq!(claude[0].provider_id, "anthropic");
+
+        let grok = parse_kilocode_file(&dir.path().join("tasks/kilo-task-grok/ui_messages.json"));
+        assert_eq!(grok[0].model_id, "x-ai/grok-code-fast-1");
+        assert_eq!(grok[0].provider_id, "xai");
+    }
 }
