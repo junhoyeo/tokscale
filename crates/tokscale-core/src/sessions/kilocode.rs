@@ -51,11 +51,13 @@ mod tests {
         assert_eq!(messages[0].model_id, "gpt-5");
         assert_eq!(messages[0].session_id, "kilo-task-1");
         assert_eq!(messages[0].agent.as_deref(), Some("KiloAgent"));
-        assert_eq!(messages[0].tokens.input, 40);
+        // OpenAI-protocol `tokensIn` already includes the 7 + 3 cached tokens.
+        assert_eq!(messages[0].tokens.input, 30);
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 7);
         assert_eq!(messages[0].tokens.cache_write, 3);
         assert_eq!(messages[0].cost, 0.05);
+        assert!(messages[0].has_authoritative_cost());
     }
 
     #[test]

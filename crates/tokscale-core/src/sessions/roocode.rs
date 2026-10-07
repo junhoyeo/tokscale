@@ -19,7 +19,11 @@ use std::path::{Path, PathBuf};
 /// happens; `message_cache::parser_version()` derives each member's version
 /// from it (base plus a per-client offset that preserves independent history)
 /// so no member can be left serving stale cache entries.
-pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 2;
+///
+/// v2->v3: `cost` is marked provider-reported so submission keeps it instead of
+/// re-pricing (and zeroing) the row, and OpenAI-protocol `tokensIn` has the
+/// cache buckets it already contains subtracted out.
+pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 struct UiMessageEntry {
@@ -116,14 +120,28 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
                 .unwrap_or_else(|| "unknown".to_string()),
         };
 
-        messages.push(UnifiedMessage::new_with_agent(
+        // OpenAI-protocol handlers record `prompt_tokens` as `tokensIn`, which
+        // already includes the cached prompt; Anthropic-protocol handlers
+        // record `input_tokens`, which excludes it. Only the former needs the
+        // cache buckets taken out to avoid counting them twice.
+        let input = if payload.input_includes_cache() {
+            payload
+                .tokens_in
+                .saturating_sub(payload.cache_reads)
+                .saturating_sub(payload.cache_writes)
+                .max(0)
+        } else {
+            payload.tokens_in
+        };
+
+        let mut message = UnifiedMessage::new_with_agent(
             source,
             model,
             provider,
             session_id.clone(),
             timestamp,
             TokenBreakdown {
-                input: payload.tokens_in,
+                input,
                 output: payload.tokens_out,
                 cache_read: payload.cache_reads,
                 cache_write: payload.cache_writes,
@@ -132,7 +150,13 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             },
             payload.cost,
             agent.clone(),
-        ));
+        );
+        // The extension writes the provider's own charge for the request
+        // (including promotional zero-cost models), so it is authoritative.
+        if payload.cost_reported {
+            message.mark_provider_reported_cost();
+        }
+        messages.push(message);
     }
 
     messages
@@ -231,6 +255,7 @@ fn parse_entry_timestamp(ts: Option<&Value>) -> Option<i64> {
 
 struct ApiReqStartedPayload {
     cost: f64,
+    cost_reported: bool,
     tokens_in: i64,
     tokens_out: i64,
     cache_reads: i64,
@@ -238,11 +263,21 @@ struct ApiReqStartedPayload {
     api_protocol: Option<String>,
 }
 
+impl ApiReqStartedPayload {
+    fn input_includes_cache(&self) -> bool {
+        self.api_protocol
+            .as_deref()
+            .and_then(|protocol| protocol.trim().rsplit('/').next())
+            .is_some_and(|protocol| protocol.eq_ignore_ascii_case("openai"))
+    }
+}
+
 fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
     let mut bytes = text.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
 
-    let cost = extract_f64(value.get("cost")).unwrap_or(0.0).max(0.0);
+    let reported_cost = extract_f64(value.get("cost")).filter(|v| v.is_finite() && *v >= 0.0);
+    let cost = reported_cost.unwrap_or(0.0);
     let tokens_in = extract_i64(value.get("tokensIn")).unwrap_or(0).max(0);
     let tokens_out = extract_i64(value.get("tokensOut")).unwrap_or(0).max(0);
     let cache_reads = extract_i64(value.get("cacheReads")).unwrap_or(0).max(0);
@@ -254,6 +289,7 @@ fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
 
     Some(ApiReqStartedPayload {
         cost,
+        cost_reported: reported_cost.is_some(),
         tokens_in,
         tokens_out,
         cache_reads,
@@ -298,6 +334,39 @@ mod tests {
             fs::write(task_dir.join("api_conversation_history.json"), history).unwrap();
         }
         task_dir.join("ui_messages.json")
+    }
+
+    #[test]
+    fn test_parse_roocode_cache_overlap_and_cost_provenance() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {"type":"say","say":"api_req_started","ts":1748038758034,
+   "text":"{\"cost\":0,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"openai\"}"},
+  {"type":"say","say":"api_req_started","ts":1748038758035,
+   "text":"{\"cost\":0.5,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"anthropic\"}"},
+  {"type":"say","say":"api_req_started","ts":1748038758036,
+   "text":"{\"tokensIn\":1000,\"tokensOut\":10}"}
+]"#;
+        let path = setup_task(&dir, "task-overlap", ui_messages, None);
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 3);
+
+        // OpenAI protocol: `tokensIn` is gross of cache, and an explicit zero
+        // cost (e.g. a free promotional model) is still the provider's charge.
+        assert_eq!(messages[0].tokens.input, 300);
+        assert_eq!(messages[0].tokens.cache_read, 600);
+        assert_eq!(messages[0].tokens.cache_write, 100);
+        assert_eq!(messages[0].cost, 0.0);
+        assert!(messages[0].has_authoritative_cost());
+
+        // Anthropic protocol: `tokensIn` already excludes cache.
+        assert_eq!(messages[1].tokens.input, 1000);
+        assert_eq!(messages[1].cost, 0.5);
+        assert!(messages[1].has_authoritative_cost());
+
+        // No `cost` key: left for the pricing service to estimate.
+        assert!(!messages[2].has_authoritative_cost());
     }
 
     #[test]
