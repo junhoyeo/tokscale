@@ -325,13 +325,17 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
 
 fn provider_from_model_id(model: &str) -> Option<String> {
     if let Some((vendor, rest)) = model.split_once('/') {
-        if !rest.is_empty() {
+        // `ollama/` routes to a local runtime rather than naming the vendor;
+        // family inference already looks through it to the routed model.
+        if !rest.is_empty() && !vendor.trim().eq_ignore_ascii_case("ollama") {
             if let Some(provider) = provider_identity::canonical_provider(vendor) {
                 return Some(provider);
             }
         }
     }
-    provider_identity::inferred_provider_from_model(model).map(str::to_string)
+    // Delimited matching, so a bare id that merely contains a family name
+    // (`engroked`) is not attributed to that vendor.
+    provider_identity::inferred_provider_from_model_delimited(model).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -386,6 +390,33 @@ mod tests {
 
         // No `cost` key: left for the pricing service to estimate.
         assert!(!messages[2].has_authoritative_cost());
+    }
+
+    #[test]
+    fn test_provider_from_model_id() {
+        assert_eq!(
+            provider_from_model_id("anthropic/claude-sonnet-4").as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            provider_from_model_id("x-ai/grok-code-fast-1").as_deref(),
+            Some("xai")
+        );
+        // `ollama/` is a routing prefix: the routed model names the vendor.
+        assert_eq!(
+            provider_from_model_id("ollama/claude-sonnet-4").as_deref(),
+            Some("anthropic")
+        );
+        assert_ne!(
+            provider_from_model_id("ollama/qwen3-coder").as_deref(),
+            Some("ollama")
+        );
+        // A family name inside a longer word is not a family match.
+        assert_eq!(provider_from_model_id("engroked"), None);
+        assert_eq!(
+            provider_from_model_id("claude-sonnet-3-7").as_deref(),
+            Some("anthropic")
+        );
     }
 
     #[test]
