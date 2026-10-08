@@ -1000,11 +1000,12 @@ fn parse_all_messages_with_pricing_with_cache_policy(
 }
 
 fn emit_missing_codex_usage_warning(missing_files: usize, inspected_files: usize) {
-    if missing_files > 0 {
-        tui_signal::emit_or_defer_stderr(format!(
+    let message = (missing_files > 0).then(|| {
+        format!(
             "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
-        ));
-    }
+        )
+    });
+    tui_signal::update_codex_usage_warning(message);
 }
 
 fn parse_all_messages_streaming<S: MessageSink>(
@@ -7643,6 +7644,85 @@ mod tests {
             } else {
                 assert!(warnings.is_empty());
             }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_coalesces_tui_refreshes_and_clears_resolved_sources() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let first = sessions.join("first.jsonl");
+        let second = sessions.join("second.jsonl");
+        let activity = concat!(
+            r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+            "\n"
+        );
+        let metered = concat!(
+            r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#,
+            "\n"
+        );
+        let home = source_home.path().to_str().unwrap();
+        for local in [false, true] {
+            let scan = |client: &str| {
+                if local {
+                    assert!(parse_local_clients(LocalParseOptions {
+                        home_dir: Some(home.to_string()),
+                        use_env_roots: false,
+                        clients: Some(vec![client.to_string()]),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .messages
+                    .is_empty());
+                } else {
+                    assert!(
+                        parse_all_messages_with_pricing(home, &[client.to_string()], None)
+                            .is_empty()
+                    );
+                }
+            };
+            std::fs::write(&first, activity).unwrap();
+            // Repeated cold/warm scans must not accumulate copies until TUI exit.
+            for _ in 0..3 {
+                scan("codex");
+            }
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(warnings.len(), 1, "local report path: {local}");
+            assert!(warnings[0].contains("1 of 1 inspected rollout files"));
+
+            // A new scan replaces the pending count rather than retaining both.
+            scan("codex");
+            std::fs::write(&second, activity).unwrap();
+            scan("codex");
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("2 of 2 inspected rollout files"));
+
+            // Usage arriving before terminal restoration clears the stale warning.
+            scan("codex");
+            std::fs::write(&first, metered).unwrap();
+            std::fs::write(&second, metered).unwrap();
+            scan("codex");
+            assert!(take_missing_codex_usage_warnings().is_empty());
+
+            // Switching clients or deleting the sources also resolves the warning.
+            std::fs::write(&first, activity).unwrap();
+            scan("codex");
+            scan("openclaw");
+            assert!(take_missing_codex_usage_warnings().is_empty());
+            scan("codex");
+            std::fs::remove_file(&first).unwrap();
+            std::fs::remove_file(&second).unwrap();
+            scan("codex");
+            assert!(take_missing_codex_usage_warnings().is_empty());
         }
     }
 
