@@ -189,7 +189,9 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(msg.timestamp, 1_750_000_000_250_i64);
     assert_eq!(msg.message_count, 42);
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    // `output_tokens` is reasoning-inclusive in Hermes, so the additive output
+    // bucket keeps only the non-reasoning remainder.
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.cache_read, 50);
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
@@ -198,6 +200,128 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
         msg.dedup_key.as_deref(),
         Some("hermes:session-1:claude-sonnet-4:anthropic")
     );
+}
+
+/// Hermes records `completion_tokens_details.reasoning_tokens` inside
+/// `output_tokens`, but `TokenBreakdown` buckets are additive and `compute_cost`
+/// prices output and reasoning at the same output rate. Mapping both fields
+/// through unmodified would bill every reasoning token twice, so the reasoning
+/// overlap must be split out of the output bucket without changing the row's
+/// token total.
+#[test]
+fn test_parse_hermes_sqlite_bills_reasoning_once() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            "session-reasoning",
+            "cli",
+            "deepseek-flash",
+            1_775_002_000.0_f64,
+            1_i64,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, billing_base_url, billing_mode, task,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            "session-reasoning",
+            "deepseek-flash",
+            "deepseek",
+            "",
+            "",
+            "",
+            1_000_i64,
+            400_i64,
+            50_i64,
+            20_i64,
+            150_i64,
+            0.0_f64,
+            0.0_f64,
+        ],
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+
+    let msg = &messages[0];
+    assert_eq!(msg.tokens.output, 250);
+    assert_eq!(msg.tokens.reasoning, 150);
+    // The split must not lose tokens: additive buckets still sum to the raw
+    // input + reasoning-inclusive output + cache.
+    assert_eq!(msg.tokens.total(), 1_000 + 400 + 50 + 20);
+}
+
+/// A malformed row claiming more reasoning than output must not drive the
+/// additive output bucket negative.
+#[test]
+fn test_parse_hermes_sqlite_clamps_reasoning_to_output() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            "session-clamped",
+            "cli",
+            "deepseek-flash",
+            1_775_002_000.0_f64,
+            1_i64,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, billing_base_url, billing_mode, task,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            "session-clamped",
+            "deepseek-flash",
+            "deepseek",
+            "",
+            "",
+            "",
+            10_i64,
+            30_i64,
+            0_i64,
+            0_i64,
+            90_i64,
+            0.0_f64,
+            0.0_f64,
+        ],
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+
+    let msg = &messages[0];
+    assert_eq!(msg.tokens.output, 0);
+    assert_eq!(msg.tokens.reasoning, 30);
+    assert_eq!(msg.tokens.total(), 10 + 30);
 }
 
 #[test]
@@ -497,7 +621,8 @@ fn test_parse_hermes_sqlite_emits_per_model_rows_for_multi_model_session() {
     // glm-5.2: primary model, gets message_count
     let glm = messages.iter().find(|m| m.model_id == "glm-5.2").unwrap();
     assert_eq!(glm.tokens.input, 5000);
-    assert_eq!(glm.tokens.output, 800);
+    assert_eq!(glm.tokens.output, 600);
+    assert_eq!(glm.tokens.reasoning, 200);
     assert_eq!(glm.message_count, 15); // primary model
     assert_eq!(
         glm.dedup_key.as_deref(),
@@ -562,7 +687,7 @@ fn test_parse_hermes_sqlite_falls_back_to_session_totals_without_session_model_u
     assert_eq!(msg.timestamp, 1_750_000_000_250_i64);
     assert_eq!(msg.message_count, 42);
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.cache_read, 50);
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
@@ -881,7 +1006,7 @@ fn test_parse_hermes_sqlite_falls_back_to_session_totals_when_per_model_query_ca
     let msg = &messages[0];
     assert_eq!(msg.session_id, "drifted-session");
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.reasoning, 10);
     assert_eq!(msg.cost, 0.34);
     assert_eq!(msg.message_count, 42);

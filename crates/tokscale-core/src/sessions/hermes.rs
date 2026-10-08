@@ -136,6 +136,20 @@ fn query_usage_rows(db_path: &Path, conn: &Connection, query: &str) -> Option<Ve
 
 fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
     let provider = resolved_provider(row.billing_provider, &row.model_id, "hermes");
+    // `reasoning_tokens` is `completion_tokens_details.reasoning_tokens`, a
+    // SUBSET of the `completion_tokens` Hermes stores in `output_tokens`:
+    // `agent/usage_pricing.py::normalize_usage` maps `completion_tokens` to the
+    // output bucket and reads reasoning out of the details object, and both
+    // `sessions.output_tokens` and `session_model_usage.output_tokens`
+    // accumulate exactly that bucket. [`TokenBreakdown`] buckets are additive —
+    // `total()` sums them and `compute_cost` prices output + reasoning at the
+    // output rate — so carrying the raw output through while also filling
+    // `reasoning` billed every reasoning token twice. Split the overlap out, as
+    // `codex.rs` does for `output_tokens`/`reasoning_output_tokens` and
+    // `dsh.rs` for `outputTokens`/`reasoningTokens`, and clamp so a malformed
+    // row claiming more reasoning than output cannot drive the bucket negative.
+    let output = row.output.max(0);
+    let reasoning = row.reasoning.max(0).min(output);
     let mut msg = UnifiedMessage::new_with_agent(
         "hermes",
         row.model_id,
@@ -144,11 +158,11 @@ fn build_message(row: HermesUsageRow, dedup_key: String) -> UnifiedMessage {
         timestamp_secs_to_ms(row.started_at),
         TokenBreakdown {
             input: row.input.max(0),
-            output: row.output.max(0),
+            output: output - reasoning,
             cache_read: row.cache_read.max(0),
             cache_write: row.cache_write.max(0),
             cache_write_1h: 0,
-            reasoning: row.reasoning.max(0),
+            reasoning,
         },
         row.cost.max(0.0),
         Some(HERMES_AGENT_NAME.to_string()),
