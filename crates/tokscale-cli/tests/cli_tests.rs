@@ -4165,6 +4165,33 @@ fn missing_codex_usage_cli_excludes_zero_malformed_and_openclaw_sources() {
 }
 
 #[test]
+fn missing_codex_usage_task_report_warns_and_excludes_injected_context() {
+    let activity = concat!(
+        r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+        "\n"
+    );
+    for (content, expected) in [
+        (activity.to_string(), true),
+        (format!("{activity}{}\n", r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#), false),
+        (concat!(r#"{"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>cwd=/tmp</environment_context>"}}"#, "\n").to_string(), false),
+    ] {
+        let tmp = create_empty_fixture_dir();
+        let sessions = tmp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout.jsonl"), content).unwrap();
+        for _ in 0..2 {
+            let output = cmd_with_home(tmp.path())
+                .args(["report", "--no-summarize", "--json"])
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report, serde_json::json!([]));
+            assert_eq!(String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"), expected);
+        }
+    }
+}
+
+#[test]
 fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
     let tmp = create_temp_fixture_dir();
     add_reasoning_only_opencode_message(tmp.path());

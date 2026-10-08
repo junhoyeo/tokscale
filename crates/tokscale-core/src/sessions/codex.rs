@@ -705,10 +705,13 @@ fn parse_codex_reader<R: BufRead>(
                                 | "image_generation_call"
                         )
                     ),
-                    "event_msg" => matches!(
-                        payload.payload_type.as_deref(),
-                        Some("user_message" | "agent_message" | "agent_reasoning")
-                    ),
+                    "event_msg" => match payload.payload_type.as_deref() {
+                        Some("user_message") => {
+                            codex_message_is_human_turn(payload.message.as_deref())
+                        }
+                        Some("agent_message" | "agent_reasoning") => true,
+                        _ => false,
+                    },
                     _ => false,
                 };
                 if has_own_activity {
@@ -1850,6 +1853,33 @@ mod tests {
             let file = create_test_file(&activity);
             let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
             assert!(parsed.is_missing_usage(), "{kind}");
+            assert!(parsed.messages.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_usage_ignores_injected_user_context() {
+        for (message, expected) in [
+            (None, false),
+            (
+                Some("<environment_context>cwd=/tmp</environment_context>"),
+                false,
+            ),
+            (
+                Some("  <system-reminder>be concise</system-reminder>"),
+                false,
+            ),
+            (Some("<user_instructions>do X</user_instructions>"), false),
+            (Some("  plain question"), true),
+            (Some("<div>hi</div>"), true),
+        ] {
+            let activity = serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": message}
+            });
+            let file = create_test_file(&format!("{activity}\n"));
+            let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            assert_eq!(parsed.is_missing_usage(), expected, "{message:?}");
             assert!(parsed.messages.is_empty());
         }
     }

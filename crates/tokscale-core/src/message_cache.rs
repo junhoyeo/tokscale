@@ -1338,6 +1338,7 @@ fn parser_version(client: ClientId) -> u32 {
         // v11->v12: retain own-activity and supported-usage flags so a warm
         // scan can diagnose active rollouts with no ledger, including zero
         // counters and appended usage that clears the diagnostic.
+        // v12->v13: also retain gateway activity for Synthetic-only scans.
         ClientId::Codex => 13,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
@@ -4343,7 +4344,7 @@ mod tests {
         // "Codex Guardian" / "Codex Headless" instead of the per-thread random
         // nickname; v9->v10 retains service_tier for Fast mode pricing, and
         // v10->v11 resets duration anchors at standalone task_started events.
-        // v11->v12 retains source completeness even for cached empty results.
+        // v11->v13 retains source completeness and gateway activity for empty results.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
         assert_eq!(parser_version(ClientId::Codex), 13);

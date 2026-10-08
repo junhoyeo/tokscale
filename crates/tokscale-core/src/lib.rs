@@ -999,6 +999,14 @@ fn parse_all_messages_with_pricing_with_cache_policy(
     messages
 }
 
+fn emit_missing_codex_usage_warning(missing_files: usize, inspected_files: usize) {
+    if missing_files > 0 {
+        tui_signal::emit_or_defer_stderr(format!(
+            "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
+        ));
+    }
+}
+
 fn parse_all_messages_streaming<S: MessageSink>(
     home_dir: &str,
     clients: &[String],
@@ -2322,11 +2330,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    if missing_codex_usage_files > 0 {
-        tui_signal::emit_or_defer_stderr(format!(
-            "Warning: {missing_codex_usage_files} of {inspected_codex_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
-        ));
-    }
+    emit_missing_codex_usage_warning(missing_codex_usage_files, inspected_codex_files);
 
     // Release Codex before Copilot. This has to sit ahead of the Copilot
     // lane rather than after it: the desktop/vscode blocks below scan
@@ -5581,11 +5585,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Claude, claude_count);
     messages.extend(claude_msgs);
 
-    let codex_files: Vec<(
+    type LocalCodexSourceOutcome = (
         PathBuf,
         Vec<UnifiedMessage>,
         sessions::codex::CodexTurnCoverage,
-    )> = scan_result
+        (bool, bool),
+    );
+    let codex_files: Vec<LocalCodexSourceOutcome> = scan_result
         .get(ClientId::Codex)
         .par_iter()
         .map(|path| {
@@ -5595,6 +5601,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 0,
                 sessions::codex::CodexParseState::default(),
             );
+            let missing_usage = (
+                parsed.is_missing_usage(),
+                parsed.state.has_own_synthetic_activity,
+            );
             let messages = parsed
                 .messages
                 .into_iter()
@@ -5603,7 +5613,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                     msg
                 })
                 .collect::<Vec<_>>();
-            (path.clone(), messages, parsed.state.turn_coverage)
+            (
+                path.clone(),
+                messages,
+                parsed.state.turn_coverage,
+                missing_usage,
+            )
         })
         .collect();
     // Rollouts OpenClaw drove (tagged `openclaw` by the parser) belong to the
@@ -5617,7 +5632,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut recorded_codex_turns = RecordedCodexTurns::default();
     let mut codex_seen: HashSet<String> = HashSet::new();
     let mut codex_msgs: Vec<ParsedMessage> = Vec::new();
-    for (path, file_messages, turn_coverage) in codex_files {
+    let inspected_codex_files = codex_files.len();
+    let include_codex_diagnostic = include_all || requested.contains("codex");
+    let mut missing_codex_usage_files = 0;
+    for (path, file_messages, turn_coverage, missing_usage) in codex_files {
+        missing_codex_usage_files += usize::from(
+            missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
+        );
         let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in file_messages {
@@ -5647,6 +5668,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
     }
+    emit_missing_codex_usage_warning(missing_codex_usage_files, inspected_codex_files);
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
@@ -7569,6 +7591,59 @@ mod tests {
         std::fs::write(&path, metadata).unwrap();
         parse_all_messages_with_pricing(home, &["synthetic".to_string()], None);
         assert!(take_missing_codex_usage_warnings().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_reaches_local_report_path() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("openai.jsonl"),
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("synthetic.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"model_provider":"synthetic"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        for (clients, expected) in [
+            (None, Some(2)),
+            (Some(vec!["synthetic".to_string()]), Some(1)),
+            (Some(vec!["openclaw".to_string()]), None),
+        ] {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients,
+                since: Some("2026-05-01".to_string()),
+                until: Some("2026-05-31".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(parsed.messages.is_empty());
+            let warnings = take_missing_codex_usage_warnings();
+            if let Some(count) = expected {
+                assert_eq!(warnings.len(), 1);
+                assert!(warnings[0].contains(&format!("{count} of 2 inspected rollout files")));
+            } else {
+                assert!(warnings.is_empty());
+            }
+        }
     }
 
     /// Re-aim a live [`redirect_cache_home`] at a different scratch directory.
