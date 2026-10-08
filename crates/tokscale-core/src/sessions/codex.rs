@@ -283,6 +283,8 @@ pub(crate) struct CodexParseState {
     pub has_own_activity: bool,
     #[serde(default)]
     pub has_supported_usage: bool,
+    #[serde(default)]
+    pub has_own_synthetic_activity: bool,
     pub current_model: Option<String>,
     /// Tier from the latest thread-scoped `thread_settings_applied`
     /// snapshot. It applies to every later turn until another snapshot
@@ -461,6 +463,19 @@ impl ParsedCodexFile {
 impl CodexParseState {
     pub(crate) fn is_missing_usage(&self) -> bool {
         !self.session_owned_by_openclaw && self.has_own_activity && !self.has_supported_usage
+    }
+
+    fn remember_own_activity(&mut self, event_model: Option<&str>) {
+        let model = event_model
+            .or(self.current_model.as_deref())
+            .unwrap_or("unknown");
+        let provider = self
+            .session_provider
+            .as_deref()
+            .or_else(|| inferred_provider_from_model(model))
+            .unwrap_or("openai");
+        self.has_own_synthetic_activity |= super::synthetic::is_synthetic_gateway(model, provider);
+        self.has_own_activity = true;
     }
 }
 
@@ -672,17 +687,22 @@ fn parse_codex_reader<R: BufRead>(
                 if entry.entry_type == "turn_context" {
                     state.request_service_tier = None;
                 }
-                state.has_own_activity |= match entry.entry_type.as_str() {
+                let has_own_activity = match entry.entry_type.as_str() {
                     "response_item" => matches!(
                         payload.payload_type.as_deref(),
                         Some(
                             "message"
+                                | "agent_message"
                                 | "reasoning"
                                 | "function_call"
                                 | "function_call_output"
                                 | "local_shell_call"
                                 | "custom_tool_call"
                                 | "custom_tool_call_output"
+                                | "tool_search_call"
+                                | "tool_search_output"
+                                | "web_search_call"
+                                | "image_generation_call"
                         )
                     ),
                     "event_msg" => matches!(
@@ -691,6 +711,9 @@ fn parse_codex_reader<R: BufRead>(
                     ),
                     _ => false,
                 };
+                if has_own_activity {
+                    state.remember_own_activity(event_model.as_deref());
+                }
                 if let Some(service_tier) = extract_request_service_tier(&payload) {
                     state.request_service_tier = Some(service_tier);
                 }
@@ -1562,10 +1585,13 @@ fn parse_codex_headless_line(
         state.current_model = Some(model);
     }
 
-    state.has_own_activity |= matches!(
+    if matches!(
         value.get("type").and_then(Value::as_str),
         Some("item.started" | "item.updated" | "item.completed")
-    ) && value.get("item").is_some_and(Value::is_object);
+    ) && value.get("item").is_some_and(Value::is_object)
+    {
+        state.remember_own_activity(None);
+    }
 
     let usage = extract_headless_usage(&value)?;
     state.has_supported_usage |= usage.has_supported_counters;
@@ -1803,6 +1829,29 @@ mod tests {
         assert!(parsed.state.has_own_activity);
         assert!(!parsed.parse_succeeded);
         assert!(!parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn missing_usage_recognizes_native_tool_items() {
+        for kind in [
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "local_shell_call",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "tool_search_call",
+            "tool_search_output",
+            "web_search_call",
+            "image_generation_call",
+        ] {
+            let activity =
+                format!("{{\"type\":\"response_item\",\"payload\":{{\"type\":\"{kind}\"}}}}\n");
+            let file = create_test_file(&activity);
+            let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            assert!(parsed.is_missing_usage(), "{kind}");
+            assert!(parsed.messages.is_empty());
+        }
     }
 
     #[test]

@@ -1338,7 +1338,7 @@ fn parser_version(client: ClientId) -> u32 {
         // v11->v12: retain own-activity and supported-usage flags so a warm
         // scan can diagnose active rollouts with no ledger, including zero
         // counters and appended usage that clears the diagnostic.
-        ClientId::Codex => 12,
+        ClientId::Codex => 13,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -4346,7 +4346,7 @@ mod tests {
         // v11->v12 retains source completeness even for cached empty results.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 12);
+        assert_eq!(parser_version(ClientId::Codex), 13);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 

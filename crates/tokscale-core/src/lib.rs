@@ -1046,7 +1046,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// it whether the messages were parsed just now or served from the cache.
     /// The final flag diagnoses own Codex activity without supported usage,
     /// including sources that emit no messages at all.
-    type CodexSourceOutcome = (CachedParseOutcome, sessions::codex::CodexTurnCoverage, bool);
+    type CodexSourceOutcome = (
+        CachedParseOutcome,
+        sessions::codex::CodexTurnCoverage,
+        (bool, bool),
+    );
 
     fn parse_full_log_source(
         path: &Path,
@@ -1060,7 +1064,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
             sessions::codex::CodexParseState::default(),
         );
         let turn_coverage = parsed.state.turn_coverage.clone();
-        let missing_usage = parsed.is_missing_usage();
+        let missing_usage = (
+            parsed.is_missing_usage(),
+            parsed.state.has_own_synthetic_activity,
+        );
         let messages = finalize_codex_messages(
             parsed.messages.clone(),
             pricing,
@@ -1952,10 +1959,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
             if cached.fingerprint == fingerprint {
                 if message_cache::codex_cache_entry_matches_fingerprint(&cached, &fingerprint) {
-                    let missing_usage = cached
-                        .codex_incremental
-                        .as_ref()
-                        .is_some_and(|incremental| incremental.state.is_missing_usage());
+                    let missing_usage =
+                        cached
+                            .codex_incremental
+                            .as_ref()
+                            .map_or((false, false), |incremental| {
+                                (
+                                    incremental.state.is_missing_usage(),
+                                    incremental.state.has_own_synthetic_activity,
+                                )
+                            });
                     let turn_coverage = cached
                         .codex_incremental
                         .as_ref()
@@ -2002,7 +2015,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                 .iter()
                                 .map(|index| existing_len + index),
                         );
-                        let missing_usage = parsed.is_missing_usage();
+                        let missing_usage = (
+                            parsed.is_missing_usage(),
+                            parsed.state.has_own_synthetic_activity,
+                        );
                         raw_messages.extend(parsed.messages);
                         let turn_coverage = parsed.state.turn_coverage.clone();
                         let cache_entry = build_codex_cache_entry(
@@ -2264,9 +2280,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
         .collect();
     let mut codex_seen: HashSet<String> = HashSet::new();
     let inspected_codex_files = codex_outcomes.len();
+    let include_codex_diagnostic = include_all || clients.iter().any(|client| client == "codex");
     let mut missing_codex_usage_files = 0;
     for (path, (outcome, turn_coverage, missing_usage)) in codex_outcomes {
-        missing_codex_usage_files += usize::from(missing_usage);
+        missing_codex_usage_files += usize::from(
+            missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
+        );
         let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in outcome.messages {
@@ -2303,11 +2322,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    if (include_all || clients.iter().any(|client| client == "codex"))
-        && missing_codex_usage_files > 0
-    {
+    if missing_codex_usage_files > 0 {
         tui_signal::emit_or_defer_stderr(format!(
-            "Warning: {missing_codex_usage_files} of {inspected_codex_files} inspected rollout files contain Codex activity but no supported usage records. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
+            "Warning: {missing_codex_usage_files} of {inspected_codex_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
         ));
     }
 
@@ -7491,6 +7508,67 @@ mod tests {
         assert!(take_missing_codex_usage_warnings().is_empty());
         parse_all_messages_with_pricing(home, &[], None);
         assert_eq!(take_missing_codex_usage_warnings().len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_tracks_synthetic_activity() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("gateway.jsonl");
+        let activity = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+            "\n"
+        );
+        let metadata = concat!(
+            r#"{"type":"session_meta","payload":{"model_provider":"synthetic"}}"#,
+            "\n"
+        );
+        std::fs::write(&path, format!("{metadata}{activity}")).unwrap();
+        std::fs::write(sessions.join("openai.jsonl"), activity).unwrap();
+        let home = source_home.path().to_str().unwrap();
+        for _ in 0..2 {
+            assert!(
+                parse_all_messages_with_pricing(home, &["synthetic".to_string()], None).is_empty()
+            );
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("1 of 2 inspected rollout files"));
+        }
+        // Gateway matching belongs to the activity's model, not the final turn context.
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{activity}{}\n",
+                r#"{"type":"turn_context","payload":{"model":"hf:example/model"}}"#,
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#
+            ),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            parse_all_messages_with_pricing(home, &["synthetic".to_string()], None);
+            assert_eq!(take_missing_codex_usage_warnings().len(), 1);
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(concat!(r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#, "\n").as_bytes()).unwrap();
+        file.flush().unwrap();
+        drop(file);
+        for _ in 0..2 {
+            parse_all_messages_with_pricing(home, &["synthetic".to_string()], None);
+            assert!(take_missing_codex_usage_warnings().is_empty());
+        }
+        // Other inspected Codex sources do not match the Synthetic-only report.
+        std::fs::write(&path, metadata).unwrap();
+        parse_all_messages_with_pricing(home, &["synthetic".to_string()], None);
+        assert!(take_missing_codex_usage_warnings().is_empty());
     }
 
     /// Re-aim a live [`redirect_cache_home`] at a different scratch directory.
