@@ -157,6 +157,16 @@ pub struct CodexTokenUsage {
     pub total_tokens: Option<i64>,
 }
 
+impl CodexTokenUsage {
+    fn has_supported_counters(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cached_input_tokens.is_some()
+            || self.cache_read_input_tokens.is_some()
+            || self.reasoning_output_tokens.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexTotals {
     input: i64,
@@ -267,6 +277,12 @@ impl CodexTotals {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
+    /// Source completeness is independent of emitted messages and report dates.
+    /// Replay-only history does not count as this file's own activity or usage.
+    #[serde(default)]
+    pub has_own_activity: bool,
+    #[serde(default)]
+    pub has_supported_usage: bool,
     pub current_model: Option<String>,
     /// Tier from the latest thread-scoped `thread_settings_applied`
     /// snapshot. It applies to every later turn until another snapshot
@@ -434,6 +450,18 @@ pub(crate) struct ParsedCodexFile {
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
+}
+
+impl ParsedCodexFile {
+    pub(crate) fn is_missing_usage(&self) -> bool {
+        self.parse_succeeded && self.state.is_missing_usage()
+    }
+}
+
+impl CodexParseState {
+    pub(crate) fn is_missing_usage(&self) -> bool {
+        !self.session_owned_by_openclaw && self.has_own_activity && !self.has_supported_usage
+    }
 }
 
 fn codex_workspace_from_cwd(cwd: &str) -> (Option<String>, Option<String>) {
@@ -644,6 +672,25 @@ fn parse_codex_reader<R: BufRead>(
                 if entry.entry_type == "turn_context" {
                     state.request_service_tier = None;
                 }
+                state.has_own_activity |= match entry.entry_type.as_str() {
+                    "response_item" => matches!(
+                        payload.payload_type.as_deref(),
+                        Some(
+                            "message"
+                                | "reasoning"
+                                | "function_call"
+                                | "function_call_output"
+                                | "local_shell_call"
+                                | "custom_tool_call"
+                                | "custom_tool_call_output"
+                        )
+                    ),
+                    "event_msg" => matches!(
+                        payload.payload_type.as_deref(),
+                        Some("user_message" | "agent_message" | "agent_reasoning")
+                    ),
+                    _ => false,
+                };
                 if let Some(service_tier) = extract_request_service_tier(&payload) {
                     state.request_service_tier = Some(service_tier);
                 }
@@ -820,6 +867,14 @@ fn parse_codex_reader<R: BufRead>(
                     // dedup and monotonicity checks — never as a direct delta source.
                     let total_usage = info.total_token_usage.as_ref().map(CodexTotals::from_usage);
                     let last_usage = info.last_token_usage.as_ref().map(CodexTotals::from_usage);
+                    let has_supported_counters = info
+                        .total_token_usage
+                        .as_ref()
+                        .is_some_and(CodexTokenUsage::has_supported_counters)
+                        || info
+                            .last_token_usage
+                            .as_ref()
+                            .is_some_and(CodexTokenUsage::has_supported_counters);
 
                     // Forked child logs can replay more than one parent
                     // token_count row after the first child turn_context,
@@ -830,10 +885,21 @@ fn parse_codex_reader<R: BufRead>(
                         info.total_token_usage.as_ref(),
                         total_usage,
                     ) {
+                        // An explicit reset to zero after the own-turn gate is
+                        // a ledger too. Accounting can still suppress it to
+                        // preserve the inherited baseline without calling an
+                        // active child unmetered.
+                        if total_usage == Some(CodexTotals::default()) {
+                            state.has_supported_usage |= has_supported_counters;
+                        }
                         continue;
                     }
                     state.forked_child_inherited_baseline = None;
                     state.forked_child_inherited_reported_total = None;
+
+                    // Zero and duplicate snapshots still prove that a supported
+                    // ledger exists, even when accounting emits no message.
+                    state.has_supported_usage |= has_supported_counters;
 
                     let (tokens, next_totals) =
                         match (total_usage, last_usage, state.previous_totals) {
@@ -1011,15 +1077,8 @@ fn parse_codex_reader<R: BufRead>(
             }
         }
 
-        let headless_message = parse_codex_headless_line(
-            trimmed,
-            session_id,
-            &mut state.current_model,
-            fallback_timestamp,
-            state.session_provider.as_deref(),
-            &state.session_agent,
-            state.session_is_headless,
-        );
+        let headless_message =
+            parse_codex_headless_line(trimmed, session_id, &mut state, fallback_timestamp);
         if !pending_model_messages.is_empty() {
             if let Some(model) = state.current_model.clone() {
                 flush_pending_model_messages(
@@ -1482,6 +1541,7 @@ fn extract_request_service_tier(payload: &CodexPayload) -> Option<String> {
 }
 
 struct CodexHeadlessUsage {
+    has_supported_counters: bool,
     input: i64,
     output: i64,
     cached: i64,
@@ -1492,23 +1552,26 @@ struct CodexHeadlessUsage {
 fn parse_codex_headless_line(
     line: &str,
     session_id: &str,
-    current_model: &mut Option<String>,
+    state: &mut CodexParseState,
     fallback_timestamp: i64,
-    session_provider: Option<&str>,
-    session_agent: &Option<String>,
-    session_is_headless: bool,
 ) -> Option<(UnifiedMessage, bool)> {
     let mut bytes = line.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
 
     if let Some(model) = extract_model_from_value(&value) {
-        *current_model = Some(model);
+        state.current_model = Some(model);
     }
 
+    state.has_own_activity |= matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("item.started" | "item.updated" | "item.completed")
+    ) && value.get("item").is_some_and(Value::is_object);
+
     let usage = extract_headless_usage(&value)?;
+    state.has_supported_usage |= usage.has_supported_counters;
     let model = usage
         .model
-        .or_else(|| current_model.clone())
+        .or_else(|| state.current_model.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let timestamp = usage.timestamp_ms.unwrap_or(fallback_timestamp);
 
@@ -1516,13 +1579,15 @@ fn parse_codex_headless_line(
         return None;
     }
 
-    let provider = session_provider
+    let provider = state
+        .session_provider
+        .as_deref()
         .or_else(|| inferred_provider_from_model(&model))
         .unwrap_or("openai");
-    let agent = if session_is_headless {
+    let agent = if state.session_is_headless {
         Some(CODEX_HEADLESS_AGENT.to_string())
     } else {
-        session_agent.clone()
+        state.session_agent.clone()
     };
 
     Some((
@@ -1572,6 +1637,19 @@ fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
     let timestamp_ms = extract_timestamp_from_value(value);
 
     Some(CodexHeadlessUsage {
+        has_supported_counters: [
+            "input_tokens",
+            "prompt_tokens",
+            "input",
+            "output_tokens",
+            "completion_tokens",
+            "output",
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cached_tokens",
+        ]
+        .iter()
+        .any(|key| extract_i64(usage.get(*key)).is_some()),
         input: input_tokens.saturating_sub(cached_tokens),
         output: output_tokens,
         cached: cached_tokens,
@@ -1677,6 +1755,132 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    const UNMETERED_ACTIVITY: &str = concat!(
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+        "\n"
+    );
+
+    #[test]
+    fn missing_usage_distinguishes_activity_from_empty_or_unreadable_sources() {
+        let cases = [
+            ("", false),
+            ("\n", false),
+            (
+                r#"{"type":"session_meta","payload":{"id":"empty","source":"cli"}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                false,
+            ),
+            (UNMETERED_ACTIVITY, true),
+            (
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+                true,
+            ),
+            ("not json\n", false),
+        ];
+        for (content, expected) in cases {
+            let file = create_test_file(content);
+            let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            assert_eq!(parsed.is_missing_usage(), expected, "{content}");
+            assert!(parsed.messages.is_empty());
+        }
+
+        let file = create_test_file(&format!("{UNMETERED_ACTIVITY}not json\n"));
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(!parsed.parse_succeeded);
+        assert!(!parsed.is_missing_usage());
+
+        let reader = FailAfterFirstLine::new(UNMETERED_ACTIVITY);
+        let parsed = parse_codex_reader(reader, "session", 0, 0, CodexParseState::default());
+        assert!(parsed.state.has_own_activity);
+        assert!(!parsed.parse_succeeded);
+        assert!(!parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn missing_usage_accepts_zero_native_and_headless_counters() {
+        let ledgers = [
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}"#,
+            r#"{"data":{"usage":{"prompt_tokens":0,"completion_tokens":0}}}"#,
+            r#"{"result":{"usage":{"input":0,"output":0}}}"#,
+            r#"{"response":{"usage":{"cached_tokens":0}}}"#,
+        ];
+        for ledger in ledgers {
+            let file = create_test_file(&format!("{UNMETERED_ACTIVITY}{ledger}\n"));
+            let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            assert!(parsed.parse_succeeded);
+            assert!(parsed.state.has_supported_usage, "{ledger}");
+            assert!(!parsed.is_missing_usage());
+            assert!(parsed.messages.is_empty());
+        }
+        for ledger in [
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{}}}}"#,
+            r#"{"type":"turn.completed","usage":{}}"#,
+        ] {
+            let file = create_test_file(&format!("{UNMETERED_ACTIVITY}{ledger}\n"));
+            let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            assert!(parsed.is_missing_usage(), "{ledger}");
+        }
+    }
+
+    #[test]
+    fn missing_usage_excludes_openclaw_and_replayed_parent_activity() {
+        let file = create_test_file(&format!(
+            "{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"session_meta","payload":{"originator":"OpenClaw"}}"#
+        ));
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(!parsed.is_missing_usage());
+
+        let inherited = format!(
+            "{}\n{}\n{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0002-7000-8000-000000000002","forked_from_id":"019a0000-0001-7000-8000-000000000001","thread_source":"user"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0001-7000-8000-000000000001","originator":"OpenClaw"}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0001-7000-8000-000000000003","model":"gpt-5.4"}}"#
+        );
+        let file = create_test_file(&inherited);
+        let replay = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(!replay.state.has_own_activity);
+        assert!(!replay.is_missing_usage());
+        let own = format!(
+            "{inherited}{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0002-7000-8000-000000000004","model":"gpt-5.4"}}"#
+        );
+        let file = create_test_file(&own);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.is_missing_usage());
+        assert!(!parsed.state.session_owned_by_openclaw);
+    }
+
+    #[test]
+    fn missing_usage_accepts_own_zero_ledger_after_inherited_nonzero_usage() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n{UNMETERED_ACTIVITY}{}\n",
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0002-7000-8000-000000000002","forked_from_id":"019a0000-0001-7000-8000-000000000001","thread_source":"user"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0001-7000-8000-000000000001"}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0001-7000-8000-000000000003","model":"gpt-5.4"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20},"last_token_usage":{"input_tokens":100,"output_tokens":20}}}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0002-7000-8000-000000000004","model":"gpt-5.4"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0},"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#
+        );
+        let file = create_test_file(&content);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.has_own_activity);
+        assert!(parsed.state.has_supported_usage);
+        assert!(!parsed.is_missing_usage());
+        assert!(parsed.messages.is_empty());
     }
 
     struct FailAfterFirstLine {

@@ -1044,7 +1044,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// outcome rather than on its messages because it is a property of the
     /// file: the openclaw lane matches OpenClaw's per-turn mirror rows against
     /// it whether the messages were parsed just now or served from the cache.
-    type CodexSourceOutcome = (CachedParseOutcome, sessions::codex::CodexTurnCoverage);
+    /// The final flag diagnoses own Codex activity without supported usage,
+    /// including sources that emit no messages at all.
+    type CodexSourceOutcome = (CachedParseOutcome, sessions::codex::CodexTurnCoverage, bool);
 
     fn parse_full_log_source(
         path: &Path,
@@ -1058,6 +1060,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             sessions::codex::CodexParseState::default(),
         );
         let turn_coverage = parsed.state.turn_coverage.clone();
+        let missing_usage = parsed.is_missing_usage();
         let messages = finalize_codex_messages(
             parsed.messages.clone(),
             pricing,
@@ -1074,6 +1077,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     invalidate_cache: false,
                 },
                 turn_coverage,
+                missing_usage,
             );
         }
 
@@ -1093,6 +1097,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 invalidate_cache: false,
             },
             turn_coverage,
+            missing_usage,
         )
     }
 
@@ -1939,14 +1944,18 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
         if let Some(cached) = cached {
             let reparse_from_start = |invalidate_cache: bool| {
-                let (mut outcome, turn_coverage) =
+                let (mut outcome, turn_coverage, missing_usage) =
                     parse_full_log_source(path, pricing, is_headless);
                 outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
-                (outcome, turn_coverage)
+                (outcome, turn_coverage, missing_usage)
             };
 
             if cached.fingerprint == fingerprint {
                 if message_cache::codex_cache_entry_matches_fingerprint(&cached, &fingerprint) {
+                    let missing_usage = cached
+                        .codex_incremental
+                        .as_ref()
+                        .is_some_and(|incremental| incremental.state.is_missing_usage());
                     let turn_coverage = cached
                         .codex_incremental
                         .as_ref()
@@ -1966,6 +1975,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                             invalidate_cache: false,
                         },
                         turn_coverage,
+                        missing_usage,
                     );
                 }
 
@@ -1992,6 +2002,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                 .iter()
                                 .map(|index| existing_len + index),
                         );
+                        let missing_usage = parsed.is_missing_usage();
                         raw_messages.extend(parsed.messages);
                         let turn_coverage = parsed.state.turn_coverage.clone();
                         let cache_entry = build_codex_cache_entry(
@@ -2018,6 +2029,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                     invalidate_cache: false,
                                 },
                                 turn_coverage,
+                                missing_usage,
                             );
                         }
                     }
@@ -2251,7 +2263,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
         })
         .collect();
     let mut codex_seen: HashSet<String> = HashSet::new();
-    for (path, (outcome, turn_coverage)) in codex_outcomes {
+    let inspected_codex_files = codex_outcomes.len();
+    let mut missing_codex_usage_files = 0;
+    for (path, (outcome, turn_coverage, missing_usage)) in codex_outcomes {
+        missing_codex_usage_files += usize::from(missing_usage);
         let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in outcome.messages {
@@ -2286,6 +2301,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 &path,
             );
         }
+    }
+
+    if (include_all || clients.iter().any(|client| client == "codex"))
+        && missing_codex_usage_files > 0
+    {
+        tui_signal::emit_or_defer_stderr(format!(
+            "Warning: {missing_codex_usage_files} of {inspected_codex_files} inspected rollout files contain Codex activity but no supported usage records. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
+        ));
     }
 
     // Release Codex before Copilot. This has to sit ahead of the Copilot
@@ -2615,7 +2638,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             })
             .collect();
         let mut rollout_messages = std::mem::take(&mut openclaw_owned_rollouts);
-        for (path, (outcome, turn_coverage)) in rollout_outcomes {
+        for (path, (outcome, turn_coverage, _missing_usage)) in rollout_outcomes {
             let thread_from_name = sessions::codex::thread_id_from_rollout_path(&path);
             let mut recorded_thread: Option<String> = None;
             for mut message in outcome.messages {
@@ -7347,6 +7370,127 @@ mod tests {
         let mut env = crate::paths::test_env::EnvGuard::capture(&["HOME", "TOKSCALE_CONFIG_DIR"]);
         point_cache_home(&mut env, home);
         env
+    }
+
+    fn take_missing_codex_usage_warnings() -> Vec<String> {
+        crate::tui_signal::take_deferred_stderr_for_test()
+            .into_iter()
+            .filter(|message| {
+                message.contains("contain Codex activity but no supported usage records")
+            })
+            .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_tracks_cold_warm_append_rewrite_and_deletion() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("unmetered.jsonl");
+        let activity = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            "\n"
+        );
+        std::fs::write(&path, activity).unwrap();
+        let scan = || {
+            parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            )
+        };
+
+        // The same source classification must survive an unchanged cache hit.
+        for _ in 0..2 {
+            assert!(scan().is_empty());
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("1 of 1 inspected rollout files"));
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-30T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":10}}}}"#,
+            "\n"
+        ).as_bytes()).unwrap();
+        file.flush().unwrap();
+        drop(file);
+        for _ in 0..2 {
+            let messages = scan();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                (
+                    messages[0].tokens.input,
+                    messages[0].tokens.output,
+                    messages[0].tokens.cache_read
+                ),
+                (90, 20, 10)
+            );
+            assert!(take_missing_codex_usage_warnings().is_empty());
+        }
+
+        // A rewrite loses the previous ledger; a cached message must not hide it.
+        std::fs::write(&path, activity.trim_end()).unwrap();
+        for _ in 0..2 {
+            assert!(scan().is_empty());
+            assert_eq!(take_missing_codex_usage_warnings().len(), 1);
+        }
+        std::fs::write(&path, format!("{activity}not json\n")).unwrap();
+        assert!(scan().is_empty());
+        assert!(take_missing_codex_usage_warnings().is_empty());
+        std::fs::remove_file(&path).unwrap();
+        assert!(scan().is_empty());
+        assert!(take_missing_codex_usage_warnings().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_is_aggregate_and_independent_of_report_dates() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for name in ["a.jsonl", "b.jsonl"] {
+            std::fs::write(sessions.join(name), concat!(
+                r#"{"timestamp":"2020-01-01T00:00:00Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
+                "\n"
+            )).unwrap();
+        }
+        let home = source_home.path().to_str().unwrap();
+        let messages = parse_all_messages_with_pricing(home, &["codex".to_string()], None);
+        assert!(filter_messages_for_report(
+            messages,
+            &ReportOptions {
+                since: Some("2026-05-01".to_string()),
+                until: Some("2026-05-31".to_string()),
+                ..Default::default()
+            }
+        )
+        .is_empty());
+        let warnings = take_missing_codex_usage_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("2 of 2 inspected rollout files"));
+        assert!(warnings[0].contains("independently of the selected report dates"));
+
+        // Codex roots are also inspected for OpenClaw reconciliation, but that
+        // lookup must not warn for a client the user did not request.
+        parse_all_messages_with_pricing(home, &["openclaw".to_string()], None);
+        assert!(take_missing_codex_usage_warnings().is_empty());
+        parse_all_messages_with_pricing(home, &[], None);
+        assert_eq!(take_missing_codex_usage_warnings().len(), 1);
     }
 
     /// Re-aim a live [`redirect_cache_home`] at a different scratch directory.
