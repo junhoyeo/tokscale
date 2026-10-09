@@ -3,6 +3,206 @@ use tokscale_core::{parse_local_unified_messages_with_pricing_uncached, LocalPar
 
 mod common;
 
+fn assert_aside_provider_fallback(model: &str, expected: &str) {
+    // Given absent/routing markers and an explicit provider that differs from inference.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [
+        None,
+        Some(""),
+        Some(" AsIdE "),
+        Some(" UNKNOWN "),
+        Some("custom-provider"),
+    ]
+    .map(|provider| {
+        serde_json::json!({
+            "role": "assistant", "model": model, "provider": provider,
+            "usage": {"input": 1}
+        })
+        .to_string()
+            + "\n"
+    })
+    .concat();
+    write_session(home.path(), &rows);
+    // When the real parser resolves provider identity.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then only routing markers use inference; explicit providers always win.
+    assert_eq!(messages.len(), 5);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        [expected, expected, expected, expected, "custom-provider"],
+        "{model}"
+    );
+}
+
+#[test]
+fn aside_customgptish_is_not_an_openai_family() {
+    assert_aside_provider_fallback("customgptish-solver", "unknown");
+}
+
+#[test]
+fn aside_notqwen_is_not_a_qwen_family() {
+    assert_aside_provider_fallback("notqwen-custom", "unknown");
+}
+
+#[test]
+fn aside_versioned_families_infer_without_overriding_explicit_providers() {
+    for model in [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-astra",
+        "gpt-5.4-mini",
+    ] {
+        assert_aside_provider_fallback(model, "openai");
+    }
+    assert_aside_provider_fallback("qwen3-coder", "qwen");
+}
+
+#[test]
+fn aside_cost_only_parser_preserves_cost_without_fabricating_tokens() {
+    use tokscale_core::sessions::{aside::parse_aside_file, CostSource};
+    // Given positive recorded cost with missing/zero output and standalone reasoning.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [serde_json::Value::Null, serde_json::json!(0)]
+        .map(|output| {
+            serde_json::json!({
+                "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+                "responseId": "cost-only", "provider": "openai-codex",
+                "usage": {"input": -1, "output": output, "reasoning": 99,
+                    "cost": {"total": 0.25}}
+            })
+            .to_string()
+                + "\n"
+        })
+        .concat();
+    write_session(home.path(), &rows);
+    // When parsing without aggregation or pricing.
+    let messages = parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then recorded cost and identity survive, while reasoning remains bounded by output.
+    assert_eq!(messages.len(), 2);
+    for message in messages {
+        assert_eq!(message.tokens, Default::default());
+        assert!((message.cost - 0.25).abs() < 1e-12);
+        assert_eq!(message.cost_source, CostSource::ProviderReported);
+        assert_eq!(message.timestamp, 1_788_609_600_000);
+        assert_eq!(message.provider_id, "openai-codex");
+        assert!(message.dedup_key.is_some());
+    }
+}
+
+#[test]
+fn aside_rejects_standalone_reasoning_without_eligible_cost() {
+    // Given no disjoint tokens and missing, zero, negative or non-finite recorded cost.
+    let home = tempfile::tempdir().unwrap();
+    let rows = ["null", "0", "-1", "1e999", "-1e999"]
+        .into_iter()
+        .flat_map(|cost| ["", "\"output\":0,"].map(move |output| format!(
+            "{{\"role\":\"assistant\",\"usage\":{{{output}\"reasoning\":99,\"cost\":{{\"total\":{cost}}}}}}}\n"
+        )))
+        .collect::<String>();
+    write_session(
+        home.path(),
+        &(rows + "{\"role\":\"assistant\",\"usage\":{\"reasoning\":99}}\n"),
+    );
+    // When parsing the metadata-only rows.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then neither reasoning nor ineligible costs create a billable record.
+    assert!(messages.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn aside_cost_only_cached_uncached_and_legacy_preserve_provider_scoped_ids() {
+    use tokscale_core::sessions::CostSource;
+    use tokscale_core::{parse_local_clients, parse_local_unified_messages_with_pricing, ClientId};
+    // Given cross-account duplicate IDs, provider reuse, and two ID-less cost-only calls.
+    let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let _env = common::EnvGuard::set(&[
+        ("TOKSCALE_CONFIG_DIR", cache.path().as_os_str()),
+        ("XDG_CACHE_HOME", cache.path().as_os_str()),
+    ]);
+    let row = serde_json::json!({
+        "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+        "model": "gpt-4o", "provider": "openai-codex", "responseId": "cost-only",
+        "usage": {"cost": {"total": 0.25}}
+    });
+    let mut reused = row.clone();
+    reused["provider"] = "anthropic".into();
+    let mut no_id = row.clone();
+    no_id.as_object_mut().unwrap().remove("responseId");
+    let rows = [&row, &row, &reused, &no_id, &no_id]
+        .map(|r| r.to_string() + "\n")
+        .concat();
+    let options = write_session(home.path(), &rows);
+    let duplicate = home.path().join(".aside/u/1/sessions/other/messages.jsonl");
+    std::fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+    std::fs::write(duplicate, row.to_string() + "\n").unwrap();
+    // When each public lane consumes the same native fixture.
+    let uncached = parse_local_unified_messages_with_pricing_uncached(options.clone(), None)
+        .await
+        .unwrap();
+    let cold = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let warm = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let legacy = parse_local_clients(options).unwrap();
+    // Then all lanes retain costs/counts without tokens and deduplicate only scoped IDs.
+    assert_eq!(
+        [
+            uncached.len(),
+            cold.len(),
+            warm.len(),
+            legacy.messages.len()
+        ],
+        [4; 4]
+    );
+    assert_eq!(cold, warm);
+    for messages in [&uncached, &cold, &warm] {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.provider_id == "anthropic")
+                .count(),
+            1
+        );
+        assert_eq!(messages.iter().filter(|m| m.dedup_key.is_none()).count(), 2);
+        assert!((messages.iter().map(|m| m.cost).sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(messages.iter().all(|m| m.tokens == Default::default()
+            && m.client == "aside"
+            && m.timestamp == 1_788_609_600_000
+            && m.cost_source == CostSource::ProviderReported));
+    }
+    assert_eq!(legacy.counts.get(ClientId::Aside), 4);
+    assert!((legacy.messages.iter().map(|m| m.cost).sum::<f64>() - 1.0).abs() < 1e-12);
+    assert!(legacy.messages.iter().all(|m| m.input == 0
+        && m.output == 0
+        && m.cache_read == 0
+        && m.cache_write == 0
+        && m.reasoning == 0
+        && m.client == "aside"
+        && m.timestamp == 1_788_609_600_000
+        && m.cost_source == CostSource::ProviderReported));
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn aside_cold_warm_and_legacy_dispatch_agree() {

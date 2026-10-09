@@ -4,7 +4,7 @@ use super::utils::{
     file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_timestamp_value,
 };
 use super::UnifiedMessage;
-use crate::{provider_identity::inferred_provider_from_model, TokenBreakdown};
+use crate::{provider_identity::inferred_provider_from_model_delimited, TokenBreakdown};
 use serde::Deserialize;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -77,7 +77,12 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning,
             ..Default::default()
         };
-        if tokens.total() == 0 {
+        let cost = usage
+            .cost
+            .and_then(|cost| cost.total)
+            .filter(|cost| cost.is_finite() && *cost > 0.0)
+            .unwrap_or(0.0);
+        if tokens.total() == 0 && cost == 0.0 {
             return ControlFlow::Continue(());
         }
         let model = record
@@ -95,17 +100,12 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
                     && !s.eq_ignore_ascii_case("aside")
                     && !s.eq_ignore_ascii_case("unknown")
             })
-            .unwrap_or_else(|| inferred_provider_from_model(model).unwrap_or("unknown"));
+            .unwrap_or_else(|| inferred_provider_from_model_delimited(model).unwrap_or("unknown"));
         let timestamp = record
             .timestamp
             .as_ref()
             .and_then(parse_timestamp_value)
             .unwrap_or(fallback_timestamp);
-        let cost = usage
-            .cost
-            .and_then(|cost| cost.total)
-            .filter(|cost| cost.is_finite() && *cost > 0.0)
-            .unwrap_or(0.0);
         let mut message = UnifiedMessage::new(
             "aside",
             model,

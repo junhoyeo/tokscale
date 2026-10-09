@@ -2327,6 +2327,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hindsight), 'H');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::MiMoDesktop), 'W');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Muse), 'N');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Aside), 'V');
         assert_eq!(
             crate::tui::client_ui::hotkey(ClientId::AntigravityExtension),
             'I'
@@ -2335,6 +2336,10 @@ mod tests {
 
     #[test]
     fn test_client_from_key() {
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('V'),
+            Some(ClientId::Aside)
+        );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('1'),
             Some(ClientId::OpenCode)
