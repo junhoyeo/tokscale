@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod antigravity;
 pub mod antigravity_cli;
+pub mod aside;
 pub mod augment;
 pub mod cherrystudio;
 pub mod claudecode;
