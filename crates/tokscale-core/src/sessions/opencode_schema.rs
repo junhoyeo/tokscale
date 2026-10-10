@@ -607,12 +607,23 @@ const MICODE_QUERY_GROUPS: &[&[&str]] = &[MICODE_QUERIES];
 /// The `json_valid` guard is load-bearing here and deliberately absent from the
 /// other clients: without it a single malformed `data` blob makes SQLite's
 /// `json_extract` abort the whole statement rather than skip the row.
+///
+/// Kilo CLI imports the Kilo Code VS Code extension's task history into this
+/// database as `ses_migrated_*` sessions whose assistant turns are stamped
+/// `providerID`/`modelID` `"legacy"` with all-zero tokens and cost. Those
+/// rows carry no usage, and the same turns are already counted (with real
+/// tokens and model) by the `kilocode` task-log parser, so they are skipped
+/// rather than reported as a zero-token "legacy" model.
 const KILO_QUERIES: &[&str] = &[r#"
         SELECT m.id, m.session_id, m.data, NULL AS workspace_root, NULL AS session_title, 1 AS eligible
         FROM message m
         WHERE json_valid(m.data)
           AND json_extract(m.data, '$.role') = 'assistant'
           AND json_extract(m.data, '$.tokens') IS NOT NULL
+          AND NOT (
+            json_extract(m.data, '$.providerID') IS 'legacy'
+            AND json_extract(m.data, '$.modelID') IS 'legacy'
+          )
     "#];
 
 const KILO_QUERY_GROUPS: &[&[&str]] = &[KILO_QUERIES];

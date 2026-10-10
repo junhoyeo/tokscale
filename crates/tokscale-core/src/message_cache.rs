@@ -1226,7 +1226,11 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // while retaining the original call's surface attribution.
             (ClientId::MiMoCode, 5),
             (ClientId::MiMoDesktop, 5),
-            (ClientId::Kilo, 0),
+            // +1 for Kilo's independent history. v1->v2: assistant rows the
+            // Kilo CLI migrated from the VS Code extension (`providerID` and
+            // `modelID` both `"legacy"`, zero usage) are no longer emitted;
+            // a warm v1 entry would keep reporting them as a "legacy" model.
+            (ClientId::Kilo, 1),
         ],
     },
     SharedParserFamily {
@@ -5770,7 +5774,7 @@ mod tests {
                     (ClientId::OpenCode, 2),
                     (ClientId::MiMoCode, 5),
                     (ClientId::MiMoDesktop, 5),
-                    (ClientId::Kilo, 0),
+                    (ClientId::Kilo, 1),
                 ],
             ),
             (

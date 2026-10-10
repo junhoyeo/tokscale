@@ -203,6 +203,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kilo_sqlite_skips_rows_migrated_from_vscode_extension() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Shape the Kilo CLI writes when it imports Kilo Code extension tasks.
+        insert_kilo_message(
+            &conn,
+            "msg_migrated_1",
+            "ses_migrated_1",
+            r#"{"role":"assistant","time":{"created":1748038767854,"completed":1748038767854},"modelID":"legacy","providerID":"legacy","mode":"code","agent":"main","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}"#,
+        );
+        insert_kilo_message(
+            &conn,
+            "msg_native_1",
+            "ses_native_1",
+            r#"{"role":"assistant","time":{"created":1768678556423},"modelID":"kilo-auto/frontier","providerID":"kilo","cost":0.01,"tokens":{"input":100,"output":20,"reasoning":0,"cache":{"read":0,"write":0}}}"#,
+        );
+        drop(conn);
+
+        let messages = parse_kilo_sqlite_with_fallback(&db_path, 42);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "ses_native_1");
+        assert_eq!(messages[0].model_id, "kilo-auto/frontier");
+    }
+
+    #[test]
     fn test_parse_kilo_sqlite_returns_empty_for_missing_db() {
         let messages = parse_kilo_sqlite(std::path::Path::new("/nonexistent/kilo.db"));
         assert!(messages.is_empty());
