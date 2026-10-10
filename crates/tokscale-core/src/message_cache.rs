@@ -1518,7 +1518,11 @@ fn parser_version(client: ClientId) -> u32 {
         // v6->v7: attempt sequence numbers restart in each transcript, so
         // fallback attempt keys now include the session id to avoid merging
         // unrelated sessions in the shared parse lane.
-        ClientId::Dsh => 7,
+        // v7->v8: a settlement now measures its own call against the
+        // `step/start` clock of its `(turn, step)` and carries `duration_ms`.
+        // Transcripts are append-only, so every cached row predates that field
+        // and would keep the client reporting zero throughput until reparsed.
+        ClientId::Dsh => 8,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -4951,8 +4955,9 @@ mod tests {
     #[test]
     fn test_dsh_attempt_identity_parser_version_invalidates_v6_entries() {
         // DSH transcript files are append-only, so v6 cache entries keep the
-        // old cross-session attempt keys unless the source is reparsed.
-        assert_eq!(parser_version(ClientId::Dsh), 7);
+        // old cross-session attempt keys unless the source is reparsed. The
+        // v7->v8 bump retires rows parsed without generation durations.
+        assert_eq!(parser_version(ClientId::Dsh), 8);
     }
 
     /// Names the row that only a served cache can put in a report. No DSH
@@ -5220,7 +5225,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 7);
+        assert_eq!(current_identity.parser_version, 8);
         // Pinned at 3, the identity 4.14.0 cached under, rather than derived
         // from the running version: this is the row that release left on disk.
         let stale_identity = CacheIdentity {
@@ -5281,7 +5286,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 7);
+        assert_eq!(cached.parser_version, 8);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].model_id, "glm-5.3");
 
@@ -5308,7 +5313,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 7);
+        assert_eq!(current_identity.parser_version, 8);
         // Pinned at 4, the identity 4.15.0 cached under; see the v3 test.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
@@ -5368,7 +5373,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 7);
+        assert_eq!(cached.parser_version, 8);
         assert_eq!(cached.messages, scanned);
 
         let warm = scan_dsh(source_home.path());
