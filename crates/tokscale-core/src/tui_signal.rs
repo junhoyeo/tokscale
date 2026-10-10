@@ -9,10 +9,26 @@ use std::sync::{Mutex, OnceLock};
 // normal log line. Diagnostics routed through this module are held until the
 // TUI releases the terminal, then written once the normal screen is restored.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
-static DEFERRED_STDERR: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static DEFERRED_STDERR: OnceLock<Mutex<DeferredStderr>> = OnceLock::new();
 
-fn deferred_stderr() -> &'static Mutex<Vec<String>> {
-    DEFERRED_STDERR.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct DeferredStderr {
+    messages: Vec<String>,
+    codex_usage_warning: Option<String>,
+}
+
+impl DeferredStderr {
+    fn take(&mut self) -> Vec<String> {
+        let mut messages = std::mem::take(&mut self.messages);
+        if let Some(warning) = self.codex_usage_warning.take() {
+            messages.push(warning);
+        }
+        messages
+    }
+}
+
+fn deferred_stderr() -> &'static Mutex<DeferredStderr> {
+    DEFERRED_STDERR.get_or_init(|| Mutex::new(DeferredStderr::default()))
 }
 
 fn transition_tui_active(active: bool) -> Vec<String> {
@@ -27,7 +43,7 @@ fn transition_tui_active(active: bool) -> Vec<String> {
     if active {
         Vec::new()
     } else {
-        std::mem::take(&mut *deferred)
+        deferred.take()
     }
 }
 
@@ -46,7 +62,7 @@ fn route_stderr(message: String) -> Option<String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if is_tui_active() {
-        deferred.push(message);
+        deferred.messages.push(message);
         None
     } else {
         Some(message)
@@ -59,12 +75,33 @@ pub(crate) fn emit_or_defer_stderr(message: String) {
     }
 }
 
+// Source completeness describes the latest scan. Keep it separate from
+// event diagnostics so refreshes replace it and a resolved scan clears it.
+fn route_codex_usage_warning(message: Option<String>) -> Option<String> {
+    let mut deferred = deferred_stderr()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if is_tui_active() {
+        deferred.codex_usage_warning = message;
+        None
+    } else {
+        deferred.codex_usage_warning = None;
+        message
+    }
+}
+
+pub(crate) fn update_codex_usage_warning(message: Option<String>) {
+    if let Some(message) = route_codex_usage_warning(message) {
+        eprintln!("{message}");
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn take_deferred_stderr_for_test() -> Vec<String> {
     let mut deferred = deferred_stderr()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::mem::take(&mut *deferred)
+    deferred.take()
 }
 
 /// Sets `TUI_ACTIVE` for the duration of a test and restores the previous
@@ -145,6 +182,40 @@ mod tests {
             route_stderr("immediate diagnostic".to_string()),
             Some("immediate diagnostic".to_string())
         );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_usage_warning_keeps_only_the_latest_scan_and_preserves_event_diagnostics() {
+        let _restore = TuiActiveGuard::capture();
+        let _discarded = transition_tui_active(false);
+        assert!(transition_tui_active(true).is_empty());
+        assert!(route_stderr("first cache error".to_string()).is_none());
+        for _ in 0..100 {
+            assert!(route_codex_usage_warning(Some("old source count".to_string())).is_none());
+        }
+        assert!(route_stderr("second cache error".to_string()).is_none());
+        assert!(route_codex_usage_warning(Some("latest source count".to_string())).is_none());
+        assert_eq!(
+            transition_tui_active(false),
+            vec![
+                "first cache error",
+                "second cache error",
+                "latest source count"
+            ]
+        );
+        assert_eq!(
+            route_codex_usage_warning(Some("immediate warning".to_string())),
+            Some("immediate warning".to_string())
+        );
+        assert!(route_codex_usage_warning(None).is_none());
+
+        assert!(transition_tui_active(true).is_empty());
+        assert!(route_stderr("unrelated cache error".to_string()).is_none());
+        assert!(route_codex_usage_warning(Some("resolved source warning".to_string())).is_none());
+        assert!(route_codex_usage_warning(None).is_none());
+        assert_eq!(transition_tui_active(false), vec!["unrelated cache error"]);
+        assert!(transition_tui_active(false).is_empty());
     }
 
     /// The guard's whole reason to exist, mirroring

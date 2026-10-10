@@ -4053,6 +4053,145 @@ fn test_monthly_json_output() {
 }
 
 #[test]
+fn missing_codex_usage_cli_warns_without_changing_json_or_recorded_totals() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("rollout.jsonl");
+    let activity = concat!(
+        r#"{"timestamp":"2020-01-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+        "\n"
+    );
+    fs::write(&path, activity).unwrap();
+    let report = || {
+        cmd_with_home(tmp.path())
+            .args([
+                "monthly",
+                "--json",
+                "--no-spinner",
+                "--client",
+                "codex",
+                "--home",
+                tmp.path().to_str().unwrap(),
+                "--since",
+                "2026-05-01",
+                "--until",
+                "2026-05-31",
+            ])
+            .output()
+            .unwrap()
+    };
+    // The source warning covers inspected files even outside the report dates,
+    // and must survive the next process reading an unchanged source cache.
+    for _ in 0..2 {
+        let output = report();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"], serde_json::json!([]));
+        assert_eq!(json["totalCost"], 0.0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr
+                .matches("contain Codex activity but no supported usage records")
+                .count(),
+            1
+        );
+        assert!(stderr.contains("1 of 1 inspected rollout files"));
+        assert!(stderr.contains("independently of the selected report dates"));
+    }
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    use std::io::Write;
+    file.write_all(concat!(
+        r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-30T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":10}}}}"#,
+        "\n"
+    ).as_bytes()).unwrap();
+    file.flush().unwrap();
+    drop(file);
+    for _ in 0..2 {
+        let output = report();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"][0]["input"], 90);
+        assert_eq!(json["entries"][0]["output"], 20);
+        assert_eq!(json["entries"][0]["cacheRead"], 10);
+    }
+}
+
+#[test]
+fn missing_codex_usage_cli_excludes_zero_malformed_and_openclaw_sources() {
+    let activity = concat!(
+        r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+        "\n"
+    );
+    for content in [
+        String::new(),
+        r#"{"type":"session_meta","payload":{"id":"metadata-only"}}"#.to_string(),
+        format!("{activity}not json\n"),
+        format!(
+            "{activity}{}\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}"#
+        ),
+        format!(
+            "{}\n{activity}",
+            r#"{"type":"session_meta","payload":{"originator":"openclaw"}}"#
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        prime_pricing_cache(tmp.path());
+        let sessions = tmp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout.jsonl"), content).unwrap();
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "monthly",
+                "--json",
+                "--no-spinner",
+                "--client",
+                "codex",
+                "--home",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"], serde_json::json!([]));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"));
+    }
+}
+
+#[test]
+fn missing_codex_usage_task_report_warns_and_excludes_injected_context() {
+    let activity = concat!(
+        r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+        "\n"
+    );
+    for (content, expected) in [
+        (activity.to_string(), true),
+        (format!("{activity}{}\n", r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#), false),
+        (concat!(r#"{"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>cwd=/tmp</environment_context>"}}"#, "\n").to_string(), false),
+    ] {
+        let tmp = create_empty_fixture_dir();
+        let sessions = tmp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout.jsonl"), content).unwrap();
+        for _ in 0..2 {
+            let output = cmd_with_home(tmp.path())
+                .args(["report", "--no-summarize", "--json"])
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report, serde_json::json!([]));
+            assert_eq!(String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"), expected);
+        }
+    }
+}
+
+#[test]
 fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
     let tmp = create_temp_fixture_dir();
     add_reasoning_only_opencode_message(tmp.path());
