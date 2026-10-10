@@ -60,7 +60,11 @@ pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
         return "\u{2014}".to_string(); // —
     }
     let per_m = cost / (total_tokens as f64) * 1_000_000.0;
-    format!("${:.2}", per_m)
+    if cost > 0.0 && per_m < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("${:.2}", per_m)
+    }
 }
 
 /// Cache reuse multiplier: cached reads per full-price input token.
@@ -1659,5 +1663,33 @@ mod tests {
         assert!(!provider_has_palette("openrouter"));
         assert!(!provider_has_palette("unknown"));
         assert!(!provider_has_palette(""));
+    }
+
+    #[test]
+    fn test_format_cost_per_million_renders_sub_cent_and_zero_cleanly() {
+        // Zero tokens -> dash
+        assert_eq!(format_cost_per_million(0.0, 0), "—");
+        assert_eq!(format_cost_per_million(10.0, 0), "—");
+
+        // Negative cost or non-finite -> dash
+        assert_eq!(format_cost_per_million(-1.0, 100), "—");
+        assert_eq!(format_cost_per_million(f64::NAN, 100), "—");
+        assert_eq!(format_cost_per_million(f64::INFINITY, 100), "—");
+
+        // Genuine zero cost -> $0.00
+        assert_eq!(format_cost_per_million(0.0, 1000), "$0.00");
+
+        // Sub-cent positive rates (< $0.01 / 1M) -> "<$0.01"
+        assert_eq!(format_cost_per_million(0.000004, 1000), "<$0.01");
+        assert_eq!(format_cost_per_million(0.003625, 1_000_000), "<$0.01");
+        assert_eq!(format_cost_per_million(0.00013, 1_000_000), "<$0.01");
+        assert_eq!(format_cost_per_million(0.005, 1_000_000), "<$0.01");
+        assert_eq!(format_cost_per_million(0.0099, 1_000_000), "<$0.01");
+
+        // At or above 1 cent -> standard two decimals
+        assert_eq!(format_cost_per_million(0.01, 1_000_000), "$0.01");
+        assert_eq!(format_cost_per_million(0.06, 1_000_000), "$0.06");
+        assert_eq!(format_cost_per_million(3.00, 1_000_000), "$3.00");
+        assert_eq!(format_cost_per_million(15.50, 1_000_000), "$15.50");
     }
 }

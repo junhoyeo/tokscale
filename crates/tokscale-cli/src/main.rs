@@ -4113,12 +4113,14 @@ fn format_currency(n: f64) -> String {
 }
 
 fn format_cost_per_million(cost: f64, total_tokens: i64) -> String {
-    if total_tokens <= 0 || !cost.is_finite() {
+    if total_tokens <= 0 || !cost.is_finite() || cost < 0.0 {
         return "—".to_string();
     }
     let cost_per_m = cost * 1_000_000.0 / total_tokens as f64;
     if !cost_per_m.is_finite() {
         "—".to_string()
+    } else if cost > 0.0 && cost_per_m < 0.01 {
+        "<$0.01/M".to_string()
     } else {
         format!("${:.2}/M", cost_per_m)
     }
@@ -7458,6 +7460,19 @@ mod tests {
                 "{cost_per_token:e} per token rendered as ${rendered}"
             );
         }
+    }
+
+    #[test]
+    fn format_cost_per_million_renders_sub_cent_and_zero_cleanly() {
+        assert_eq!(format_cost_per_million(0.0, 0), "—");
+        assert_eq!(format_cost_per_million(-1.0, 100), "—");
+        assert_eq!(format_cost_per_million(0.0, 1000), "$0.00/M");
+        assert_eq!(format_cost_per_million(0.000004, 1000), "<$0.01/M");
+        assert_eq!(format_cost_per_million(0.003625, 1_000_000), "<$0.01/M");
+        assert_eq!(format_cost_per_million(0.005, 1_000_000), "<$0.01/M");
+        assert_eq!(format_cost_per_million(0.0099, 1_000_000), "<$0.01/M");
+        assert_eq!(format_cost_per_million(0.01, 1_000_000), "$0.01/M");
+        assert_eq!(format_cost_per_million(15.0, 1_000_000), "$15.00/M");
     }
 
     #[test]
