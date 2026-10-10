@@ -482,6 +482,13 @@ enum CursorSubcommand {
     Sync {
         #[arg(long, help = "Output as JSON")]
         json: bool,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Overall sync timeout in seconds (overrides default dynamic budget)"
+        )]
+        timeout: Option<u64>,
     },
     #[command(about = "Switch active Cursor account")]
     Switch {
@@ -6891,7 +6898,7 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         } => cursor::run_cursor_logout(name, all, purge_cache),
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
-        CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
+        CursorSubcommand::Sync { json, timeout } => cursor::run_cursor_sync(json, timeout),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
     }
 }
@@ -9610,6 +9617,8 @@ mod tests {
     fn clap_accepts_cursor_sync_command() {
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "300"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "0"]).is_err());
     }
 
     #[test]

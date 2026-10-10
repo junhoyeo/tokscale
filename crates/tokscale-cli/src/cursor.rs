@@ -15,11 +15,47 @@ use std::time::{Duration, Instant, SystemTime};
 /// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Environment variable overriding the explicit sync timeout budget in milliseconds.
+pub const CURSOR_SYNC_TIMEOUT_MS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_MS";
+
+/// Environment variable overriding the explicit sync timeout budget in seconds.
+pub const CURSOR_SYNC_TIMEOUT_SECS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_SECS";
+
 /// Per-request timeout for the usage-CSV download during an explicit
 /// `tokscale cursor sync`. Large accounts export CSVs that take well over the
 /// default [`CURSOR_HTTP_TIMEOUT`] to generate and stream (issue #1175); the
 /// user asked for the sync, so waiting longer beats failing fast.
-const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+pub const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Seconds allocated per page when dynamically scaling the explicit sync budget
+/// to the advertised `totalUsageEventsCount`.
+const CURSOR_DYNAMIC_BUDGET_SECS_PER_PAGE: u64 = 3;
+
+/// Maximum duration dynamic scaling may expand the explicit sync budget to.
+const CURSOR_MAX_DYNAMIC_SYNC_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Compute the dynamic sync timeout budget for a Cursor usage events walk.
+///
+/// Accounts with tens of thousands of rows require multiple paginated requests.
+/// When no explicit custom timeout is given, Tokscale dynamically scales the budget
+/// based on the advertised total count and the observed page yield, allocating
+/// 3 seconds per estimated page (clamped between the initial budget and 1,800s).
+pub fn compute_dynamic_cursor_budget(
+    total_events: u64,
+    effective_page_size: usize,
+    initial_budget: Duration,
+) -> Duration {
+    if effective_page_size == 0 {
+        return initial_budget;
+    }
+    let total_pages = (total_events.saturating_add(effective_page_size as u64 - 1))
+        / (effective_page_size as u64);
+    let estimated_needed =
+        Duration::from_secs(total_pages.saturating_mul(CURSOR_DYNAMIC_BUDGET_SECS_PER_PAGE));
+    estimated_needed
+        .max(initial_budget)
+        .min(CURSOR_MAX_DYNAMIC_SYNC_TIMEOUT)
+}
 
 /// Skip implicit pre-report sync when every expected Cursor account cache file
 /// was modified within this window. Prevents `tokscale models` (and its
@@ -1169,21 +1205,7 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
     }
 }
 
-pub async fn fetch_cursor_usage_events_json(
-    session_token: &str,
-    timeout_override: Option<Duration>,
-) -> Result<String> {
-    fetch_cursor_usage_events_json_from(
-        USAGE_EVENTS_JSON_ENDPOINT,
-        session_token,
-        timeout_override,
-        CURSOR_MAX_JSON_BYTES,
-        CURSOR_JSON_PAGE_SIZE,
-    )
-    .await
-}
-
-/// Body of [`fetch_cursor_usage_events_json`] with the endpoint, byte ceiling,
+/// Fetch Cursor usage events JSON with the endpoint, byte ceiling,
 /// and page size injected so tests can drive the real paginating path against a
 /// local server.
 ///
@@ -1197,6 +1219,7 @@ async fn fetch_cursor_usage_events_json_from(
     url: &str,
     session_token: &str,
     timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
     max_body_bytes: usize,
     page_size: usize,
 ) -> Result<String> {
@@ -1210,16 +1233,29 @@ async fn fetch_cursor_usage_events_json_from(
     // stall report startup (auto-sync runs first) for that timeout times the page
     // count. Each page's timeout is clamped to what remains of this budget below,
     // and the walk aborts once it is spent.
-    let per_page_timeout = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
-    let fetch_deadline = Instant::now() + per_page_timeout;
+    let start_time = Instant::now();
+    let initial_budget = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
+    let mut overall_budget = initial_budget;
+    let mut fetch_deadline = start_time + overall_budget;
 
     let mut completed = false;
     for page in 1..=CURSOR_MAX_JSON_PAGES {
         let remaining_budget = fetch_deadline.saturating_duration_since(Instant::now());
         if remaining_budget.is_zero() {
-            anyhow::bail!(
-                "Cursor usage events fetch exceeded its overall time budget before the full history was collected"
-            );
+            let budget_secs = overall_budget.as_secs();
+            let fetched_pages = page - 1;
+            let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
+            if let Some(total) = total_count {
+                anyhow::bail!(
+                    "Cursor usage events fetch exceeded its {budget_secs}s time budget before the full history was collected (fetched {fetched_pages} {pages_str}, {}/{total} events)",
+                    all_events.len()
+                );
+            } else {
+                anyhow::bail!(
+                    "Cursor usage events fetch exceeded its {budget_secs}s time budget before the full history was collected (fetched {fetched_pages} {pages_str}, {} events)",
+                    all_events.len()
+                );
+            }
         }
 
         let body = serde_json::json!({
@@ -1228,13 +1264,36 @@ async fn fetch_cursor_usage_events_json_from(
             "pageSize": page_size,
         });
 
+        let page_timeout = initial_budget.min(remaining_budget);
         let req = client
             .post(url)
             .headers(build_cursor_json_headers(session_token))
             .json(&body)
-            .timeout(per_page_timeout.min(remaining_budget));
+            .timeout(page_timeout);
 
-        let response = req.send().await?;
+        let response = match req.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                let now = Instant::now();
+                if fetch_deadline.saturating_duration_since(now).is_zero() {
+                    let budget_secs = overall_budget.as_secs();
+                    let fetched_pages = page - 1;
+                    let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
+                    if let Some(total) = total_count {
+                        anyhow::bail!(
+                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while requesting page {page} ({fetched_pages} {pages_str}, {}/{total} events collected before timeout): {err}",
+                            all_events.len()
+                        );
+                    } else {
+                        anyhow::bail!(
+                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while requesting page {page} ({fetched_pages} {pages_str}, {} events collected before timeout): {err}",
+                            all_events.len()
+                        );
+                    }
+                }
+                return Err(err.into());
+            }
+        };
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -1257,16 +1316,43 @@ async fn fetch_cursor_usage_events_json_from(
                 "Cursor usage events JSON exceeded the {max_body_bytes} byte limit across pages"
             ),
         };
-        let text = read_cursor_body_with_cap(response, remaining, "usage events JSON").await?;
+        let text = match read_cursor_body_with_cap(response, remaining, "usage events JSON").await {
+            Ok(text) => text,
+            Err(err) => {
+                if fetch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero()
+                {
+                    let budget_secs = overall_budget.as_secs();
+                    let fetched_pages = page - 1;
+                    let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
+                    if let Some(total) = total_count {
+                        anyhow::bail!(
+                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while reading page {page} ({fetched_pages} {pages_str}, {}/{total} events collected before timeout): {err}",
+                            all_events.len()
+                        );
+                    } else {
+                        anyhow::bail!(
+                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while reading page {page} ({fetched_pages} {pages_str}, {} events collected before timeout): {err}",
+                            all_events.len()
+                        );
+                    }
+                }
+                return Err(err);
+            }
+        };
         bytes_read += text.len();
 
         let page_value: serde_json::Value = serde_json::from_str(&text)
             .context("Invalid response from Cursor API - expected usage events JSON")?;
 
         if total_count.is_none() {
-            total_count = page_value
+            if let Some(total) = page_value
                 .get("totalUsageEventsCount")
-                .and_then(|value| value.as_u64());
+                .and_then(|value| value.as_u64())
+            {
+                total_count = Some(total);
+            }
         }
 
         // A well-formed page always carries a `usageEventsDisplay` array. A 200
@@ -1284,6 +1370,24 @@ async fn fetch_cursor_usage_events_json_from(
         };
         let received = page_events.len();
         all_events.extend(page_events);
+
+        // When running an explicit sync with the default budget (no custom
+        // override specified via flag or environment variable), dynamically
+        // scale the wall-clock budget with the advertised total events so
+        // accounts with tens of thousands of rows don't abort prematurely.
+        // Base the page estimate on observed page yield so server-side page
+        // clamping (e.g. Cursor clamping a 500-event request to 100) doesn't
+        // underestimate pages and time out.
+        if !is_custom_timeout && timeout_override.is_some() {
+            if let Some(total) = total_count {
+                let effective_page = if received > 0 { received } else { page_size };
+                let expanded = compute_dynamic_cursor_budget(total, effective_page, initial_budget);
+                if expanded > overall_budget {
+                    fetch_deadline = start_time + expanded;
+                    overall_budget = expanded;
+                }
+            }
+        }
 
         // Once the advertised total is known, keep paging until it is reached so
         // a server that clamps `pageSize` (a short page while more events remain)
@@ -1557,19 +1661,69 @@ where
     }
 }
 
+fn configured_explicit_sync_timeout(explicit_timeout: Option<Duration>) -> (Duration, bool) {
+    if let Some(timeout) = explicit_timeout {
+        if !timeout.is_zero() {
+            return (timeout, true);
+        }
+    }
+
+    if let Ok(val) = std::env::var(CURSOR_SYNC_TIMEOUT_MS_ENV) {
+        if let Ok(ms) = val.trim().parse::<u64>() {
+            if ms > 0 {
+                return (Duration::from_millis(ms), true);
+            }
+        }
+    }
+
+    if let Ok(val) = std::env::var(CURSOR_SYNC_TIMEOUT_SECS_ENV) {
+        if let Ok(secs) = val.trim().parse::<u64>() {
+            if secs > 0 {
+                return (Duration::from_secs(secs), true);
+            }
+        }
+    }
+
+    (CURSOR_EXPLICIT_SYNC_TIMEOUT, false)
+}
+
 /// Timeout override for the usage download: explicit syncs get the longer
-/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`]; implicit syncs keep the client default.
-fn sync_timeout_override(explicit: bool) -> Option<Duration> {
-    explicit.then_some(CURSOR_EXPLICIT_SYNC_TIMEOUT)
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`] (or user-configured override); implicit syncs keep the client default.
+fn sync_timeout_override(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+) -> (Option<Duration>, bool) {
+    if explicit {
+        let (duration, is_custom) = configured_explicit_sync_timeout(explicit_timeout);
+        (Some(duration), is_custom)
+    } else {
+        (None, false)
+    }
 }
 
 pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
+    sync_cursor_cache_with_explicit_timeout(explicit, None).await
+}
+
+pub async fn sync_cursor_cache_with_explicit_timeout(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+) -> SyncCursorResult {
     // Prefer a fresh token from the local Cursor desktop login when available.
     // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
     let _ = ensure_credentials_from_local_cursor();
 
+    let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout);
     sync_cursor_cache_with_fetcher(move |session_token| async move {
-        fetch_cursor_usage_events_json(&session_token, sync_timeout_override(explicit)).await
+        fetch_cursor_usage_events_json_from(
+            USAGE_EVENTS_JSON_ENDPOINT,
+            &session_token,
+            timeout,
+            is_custom,
+            CURSOR_MAX_JSON_BYTES,
+            CURSOR_JSON_PAGE_SIZE,
+        )
+        .await
     })
     .await
 }
@@ -1844,12 +1998,16 @@ pub fn run_cursor_accounts(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn run_cursor_sync(json: bool) -> Result<()> {
+pub fn run_cursor_sync(json: bool, timeout_secs: Option<u64>) -> Result<()> {
     use colored::Colorize;
     use tokio::runtime::Runtime;
 
+    let timeout_override = timeout_secs.map(Duration::from_secs);
     let rt = Runtime::new()?;
-    let result = rt.block_on(sync_cursor_cache(true));
+    let result = rt.block_on(sync_cursor_cache_with_explicit_timeout(
+        true,
+        timeout_override,
+    ));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1890,8 +2048,45 @@ pub fn run_cursor_switch(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(name);
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, original }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var_os(name);
+            unsafe {
+                std::env::remove_var(name);
+            }
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    std::env::set_var(self.name, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.name);
+                },
+            }
+        }
+    }
 
     /// #1250: cursor.com serves a bot-protection challenge instead of the API
     /// response when the ClientHello comes from rustls, so this one client has
@@ -2091,9 +2286,47 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_sync_timeout_override_only_for_explicit_sync() {
-        assert_eq!(sync_timeout_override(true), Some(Duration::from_secs(120)));
-        assert_eq!(sync_timeout_override(false), None);
+        let _g1 = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_MS_ENV);
+        let _g2 = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_SECS_ENV);
+        assert_eq!(
+            sync_timeout_override(true, None),
+            (Some(Duration::from_secs(120)), false)
+        );
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(300))),
+            (Some(Duration::from_secs(300)), true)
+        );
+        assert_eq!(sync_timeout_override(false, None), (None, false));
+        assert_eq!(
+            sync_timeout_override(false, Some(Duration::from_secs(300))),
+            (None, false)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_timeout_override_honors_env_vars() {
+        {
+            let _g_clean = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_SECS_ENV);
+            let _g_ms = EnvVarGuard::set(CURSOR_SYNC_TIMEOUT_MS_ENV, "180000");
+            assert_eq!(
+                sync_timeout_override(true, None),
+                (Some(Duration::from_millis(180000)), true)
+            );
+            assert_eq!(sync_timeout_override(false, None), (None, false));
+        }
+
+        {
+            let _g_clean = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_MS_ENV);
+            let _g_secs = EnvVarGuard::set(CURSOR_SYNC_TIMEOUT_SECS_ENV, "240");
+            assert_eq!(
+                sync_timeout_override(true, None),
+                (Some(Duration::from_secs(240)), true)
+            );
+            assert_eq!(sync_timeout_override(false, None), (None, false));
+        }
     }
 
     #[test]
@@ -2185,6 +2418,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 TEST_JSON_CAP,
                 500,
             ))
@@ -2224,6 +2458,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 TEST_JSON_CAP,
                 500,
             ))
@@ -2255,7 +2490,8 @@ mod tests {
             .block_on(fetch_cursor_usage_events_json_from(
                 &url,
                 "session-token",
-                sync_timeout_override(true),
+                sync_timeout_override(true, None).0,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2309,6 +2545,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 2,
             ))
@@ -2351,6 +2588,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 5,
             ))
@@ -2376,6 +2614,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2411,6 +2650,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 5,
             ))
@@ -2444,6 +2684,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2451,6 +2692,133 @@ mod tests {
         assert!(
             format!("{err:#}").contains("cursor login"),
             "the error should tell the user to re-authenticate: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_timeout_reports_clear_diagnostics() {
+        // When the wall-clock budget is exceeded mid-walk, the error must clearly
+        // state the budget in seconds and how many pages/events were collected
+        // rather than failing with an opaque request error.
+        let (url, _requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    10,
+                    &[
+                        &json_event("c1", "1788171994001"),
+                        &json_event("c2", "1788171994002"),
+                    ],
+                ),
+            ),
+            (
+                String::new(),
+                json_page(10, &[&json_event("c3", "1788171994003")]),
+            ),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // Give a tiny 0-second budget so it expires immediately after or during page 1.
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_millis(0)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+            ))
+            .expect_err("a 0ms budget must expire");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("time budget"),
+            "error must report budget exhaustion: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compute_dynamic_cursor_budget_scaling() {
+        let default_budget = Duration::from_secs(120);
+
+        // Zero page size returns initial budget
+        assert_eq!(
+            compute_dynamic_cursor_budget(10_000, 0, default_budget),
+            default_budget
+        );
+
+        // Small count inside default budget remains initial budget
+        assert_eq!(
+            compute_dynamic_cursor_budget(500, 500, default_budget),
+            default_budget
+        );
+        assert_eq!(
+            compute_dynamic_cursor_budget(40 * 500, 500, default_budget),
+            default_budget
+        ); // 40 pages * 3s = 120s
+
+        // 40,000 events with 500 page size = 80 pages * 3s = 240s
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 500, default_budget),
+            Duration::from_secs(240)
+        );
+
+        // 40,000 events with 100 clamped page size = 400 pages * 3s = 1200s
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 100, default_budget),
+            Duration::from_secs(1200)
+        );
+
+        // Extremely large count caps at 1800s (30m)
+        assert_eq!(
+            compute_dynamic_cursor_budget(1_000_000, 100, default_budget),
+            Duration::from_secs(1800)
+        );
+
+        // Custom higher initial budget is preserved if needed is smaller
+        let high_budget = Duration::from_secs(300);
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 500, high_budget),
+            high_budget
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_dynamically_scales_budget_for_large_history() {
+        // When an explicit sync runs without custom override and encounters an
+        // advertised total of 40k events (80 pages), the budget must dynamically scale
+        // past the initial 120s up to total_pages * 3s (240s).
+        let (url, _requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    40_000,
+                    &[
+                        &json_event("c1", "1788171994001"),
+                        &json_event("c2", "1788171994002"),
+                    ],
+                ),
+            ),
+            // End early by empty page
+            (String::new(), json_page(40_000, &[])),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // With default 120s budget (is_custom_timeout: false), total_count: 40000 scales budget.
+        // It will fail because the 2nd page is empty before the 40k advertised total,
+        // proving it processed the first page and recognized the advertised total.
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(120)),
+                false,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("empty page before 40000 total must fail");
+        assert!(
+            format!("{err:#}").contains("40000 events"),
+            "must process advertised total of 40000: {err:#}"
         );
     }
 
