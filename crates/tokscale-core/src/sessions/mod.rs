@@ -46,6 +46,7 @@ pub mod omp;
 pub mod openclaw;
 pub mod opencode;
 pub mod opencode_schema;
+pub(crate) mod opencodex;
 pub mod opencodereview;
 pub mod pi;
 pub mod prime_agent;

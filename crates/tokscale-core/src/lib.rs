@@ -922,6 +922,42 @@ struct FlushContext<'a> {
     timezone: Option<bucket_tz::BucketTimezone>,
 }
 
+fn matches_flush_filter(message: &UnifiedMessage, context: &FlushContext<'_>) -> bool {
+    context.include_all
+        || retain_for_requested_clients(
+            &message.client,
+            &message.model_id,
+            &message.provider_id,
+            &context.requested,
+        )
+}
+
+/// Apply the post-filter parse tail to one retained message.
+///
+/// Filtering must happen before any attribution/normalization that can rewrite
+/// model/provider identity, because `--synthetic` eligibility is based on the
+/// source fields. Most lanes call `flush_message`, which performs that filter
+/// immediately before this tail. A lane that intentionally filters earlier may
+/// call this helper after its attribution pass without changing eligibility.
+fn flush_retained_message<S: MessageSink>(
+    mut message: UnifiedMessage,
+    context: &FlushContext<'_>,
+    sink: &mut S,
+) {
+    if context.include_synthetic {
+        sessions::synthetic::normalize_synthetic_gateway_fields(
+            &mut message.model_id,
+            &mut message.provider_id,
+        );
+    }
+
+    if let Some(timezone) = &context.timezone {
+        message.rebucket_date(timezone);
+    }
+
+    sink.accept(message);
+}
+
 /// Drain `buffer` into `sink`, applying the tail passes to each message.
 ///
 /// The order is load-bearing and matches the original tail: filter BEFORE
@@ -937,38 +973,33 @@ fn flush_lane<S: MessageSink>(
     }
 }
 
+/// Drain a lane whose messages were already filtered using their source
+/// attribution. This is used when a later overlay rewrites model/provider
+/// identity but must not retroactively change source selection.
+fn flush_retained_lane<S: MessageSink>(
+    buffer: &mut Vec<UnifiedMessage>,
+    context: &FlushContext<'_>,
+    sink: &mut S,
+) {
+    for message in buffer.drain(..) {
+        flush_retained_message(message, context, sink);
+    }
+}
+
 /// Apply the parse tail to one message and release it into the consumer.
 ///
 /// Most parsers still hand back a lane buffer, but sources with their own
 /// streaming boundary can call this directly without rebuilding that buffer.
 fn flush_message<S: MessageSink>(
-    mut message: UnifiedMessage,
+    message: UnifiedMessage,
     context: &FlushContext<'_>,
     sink: &mut S,
 ) {
-    if !context.include_all
-        && !retain_for_requested_clients(
-            &message.client,
-            &message.model_id,
-            &message.provider_id,
-            &context.requested,
-        )
-    {
+    if !matches_flush_filter(&message, context) {
         return;
     }
 
-    if context.include_synthetic {
-        sessions::synthetic::normalize_synthetic_gateway_fields(
-            &mut message.model_id,
-            &mut message.provider_id,
-        );
-    }
-
-    if let Some(timezone) = &context.timezone {
-        message.rebucket_date(timezone);
-    }
-
-    sink.accept(message);
+    flush_retained_message(message, context, sink);
 }
 
 fn parse_all_messages_with_pricing_with_cache_policy(
@@ -2288,11 +2319,35 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    // Release Codex before Copilot. This has to sit ahead of the Copilot
-    // lane rather than after it: the desktop/vscode blocks below scan
-    // `all_messages` for `client == "copilot"` to dedup against OTEL rows, so
-    // copilot's own messages must still be buffered when they run.
-    flush_lane(&mut all_messages, &flush_context, sink);
+    // Client selection is defined by the source attribution. Preserve that
+    // decision before the OpenCodex overlay can rewrite model/provider fields;
+    // otherwise a `--synthetic` Codex row could disappear (or appear) solely
+    // because its physical combo target has different gateway identifiers.
+    all_messages.retain(|message| matches_flush_filter(message, &flush_context));
+
+    // Codex rollouts only know the caller-facing OpenCodex combo selector.
+    // When OpenCodex's durable ledger is available, correlate the existing
+    // Codex usage row with the successful physical attempt. This rewrites
+    // attribution only; it never emits an extra row, so totals cannot double
+    // count proxy traffic. Ambiguous matches keep the virtual selector.
+    if sessions::opencodex::attribute_codex_messages(
+        home_dir,
+        use_env_roots,
+        &mut all_messages,
+    ) > 0
+    {
+        apply_pricing_to_messages(&mut all_messages, pricing);
+    }
+
+    // Release Codex before Copilot. The lane was filtered above while its
+    // source attribution was still intact, so do not re-run client selection
+    // against the rewritten physical model/provider fields.
+    //
+    // This has to sit ahead of the Copilot lane rather than after it: the
+    // desktop/vscode blocks below scan `all_messages` for `client == "copilot"`
+    // to dedup against OTEL rows, so copilot's own messages must still be
+    // buffered when they run.
+    flush_retained_lane(&mut all_messages, &flush_context, sink);
 
     parse_cached_lane(
         &scan_result,
@@ -8987,6 +9042,41 @@ mod tests {
             "anthropic",
             &requested
         ));
+    }
+
+    #[test]
+    fn test_codex_prefilter_survives_physical_attribution_for_synthetic_request() {
+        let context = FlushContext {
+            include_all: false,
+            requested: HashSet::from(["synthetic"]),
+            include_synthetic: true,
+            timezone: None,
+        };
+        let mut message = UnifiedMessage::new(
+            "codex",
+            "sol-luna-jev-combo",
+            "synthetic",
+            "session",
+            1,
+            TokenBreakdown::default(),
+            0.0,
+        );
+
+        assert!(matches_flush_filter(&message, &context));
+
+        // OpenCodex resolves the virtual selector to a non-Synthetic physical
+        // target. Re-evaluating the filter now would incorrectly drop the row.
+        message.model_id = "gpt-6-luna".to_string();
+        message.provider_id = "openai".to_string();
+        assert!(!matches_flush_filter(&message, &context));
+
+        let mut buffer = vec![message];
+        let mut sink = Vec::new();
+        flush_retained_lane(&mut buffer, &context, &mut sink);
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].model_id, "gpt-6-luna");
+        assert_eq!(sink[0].provider_id, "openai");
     }
 
     #[test]
