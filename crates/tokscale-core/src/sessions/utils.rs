@@ -625,6 +625,9 @@ pub struct AnthropicUsage {
     pub cache_read_input_tokens: Option<i64>,
     pub cache_creation_input_tokens: Option<i64>,
     pub cache_creation: Option<AnthropicCacheCreation>,
+    /// Optional server-side calls. Keep unknown shapes from invalidating totals;
+    /// Claude Code interprets only well-formed advisor iterations.
+    pub iterations: Option<serde_json::Value>,
 }
 
 impl AnthropicUsage {
