@@ -25,7 +25,10 @@
 //! clients, ensuring format-level changes in `pi.rs` invalidate cached messages
 //! consistently across all five (#1195).
 
-use super::utils::{file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_json_line};
+use super::utils::{
+    back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line_with_bytes,
+    parse_json_line,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::clients::ClientId;
 use crate::provider_identity::inferred_provider_from_model;
@@ -46,7 +49,7 @@ use std::path::Path;
 /// `message_cache::parser_version()`, while allowing each client to keep its
 /// own client-specific version offset for independent historical invalidations
 /// (e.g. dedup key changes, session metadata).
-pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 2;
+pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 3;
 
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
@@ -266,6 +269,8 @@ pub struct PiMessage {
     pub provider: Option<String>,
     #[serde(rename = "responseId")]
     pub response_id: Option<String>,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: Option<serde_json::Value>,
 }
 
 /// The camelCase usage block of a Pi record: `utils::CamelUsage`'s
@@ -790,7 +795,16 @@ fn parse_pi_format_file_inner(
             .as_deref()
             .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
             .map(|timestamp| timestamp.timestamp_millis());
-        let timestamp = recorded_timestamp.unwrap_or(fallback_timestamp);
+        let duration_ms = message
+            .duration_ms
+            .as_ref()
+            .and_then(serde_json::Value::as_i64)
+            .filter(|duration| *duration > 0);
+        // Pi writes the entry timestamp at message_end; session spans start before it.
+        let timestamp = match (recorded_timestamp, duration_ms) {
+            (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
+            _ => recorded_timestamp.unwrap_or(fallback_timestamp),
+        };
 
         let mut unified = UnifiedMessage::new_with_agent(
             client,
@@ -802,6 +816,7 @@ fn parse_pi_format_file_inner(
             0.0,
             agent.clone(),
         );
+        unified.duration_ms = duration_ms;
         if let Some(namespace) = dedup_namespace {
             if options.cross_session_dedup {
                 let clean_response_key = message
@@ -888,6 +903,87 @@ mod tests {
     fn parse_prime_test_file(path: &Path) -> Vec<UnifiedMessage> {
         let mut observer = NoopPiFormatObserver;
         parse_pi_format_rlm_file_with_observer(path, "prime-agent", "prime-agent", &mut observer)
+    }
+
+    #[test]
+    fn assistant_duration_populates_performance_across_pi_format_clients() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"session-timed","cwd":"/tmp/project"}
+{"type":"message","id":"assistant-1","timestamp":"2026-10-10T06:44:18.431Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","durationMs":2500,"usage":{"input":100,"output":50,"cacheRead":200,"reasoning":20}}}"#,
+        );
+        let end = chrono::DateTime::parse_from_rfc3339("2026-10-10T06:44:18.431Z")
+            .unwrap()
+            .timestamp_millis();
+        for messages in [
+            parse_pi_file(file.path()),
+            crate::sessions::senpi::parse_senpi_file(file.path()),
+            crate::sessions::kimchi::parse_kimchi_file(file.path()),
+            crate::sessions::omp::parse_omp_file(file.path()),
+            parse_prime_test_file(file.path()),
+        ] {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].duration_ms, Some(2500));
+            assert_eq!(messages[0].timestamp, end - 2500);
+            assert_eq!(messages[0].tokens.total(), 350);
+            assert_eq!(messages[0].tokens.reasoning, 0);
+            let entries =
+                crate::aggregate_model_usage_entries(messages, &crate::GroupBy::ClientModel);
+            assert_eq!(entries[0].performance.total_duration_ms, 2500);
+            assert_eq!(entries[0].performance.timed_tokens, 350);
+            assert_eq!(entries[0].performance.sample_count, 1);
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_duration_keeps_usage_and_completion_timestamp() {
+        for field in [
+            "",
+            r#", "durationMs":null"#,
+            r#", "durationMs":0"#,
+            r#", "durationMs":-1"#,
+            r#", "durationMs":"2500""#,
+            r#", "durationMs":true"#,
+            r#", "durationMs":{}"#,
+            r#", "durationMs":2.5"#,
+            r#", "durationMs":9223372036854775808"#,
+        ] {
+            let file = create_test_file(&format!(
+                "{{\"type\":\"session\",\"id\":\"session-untimed\"}}\n\
+                 {{\"type\":\"message\",\"timestamp\":\"2026-10-10T06:44:18.431Z\",\"message\":\
+                 {{\"role\":\"assistant\",\"model\":\"gpt-5\",\"usage\":{{\"input\":100,\"output\":50}}{field}}}}}"
+            ));
+            let messages = parse_pi_file(file.path());
+            assert_eq!(messages.len(), 1, "{field}");
+            assert_eq!(messages[0].duration_ms, None, "{field}");
+            assert_eq!(messages[0].tokens.total(), 150, "{field}");
+            assert_eq!(messages[0].timestamp, 1791614658431, "{field}");
+        }
+    }
+
+    #[test]
+    fn duration_preserves_fallback_timestamp_and_cross_session_dedup_key() {
+        let record = r#"{"type":"message","id":"assistant-1","timestamp":"2026-10-10T06:44:18.431Z","message":{"role":"assistant","model":"gpt-5","durationMs":2500,"usage":{"input":100,"output":50}}}"#;
+        let timed = create_test_file(&format!(
+            "{{\"type\":\"session\",\"id\":\"session-timed\"}}\n{record}"
+        ));
+        let untimed = create_test_file(&format!(
+            "{{\"type\":\"session\",\"id\":\"session-copy\"}}\n{}",
+            record.replace("\"durationMs\":2500,", "")
+        ));
+        assert_eq!(
+            parse_pi_file(timed.path())[0].dedup_key,
+            parse_pi_file(untimed.path())[0].dedup_key
+        );
+        let missing_timestamp = create_test_file(&format!(
+            "{{\"type\":\"session\",\"id\":\"session-fallback\"}}\n{}",
+            record.replace("\"timestamp\":\"2026-10-10T06:44:18.431Z\",", "")
+        ));
+        let rows = parse_pi_file(missing_timestamp.path());
+        assert_eq!(rows[0].duration_ms, Some(2500));
+        assert_eq!(
+            rows[0].timestamp,
+            file_modified_timestamp_ms(missing_timestamp.path())
+        );
     }
 
     #[test]
