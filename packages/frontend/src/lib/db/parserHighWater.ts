@@ -27,10 +27,19 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * `gen_metadata`; the `antigravity` parser correlates standalone rows to
  * trajectory steps. All three source labels are admitted and reconciled as one
  * family because the same provider response can appear in multiple surfaces.
+ *
+ * Devin CLI is registered at generation 2: generation 1 deduplicated
+ * `message_nodes` rows by database row id and counted the same API request
+ * once per persisted copy, while generation 2 deduplicates by
+ * `metadata.request_id`. Because that generation counts the same history
+ * strictly LOWER, neither the merge guard nor the high-water can heal the
+ * inflation — both only ever defend stored values. See
+ * RECOUNTING_GENERATION_CLIENTS.
  */
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
   droid: 1,
+  "devin-cli": 2,
   // Membership and accepted generations for the atomic Antigravity family
   // transition; the submit route deliberately skips independent client plans.
   "antigravity-cli": 1,
@@ -50,6 +59,32 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
  * keeps every stored row.
  */
 const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
+
+/**
+ * Clients whose REGISTERED generation counts the same history differently in
+ * absolute terms — unlike SNAPSHOT_LAYOUT_CLIENTS, where tokens only move
+ * between days, a recounting generation legitimately lowers the credited
+ * lifetime (Devin CLI gen 2 drops duplicate-row counting).
+ *
+ * Every ledger this file maintains is monotonic, so deflation cannot flow
+ * through increments or a coverage-gated replace: a stored inflated cell
+ * would be defended forever. A recounting client therefore gets ONE rewrite
+ * at generation transition — the first full-history snapshot at the
+ * registered version replaces the client's stored cells on every day the
+ * snapshot reports, including decreases. Stored days the snapshot does not
+ * report are kept: the parser cannot say whether that usage was deleted
+ * locally or simply never existed, and the never-lose-data stance resolves
+ * the ambiguity toward preservation.
+ *
+ * The rewrite happens once per device, only in the transition branch (no
+ * established baseline). Later submits run the normal incremental ledger, so
+ * the guard is weakened exactly for the generation cutover and nowhere else.
+ * A non-fullHistory submit still freezes, so a partial scan can never
+ * recount away covered days.
+ */
+const RECOUNTING_GENERATION_CLIENTS: ReadonlySet<string> = new Set([
+  "devin-cli",
+]);
 
 const TOKEN_FIELDS = [
   "input",
@@ -116,7 +151,8 @@ export type ParserHighWaterMode =
   | "baseline-legacy"
   | "baseline-new"
   | "incremental"
-  | "replace";
+  | "replace"
+  | "recount";
 
 export interface ParserHighWaterPlan {
   mode: ParserHighWaterMode;
@@ -385,6 +421,42 @@ function replaceLayoutPlan(args: {
     increments: createSafeRecord<ClientBreakdownData>(),
     layoutDays: normalizeStateDays(args.incomingDays),
     nextState: stateFromSnapshot(args.version, args.incomingDays),
+  };
+}
+
+/**
+ * The one-time rewrite a recounting generation gets at transition. Coverage
+ * is deliberately NOT required — a truthful recount is expected to fall below
+ * the inflated credited aggregate. `layoutDays` is only the snapshot: the
+ * route writes covered days and keeps stored cells elsewhere, so the credited
+ * ledger for `nextState` merges normalized incoming cells over the legacy
+ * ones rather than adopting the snapshot wholesale.
+ */
+function recountLayoutPlan(args: {
+  client: string;
+  version: number;
+  existingLegacyDays: Record<string, ClientBreakdownData>;
+  incomingDays: Record<string, ClientBreakdownData>;
+}): ParserHighWaterPlan | null {
+  if (!RECOUNTING_GENERATION_CLIENTS.has(args.client)) {
+    return null;
+  }
+  const days = normalizeStateDays({
+    ...args.existingLegacyDays,
+    ...args.incomingDays,
+  });
+  return {
+    mode: "recount",
+    increments: createSafeRecord<ClientBreakdownData>(),
+    layoutDays: normalizeStateDays(args.incomingDays),
+    nextState: {
+      stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
+      version: args.version,
+      baselineEstablished: true,
+      aggregate: aggregateSnapshot(days),
+      days,
+      observedDays: normalizeStateDays(args.incomingDays),
+    },
   };
 }
 
@@ -763,6 +835,19 @@ export function planParserHighWaterSubmission(args: {
         incomingDays: args.incomingDays,
       });
       if (followed) return followed;
+
+      // A recounting generation can legitimately credit LESS than the stored
+      // cells it replaces, so the coverage-gated replace above can never admit
+      // it. Give those clients their one-time rewrite at this boundary instead
+      // — after this state persists, later submits run the monotonic
+      // incremental ledger and the guard is closed again.
+      const recount = recountLayoutPlan({
+        client: args.client,
+        version: args.incomingVersion,
+        existingLegacyDays: args.existingLegacyDays,
+        incomingDays: args.incomingDays,
+      });
+      if (recount) return recount;
     }
     // At transition, preserving all legacy rows and crediting at most positive
     // lifetime aggregate growth is non-destructive. With deleted old usage D

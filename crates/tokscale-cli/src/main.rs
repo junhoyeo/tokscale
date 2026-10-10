@@ -4873,6 +4873,12 @@ const COPILOT_SUBMISSION_PARSER_VERSION: u32 = 2;
 // selected surfaces declare this generation and cover the credited history.
 // This is a submission contract, independent of the on-disk parser cache version.
 const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
+// Devin CLI generation 2 deduplicates `message_nodes` rows by request_id
+// instead of row_id (ea4dd97e, parser cache v3->v4). That generation counts
+// the same history strictly LOWER, so the server treats it as a recounting
+// generation: a full snapshot at this version replaces stored cells instead
+// of advancing a lifetime high-water. Generation 1 submissions freeze.
+const DEVIN_CLI_SUBMISSION_PARSER_VERSION: u32 = 2;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5027,6 +5033,7 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
         .map(|client| {
             let version = match client.as_str() {
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
+                "devin-cli" => DEVIN_CLI_SUBMISSION_PARSER_VERSION,
                 "micode" | "micode-desktop" => MICODE_SUBMISSION_PARSER_VERSION,
                 _ => SUBMISSION_PARSER_VERSION,
             };
@@ -9409,6 +9416,27 @@ mod tests {
         let scope = submit_scan_scope(Some(&clients), true).expect("droid scope");
 
         assert_eq!(scope.parser_versions.get("droid"), Some(&1));
+    }
+
+    /// Devin CLI generation 2 deduplicates `message_nodes` rows by request_id,
+    /// which lowers the counted total — a recount, not a re-attribution. The
+    /// server accepts the generation via `SUPPORTED_VERSIONED_PARSERS` and the
+    /// actual one-time rewrite behavior comes from `RECOUNTING_GENERATION_CLIENTS`
+    /// (both in packages/frontend/src/lib/db/parserHighWater.ts); a full-history
+    /// snapshot then replaces stored cells outright. Generation 1
+    /// (pre-request_id dedup) freezes, so only a CLI declaring this version can
+    /// heal the inflated rows.
+    #[test]
+    fn submit_scan_scope_declares_the_devin_cli_generation_the_server_registers() {
+        let clients = vec!["devin-cli".to_string()];
+        let scope = submit_scan_scope(Some(&clients), true).expect("devin-cli scope");
+
+        assert_eq!(scope.parser_versions.get("devin-cli"), Some(&2));
+        // The desktop surface parses an unrelated ACP stream and is unaffected
+        // by the CLI request_id dedup; it keeps the default generation.
+        let desktop = vec!["devin-desktop".to_string()];
+        let scope = submit_scan_scope(Some(&desktop), true).expect("devin-desktop scope");
+        assert_eq!(scope.parser_versions.get("devin-desktop"), Some(&1));
     }
 
     /// The tip is advice for a person at a prompt. Autosubmit's stdout is the

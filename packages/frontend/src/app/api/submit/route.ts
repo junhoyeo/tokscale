@@ -93,6 +93,16 @@ function isReplacePlan(plan: ParserHighWaterPlan): boolean {
 }
 
 /**
+ * Plans carrying an authoritative layout for the client's covered days:
+ * `replace` rewrites the client's whole stored layout (deleting cells the
+ * snapshot does not report), while `recount` rewrites only the days the
+ * snapshot reports and keeps stored cells elsewhere.
+ */
+function isLayoutPlan(plan: ParserHighWaterPlan): boolean {
+  return plan.mode === "replace" || plan.mode === "recount";
+}
+
+/**
  * The family's credited lifetime cost across stored days, read from DB rows
  * (never incoming or legacy-ledger estimates) before any rewrite can delete
  * the source that carries it. Feeds `reapplyReplaceFamilyCostFloor`.
@@ -121,7 +131,7 @@ function applyReplaceLayouts(
   incomingCostIsComplete: boolean
 ): void {
   for (const [client, plan] of parserPlans) {
-    if (!isReplacePlan(plan) || !plan.layoutDays) continue;
+    if (!isLayoutPlan(plan) || !plan.layoutDays) continue;
     const next = ownValue(plan.layoutDays, date);
     if (next) {
       // A replacement is the authoritative token/model layout. Old same-day
@@ -133,9 +143,12 @@ function applyReplaceLayouts(
         undefined,
         incomingCostIsComplete
       );
-    } else {
+    } else if (isReplacePlan(plan)) {
       delete merged[client];
     }
+    // A recount keeps the stored cell on days its snapshot does not report:
+    // the parser cannot distinguish pruned local history from usage that
+    // never existed, so the never-lose-data stance preserves it.
   }
 }
 
@@ -874,6 +887,10 @@ export async function POST(request: Request) {
           warnings.push(
             `Rewrote ${label} daily layout from the full parser snapshot without changing the lifetime high-water.`
           );
+        } else if (plan.mode === "recount") {
+          warnings.push(
+            `Recounted ${label} history with parser generation ${supportedVersion}; covered stored cells were rewritten to the corrected lower counts while uncovered stored cells were preserved.`
+          );
         } else if (plan.mode === "freeze") {
           warnings.push(
             `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
@@ -938,8 +955,11 @@ export async function POST(request: Request) {
         ([, plan]) =>
           plan.mode === "incremental" || plan.mode === "baseline-legacy"
       );
-      const replaceClients = [...parserPlans]
-        .filter(([, plan]) => isReplacePlan(plan))
+      // Layout clients (replace AND recount) rewrite their covered cells, so
+      // each participates in the lifetime cost floor: an incomplete snapshot
+      // may not lower the client's credited lifetime cost.
+      const layoutClients = [...parserPlans]
+        .filter(([, plan]) => isLayoutPlan(plan))
         .map(([client]) => client);
       // The Antigravity family replaces as one atomic unit, so its credited
       // lifetime cost is one number, captured from the stored rows BEFORE the
@@ -951,7 +971,7 @@ export async function POST(request: Request) {
       const antigravityFamilyFloor = antigravityReplacing
         ? quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY)
         : 0;
-      const individuallyFlooredClients = replaceClients.filter(
+      const individuallyFlooredClients = layoutClients.filter(
         (client) =>
           !(
             antigravityReplacing &&
@@ -962,7 +982,7 @@ export async function POST(request: Request) {
         existingDeviceDays,
         individuallyFlooredClients
       );
-      const incompleteReplaceClients = new Set<string>();
+      const incompleteLayoutClients = new Set<string>();
 
       const existingDaysMap = new Map(
         existingDeviceDays.map((d) => [d.date, d])
@@ -976,6 +996,36 @@ export async function POST(request: Request) {
         parserPlans,
         existingDeviceDays
       );
+
+      // A recount keeps stored cells on days its snapshot does not cover, and
+      // those rows never reach mergedRows — but their cost is part of the
+      // client's stored lifetime floor. Reapplication compares the floor
+      // against written rows only, so subtract the preserved lifetime or the
+      // kept days' cost would be credited a second time on covered cells.
+      const recountClients = [...parserPlans]
+        .filter(([, plan]) => plan.mode === "recount")
+        .map(([client]) => client);
+      if (recountClients.length > 0) {
+        const processedDates = new Set(daysToProcess.keys());
+        for (const client of recountClients) {
+          const floor = replaceCostFloors.get(client);
+          if (floor == null) continue;
+          let preserved = 0;
+          for (const day of existingDeviceDays) {
+            if (processedDates.has(day.date)) continue;
+            const breakdown = day.sourceBreakdown as Record<
+              string,
+              ClientBreakdownData
+            > | null;
+            preserved += ownValue(breakdown ?? {}, client)?.cost ?? 0;
+          }
+          if (floor - preserved > 0) {
+            replaceCostFloors.set(client, floor - preserved);
+          } else {
+            replaceCostFloors.delete(client);
+          }
+        }
+      }
 
       // ------------------------------------------
       // STEP 3c: Compute merge results in memory, then batch write
@@ -1011,9 +1061,9 @@ export async function POST(request: Request) {
 
       for (const incomingDay of daysToProcess.values()) {
         if (incomingDay.totals?.costIsComplete === false) {
-          for (const client of replaceClients) {
+          for (const client of layoutClients) {
             if (ownValue(parserPlans.get(client)?.layoutDays ?? {}, incomingDay.date)) {
-              incompleteReplaceClients.add(client);
+              incompleteLayoutClients.add(client);
             }
           }
         }
@@ -1036,7 +1086,7 @@ export async function POST(request: Request) {
         }
 
         for (const [client, plan] of parserPlans) {
-          if (plan.mode === "freeze" || plan.mode === "replace") {
+          if (plan.mode === "freeze" || isLayoutPlan(plan)) {
             delete incomingClientBreakdown[client];
           } else if (
             plan.mode === "incremental" ||
@@ -1058,7 +1108,7 @@ export async function POST(request: Request) {
         // disappear -- merging them would preserve them with a false warning.
         if (layoutOnlyDates.has(incomingDay.date)) clientsToMerge.clear();
         for (const [client, plan] of parserPlans) {
-          if (plan.mode === "replace") {
+          if (isLayoutPlan(plan)) {
             clientsToMerge.delete(client);
             continue;
           }
@@ -1206,7 +1256,7 @@ export async function POST(request: Request) {
       reapplyReplaceLayoutCostFloors(
         mergedRows,
         replaceCostFloors,
-        incompleteReplaceClients
+        incompleteLayoutClients
       );
       if (antigravityReplacing && antigravityFamilyFloor > 0) {
         reapplyReplaceFamilyCostFloor(

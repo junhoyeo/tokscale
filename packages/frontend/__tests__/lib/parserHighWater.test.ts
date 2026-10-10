@@ -1528,6 +1528,180 @@ describe("droid parser high-water", () => {
   });
 });
 
+describe("devin-cli recount", () => {
+  function devinContribution(date: string, tokens: number, modelId = "swe-2-high") {
+    return {
+      date,
+      clients: [
+        {
+          client: "devin-cli",
+          modelId,
+          tokens: {
+            input: tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          cost: 0,
+          messages: 1,
+        },
+      ],
+    };
+  }
+
+  function devinSnapshot(...rows: ReturnType<typeof devinContribution>[]) {
+    return foldParserClientSnapshot(rows, "devin-cli");
+  }
+
+  function devinPlan(
+    existingLegacyDays: Record<string, ClientBreakdownData>,
+    incomingDays: Record<string, ClientBreakdownData>,
+    state?: ParserClientHighWaterState
+  ) {
+    return planParserHighWaterSubmission({
+      client: "devin-cli",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS["devin-cli"],
+      fullHistory: true,
+      existingLegacyDays,
+      incomingDays,
+      state,
+    });
+  }
+
+  // The row_id-dedup generation counted each persisted copy of a Devin
+  // assistant response; the request_id-dedup generation counts each API
+  // request once, so the corrected snapshot lands strictly BELOW the stored
+  // cells it must replace.
+  const inflatedStored = devinSnapshot(
+    devinContribution("2026-10-07", 514_000_000),
+    devinContribution("2026-10-08", 1_000_000_000)
+  );
+  const correctedScan = devinSnapshot(
+    devinContribution("2026-10-07", 234_000_000),
+    devinContribution("2026-10-08", 455_000_000)
+  );
+
+  it("is registered at the generation the deduplicating CLI declares", () => {
+    // Generation 2 is the request_id recount. A registered version of 1 would
+    // recount on every generation-1 (still-inflating) submission; a version
+    // above 2 would freeze the only CLI that can heal the stored rows.
+    expect(SUPPORTED_VERSIONED_PARSERS["devin-cli"]).toBe(2);
+  });
+
+  it("shows why the merge guard alone can never heal the inflated cells", () => {
+    // Without the recount this is what the submit route stores: the same-day
+    // regression guard preserves the higher stored value on every covered
+    // day, so the inflation is locked in forever.
+    let stored = 0;
+    for (const date of Object.keys(correctedScan)) {
+      const merged = mergeClientBreakdownsWithRegressionGuard(
+        inflatedStored[date] ? { "devin-cli": inflatedStored[date] } : {},
+        { "devin-cli": correctedScan[date] },
+        new Set(["devin-cli"]),
+        undefined,
+        true
+      );
+      stored += merged.merged["devin-cli"]?.tokens ?? 0;
+    }
+
+    expect(stored).toBe(1_514_000_000);
+  });
+
+  it("rewrites covered stored cells to the corrected lower counts", () => {
+    const plan = devinPlan(inflatedStored, correctedScan);
+
+    expect(plan.mode).toBe("recount");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays?.["2026-10-07"]?.tokens).toBe(234_000_000);
+    expect(plan.layoutDays?.["2026-10-08"]?.tokens).toBe(455_000_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(689_000_000);
+  });
+
+  it("keeps stored cells on days the recounting snapshot does not report", () => {
+    const legacyWithExtraDay = devinSnapshot(
+      devinContribution("2026-10-06", 88_000_000),
+      devinContribution("2026-10-07", 514_000_000),
+      devinContribution("2026-10-08", 1_000_000_000)
+    );
+
+    const plan = devinPlan(legacyWithExtraDay, correctedScan);
+
+    expect(plan.mode).toBe("recount");
+    // The uncovered day stays out of the rewrite layout...
+    expect(plan.layoutDays?.["2026-10-06"]).toBeUndefined();
+    // ...but remains in the credited ledger, since the route keeps the row.
+    expect(plan.nextState?.days["2026-10-06"]?.tokens).toBe(88_000_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(777_000_000);
+  });
+
+  it("closes the guard again after the one-time recount", () => {
+    const state = devinPlan(inflatedStored, correctedScan).nextState!;
+
+    // An even lower same-generation snapshot cannot lower credited days a
+    // second time: the monotonic incremental ledger applies from here on.
+    const lower = devinPlan(
+      {},
+      devinSnapshot(devinContribution("2026-10-08", 100_000_000)),
+      state
+    );
+    expect(lower.mode).toBe("incremental");
+    expect(lower.highWaterDeficit).toBeGreaterThan(0);
+    expect(lower.increments["2026-10-08"]).toBeUndefined();
+
+    // Real growth on top of the recounted baseline is still credited.
+    const grown = devinPlan(
+      {},
+      devinSnapshot(
+        devinContribution("2026-10-07", 234_000_000),
+        devinContribution("2026-10-08", 455_000_000),
+        devinContribution("2026-10-09", 11_000_000)
+      ),
+      state
+    );
+    expect(grown.mode).toBe("incremental");
+    expect(grown.nextState?.aggregate.tokens).toBe(700_000_000);
+  });
+
+  it("freezes the still-inflating generation-1 submissions", () => {
+    const plan = planParserHighWaterSubmission({
+      client: "devin-cli",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: inflatedStored,
+      incomingDays: inflatedStored,
+    });
+
+    expect(plan.mode).toBe("freeze");
+    expect(plan.nextState).toBeUndefined();
+  });
+
+  it("does not let a partial snapshot recount away covered days", () => {
+    const partial = planParserHighWaterSubmission({
+      client: "devin-cli",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS["devin-cli"],
+      fullHistory: false,
+      existingLegacyDays: inflatedStored,
+      incomingDays: devinSnapshot(devinContribution("2026-10-08", 1)),
+    });
+
+    expect(partial.mode).toBe("freeze");
+    expect(partial.nextState?.baselineEstablished).toBe(false);
+
+    // The pending state must not close the transition: a later full-history
+    // snapshot at the registered generation still gets its recount.
+    const followed = devinPlan(inflatedStored, correctedScan, partial.nextState);
+    expect(followed.mode).toBe("recount");
+  });
+
+  it("baselines normally when no inflated history is stored", () => {
+    const plan = devinPlan({}, correctedScan);
+
+    expect(plan.mode).toBe("baseline-new");
+    expect(plan.nextState?.aggregate.tokens).toBe(689_000_000);
+  });
+});
+
 describe("unverified retention floor", () => {
   function floored(
     state: ParserClientHighWaterState,
