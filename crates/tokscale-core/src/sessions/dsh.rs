@@ -13,6 +13,10 @@
 //!   `seedLength` fork boundary.
 //! - `request/header`: the provider/model the request was routed to (fallback
 //!   for messages whose `source` is absent).
+//! - `step/start`: the clock of the loop step it opens, tagged with the same
+//!   `(turn, step)` its settlement carries. The gap from this anchor to the
+//!   settlement that reports the usage is the call's own generation latency,
+//!   which is what the shared `performance` block measures.
 //! - `assistant/message`: authoritative per-call usage on `data.usage`
 //!   (`inputTokens`, `outputTokens`, `cacheReadTokens`, ...) plus the serving
 //!   provider and model on `data.message.source`. `source.model` is the model
@@ -30,7 +34,7 @@ use super::utils::lossy_lines;
 use super::{workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use tracing::warn;
@@ -224,6 +228,11 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
     // same (turn, step), unless a durable retry-started event closes that
     // replacement slot. Retried attempts then accumulate as separate calls.
     let mut last_settlement: Option<(i64, i64, usize)> = None;
+    // Clock of the `step/start` that opened each `(turn, step)`, re-set by a
+    // retry. Settlements only read it: re-anchoring on a settlement would make
+    // a later sample for the same slot measure the gap between two samples of
+    // one call instead of the whole span the call actually occupied.
+    let mut step_started: HashMap<(i64, i64), i64> = HashMap::new();
     // Turn numbers that already emitted a turn-start message.
     let mut turn_started: HashSet<i64> = HashSet::new();
     // Fallback turn-start marker for transcripts without turn numbers: a
@@ -261,9 +270,32 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
             "user/message" => {
                 pending_user_turn = true;
             }
+            "step/start" => {
+                if let (Some(turn), Some(step), Some(started)) = (
+                    value.pointer("/data/turn").and_then(Value::as_i64),
+                    value.pointer("/data/step").and_then(Value::as_i64),
+                    value.get("time").and_then(Value::as_i64),
+                ) {
+                    if started > 0 {
+                        step_started.insert((turn, step), started);
+                    }
+                }
+            }
             "llm/retry-started" => {
                 let retry_turn = value.pointer("/data/turn").and_then(Value::as_i64);
                 let retry_step = value.pointer("/data/step").and_then(Value::as_i64);
+                // A retry is a second provider call for the same step, so it
+                // gets its own clock. Re-anchoring here keeps its latency from
+                // being charged to the span the failed call already used.
+                if let (Some(turn), Some(step), Some(started)) = (
+                    retry_turn,
+                    retry_step,
+                    value.get("time").and_then(Value::as_i64),
+                ) {
+                    if started > 0 {
+                        step_started.insert((turn, step), started);
+                    }
+                }
                 if last_settlement.is_some_and(|(turn, step, _)| {
                     Some(turn) == retry_turn && Some(step) == retry_step
                 }) {
@@ -310,6 +342,35 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 if timestamp <= 0 {
                     continue;
                 }
+
+                let step = value
+                    .pointer("/data/turn")
+                    .and_then(Value::as_i64)
+                    .zip(value.pointer("/data/step").and_then(Value::as_i64));
+                // `SessionSpan` projects a message as
+                // `[timestamp, timestamp + duration_ms]`, so a settled call is
+                // dated at the `step/start` that opened it rather than at its
+                // own settlement row. Stamping the settlement instead would
+                // push every DSH interval forward by one generation, which
+                // moves day buckets and active-time metrics with it. The dedup
+                // key below still uses the raw row time, so cross-file identity
+                // is unchanged.
+                let started_at = if is_summary {
+                    None
+                } else {
+                    step.and_then(|slot| step_started.get(&slot).copied())
+                };
+                // A log-only `assistant/attempt`, and an `assistant/message`
+                // whose usage sits in the compact stream, are charged from the
+                // last usage chunk of that stream, and the stream's own records
+                // can be written later than the outer row. The span has to close
+                // on the record that supplied the charged numbers, or the usage
+                // lands after the duration meant to cover it.
+                let settled_at = if settles_from_stream(&value, event_type) {
+                    stream_settled_ms(&value).map_or(timestamp, |ms| ms.max(timestamp))
+                } else {
+                    timestamp
+                };
 
                 let source = value.pointer("/data/message/source");
                 let model_id = served_model(source)
@@ -446,7 +507,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                     model_id,
                     provider_id,
                     &sid,
-                    timestamp,
+                    started_at.unwrap_or(timestamp),
                     tokens,
                     0.0,
                     Some(dedup_key),
@@ -463,11 +524,13 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                     continue;
                 }
 
-                let step = value
-                    .pointer("/data/turn")
-                    .and_then(Value::as_i64)
-                    .zip(value.pointer("/data/step").and_then(Value::as_i64));
                 if let Some((turn, step)) = step {
+                    // The span is the one the call actually occupied: the
+                    // message was dated at its anchor above, and the duration
+                    // closes it where the charged usage was written.
+                    if let Some(anchor) = started_at {
+                        message.duration_ms = duration_between_ms(Some(anchor), Some(settled_at));
+                    }
                     if let Some((last_turn, last_step, index)) = last_settlement {
                         if last_turn == turn && last_step == step {
                             // This settlement is another sample for the same
@@ -491,6 +554,15 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     messages
+}
+
+/// Milliseconds between two DSH row clocks, or `None` when the pair cannot
+/// describe a real span. Both ends are required: a settlement with no matching
+/// `step/start` has no measurable latency and must stay untimed rather than
+/// inherit a neighbouring step's clock.
+fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    let duration = end_ms?.saturating_sub(start_ms?);
+    (duration > 0).then_some(duration)
 }
 
 /// Return the authoritative usage sample for a durable DSH model settlement.
@@ -527,6 +599,38 @@ fn last_assistant_stream_usage(value: &Value) -> Option<&Value> {
                 .then(|| chunk.get("usage"))
                 .flatten()
         })
+}
+
+/// Whether this event's authoritative usage comes from its embedded stream
+/// rather than from a top-level `data.usage`. Mirrors [`usage_for_event`].
+fn settles_from_stream(value: &Value, event_type: &str) -> bool {
+    match event_type {
+        "assistant/message" => value.pointer("/data/usage").is_none(),
+        "assistant/attempt" => true,
+        _ => false,
+    }
+}
+
+/// Latest clock the embedded Assistant stream recorded for a call.
+///
+/// Only the records that describe the call's outcome count: its usage samples
+/// and its finish. The stream is chronological, so the newest of those is the
+/// clock at which the charged sample was written.
+fn stream_settled_ms(value: &Value) -> Option<i64> {
+    value
+        .pointer("/data/stream")?
+        .as_array()?
+        .iter()
+        .filter_map(|record| {
+            if !matches!(
+                record.pointer("/chunk/type").and_then(Value::as_str),
+                Some("usage" | "finish")
+            ) {
+                return None;
+            }
+            record.get("time").and_then(Value::as_i64)
+        })
+        .max()
 }
 
 /// Return the concrete model that served a DSH call.
@@ -788,6 +892,87 @@ mod tests {
 
         // Same turn, later step: not a turn start.
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn measures_generation_latency_from_the_step_start_clock() {
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-duration","createdAt":1786669406484,"cwd":"/work"}"#,
+            r#"{"type":"step/start","seq":10,"time":1786669450000,"data":{"turn":1,"step":1}}"#,
+            r#"{"type":"assistant/message","seq":11,"time":1786669451200,"data":{"turn":1,"step":1,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":130,"outputTokens":159}}}"#,
+            // No `step/start` for this slot, so there is no measurable span. It
+            // must stay untimed rather than inherit the previous step's clock.
+            r#"{"type":"assistant/message","seq":21,"time":1786669460000,"data":{"turn":1,"step":2,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":130,"outputTokens":159}}}"#,
+            r#"{"type":"step/start","seq":30,"time":1786669465000,"data":{"turn":1,"step":3}}"#,
+            r#"{"type":"assistant/message","seq":31,"time":1786669467000,"data":{"turn":1,"step":3,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":130,"outputTokens":159}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        // `SessionSpan` closes a span by adding `duration_ms` to `timestamp`,
+        // so the message has to be dated at the anchor, not at the settlement.
+        assert_eq!(messages[0].timestamp, 1786669450000);
+        assert_eq!(messages[0].duration_ms, Some(1_200));
+        // No anchor means no measurable span, so the row keeps its own time.
+        assert_eq!(messages[1].timestamp, 1786669460000);
+        assert_eq!(messages[1].duration_ms, None);
+        assert_eq!(messages[2].timestamp, 1786669465000);
+        assert_eq!(messages[2].duration_ms, Some(2_000));
+        // The dedup key still identifies the settlement row rather than the
+        // span start, so a row copied into a fork keeps collapsing against the
+        // original it was copied from.
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("dsh:seq:11:1786669451200:irix:deepseek-v4-flash:130:159:0:0:0")
+        );
+    }
+
+    #[test]
+    fn replacement_keeps_the_full_span_and_a_retry_measures_its_own_call() {
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-retry","createdAt":1786669406484,"cwd":"/work"}"#,
+            r#"{"type":"step/start","seq":10,"time":1786669450000,"data":{"turn":1,"step":1}}"#,
+            r#"{"type":"assistant/message","seq":11,"time":1786669451000,"data":{"turn":1,"step":1,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":10,"outputTokens":20}}}"#,
+            // A later sample for the same slot replaces that row. It still
+            // describes the whole step, not the 3 s between the two samples.
+            r#"{"type":"assistant/message","seq":12,"time":1786669454000,"data":{"turn":1,"step":1,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":30,"outputTokens":40}}}"#,
+            r#"{"type":"llm/retry-started","seq":13,"time":1786669454500,"data":{"turn":1,"step":1,"retry":1,"retryId":"retry-1"}}"#,
+            r#"{"type":"assistant/message","seq":14,"time":1786669456000,"data":{"turn":1,"step":1,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":50,"outputTokens":60}}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        // The replacement collapsed into one row and the retry became a second
+        // call, measured from the retry boundary so the two spans never overlap.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, 1786669450000);
+        assert_eq!(messages[0].tokens.output, 40);
+        assert_eq!(messages[0].duration_ms, Some(4_000));
+        assert_eq!(messages[1].timestamp, 1786669454500);
+        assert_eq!(messages[1].tokens.output, 60);
+        assert_eq!(messages[1].duration_ms, Some(1_500));
+    }
+
+    #[test]
+    fn stream_only_settlements_close_the_span_at_the_stream_clock() {
+        let file = write_zstd_session(&[
+            r#"{"type":"session","id":"session-stream","createdAt":1,"cwd":"/work"}"#,
+            r#"{"type":"step/start","seq":1,"time":1786669450000,"data":{"turn":1,"step":1}}"#,
+            // The row is written at ...0002, but the sample that gets charged is
+            // the second usage chunk and the call finishes at ...0100. Closing
+            // the span on the outer row time would bill usage that the duration
+            // does not cover.
+            r#"{"type":"assistant/attempt","seq":2,"time":1786669450002,"data":{"turn":1,"step":1,"stream":[{"type":"chunk","time":1786669450002,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":3}}},{"type":"chunk","time":1786669450004,"chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":5}}},{"type":"chunk","time":1786669450100,"chunk":{"type":"finish","reason":{"kind":"error"}}}]}}"#,
+        ]);
+
+        let messages = parse_dsh_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1786669450000);
+        assert_eq!(messages[0].tokens.input, 20);
+        assert_eq!(messages[0].tokens.output, 5);
+        assert_eq!(messages[0].duration_ms, Some(100));
     }
 
     #[test]
