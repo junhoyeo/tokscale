@@ -457,11 +457,91 @@ pub struct LocalParseOptions {
     pub scanner_settings: scanner::ScannerSettings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostProvenance {
+    #[serde(default)]
+    pub kind: CostProvenanceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_source: Option<EstimateSource>,
+}
+
+impl CostProvenance {
+    pub const fn unknown() -> Self {
+        Self {
+            kind: CostProvenanceKind::Unknown,
+            estimate_source: None,
+        }
+    }
+
+    pub const fn provider_reported() -> Self {
+        Self {
+            kind: CostProvenanceKind::ProviderReported,
+            estimate_source: None,
+        }
+    }
+
+    pub const fn estimated(estimate_source: EstimateSource) -> Self {
+        Self {
+            kind: CostProvenanceKind::Estimated,
+            estimate_source: Some(estimate_source),
+        }
+    }
+
+    pub const fn mixed(estimate_source: Option<EstimateSource>) -> Self {
+        Self {
+            kind: CostProvenanceKind::Mixed,
+            estimate_source,
+        }
+    }
+}
+
+impl Default for CostProvenance {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostProvenanceKind {
+    #[default]
+    Unknown,
+    ProviderReported,
+    Estimated,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EstimateSource {
+    Catalog,
+    Custom,
+    Unknown,
+    Mixed,
+}
+
+const fn default_unknown_provenance_opt() -> Option<CostProvenance> {
+    Some(CostProvenance::unknown())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DailyTotals {
     pub tokens: i64,
     pub cost: f64,
     pub messages: i32,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
+}
+
+impl DailyTotals {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -472,6 +552,18 @@ pub struct ClientContribution {
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub messages: i32,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
+}
+
+impl ClientContribution {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -503,16 +595,28 @@ pub struct SessionContribution {
     pub last_seen: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct YearSummary {
     pub year: String,
     pub total_tokens: i64,
     pub total_cost: f64,
     pub range_start: String,
     pub range_end: String,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+impl YearSummary {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DataSummary {
     pub total_tokens: i64,
     pub total_cost: f64,
@@ -522,6 +626,18 @@ pub struct DataSummary {
     pub max_cost_in_single_day: f64,
     pub clients: Vec<String>,
     pub models: Vec<String>,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
+}
+
+impl DataSummary {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5255,6 +5371,21 @@ pub fn calculate_cost_with_service_tier(
         * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
 }
 
+pub fn calculate_cost_detailed_with_service_tier(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+) -> (f64, Option<EstimateSource>) {
+    let (cost, source) =
+        pricing.calculate_cost_detailed_with_provider(model_id, provider_id, tokens);
+    (
+        cost * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier),
+        source,
+    )
+}
+
 fn apply_pricing_if_available(
     message: &mut UnifiedMessage,
     pricing: Option<&pricing::PricingService>,
@@ -5267,15 +5398,21 @@ fn apply_pricing_if_available(
         return;
     };
 
-    let calculated_cost = pricing.calculate_cost_with_provider(
+    let (calculated_cost, estimate_source) = pricing.calculate_cost_detailed_with_provider(
         &message.model_id,
         Some(&message.provider_id),
         &message.tokens,
-    ) * pricing_multiplier(message, pricing);
+    );
+    let calculated_cost = calculated_cost * pricing_multiplier(message, pricing);
 
-    if calculated_cost > 0.0 {
-        message.cost = calculated_cost;
-        message.mark_estimated_cost();
+    if let Some(source) = estimate_source {
+        // A covered zero rate may classify a message that carries no cost, but
+        // must never zero out a positive cost already on a non-authoritative
+        // message (e.g. after a cross-file merge).
+        if calculated_cost > 0.0 || message.cost <= 0.0 {
+            message.cost = calculated_cost;
+            message.mark_estimated_cost_with_source(source);
+        }
     }
 }
 
@@ -6837,6 +6974,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         parent_session_id: None,
         is_turn_start: false,
         model_attribution_conflicted: false,
+        estimate_source: None,
     }
 }
 

@@ -122,6 +122,10 @@ pub struct UnifiedMessage {
     /// Such rows must remain unpriced rather than accepting fallback attribution.
     #[serde(default)]
     pub model_attribution_conflicted: bool,
+    /// Origin of estimated rates when `cost_source == CostSource::Estimated`.
+    /// Skipped in serde to preserve bincode message cache layout compatibility.
+    #[serde(default, skip)]
+    pub estimate_source: Option<crate::EstimateSource>,
 }
 
 const fn default_message_count() -> i32 {
@@ -402,6 +406,7 @@ impl UnifiedMessage {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            estimate_source: None,
         }
     }
 
@@ -456,8 +461,16 @@ impl UnifiedMessage {
         self.cost_source = CostSource::ProviderReported;
     }
 
-    pub(crate) fn mark_estimated_cost(&mut self) {
+    pub fn mark_estimated_cost(&mut self) {
         self.cost_source = CostSource::Estimated;
+        if self.estimate_source.is_none() {
+            self.estimate_source = Some(crate::EstimateSource::Unknown);
+        }
+    }
+
+    pub(crate) fn mark_estimated_cost_with_source(&mut self, source: crate::EstimateSource) {
+        self.cost_source = CostSource::Estimated;
+        self.estimate_source = Some(source);
     }
 
     pub(crate) fn has_authoritative_cost(&self) -> bool {

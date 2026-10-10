@@ -1051,6 +1051,7 @@ fn add_row(day: &mut DayBuilder, client: &str, model: &str, tokens: TokenBreakdo
             tokens: TokenBreakdown::default(),
             cost: 0.0,
             messages: 0,
+            cost_provenance: None,
         });
     entry.tokens += &tokens;
     entry.cost += cost;
@@ -1086,6 +1087,7 @@ fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
             // clawdboard does not export per-model message counts; leaving this
             // at 0 keeps the day internally consistent (0 == sum of client 0s).
             messages: 0,
+            cost_provenance: None,
         },
         intensity: 0,
         token_breakdown,

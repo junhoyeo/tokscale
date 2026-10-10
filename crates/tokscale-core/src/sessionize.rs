@@ -512,6 +512,7 @@ mod tests {
             is_turn_start: false,
             model_attribution_conflicted: false,
             duration_ms: None,
+            estimate_source: None,
         }
     }
 

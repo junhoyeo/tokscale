@@ -1883,19 +1883,40 @@ impl PricingLookup {
         self.calculate_cost_with_provider(model_id, None, &usage)
     }
 
+    pub fn calculate_cost_detailed_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> (f64, Option<crate::EstimateSource>) {
+        let provider_id = normalize_provider_hint(provider_id);
+        let result = match self.resolve_for_usage(model_id, provider_id, usage) {
+            Some(r) => r,
+            None => return (0.0, None),
+        };
+
+        let cost = compute_cost_for_lookup(&result, provider_id, usage);
+        if cost > 0.0 {
+            return (cost, Some(crate::EstimateSource::Catalog));
+        }
+
+        // A catalog row can legitimately price usage at zero (free or
+        // subscription models). Mirror the custom branch: a zero the row
+        // covers is an estimate, not an unknown.
+        let covered_zero = usage.total() > 0
+            && result.evidence.is_submission_safe()
+            && result.pricing.covers_usage(usage);
+        (0.0, covered_zero.then_some(crate::EstimateSource::Catalog))
+    }
+
     pub fn calculate_cost_with_provider(
         &self,
         model_id: &str,
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> f64 {
-        let provider_id = normalize_provider_hint(provider_id);
-        let result = match self.resolve_for_usage(model_id, provider_id, usage) {
-            Some(r) => r,
-            None => return 0.0,
-        };
-
-        compute_cost_for_lookup(&result, provider_id, usage)
+        self.calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+            .0
     }
 
     /// Resolve `model_id` for pricing `usage`, borrowing the rates the

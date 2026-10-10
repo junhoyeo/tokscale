@@ -1814,6 +1814,7 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             parent_session_id: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
+            estimate_source: None,
         }
     }
 }
@@ -1899,6 +1900,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             parent_session_id: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
+            estimate_source: None,
         }
     }
 }
@@ -1982,6 +1984,7 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
             parent_session_id: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
+            estimate_source: None,
         }
     }
 }

@@ -4,8 +4,9 @@
 
 use crate::sessions::UnifiedMessage;
 use crate::{
-    ClientContribution, DailyContribution, DailyTotals, DataSummary, GraphMeta, GraphResult,
-    SessionContribution, TokenBreakdown, YearSummary,
+    ClientContribution, CostProvenance, CostProvenanceKind, DailyContribution, DailyTotals,
+    DataSummary, EstimateSource, GraphMeta, GraphResult, SessionContribution, TokenBreakdown,
+    YearSummary,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -156,8 +157,21 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
 
     let mut clients_set = std::collections::HashSet::with_capacity(5);
     let mut models_set = std::collections::HashSet::with_capacity(20);
+    let mut provenance = CostProvenanceAccumulator::default();
 
     for c in contributions {
+        if c.totals.tokens > 0
+            || c.totals.cost > 0.0
+            || c.totals.messages > 0
+            || c.totals
+                .cost_provenance
+                .as_ref()
+                .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
+        {
+            if let Some(prov) = &c.totals.cost_provenance {
+                provenance.add_provenance(prov);
+            }
+        }
         for s in &c.clients {
             clients_set.insert(s.client.clone());
             models_set.insert(s.model_id.clone());
@@ -185,6 +199,7 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
             v.sort();
             v
         },
+        cost_provenance: Some(provenance.finish()),
     }
 }
 
@@ -206,6 +221,19 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         entry.tokens = entry.tokens.saturating_add(c.totals.tokens);
         entry.cost += c.totals.cost;
 
+        if c.totals.tokens > 0
+            || c.totals.cost > 0.0
+            || c.totals.messages > 0
+            || c.totals
+                .cost_provenance
+                .as_ref()
+                .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
+        {
+            if let Some(prov) = &c.totals.cost_provenance {
+                entry.provenance.add_provenance(prov);
+            }
+        }
+
         if entry.start.is_empty() || c.date < entry.start {
             entry.start = c.date.clone();
         }
@@ -221,6 +249,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         total_cost: acc.cost,
         range_start: acc.start,
         range_end: acc.end,
+        cost_provenance: Some(acc.provenance.finish()),
     }));
 
     years.sort_by(|a, b| a.year.cmp(&b.year));
@@ -265,10 +294,159 @@ pub fn generate_graph_result(
 // Internal helpers
 // =============================================================================
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CostProvenanceAccumulator {
+    has_unknown: bool,
+    has_provider_reported: bool,
+    has_estimated: bool,
+    has_catalog: bool,
+    has_custom: bool,
+    has_estimate_unknown: bool,
+}
+
+impl CostProvenanceAccumulator {
+    pub fn is_empty(&self) -> bool {
+        !self.has_unknown && !self.has_provider_reported && !self.has_estimated
+    }
+
+    pub fn add_message(&mut self, msg: &UnifiedMessage) {
+        let has_usage = msg.tokens.total() > 0;
+        let has_cost = msg.cost > 0.0;
+        let is_explicit_source = msg.cost_source != crate::sessions::CostSource::Unknown;
+
+        if !has_usage && !has_cost && !is_explicit_source {
+            return;
+        }
+
+        match msg.cost_source {
+            crate::sessions::CostSource::ProviderReported => {
+                self.has_provider_reported = true;
+            }
+            crate::sessions::CostSource::Estimated => {
+                self.has_estimated = true;
+                match msg.estimate_source {
+                    Some(EstimateSource::Catalog) => self.has_catalog = true,
+                    Some(EstimateSource::Custom) => self.has_custom = true,
+                    Some(EstimateSource::Mixed) => {
+                        self.has_catalog = true;
+                        self.has_custom = true;
+                    }
+                    Some(EstimateSource::Unknown) | None => {
+                        self.has_estimate_unknown = true;
+                    }
+                }
+            }
+            crate::sessions::CostSource::Unknown => {
+                self.has_unknown = true;
+            }
+        }
+    }
+
+    pub fn add_provenance(&mut self, prov: &CostProvenance) {
+        match prov.kind {
+            CostProvenanceKind::Unknown => {
+                self.has_unknown = true;
+            }
+            CostProvenanceKind::ProviderReported => {
+                self.has_provider_reported = true;
+            }
+            CostProvenanceKind::Estimated => {
+                self.has_estimated = true;
+                match prov.estimate_source {
+                    Some(EstimateSource::Catalog) => self.has_catalog = true,
+                    Some(EstimateSource::Custom) => self.has_custom = true,
+                    Some(EstimateSource::Mixed) => {
+                        self.has_catalog = true;
+                        self.has_custom = true;
+                    }
+                    Some(EstimateSource::Unknown) | None => {
+                        self.has_estimate_unknown = true;
+                    }
+                }
+            }
+            CostProvenanceKind::Mixed => {
+                if let Some(src) = prov.estimate_source {
+                    self.has_estimated = true;
+                    match src {
+                        EstimateSource::Catalog => self.has_catalog = true,
+                        EstimateSource::Custom => self.has_custom = true,
+                        EstimateSource::Mixed => {
+                            self.has_catalog = true;
+                            self.has_custom = true;
+                        }
+                        EstimateSource::Unknown => self.has_estimate_unknown = true,
+                    }
+                    self.has_unknown = true;
+                } else {
+                    self.has_unknown = true;
+                    self.has_provider_reported = true;
+                }
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.has_unknown |= other.has_unknown;
+        self.has_provider_reported |= other.has_provider_reported;
+        self.has_estimated |= other.has_estimated;
+        self.has_catalog |= other.has_catalog;
+        self.has_custom |= other.has_custom;
+        self.has_estimate_unknown |= other.has_estimate_unknown;
+    }
+
+    pub fn finish(&self) -> CostProvenance {
+        let kind_count = (self.has_unknown as u8)
+            + (self.has_provider_reported as u8)
+            + (self.has_estimated as u8);
+
+        let kind = match kind_count {
+            0 => CostProvenanceKind::Unknown,
+            1 => {
+                if self.has_provider_reported {
+                    CostProvenanceKind::ProviderReported
+                } else if self.has_estimated {
+                    CostProvenanceKind::Estimated
+                } else {
+                    CostProvenanceKind::Unknown
+                }
+            }
+            _ => CostProvenanceKind::Mixed,
+        };
+
+        let estimate_source = if self.has_estimated {
+            let est_count = (self.has_catalog as u8)
+                + (self.has_custom as u8)
+                + (self.has_estimate_unknown as u8);
+            match est_count {
+                0 => Some(EstimateSource::Unknown),
+                1 => {
+                    if self.has_catalog {
+                        Some(EstimateSource::Catalog)
+                    } else if self.has_custom {
+                        Some(EstimateSource::Custom)
+                    } else {
+                        Some(EstimateSource::Unknown)
+                    }
+                }
+                _ => Some(EstimateSource::Mixed),
+            }
+        } else {
+            None
+        };
+
+        CostProvenance {
+            kind,
+            estimate_source,
+        }
+    }
+}
+
 struct DayAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     clients: HashMap<String, ClientContribution>,
+    provenance: CostProvenanceAccumulator,
+    client_provenance: HashMap<String, CostProvenanceAccumulator>,
 }
 
 impl Default for DayAccumulator {
@@ -277,6 +455,8 @@ impl Default for DayAccumulator {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(8),
+            provenance: CostProvenanceAccumulator::default(),
+            client_provenance: HashMap::with_capacity(8),
         }
     }
 }
@@ -293,6 +473,7 @@ impl DayAccumulator {
             .saturating_add(msg.message_count.max(0));
 
         self.token_breakdown += &msg.tokens;
+        self.provenance.add_message(msg);
 
         // Update client contribution
         // Canonical (alias-free) id: this contribution is serialized into the
@@ -303,6 +484,10 @@ impl DayAccumulator {
             msg.client,
             crate::canonical_model_id(&msg.model_id)
         );
+        self.client_provenance
+            .entry(key.clone())
+            .or_default()
+            .add_message(msg);
         let client_entry = self
             .clients
             .entry(key)
@@ -313,6 +498,7 @@ impl DayAccumulator {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
+                cost_provenance: None,
             });
 
         // Merge provider_id if different provider contributes to same client+model
@@ -343,6 +529,11 @@ impl DayAccumulator {
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
         self.token_breakdown += &other.token_breakdown;
+        self.provenance.merge(other.provenance);
+
+        for (key, prov) in other.client_provenance {
+            self.client_provenance.entry(key).or_default().merge(prov);
+        }
 
         for (key, client_contrib) in other.clients {
             let entry = self
@@ -355,6 +546,7 @@ impl DayAccumulator {
                     tokens: TokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
+                    cost_provenance: None,
                 });
 
             // Merge provider_ids from parallel reduction
@@ -388,10 +580,11 @@ impl DayAccumulator {
             reasoning: self.token_breakdown.reasoning.max(0),
         };
 
+        let mut client_provenance = self.client_provenance;
         let clients: Vec<ClientContribution> = self
             .clients
-            .into_values()
-            .map(|mut s| {
+            .into_iter()
+            .map(|(key, mut s)| {
                 s.tokens.input = s.tokens.input.max(0);
                 s.tokens.output = s.tokens.output.max(0);
                 s.tokens.cache_read = s.tokens.cache_read.max(0);
@@ -399,6 +592,12 @@ impl DayAccumulator {
                 s.tokens.cache_write_1h = s.tokens.cache_write_1h.max(0);
                 s.tokens.reasoning = s.tokens.reasoning.max(0);
                 s.cost = s.cost.max(0.0);
+                s.cost_provenance = Some(
+                    client_provenance
+                        .remove(&key)
+                        .map(|p| p.finish())
+                        .unwrap_or_default(),
+                );
                 s
             })
             .collect();
@@ -409,6 +608,7 @@ impl DayAccumulator {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
                 messages: self.totals.messages.max(0),
+                cost_provenance: Some(self.provenance.finish()),
             },
             intensity: 0,
             token_breakdown,
@@ -422,6 +622,8 @@ struct SessionAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     clients: HashMap<String, ClientContribution>,
+    provenance: CostProvenanceAccumulator,
+    client_provenance: HashMap<String, CostProvenanceAccumulator>,
     /// Tracks the most-active (client, provider, model) for the session, used
     /// as the canonical top-level fields on `SessionContribution`.
     top_client: String,
@@ -438,6 +640,8 @@ impl Default for SessionAccumulator {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(2),
+            provenance: CostProvenanceAccumulator::default(),
+            client_provenance: HashMap::with_capacity(2),
             top_client: String::new(),
             top_provider: String::new(),
             top_model: String::new(),
@@ -460,12 +664,17 @@ impl SessionAccumulator {
             .saturating_add(msg.message_count.max(0));
 
         self.token_breakdown += &msg.tokens;
+        self.provenance.add_message(msg);
 
         // Track tightest (client, provider, model) by cost contribution.
         // Canonical (alias-free) id — this feeds the submitted/exported payload,
         // so machine-local aliases must not rewrite it (see `add_message`).
         let normalized_model = crate::canonical_model_id(&msg.model_id);
         let key = format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model);
+        self.client_provenance
+            .entry(key.clone())
+            .or_default()
+            .add_message(msg);
         let client_entry = self
             .clients
             .entry(key)
@@ -476,6 +685,7 @@ impl SessionAccumulator {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
+                cost_provenance: None,
             });
         client_entry.tokens += &msg.tokens;
         client_entry.cost += msg.cost;
@@ -511,6 +721,11 @@ impl SessionAccumulator {
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
         self.token_breakdown += &other.token_breakdown;
+        self.provenance.merge(other.provenance);
+
+        for (key, prov) in other.client_provenance {
+            self.client_provenance.entry(key).or_default().merge(prov);
+        }
 
         for (key, contrib) in other.clients {
             let entry = self
@@ -523,6 +738,7 @@ impl SessionAccumulator {
                     tokens: TokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
+                    cost_provenance: None,
                 });
             entry.tokens += &contrib.tokens;
             entry.cost += contrib.cost;
@@ -554,10 +770,11 @@ impl SessionAccumulator {
             reasoning: self.token_breakdown.reasoning.max(0),
         };
 
+        let mut client_provenance = self.client_provenance;
         let mut clients: Vec<ClientContribution> = self
             .clients
-            .into_values()
-            .map(|mut c| {
+            .into_iter()
+            .map(|(key, mut c)| {
                 c.tokens.input = c.tokens.input.max(0);
                 c.tokens.output = c.tokens.output.max(0);
                 c.tokens.cache_read = c.tokens.cache_read.max(0);
@@ -565,6 +782,12 @@ impl SessionAccumulator {
                 c.tokens.cache_write_1h = c.tokens.cache_write_1h.max(0);
                 c.tokens.reasoning = c.tokens.reasoning.max(0);
                 c.cost = c.cost.max(0.0);
+                c.cost_provenance = Some(
+                    client_provenance
+                        .remove(&key)
+                        .map(|p| p.finish())
+                        .unwrap_or_default(),
+                );
                 c
             })
             .collect();
@@ -596,6 +819,7 @@ impl SessionAccumulator {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
                 messages: self.totals.messages.max(0),
+                cost_provenance: Some(self.provenance.finish()),
             },
             token_breakdown,
             clients,
@@ -611,6 +835,7 @@ struct YearAccumulator {
     cost: f64,
     start: String,
     end: String,
+    provenance: CostProvenanceAccumulator,
 }
 
 /// Cost-relative intensity buckets (0-4): each day's intensity is a function
@@ -688,6 +913,7 @@ mod tests {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            estimate_source: None,
         }
     }
 
@@ -869,6 +1095,7 @@ mod tests {
                     tokens: 1000,
                     cost: 0.05,
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -881,6 +1108,7 @@ mod tests {
                     tokens: 0,
                     cost: 0.0,
                     messages: 0,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -904,6 +1132,7 @@ mod tests {
                     tokens: 1000,
                     cost: 0.05,
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -916,6 +1145,7 @@ mod tests {
                     tokens: 0,
                     cost: 1.25,
                     messages: 0,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -928,6 +1158,7 @@ mod tests {
                     tokens: 0,
                     cost: 0.0,
                     messages: 0,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -952,6 +1183,7 @@ mod tests {
                 tokens: i64::MAX,
                 cost: 1.0,
                 messages: 1,
+                cost_provenance: None,
             },
             intensity: 0,
             token_breakdown: TokenBreakdown::default(),
@@ -1042,6 +1274,7 @@ mod tests {
                 tokens: 1000,
                 cost: 0.05,
                 messages: 1,
+                cost_provenance: None,
             },
             intensity: 0,
             token_breakdown: TokenBreakdown::default(),
@@ -1100,6 +1333,7 @@ mod tests {
                     tokens: 1000,
                     cost: 0.0,
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1112,6 +1346,7 @@ mod tests {
                     tokens: 2000,
                     cost: 0.0,
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1134,6 +1369,7 @@ mod tests {
                     tokens: 1000,
                     cost: 1.0, // 100% of max
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1146,6 +1382,7 @@ mod tests {
                     tokens: 800,
                     cost: 0.8, // 80% of max (>= 0.75)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1158,6 +1395,7 @@ mod tests {
                     tokens: 600,
                     cost: 0.6, // 60% of max (>= 0.5)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1170,6 +1408,7 @@ mod tests {
                     tokens: 300,
                     cost: 0.3, // 30% of max (>= 0.25)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1182,6 +1421,7 @@ mod tests {
                     tokens: 100,
                     cost: 0.1, // 10% of max (> 0.0)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1208,6 +1448,7 @@ mod tests {
                     tokens: 1000,
                     cost: 1.0,
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1220,6 +1461,7 @@ mod tests {
                     tokens: 750,
                     cost: 0.75, // Exactly 0.75 (should be level 4)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1232,6 +1474,7 @@ mod tests {
                     tokens: 500,
                     cost: 0.5, // Exactly 0.5 (should be level 3)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1244,6 +1487,7 @@ mod tests {
                     tokens: 250,
                     cost: 0.25, // Exactly 0.25 (should be level 2)
                     messages: 1,
+                    cost_provenance: None,
                 },
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
@@ -1341,6 +1585,7 @@ mod tests {
             is_turn_start: false,
             model_attribution_conflicted: false,
             duration_ms: None,
+            estimate_source: None,
         }
     }
 
@@ -1558,6 +1803,7 @@ mod tests {
                 tokens: 25298,
                 cost: 0.0123,
                 messages: 12,
+                cost_provenance: Some(CostProvenance::unknown()),
             },
             token_breakdown: TokenBreakdown {
                 input: 25_251,
@@ -1581,6 +1827,7 @@ mod tests {
                 },
                 cost: 0.0123,
                 messages: 12,
+                cost_provenance: Some(CostProvenance::unknown()),
             }],
             first_seen: 1_715_551_577,
             last_seen: 1_715_551_612,
@@ -1591,5 +1838,263 @@ mod tests {
         assert_eq!(parsed, contrib);
         // Spot-check key field is present in JSON.
         assert!(json.contains("\"session_id\":\"019e1e27"));
+    }
+
+    #[test]
+    fn test_cost_provenance_serde_round_trip_and_backward_compatibility() {
+        // Modern serialization round trip
+        let prov = CostProvenance::estimated(EstimateSource::Catalog);
+        let json = serde_json::to_string(&prov).unwrap();
+        assert_eq!(json, r#"{"kind":"estimated","estimateSource":"catalog"}"#);
+        let parsed: CostProvenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, prov);
+
+        let prov_reported = CostProvenance::provider_reported();
+        let json_reported = serde_json::to_string(&prov_reported).unwrap();
+        assert_eq!(json_reported, r#"{"kind":"providerReported"}"#);
+        let parsed_reported: CostProvenance = serde_json::from_str(&json_reported).unwrap();
+        assert_eq!(parsed_reported, prov_reported);
+
+        // Backward compatibility: missing costProvenance in DailyTotals deserializes as unknown
+        let legacy_json = r#"{"tokens":100,"cost":0.5,"messages":2}"#;
+        let parsed_totals: DailyTotals = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed_totals.cost_provenance(), CostProvenance::unknown());
+
+        // Backward compatibility: missing costProvenance in ClientContribution
+        let legacy_client = r#"{"client":"test","model_id":"m","provider_id":"p","tokens":{"input":10,"output":20,"cache_read":0,"cache_write":0,"cache_write_1h":0,"reasoning":0},"cost":0.1,"messages":1}"#;
+        let parsed_client: ClientContribution = serde_json::from_str(legacy_client).unwrap();
+        assert_eq!(parsed_client.cost_provenance(), CostProvenance::unknown());
+    }
+
+    #[test]
+    fn test_cost_provenance_single_source_aggregates() {
+        fn make_msg_with_source(
+            cost_source: crate::sessions::CostSource,
+            estimate_source: Option<EstimateSource>,
+            cost: f64,
+        ) -> UnifiedMessage {
+            let mut msg = mock_unified_message("2024-01-01", 100, cost, "model-a", "client-a");
+            msg.cost_source = cost_source;
+            msg.estimate_source = estimate_source;
+            msg
+        }
+
+        // Provider reported
+        let msgs = vec![make_msg_with_source(
+            crate::sessions::CostSource::ProviderReported,
+            None,
+            1.0,
+        )];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::provider_reported()
+        );
+        assert_eq!(
+            daily[0].clients[0].cost_provenance(),
+            CostProvenance::provider_reported()
+        );
+
+        // Estimated (Catalog)
+        let msgs = vec![make_msg_with_source(
+            crate::sessions::CostSource::Estimated,
+            Some(EstimateSource::Catalog),
+            1.0,
+        )];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Catalog)
+        );
+        assert_eq!(
+            daily[0].clients[0].cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Catalog)
+        );
+
+        // Estimated (Custom)
+        let msgs = vec![make_msg_with_source(
+            crate::sessions::CostSource::Estimated,
+            Some(EstimateSource::Custom),
+            1.0,
+        )];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Custom)
+        );
+        assert_eq!(
+            daily[0].clients[0].cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Custom)
+        );
+
+        // Estimated (Unknown)
+        let msgs = vec![make_msg_with_source(
+            crate::sessions::CostSource::Estimated,
+            None,
+            1.0,
+        )];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Unknown)
+        );
+
+        // Pure unknown (tokens > 0)
+        let msgs = vec![make_msg_with_source(
+            crate::sessions::CostSource::Unknown,
+            None,
+            0.0,
+        )];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(daily[0].totals.cost_provenance(), CostProvenance::unknown());
+    }
+
+    #[test]
+    fn test_cost_provenance_mixed_aggregates() {
+        fn make_msg(
+            model: &str,
+            cost_source: crate::sessions::CostSource,
+            estimate_source: Option<EstimateSource>,
+        ) -> UnifiedMessage {
+            let mut msg = mock_unified_message("2024-01-01", 100, 0.5, model, "client-a");
+            msg.cost_source = cost_source;
+            msg.estimate_source = estimate_source;
+            msg
+        }
+
+        // Provider reported + Estimated
+        let msgs = vec![
+            make_msg(
+                "model-1",
+                crate::sessions::CostSource::ProviderReported,
+                None,
+            ),
+            make_msg(
+                "model-2",
+                crate::sessions::CostSource::Estimated,
+                Some(EstimateSource::Catalog),
+            ),
+        ];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance().kind,
+            CostProvenanceKind::Mixed
+        );
+
+        // Catalog + Custom estimates = Estimated (Mixed)
+        let msgs = vec![
+            make_msg(
+                "model-1",
+                crate::sessions::CostSource::Estimated,
+                Some(EstimateSource::Catalog),
+            ),
+            make_msg(
+                "model-2",
+                crate::sessions::CostSource::Estimated,
+                Some(EstimateSource::Custom),
+            ),
+        ];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Mixed)
+        );
+
+        // Provider reported + Unknown
+        let msgs = vec![
+            make_msg(
+                "model-1",
+                crate::sessions::CostSource::ProviderReported,
+                None,
+            ),
+            make_msg("model-2", crate::sessions::CostSource::Unknown, None),
+        ];
+        let daily = aggregate_by_date(msgs);
+        assert_eq!(
+            daily[0].totals.cost_provenance().kind,
+            CostProvenanceKind::Mixed
+        );
+    }
+
+    #[test]
+    fn test_cost_provenance_zero_cost_preservation() {
+        // Provider-reported $0 with tokens participates as ProviderReported
+        let mut msg1 = mock_unified_message("2024-01-01", 100, 0.0, "model-free", "client-a");
+        msg1.cost_source = crate::sessions::CostSource::ProviderReported;
+        let daily = aggregate_by_date(vec![msg1]);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::provider_reported()
+        );
+
+        // Explicit custom $0 rate participates as Estimated(Custom)
+        let mut msg2 =
+            mock_unified_message("2024-01-01", 100, 0.0, "model-custom-free", "client-a");
+        msg2.cost_source = crate::sessions::CostSource::Estimated;
+        msg2.estimate_source = Some(EstimateSource::Custom);
+        let daily = aggregate_by_date(vec![msg2]);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Custom)
+        );
+
+        // Zero-token, zero-cost, unknown cost source does not participate
+        let mut msg_empty = mock_unified_message("2024-01-01", 0, 0.0, "model-none", "client-a");
+        msg_empty.cost_source = crate::sessions::CostSource::Unknown;
+        let mut msg_prov = mock_unified_message("2024-01-01", 100, 0.5, "model-real", "client-a");
+        msg_prov.cost_source = crate::sessions::CostSource::ProviderReported;
+        let daily = aggregate_by_date(vec![msg_empty, msg_prov]);
+        assert_eq!(
+            daily[0].totals.cost_provenance(),
+            CostProvenance::provider_reported()
+        );
+    }
+
+    #[test]
+    fn test_cost_provenance_order_independent_merge() {
+        let mut acc1 = CostProvenanceAccumulator::default();
+        let mut acc2 = CostProvenanceAccumulator::default();
+
+        let mut msg_a = mock_unified_message("2024-01-01", 100, 1.0, "m1", "c1");
+        msg_a.cost_source = crate::sessions::CostSource::ProviderReported;
+        acc1.add_message(&msg_a);
+
+        let mut msg_b = mock_unified_message("2024-01-01", 100, 1.0, "m2", "c2");
+        msg_b.cost_source = crate::sessions::CostSource::Estimated;
+        msg_b.estimate_source = Some(EstimateSource::Catalog);
+        acc2.add_message(&msg_b);
+
+        let mut merge_1_then_2 = acc1;
+        merge_1_then_2.merge(acc2);
+
+        let mut merge_2_then_1 = acc2;
+        merge_2_then_1.merge(acc1);
+
+        assert_eq!(merge_1_then_2.finish(), merge_2_then_1.finish());
+    }
+
+    #[test]
+    fn test_cost_provenance_propagates_to_summary_and_years() {
+        let mut msg1 = mock_unified_message("2024-01-01", 100, 1.0, "model-1", "client-1");
+        msg1.cost_source = crate::sessions::CostSource::Estimated;
+        msg1.estimate_source = Some(EstimateSource::Catalog);
+
+        let mut msg2 = mock_unified_message("2024-02-01", 200, 2.0, "model-2", "client-2");
+        msg2.cost_source = crate::sessions::CostSource::Estimated;
+        msg2.estimate_source = Some(EstimateSource::Catalog);
+
+        let contributions = aggregate_by_date(vec![msg1, msg2]);
+        let summary = calculate_summary(&contributions);
+        assert_eq!(
+            summary.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Catalog)
+        );
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 1);
+        assert_eq!(
+            years[0].cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Catalog)
+        );
     }
 }
