@@ -846,7 +846,9 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 | **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
 | **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
 | **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
-| **Grok Build** | OAuth (`~/.grok/auth.json`) | Credits, subscription plan | Run `grok login` |
+| **Cursor** | Desktop `state.vscdb` JWT (or macOS Keychain `cursor-access-token`, or JWT inside a saved `tokscale cursor login` session) | Auto and API plan period remaining | Sign in to Cursor desktop, or run `tokscale cursor login` |
+| **Grok Bot** | Cursor desktop JWT (with macOS Keychain refresh when available) | Weekly personal quota | Sign in to Cursor desktop; shown when a personal quota is available |
+| **Grok** | OAuth (`~/.grok/auth.json`) | Weekly credits, Monthly allowance, subscription plan | Run `grok login` |
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
 | **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
 | **MiniMax Token Plan** | API key (env var) | Interval + weekly remaining-percent quotas (per region: CN minimaxi.com + Global minimax.io) | Set `MINIMAX_TOKEN_PLAN_CN_KEY` and/or `MINIMAX_TOKEN_PLAN_GLOBAL_KEY` |
@@ -948,7 +950,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |
 | `nativeTimeoutMs` | number | `300000` | Maximum time for native subprocess processing (5000-3600000ms) |
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
-| `usage.disabledProviders` | string[] | `[]` | Subscription-usage providers to skip before credential discovery or network access. Valid ids (case-insensitive; surrounding whitespace ignored): `claude`, `codex`, `zai`, `amp`, `antigravity`, `copilot`, `grok`, `kimi`, `minimax`, `minimax-token-plan`, `warp`, `sakana`, and `opencode-go`. Unknown ids are ignored. Disabled providers are also hidden from cached TUI cards and diagnostics. Changes apply to the next `tokscale usage` run or TUI launch/refresh. |
+| `usage.disabledProviders` | string[] | `[]` | Subscription-usage providers to skip before credential discovery or network access. Valid ids (case-insensitive; surrounding whitespace ignored): `claude`, `codex`, `zai`, `amp`, `antigravity`, `copilot`, `cursor`, `grok-bot`, `grok`, `kimi`, `minimax`, `minimax-token-plan`, `warp`, `sakana`, and `opencode-go`. Legacy `grok-build`, `grok_build`, and `Grok Build` aliases also select `grok`. Unknown ids are ignored. Disabled providers are also hidden from cached TUI cards and diagnostics. Changes apply to the next `tokscale usage` run or TUI launch/refresh. |
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `autosubmit` | object | disabled | Saved `tokscale autosubmit` state: interval, client/date filters, scheduler backend, last run time, and last error. Prefer `tokscale autosubmit enable/status/disable` over editing this object by hand. |

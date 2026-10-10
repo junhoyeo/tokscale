@@ -374,6 +374,12 @@ fn find_cursor_state_vscdb(home_dir: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Public path lookup for subscription-usage and other callers that need the
+/// desktop `state.vscdb` without depending on a session cookie conversion.
+pub fn find_cursor_state_vscdb_for_usage(home_dir: &Path) -> Option<PathBuf> {
+    find_cursor_state_vscdb(home_dir)
+}
+
 /// Read `cursorAuth/accessToken` from a Cursor `state.vscdb` SQLite DB.
 pub fn read_access_token_from_state_vscdb(db_path: &Path) -> Result<String> {
     use rusqlite::{Connection, OpenFlags};
