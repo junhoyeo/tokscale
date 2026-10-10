@@ -112,6 +112,7 @@
 | <img width="48px" src="https://github.com/deepseek-ai.png" alt="DeepSeek Harness" /> | [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) | `~/.dsh/sessions/**/session.jsonl.zstd`（압축 없이 기록된 경우 `session.jsonl`, 버전이 붙은 `session.v<N>.jsonl[.zstd]` 형식도 읽음, `DSH_HOME`으로 재정의 가능） |
 | <img width="48px" src=".github/assets/client-fx.png" alt="Fx" /> | [fx](https://github.com/vercel-labs/fx) | `~/.fx/sessions/<sessionId>/usage-v2.json` (세션 단위 집계) |
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl` (Windows 포함 전 플랫폼 공통 XDG 경로, `subagent/<uuid>/` 하위 서브에이전트 기록 포함) |
+| <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
 
@@ -185,7 +186,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -420,7 +421,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`.
 
 > **Breaking change (v4.0.0):** 클라이언트별 boolean 플래그(`--opencode`, `--claude`, `--codex` 등)는 제거되었으며 이제 오류를 발생시킵니다. 대신 정식 `--client`/`-c` 플래그를 사용하세요 — 예: `tokscale --client opencode,claude`.
 
@@ -1098,7 +1099,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1522,6 +1523,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 | Hindsight | `$HINDSIGHT_HOME/usage/` (폴백: `~/.hindsight/usage/`) | `%HINDSIGHT_HOME%\usage\` (폴백: `%USERPROFILE%\.hindsight\usage\`) | `tokscale hindsight sync`를 통한 API 동기화; Hindsight 자체는 로컬 세션 로그를 남기지 않으므로 LLM 추적 API에서 추가 전용 JSONL 캐시로 동기화 |
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 전 플랫폼 공통 XDG 경로; `session.jsonl`의 `model_completed` 사용량 이벤트와 `subagent/` 기록 파싱 |
+| Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 계정별 네이티브 브라우저 사용량; `messages.jsonl`만 읽고 artifacts, memory, passwords 제외. |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
 
@@ -1995,6 +1997,10 @@ WHERE json_extract(m.data, '$.role') = 'assistant'
 }
 ```
 Tokscale은 타임스탬프, 모델, 프로바이더, 토큰 수, 비용, 에이전트 이름의 지문을 사용하여 포크된 세션 간 메시지를 중복 제거합니다.
+
+### Aside
+
+Aside의 평면 assistant 사용량 기록은 `~/.aside/u/<account>/sessions/<session>/messages.jsonl`에 저장됩니다. Tokscale은 원본 타임스탬프, 제공자·모델 정보와 캐시 입력 구간을 보존합니다. reasoning은 output에서 분리하여 토큰 합계와 추정 비용에 한 번만 반영합니다. 같은 제공자의 반복 response ID는 세션·계정 간 한 번만 집계하고, ID 없는 호출은 각각 유지합니다. 양수 기록 비용은 보존하며 0 또는 누락 비용에는 기존 가격 계산을 적용합니다. `tokscale --no-spinner --client aside`로 필터링할 수 있습니다. 검증은 Linux 합성 fixture 기반이며 실제 Mac 계정과 Windows 실행은 검증하지 않았습니다.
 
 ### Muse Code
 

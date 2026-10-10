@@ -27,6 +27,7 @@ export const MONTH_LABELS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Ju
 
 // Source configuration
 export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
+  aside: "Aside",
   opencode: "OpenCode",
   claude: "Claude Code",
   codex: "Codex CLI",
@@ -90,6 +91,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
 // Client logos from GitHub CDN (public repo)
 const GITHUB_CDN_BASE = "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets";
 export const SOURCE_LOGOS: Record<ClientType, string> = {
+  aside: `${GITHUB_CDN_BASE}/client-aside.png`,
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
@@ -157,6 +159,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
+  aside: "#64748B",
   opencode: "#00A8E8",
   claude: "#f97316",
   codex: "#10B981",

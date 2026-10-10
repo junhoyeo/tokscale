@@ -436,6 +436,36 @@ fn is_openclaw_compaction_checkpoint(file_name: &str) -> bool {
     !session_id.is_empty() && is_uuid(checkpoint_id)
 }
 
+fn scan_aside_accounts(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(accounts) = std::fs::read_dir(root) else {
+        return paths;
+    };
+    for account in accounts.flatten() {
+        if !account.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let sessions = account.path().join("sessions");
+        if !std::fs::symlink_metadata(&sessions).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(sessions) else {
+            continue;
+        };
+        for session in entries.flatten() {
+            if !session.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let transcript = session.path().join("messages.jsonl");
+            if std::fs::symlink_metadata(&transcript).is_ok_and(|meta| meta.is_file()) {
+                paths.push(transcript);
+            }
+        }
+    }
+    paths.sort_unstable();
+    paths
+}
+
 /// Scan a single directory for session files
 pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
     if !std::path::Path::new(root).exists() {
@@ -2855,7 +2885,11 @@ fn scan_all_clients_with_env_strategy_inner(
         tasks
             .into_par_iter()
             .map(|(client_id, path, pattern)| {
-                let files = scan_directory(&path, pattern);
+                let files = if client_id == ClientId::Aside {
+                    scan_aside_accounts(Path::new(&path))
+                } else {
+                    scan_directory(&path, pattern)
+                };
                 (client_id, path, files)
             })
             .collect()

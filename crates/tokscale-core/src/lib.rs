@@ -2725,6 +2725,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Aside,
+        sessions::aside::parse_aside_file,
+    );
+
     // Pi branch/fork copies prior assistant records into a new session file
     // (#1306). The parser stamps cross-session keys (`responseId` preferred);
     // this lane drops the copies — first-wins in scan order, same key survives
@@ -5852,6 +5861,23 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let openclaw_count = openclaw_msgs.len() as i32;
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
+
+    let aside_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Aside)
+        .par_iter()
+        .flat_map(|path| sessions::aside::parse_aside_file(path))
+        .collect();
+    let mut aside_seen = HashSet::new();
+    let aside_msgs: Vec<ParsedMessage> = aside_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut aside_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    counts.set(
+        ClientId::Aside,
+        i32::try_from(aside_msgs.len()).unwrap_or(i32::MAX),
+    );
+    messages.extend(aside_msgs);
 
     // Pi branch/fork copies prior assistant records into a new session file
     // (#1306); the parser stamps cross-session keys, drop the copies here too
