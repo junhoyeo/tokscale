@@ -1147,6 +1147,7 @@ pub enum ClientFilter {
     Muse,
     #[value(name = "antigravity-extension")]
     AntigravityExtension,
+    Vibe,
     Synthetic,
 }
 
@@ -1213,6 +1214,7 @@ impl ClientFilter {
             Self::Hindsight => "hindsight",
             Self::MicodeDesktop => "micode-desktop",
             Self::Muse => "muse",
+            Self::Vibe => "vibe",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1282,6 +1284,7 @@ impl ClientFilter {
             Self::Hindsight => Some(ClientId::Hindsight),
             Self::MicodeDesktop => Some(ClientId::MiMoDesktop),
             Self::Muse => Some(ClientId::Muse),
+            Self::Vibe => Some(ClientId::Vibe),
             Self::Synthetic => None,
         }
     }
@@ -1347,6 +1350,7 @@ impl ClientFilter {
             ClientId::Hindsight => Self::Hindsight,
             ClientId::MiMoDesktop => Self::MicodeDesktop,
             ClientId::Muse => Self::Muse,
+            ClientId::Vibe => Self::Vibe,
         }
     }
 

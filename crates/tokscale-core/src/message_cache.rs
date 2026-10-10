@@ -1565,6 +1565,7 @@ fn parser_version(client: ClientId) -> u32 {
         // v2 preserves actual provider identity; v3 clears stale provider
         // metadata when a persisted reset/sentinel snapshot removes it.
         ClientId::Muse => 3,
+        ClientId::Vibe => 1,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -5703,6 +5704,11 @@ mod tests {
     #[test]
     fn test_muse_parser_version_invalidates_stale_provider_metadata_after_reset() {
         assert_eq!(parser_version(ClientId::Muse), 3);
+    }
+
+    #[test]
+    fn test_vibe_parser_version() {
+        assert_eq!(parser_version(ClientId::Vibe), 1);
     }
 
     #[test]

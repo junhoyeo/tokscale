@@ -634,6 +634,18 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                             .unwrap_or(false)
                 }
                 "sessions.json" => file_name == "sessions.json",
+                // Mistral Vibe (CLI): session directories contain `meta.json` with
+                // cumulative token counts and session metadata. Legacy Vibe 1.x
+                // stored flat `session_*.json` files.
+                "vibe-session" => {
+                    if file_name == "meta.json" {
+                        true
+                    } else if file_name.starts_with("session_") && file_name.ends_with(".json") {
+                        !file_name.starts_with(".session_index") && !file_name.ends_with(".tmp")
+                    } else {
+                        false
+                    }
+                }
                 // DeepSeek Harness: one JSONL transcript per session at any
                 // depth under `~/.dsh/sessions/`. The `.zstd` suffix marks the
                 // physical encoding only — a backend configured with

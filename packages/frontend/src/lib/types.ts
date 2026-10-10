@@ -57,6 +57,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "hindsight",
   "micode-desktop",
   "muse",
+  "vibe",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

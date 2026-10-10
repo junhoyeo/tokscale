@@ -58,6 +58,7 @@ pub(crate) mod tencent_buddy;
 pub mod trae;
 pub mod unsloth;
 pub(crate) mod utils;
+pub mod vibe;
 pub mod warp;
 pub mod workbuddy;
 pub mod zcode;

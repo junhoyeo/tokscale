@@ -3097,6 +3097,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::muse::parse_muse_file,
     );
 
+    // Mistral Vibe `meta.json` session records carry cumulative usage stats,
+    // and pricing is resolved through Tokscale's pricing engine.
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Vibe,
+        sessions::vibe::parse_vibe_file,
+    );
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result
@@ -6157,6 +6168,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let muse_count = summed_parsed_message_count(&muse_msgs);
     counts.set(ClientId::Muse, muse_count);
     messages.extend(muse_msgs);
+
+    let vibe_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Vibe)
+        .par_iter()
+        .flat_map(|path| sessions::vibe::parse_vibe_file(path))
+        .collect();
+    let mut vibe_seen: HashSet<String> = HashSet::new();
+    let vibe_msgs: Vec<ParsedMessage> = vibe_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut vibe_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let vibe_count = summed_parsed_message_count(&vibe_msgs);
+    counts.set(ClientId::Vibe, vibe_count);
+    messages.extend(vibe_msgs);
 
     let mcode_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Mcode)

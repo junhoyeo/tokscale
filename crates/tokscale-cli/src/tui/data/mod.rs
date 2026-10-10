@@ -2212,6 +2212,7 @@ mod tests {
         assert_eq!(clients[53], ClientId::MiMoDesktop);
         assert_eq!(clients[54], ClientId::Muse);
         assert_eq!(clients[55], ClientId::AntigravityExtension);
+        assert_eq!(clients[56], ClientId::Vibe);
     }
 
     #[test]
@@ -2273,6 +2274,7 @@ mod tests {
             "Xiaomi MiMo AI",
             "Muse Code",
             "Antigravity IDE Extension",
+            "Mistral Vibe",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -2329,6 +2331,7 @@ mod tests {
             crate::tui::client_ui::hotkey(ClientId::AntigravityExtension),
             'I'
         );
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Vibe), 'V');
     }
 
     #[test]
@@ -2448,6 +2451,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('P'),
             Some(ClientId::PrimeAgent)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('V'),
+            Some(ClientId::Vibe)
         );
     }
 

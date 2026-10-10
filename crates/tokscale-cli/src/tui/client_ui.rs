@@ -76,6 +76,8 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // Antigravity IDE Extensions: uppercase `I` keeps the extension distinct
     // from the existing lowercase `i` hotkey for Kiro.
     ClientUi { hotkey: 'I' },
+    // Mistral Vibe: uppercase `V` stays mnemonic (lowercase `v` belongs to Warp).
+    ClientUi { hotkey: 'V' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
