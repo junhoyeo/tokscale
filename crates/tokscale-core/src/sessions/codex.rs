@@ -11,15 +11,15 @@
 //! Note: This parser has stateful logic to track model and delta calculations.
 
 use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-    session_id_from_path,
+    extract_i64, extract_string, file_modified_timestamp_ms, is_zst_path, parse_timestamp_value,
+    session_id_from_path, MAX_ARCHIVE_BYTES,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Agents-tab bucket for a regular interactive Codex thread. Codex stamps each
@@ -400,7 +400,10 @@ pub(crate) const OPENCLAW_CLIENT_ID: &str = "openclaw";
 /// `session_meta.originator`, so the parser did not already put the thread id
 /// on its messages. Returns `None` for any other spelling rather than guessing.
 pub(crate) fn thread_id_from_rollout_path(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?;
+    let mut stem = path.file_stem()?.to_str()?;
+    if is_zst_path(path) {
+        stem = Path::new(stem).file_stem()?.to_str()?;
+    }
     let stem = stem.strip_prefix("rollout-")?;
     // `2026-08-30T10-00-00-` is 20 chars; everything after is the thread id.
     let candidate = stem.get(20..)?;
@@ -1323,24 +1326,9 @@ fn flush_pending_model_messages_as_unknown(
     );
 }
 
-/// Parse a Codex JSONL file with stateful tracking
+/// Parse a Codex JSONL or .jsonl.zst file with stateful tracking
 pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let session_id = session_id_from_path(path);
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
-    let parsed = parse_codex_reader(
-        reader,
-        &session_id,
-        fallback_timestamp,
-        0,
-        CodexParseState::default(),
-    );
-    parsed.messages
+    parse_codex_file_incremental(path, 0, CodexParseState::default()).messages
 }
 
 fn reported_total_tokens(usage: &CodexTokenUsage) -> Option<i64> {
@@ -1383,6 +1371,72 @@ pub(crate) fn parse_codex_file_incremental(
     start_offset: u64,
     state: CodexParseState,
 ) -> ParsedCodexFile {
+    let session_id = session_id_from_path(path);
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+
+    if is_zst_path(path) {
+        if start_offset != 0 {
+            return ParsedCodexFile {
+                messages: Vec::new(),
+                fallback_timestamp_indices: Vec::new(),
+                consumed_offset: start_offset,
+                parse_succeeded: false,
+                unresolved_model_events: false,
+                state,
+            };
+        }
+
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
+                return ParsedCodexFile {
+                    messages: Vec::new(),
+                    fallback_timestamp_indices: Vec::new(),
+                    consumed_offset: 0,
+                    parse_succeeded: false,
+                    unresolved_model_events: false,
+                    state,
+                };
+            }
+        };
+
+        let mut decoder = match zstd::stream::read::Decoder::new(file) {
+            Ok(d) => d,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
+                return ParsedCodexFile {
+                    messages: Vec::new(),
+                    fallback_timestamp_indices: Vec::new(),
+                    consumed_offset: 0,
+                    parse_succeeded: false,
+                    unresolved_model_events: false,
+                    state,
+                };
+            }
+        };
+        if let Err(error) = decoder.window_log_max(26) {
+            tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
+            return ParsedCodexFile {
+                messages: Vec::new(),
+                fallback_timestamp_indices: Vec::new(),
+                consumed_offset: 0,
+                parse_succeeded: false,
+                unresolved_model_events: false,
+                state,
+            };
+        }
+
+        let reader = BufReader::new(decoder.take(MAX_ARCHIVE_BYTES + 1));
+        let mut parsed = parse_codex_reader(reader, &session_id, fallback_timestamp, 0, state);
+        if parsed.consumed_offset > MAX_ARCHIVE_BYTES || !parsed.parse_succeeded {
+            parsed.messages.clear();
+            parsed.fallback_timestamp_indices.clear();
+            parsed.parse_succeeded = false;
+        }
+        return parsed;
+    }
+
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(_) => {
@@ -1408,8 +1462,6 @@ pub(crate) fn parse_codex_file_incremental(
         };
     }
 
-    let session_id = session_id_from_path(path);
-    let fallback_timestamp = file_modified_timestamp_ms(path);
     let reader = BufReader::new(file);
     parse_codex_reader(reader, &session_id, fallback_timestamp, start_offset, state)
 }
@@ -1643,7 +1695,7 @@ mod tests {
     use super::*;
     use crate::{aggregate_model_usage_entries, GroupBy};
     use std::io::{BufRead, Cursor, Error, ErrorKind, Seek, SeekFrom, Write};
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     const CODEX_DURATION_FIXTURE: &str =
         include_str!("../../tests/fixtures/codex_duration_timing.jsonl");
@@ -3868,5 +3920,70 @@ mod tests {
             messages[2].timestamp,
             parse_codex_entry_timestamp(Some("2040-01-03T00:00:00.250Z")).unwrap()
         );
+    }
+
+    #[test]
+    fn test_thread_id_from_rollout_path_handles_plain_and_compressed_zst() {
+        let plain =
+            Path::new("rollout-2026-08-30T10-00-00-550e8400-e29b-41d4-a716-446655440000.jsonl");
+        let compressed =
+            Path::new("rollout-2026-08-30T10-00-00-550e8400-e29b-41d4-a716-446655440000.jsonl.zst");
+        assert_eq!(
+            thread_id_from_rollout_path(plain),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+        assert_eq!(
+            thread_id_from_rollout_path(compressed),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn compressed_archives_preserve_codex_usage_and_session_identity() {
+        let dir = TempDir::new().unwrap();
+        let content = concat!(
+            r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#,
+            "\n"
+        );
+        let plain_path = dir.path().join("fixture.jsonl");
+        std::fs::write(&plain_path, content).unwrap();
+        let expected = parse_codex_file(&plain_path);
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].model_id, "gpt-5");
+        assert_eq!(expected[0].session_id, "fixture");
+        assert_eq!(expected[0].tokens.input, 110);
+        assert_eq!(expected[0].tokens.cache_read, 30);
+        assert_eq!(expected[0].tokens.output, 10);
+        assert_eq!(expected[0].tokens.reasoning, 10);
+        assert_eq!(expected[0].tokens.total(), 160);
+
+        let zst_path = dir.path().join("fixture.jsonl.zst");
+        std::fs::write(&zst_path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
+        let compressed_parsed = parse_codex_file(&zst_path);
+        assert_eq!(compressed_parsed, expected);
+
+        let incremental = parse_codex_file_incremental(&zst_path, 0, CodexParseState::default());
+        assert!(incremental.parse_succeeded);
+        assert_eq!(incremental.messages, expected);
+    }
+
+    #[test]
+    fn invalid_or_truncated_compressed_codex_archive_does_not_emit_partial_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl.zst");
+        let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
+{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150},"last_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}}"#;
+        let mut bytes = zstd::encode_all(&content[..], 0).unwrap();
+        bytes.pop();
+        std::fs::write(&path, bytes).unwrap();
+        assert!(parse_codex_file(&path).is_empty());
+        let incremental = parse_codex_file_incremental(&path, 0, CodexParseState::default());
+        assert!(!incremental.parse_succeeded);
+        assert!(incremental.messages.is_empty());
+
+        std::fs::write(&path, b"not a zstd stream").unwrap();
+        assert!(parse_codex_file(&path).is_empty());
     }
 }

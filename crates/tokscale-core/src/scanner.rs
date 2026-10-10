@@ -510,8 +510,8 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                                 .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
                         })
                 }
-                // OpenClaw: live transcripts plus every copy OpenClaw makes of
-                // one by appending a suffix to the `.jsonl` name — published
+                // OpenClaw and Codex: live transcripts plus every copy made
+                // by appending a suffix to the `.jsonl` name — published
                 // archives (`<id>.jsonl.deleted.<ts>`, `<id>.jsonl.reset.<ts>`, and
                 // their zstd form `<id>.jsonl.zst`),
                 // doctor backups (`<id>.jsonl.pre-doctor-<repair>-<ts>.bak`) and
@@ -6800,6 +6800,41 @@ mod tests {
         assert_eq!(result.get(ClientId::Codex).len(), 2);
 
         restore_env("CODEX_HOME", previous_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn scan_codex_compressed_transcripts_reaches_the_parser() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        let archived = dir.path().join(".codex/archived_sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&archived).unwrap();
+        let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
+{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#;
+
+        fs::write(
+            sessions.join("rollout-1.jsonl.zst"),
+            zstd::encode_all(&content[..], 0).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            archived.join("rollout-2.jsonl.zst"),
+            zstd::encode_all(&content[..], 0).unwrap(),
+        )
+        .unwrap();
+        fs::write(sessions.join("unrelated.zst"), b"not a session").unwrap();
+
+        let mut env = EnvGuard::capture(&["CODEX_HOME"]);
+        env.set("CODEX_HOME", dir.path().join(".codex"));
+        let scan = scan_without_extra_dirs(dir.path().to_str().unwrap(), &["codex".to_string()]);
+
+        assert_eq!(scan.get(ClientId::Codex).len(), 2);
+        for path in scan.get(ClientId::Codex) {
+            let messages = crate::sessions::codex::parse_codex_file(path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 160);
+        }
     }
 
     #[test]

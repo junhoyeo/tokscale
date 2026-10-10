@@ -1335,7 +1335,9 @@ fn parser_version(client: ClientId) -> u32 {
         // so it could land without another bump.
         // v10->v11: standalone `task_started` events reset duration anchors so
         // resumed turns cannot inherit the idle gap from a previous turn.
-        ClientId::Codex => 11,
+        // v11->v12: support zstd-compressed transcripts (`.jsonl.zst`) in Codex
+        // sessions and archives.
+        ClientId::Codex => 12,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -4333,16 +4335,17 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_parser_version_invalidates_v10_entries() {
+    fn test_codex_parser_version_invalidates_v11_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
         // bucket, v7->v8 retags rollouts OpenClaw originated as openclaw, and
         // v8->v9 buckets agent attribution into "Codex" / "Codex Subagent" /
         // "Codex Guardian" / "Codex Headless" instead of the per-thread random
-        // nickname; v9->v10 retains service_tier for Fast mode pricing, and
-        // v10->v11 resets duration anchors at standalone task_started events.
+        // nickname; v9->v10 retains service_tier for Fast mode pricing,
+        // v10->v11 resets duration anchors at standalone task_started events, and
+        // v11->v12 decodes compressed archives (.jsonl.zst).
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 11);
+        assert_eq!(parser_version(ClientId::Codex), 12);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -4715,6 +4718,50 @@ mod tests {
         let mut cache = SourceMessageCache::load();
         assert!(cache.get(identity, &source).is_none());
         let parsed = crate::sessions::openclaw::parse_openclaw_transcript(&source);
+        assert_eq!(parsed.len(), 1);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_compressed_archives_discard_cached_empty_v11_results() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("rollout.jsonl.zst");
+        let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
+{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#;
+        fs::write(&source, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let old_identity = CacheIdentity {
+            parser_version: 11,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let entry = CachedSourceEntry::new(
+            old_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old_identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(identity, &source).is_none());
+        let parsed = crate::sessions::codex::parse_codex_file(&source);
         assert_eq!(parsed.len(), 1);
         cache.insert(CachedSourceEntry::new(
             identity,

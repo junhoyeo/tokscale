@@ -1123,16 +1123,25 @@ fn parse_all_messages_streaming<S: MessageSink>(
         fallback_timestamp_indices: Vec<usize>,
     ) -> Option<message_cache::CachedSourceEntry> {
         let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
-        if fingerprint.size != consumed_offset {
-            return None;
-        }
+        let codex_incremental = if sessions::utils::is_zst_path(path) {
+            message_cache::CodexIncrementalCache {
+                state,
+                consumed_offset: fingerprint.size,
+                ends_with_newline: true,
+                prefix_hash: fingerprint.content_hash,
+            }
+        } else {
+            if fingerprint.size != consumed_offset {
+                return None;
+            }
 
-        let codex_incremental = message_cache::build_codex_incremental_cache_with_prefix_hash(
-            path,
-            consumed_offset,
-            state,
-            fingerprint.content_hash,
-        )?;
+            message_cache::build_codex_incremental_cache_with_prefix_hash(
+                path,
+                consumed_offset,
+                state,
+                fingerprint.content_hash,
+            )?
+        };
 
         Some(message_cache::CachedSourceEntry::new(
             message_cache::CacheIdentity::for_client(ClientId::Codex),
@@ -1972,53 +1981,55 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 return reparse_from_start(true);
             }
 
-            if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
-                if fingerprint.size > codex_incremental.consumed_offset
-                    && message_cache::codex_prefix_matches(path, codex_incremental)
-                {
-                    let parsed = sessions::codex::parse_codex_file_incremental(
-                        path,
-                        codex_incremental.consumed_offset,
-                        codex_incremental.state.clone(),
-                    );
-                    if parsed.parse_succeeded && !parsed.unresolved_model_events {
-                        let mut raw_messages = cached.messages.clone();
-                        let mut fallback_timestamp_indices =
-                            cached.fallback_timestamp_indices.clone();
-                        let existing_len = raw_messages.len();
-                        fallback_timestamp_indices.extend(
-                            parsed
-                                .fallback_timestamp_indices
-                                .iter()
-                                .map(|index| existing_len + index),
-                        );
-                        raw_messages.extend(parsed.messages);
-                        let turn_coverage = parsed.state.turn_coverage.clone();
-                        let cache_entry = build_codex_cache_entry(
+            if !sessions::utils::is_zst_path(path) {
+                if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
+                    if fingerprint.size > codex_incremental.consumed_offset
+                        && message_cache::codex_prefix_matches(path, codex_incremental)
+                    {
+                        let parsed = sessions::codex::parse_codex_file_incremental(
                             path,
-                            raw_messages.clone(),
-                            parsed.consumed_offset,
-                            parsed.state,
-                            fallback_timestamp_indices.clone(),
+                            codex_incremental.consumed_offset,
+                            codex_incremental.state.clone(),
                         );
-                        if let Some(cache_entry) = cache_entry {
-                            let messages = finalize_codex_messages(
-                                raw_messages,
-                                pricing,
-                                is_headless,
-                                &fallback_timestamp_indices,
-                                fallback_timestamp,
+                        if parsed.parse_succeeded && !parsed.unresolved_model_events {
+                            let mut raw_messages = cached.messages.clone();
+                            let mut fallback_timestamp_indices =
+                                cached.fallback_timestamp_indices.clone();
+                            let existing_len = raw_messages.len();
+                            fallback_timestamp_indices.extend(
+                                parsed
+                                    .fallback_timestamp_indices
+                                    .iter()
+                                    .map(|index| existing_len + index),
                             );
+                            raw_messages.extend(parsed.messages);
+                            let turn_coverage = parsed.state.turn_coverage.clone();
+                            let cache_entry = build_codex_cache_entry(
+                                path,
+                                raw_messages.clone(),
+                                parsed.consumed_offset,
+                                parsed.state,
+                                fallback_timestamp_indices.clone(),
+                            );
+                            if let Some(cache_entry) = cache_entry {
+                                let messages = finalize_codex_messages(
+                                    raw_messages,
+                                    pricing,
+                                    is_headless,
+                                    &fallback_timestamp_indices,
+                                    fallback_timestamp,
+                                );
 
-                            return (
-                                CachedParseOutcome {
-                                    messages,
-                                    retained_message_keys: HashSet::new(),
-                                    cache_entry: Some(cache_entry),
-                                    invalidate_cache: false,
-                                },
-                                turn_coverage,
-                            );
+                                return (
+                                    CachedParseOutcome {
+                                        messages,
+                                        retained_message_keys: HashSet::new(),
+                                        cache_entry: Some(cache_entry),
+                                        invalidate_cache: false,
+                                    },
+                                    turn_coverage,
+                                );
+                            }
                         }
                     }
                 }
@@ -19927,5 +19938,85 @@ mod tests {
             outside_root.agent.as_deref(),
             Some(sessions::codex::CODEX_DEFAULT_AGENT)
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_codex_compressed_history_matches_plain_history_and_caches_warmly() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions_dir = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let content = concat!(
+            r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#,
+            "\n"
+        );
+        let plain_file = sessions_dir.join("fixture.jsonl");
+        std::fs::write(&plain_file, content).unwrap();
+
+        // 1. Scan plain JSONL file.
+        let plain_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        );
+        assert_eq!(plain_messages.len(), 1);
+        assert_eq!(plain_messages[0].tokens.total(), 160);
+        assert_eq!(plain_messages[0].tokens.input, 110);
+        assert_eq!(plain_messages[0].tokens.cache_read, 30);
+        assert_eq!(plain_messages[0].tokens.output, 10);
+        assert_eq!(plain_messages[0].tokens.reasoning, 10);
+
+        // 2. Compress to .jsonl.zst and remove the uncompressed file.
+        let zst_file = sessions_dir.join("fixture.jsonl.zst");
+        std::fs::write(&zst_file, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
+        std::fs::remove_file(&plain_file).unwrap();
+
+        // 3. Rescan with warm cache.
+        let compressed_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        );
+        assert_eq!(compressed_messages.len(), 1);
+        assert_eq!(compressed_messages[0].tokens.total(), 160);
+        assert_eq!(compressed_messages[0].tokens, plain_messages[0].tokens);
+        assert_eq!(
+            compressed_messages[0].session_id,
+            plain_messages[0].session_id
+        );
+        assert_eq!(compressed_messages[0].model_id, plain_messages[0].model_id);
+
+        // 4. Verify cache persistence for the .zst file.
+        let warm_cache = message_cache::SourceMessageCache::load();
+        let cached_entry = warm_cache
+            .get(
+                message_cache::CacheIdentity::for_client(ClientId::Codex),
+                &zst_file,
+            )
+            .expect("compressed .zst source entry must be cached");
+        assert_eq!(cached_entry.messages.len(), 1);
+
+        // 5. Subsequent run hits warm cache.
+        let warm_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        );
+        assert_eq!(warm_messages, compressed_messages);
+
+        // 6. When both plain and compressed files exist, deduplication prevents double-counting.
+        std::fs::write(&plain_file, content).unwrap();
+        let deduped_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        );
+        assert_eq!(deduped_messages.len(), 1);
+        assert_eq!(deduped_messages[0].tokens.total(), 160);
     }
 }

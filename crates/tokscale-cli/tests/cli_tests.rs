@@ -7070,3 +7070,40 @@ fn test_auto_pinning_does_not_shadow_a_legacy_settings_file_it_cannot_open() {
         "and the legacy file itself must be left alone"
     );
 }
+
+#[test]
+fn test_codex_compressed_session_reports_usage() {
+    let tmp = TempDir::new().unwrap();
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let content = concat!(
+        r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#,
+        "\n"
+    );
+    let compressed_file = sessions.join("fixture.jsonl.zst");
+    fs::write(
+        &compressed_file,
+        zstd::encode_all(content.as_bytes(), 0).unwrap(),
+    )
+    .unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["--client", "codex", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
+    assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
+    assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
+    assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+}

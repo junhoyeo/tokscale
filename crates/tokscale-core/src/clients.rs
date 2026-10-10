@@ -432,7 +432,7 @@ define_clients!(
             fallback_relative: ".codex",
         },
         relative: "sessions",
-        pattern: "*.jsonl",
+        pattern: "*.jsonl*",
         headless: true,
         parse_local: true,
         submit_default: true
