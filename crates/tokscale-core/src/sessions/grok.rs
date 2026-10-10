@@ -174,6 +174,8 @@ struct ActiveTurn {
 #[derive(Debug, Clone)]
 struct GrokUsage {
     tokens: TokenBreakdown,
+    model_calls: i64,
+    cost_usd_ticks: Option<i64>,
 }
 
 impl GrokUsage {
@@ -210,12 +212,15 @@ impl GrokUsage {
             .or_else(|| usage.get("total_tokens"))
             .and_then(|value| extract_i64(Some(value)))
             .map(|value| value.max(0));
+        let cost_usd_ticks = extract_cost_usd_ticks(usage, get_path(value, &["params", "update"]));
+        let model_calls = extract_model_calls(usage);
 
         if raw_input == 0
             && raw_output == 0
             && cache_read == 0
             && cache_write == 0
             && reasoning == 0
+            && cost_usd_ticks.unwrap_or(0) <= 0
         {
             return None;
         }
@@ -249,8 +254,83 @@ impl GrokUsage {
                 cache_write_1h: 0,
                 reasoning,
             },
+            model_calls,
+            cost_usd_ticks,
         })
     }
+}
+
+fn extract_ticks_i64(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|val| {
+        val.as_i64()
+            .or_else(|| val.as_u64().map(|v| v as i64))
+            .or_else(|| {
+                val.as_f64()
+                    .filter(|f| f.is_finite() && *f >= 0.0)
+                    .map(|f| f.round() as i64)
+            })
+            .or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()))
+    })
+}
+
+fn usage_keys_opt_ticks(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| extract_ticks_i64(value.get(*key)))
+        .filter(|&val| val >= 0)
+}
+
+fn extract_cost_usd_ticks(usage: &Value, update: Option<&Value>) -> Option<i64> {
+    const TICK_KEYS: &[&str] = &[
+        "costUsdTicks",
+        "cost_usd_ticks",
+        "costInUsdTicks",
+        "cost_in_usd_ticks",
+    ];
+
+    if let Some(ticks) = usage_keys_opt_ticks(usage, TICK_KEYS) {
+        return Some(ticks);
+    }
+
+    if let Some(models) = usage.get("modelUsage").and_then(Value::as_object) {
+        let mut total_ticks = 0i64;
+        let mut found = false;
+        for model_entry in models.values() {
+            if let Some(ticks) = usage_keys_opt_ticks(model_entry, TICK_KEYS) {
+                total_ticks = total_ticks.saturating_add(ticks);
+                found = true;
+            }
+        }
+        if found {
+            return Some(total_ticks);
+        }
+    }
+
+    if let Some(update) = update {
+        if let Some(ticks) = usage_keys_opt_ticks(update, TICK_KEYS) {
+            return Some(ticks);
+        }
+    }
+
+    None
+}
+
+fn extract_model_calls(usage: &Value) -> i64 {
+    let direct = usage_value(usage, &["modelCalls", "model_calls", "modelCallCount"]);
+    if direct > 0 {
+        return direct;
+    }
+
+    if let Some(models) = usage.get("modelUsage").and_then(Value::as_object) {
+        let sum: i64 = models
+            .values()
+            .map(|entry| usage_value(entry, &["modelCalls", "model_calls", "modelCallCount"]))
+            .fold(0i64, |total, calls| total.saturating_add(calls));
+        if sum > 0 {
+            return sum;
+        }
+    }
+
+    1
 }
 
 fn usage_value(value: &Value, keys: &[&str]) -> i64 {
@@ -421,7 +501,7 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
             // unchanged file, which the on-disk message cache this key feeds
             // requires. Note the key is only unique within one file; it is not
             // a global identity.
-            usage_messages.push(message_from_tokens(
+            let mut message = message_from_tokens(
                 &metadata,
                 model_id,
                 timestamp,
@@ -431,7 +511,15 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                     metadata.session_id
                 ),
                 true,
-            ));
+            );
+            if usage.model_calls > 0 {
+                message.message_count = usage.model_calls.clamp(1, i64::from(i32::MAX)) as i32;
+            }
+            if let Some(ticks) = usage.cost_usd_ticks {
+                message.cost = (ticks as f64) * 1e-10;
+                message.mark_provider_reported_cost();
+            }
+            usage_messages.push(message);
             usage_index = usage_index.saturating_add(1);
         }
 
@@ -1502,6 +1590,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CostSource;
 
     /// `updates_jsonl` is taken as bytes so fixtures can contain sequences a
     /// `&str` cannot hold (undecodable bytes, a UTF-8 BOM); `&str` and `&String`
@@ -2141,5 +2230,64 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 50);
         assert_eq!(messages[1].tokens.input, 200);
         assert_eq!(messages[1].model_id, "grok-composer-2.5-fast");
+    }
+
+    #[test]
+    fn parses_turn_completed_model_calls_and_cost_usd_ticks() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"user_message_chunk"},"_meta":{"agentTimestampMs":1790900000000}}}
+{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":372794,"outputTokens":8021,"totalTokens":380815,"cachedReadTokens":314112,"reasoningTokens":4144,"modelCalls":8,"costUsdTicks":964100000000,"modelUsage":{"grok-4.5":{"inputTokens":372794,"outputTokens":8021,"totalTokens":380815,"cachedReadTokens":314112,"reasoningTokens":4144,"modelCalls":8}}}},"_meta":{"eventId":"turn-1","agentTimestampMs":1790900001000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.model_id, "grok-4.5");
+        assert_eq!(msg.message_count, 8);
+        assert_eq!(msg.cost_source, CostSource::ProviderReported);
+        assert!((msg.cost - 96.41).abs() < 1e-9);
+        assert_eq!(msg.tokens.input, 58_682);
+        assert_eq!(msg.tokens.cache_read, 314_112);
+        assert_eq!(msg.tokens.output, 3_877);
+        assert_eq!(msg.tokens.reasoning, 4_144);
+    }
+
+    #[test]
+    fn parses_model_calls_and_cost_ticks_from_model_usage_when_top_level_absent() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":20,"modelUsage":{"grok-4.5":{"inputTokens":100,"outputTokens":20,"modelCalls":5,"costUsdTicks":10000000000}}}},"_meta":{"eventId":"turn-1","agentTimestampMs":1790900001000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.message_count, 5);
+        assert_eq!(msg.cost_source, CostSource::ProviderReported);
+        assert!((msg.cost - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_reproduction_turn_completed_without_cost_ticks() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"user_message_chunk"},"_meta":{"agentTimestampMs":1790900000000}}}
+{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":372794,"outputTokens":8021,"totalTokens":380815,"cachedReadTokens":314112,"reasoningTokens":4144,"modelCalls":8,"modelUsage":{"grok-4.5":{"inputTokens":372794,"outputTokens":8021,"totalTokens":380815,"cachedReadTokens":314112,"reasoningTokens":4144,"modelCalls":8}}}},"_meta":{"eventId":"turn-1","agentTimestampMs":1790900001000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.model_id, "grok-4.5");
+        assert_eq!(msg.message_count, 8);
+        assert_eq!(msg.cost_source, CostSource::Unknown);
+        assert_eq!(msg.tokens.input, 58_682);
+        assert_eq!(msg.tokens.cache_read, 314_112);
+        assert_eq!(msg.tokens.output, 3_877);
+        assert_eq!(msg.tokens.reasoning, 4_144);
     }
 }

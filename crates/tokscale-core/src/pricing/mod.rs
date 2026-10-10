@@ -610,6 +610,16 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> f64 {
+        self.calculate_cost_with_provider_and_calls(model_id, provider_id, usage, 1)
+    }
+
+    pub fn calculate_cost_with_provider_and_calls(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+        calls: usize,
+    ) -> f64 {
         if let Some(result) = self.custom.lookup_with_key(model_id) {
             return compute_cost(
                 result.pricing,
@@ -623,7 +633,7 @@ impl PricingService {
         }
 
         self.lookup
-            .calculate_cost_with_provider(model_id, provider_id, usage)
+            .calculate_cost_with_provider_and_calls(model_id, provider_id, usage, calls)
     }
 
     pub fn covers_usage_with_provider(

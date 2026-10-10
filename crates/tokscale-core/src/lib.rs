@@ -5251,7 +5251,25 @@ pub fn calculate_cost_with_service_tier(
     tokens: &TokenBreakdown,
     service_tier: Option<&str>,
 ) -> f64 {
-    pricing.calculate_cost_with_provider(model_id, provider_id, tokens)
+    calculate_cost_with_service_tier_and_calls(
+        pricing,
+        model_id,
+        provider_id,
+        tokens,
+        service_tier,
+        1,
+    )
+}
+
+pub fn calculate_cost_with_service_tier_and_calls(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+    calls: usize,
+) -> f64 {
+    pricing.calculate_cost_with_provider_and_calls(model_id, provider_id, tokens, calls)
         * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
 }
 
@@ -5267,10 +5285,16 @@ fn apply_pricing_if_available(
         return;
     };
 
-    let calculated_cost = pricing.calculate_cost_with_provider(
+    let calls = if message.client == "droid" {
+        1
+    } else {
+        message.message_count.max(1) as usize
+    };
+    let calculated_cost = pricing.calculate_cost_with_provider_and_calls(
         &message.model_id,
         Some(&message.provider_id),
         &message.tokens,
+        calls,
     ) * pricing_multiplier(message, pricing);
 
     if calculated_cost > 0.0 {
@@ -16661,6 +16685,134 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.42);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_preserves_grok_provider_reported_cost() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-4.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000003),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.0000006),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "grok",
+            "grok-4.5",
+            "xai",
+            "probe-session",
+            1_790_900_001_000,
+            TokenBreakdown {
+                input: 58_682,
+                output: 3_877,
+                cache_read: 314_112,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 4_144,
+            },
+            96.41,
+        );
+        msg.message_count = 8;
+        msg.mark_provider_reported_cost();
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 96.41);
+        assert_eq!(msg.cost_source, sessions::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_uses_base_rates_for_grok_turn_aggregate_when_estimated() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-4.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000003),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.0000006),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        // Issue #1387 reproduction: 8 calls, prompt 372,794 >= 200k.
+        let mut msg = UnifiedMessage::new(
+            "grok",
+            "grok-4.5",
+            "xai",
+            "probe-session",
+            1_790_900_001_000,
+            TokenBreakdown {
+                input: 58_682,
+                output: 3_877,
+                cache_read: 314_112,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 4_144,
+            },
+            0.0,
+        );
+        msg.message_count = 8;
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        // Base rate expected: $0.2597236 (NOT the doubled request-wide tier $0.5194472).
+        assert!((msg.cost - 0.2597236).abs() < 1e-7);
+        assert_eq!(msg.cost_source, sessions::CostSource::Estimated);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_treats_droid_fragment_as_single_call() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-4.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000003),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.0000006),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        // A single Droid fragment carrying 250k prompt tokens but message_count = 10 (session_replies).
+        // Since it's a single fragment with 250k prompt tokens, it should evaluate calls = 1 and hit the 200k tier.
+        let mut msg = UnifiedMessage::new(
+            "droid",
+            "grok-4.5",
+            "xai",
+            "droid-session",
+            1_790_900_001_000,
+            TokenBreakdown {
+                input: 250_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        msg.message_count = 10;
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        // 250,000 * 0.000004 = 1.0 (hit the above_200k tier because calls = 1 for droid)
+        assert!((msg.cost - 1.0).abs() < 1e-7);
     }
 
     #[test]

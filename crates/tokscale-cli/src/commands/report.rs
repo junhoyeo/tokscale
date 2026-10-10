@@ -14,7 +14,7 @@ use tokscale_core::content_extractor::{extract_session_content, metadata_only_co
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
 use tokscale_core::{
-    calculate_cost_with_service_tier, parse_local_clients, CostSource, LocalParseOptions,
+    calculate_cost_with_service_tier_and_calls, parse_local_clients, CostSource, LocalParseOptions,
     ParsedMessage, TokenBreakdown,
 };
 
@@ -1576,7 +1576,12 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
     let Some(pricing) = pricing else {
         return 0.0;
     };
-    calculate_cost_with_service_tier(
+    let calls = if msg.client == "droid" {
+        1
+    } else {
+        msg.message_count.max(1) as usize
+    };
+    calculate_cost_with_service_tier_and_calls(
         pricing,
         &msg.model_id,
         Some(&msg.provider_id),
@@ -1589,6 +1594,7 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
             reasoning: msg.reasoning,
         },
         msg.service_tier.as_deref(),
+        calls,
     )
 }
 
