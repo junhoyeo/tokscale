@@ -1405,12 +1405,10 @@ fn parser_version(client: ClientId) -> u32 {
         // an invalidation debt forward, and a further bump would have had
         // nothing to invalidate.
         ClientId::OpenCodeReview => 3,
-        // Kiro's structured messages.jsonl turns now back-calculate the
-        // start anchor from `turn_end - elapsedTime` when the user prompt's
-        // own timestamp is missing/unparseable, instead of falling through
-        // to the (end-anchored) turn_end timestamp. Second-round follow-up
-        // to #890.
-        ClientId::Kiro => 2,
+        // v3 assigns CLI metering credits per turn instead of putting the
+        // conversation sum on the first message. Reparse unchanged sources
+        // so cached Unknown costs cannot be token-priced a second time.
+        ClientId::Kiro => 3,
         // Kimi v2 checks token buckets without an overflowing sum. v2->v3:
         // symbolic usage-record models now resolve from the latest llm.request.
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
@@ -4370,7 +4368,7 @@ mod tests {
         assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
-        assert_eq!(parser_version(ClientId::Kiro), 2);
+        assert_eq!(parser_version(ClientId::Kiro), 3);
     }
 
     #[test]
@@ -6319,6 +6317,94 @@ mod tests {
         );
         assert_eq!(third[0].tokens, first[0].tokens);
         assert_warm("a re-parsed session");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kiro_cli_credit_cache_is_rebuilt_without_source_changes() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let source = PathBuf::from(
+            ClientId::Kiro
+                .data()
+                .resolve_path_with_env_strategy(&source_home.path().to_string_lossy(), false),
+        )
+        .join("credits.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            r#"{"session_id":"cached-credits","session_state":{"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1,"output_token_count":2,"metering_usage":[{"value":0.25,"unit":"credit"}]},{"input_token_count":3,"output_token_count":4,"metering_usage":[{"value":0.25,"unit":"credit"}]}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(source.with_extension("jsonl"), "").unwrap();
+        let fingerprint = match SourceFingerprint::check_kiro_path_samples_only(&source, None)
+            .unwrap()
+        {
+            FingerprintStatus::Changed(fingerprint) => fingerprint,
+            FingerprintStatus::Unchanged => panic!("an uncached source must build a fingerprint"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Kiro);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: 2,
+        };
+        let mut stale_messages = crate::sessions::kiro::parse_kiro_file(&source);
+        assert_eq!(stale_messages.len(), 2);
+        stale_messages[0].cost = 0.02;
+        stale_messages[0].mark_provider_reported_cost();
+        stale_messages[1].cost = 0.0;
+        stale_messages[1].cost_source = crate::sessions::CostSource::Unknown;
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            stale_messages,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+        assert!(SourceMessageCache::load().get(identity, &source).is_none());
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&source, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let parse = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["kiro".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let first = parse();
+        assert_eq!(first.len(), 2);
+        for message in &first {
+            assert!((message.cost - 0.01).abs() < 1e-9);
+            assert_eq!(
+                message.cost_source,
+                crate::sessions::CostSource::ProviderReported
+            );
+        }
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt.get(identity, &source).unwrap();
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages, first);
+        assert_eq!(
+            parse(),
+            first,
+            "warm cache must retain per-turn cost authority"
+        );
     }
 
     #[test]
