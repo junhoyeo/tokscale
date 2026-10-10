@@ -27,7 +27,7 @@ tokscale-core = { workspace = true }
 clap = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
 anyhow = { workspace = true }
 comfy-table = { workspace = true }
 colored = { workspace = true }
@@ -130,6 +130,7 @@ windows-sys = { version = "0.61", features = ["Win32_Security_Credentials"] }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"
