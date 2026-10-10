@@ -921,16 +921,20 @@ export async function POST(request: Request) {
       });
       if (antigravityPlan.mode !== "status-quo") {
         for (const client of ANTIGRAVITY_FAMILY) {
-          parserPlans.set(
-            client,
-            antigravityPlan.mode === "replace"
-              ? {
-                  mode: "replace",
-                  increments: {},
-                  layoutDays: antigravityPlan.layouts![client],
-                }
-              : { mode: "freeze", increments: {} }
-          );
+          if (antigravityPlan.mode === "replace") {
+            parserPlans.set(client, {
+              mode: "replace",
+              increments: {},
+              layoutDays: antigravityPlan.layouts![client],
+            });
+          } else if (antigravityPlan.mode === "incremental") {
+            parserPlans.set(client, {
+              mode: "incremental",
+              increments: antigravityPlan.increments![client] ?? {},
+            });
+          } else {
+            parserPlans.set(client, { mode: "freeze", increments: {} });
+          }
         }
         if (antigravityPlan.warning) warnings.push(antigravityPlan.warning);
       }
@@ -1547,7 +1551,10 @@ export async function POST(request: Request) {
         submissionId,
         isNewSubmission,
         metrics: {
-          totalTokens: aggregates.totalTokens,
+          totalTokens:
+            aggregates.totalTokens >= 9007199254740991
+              ? 9007199254740991
+              : Number(aggregates.totalTokens),
           totalCost: parseFloat(aggregates.totalCost),
           dateRange: {
             start: effectiveDateStart,

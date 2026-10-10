@@ -4879,6 +4879,8 @@ const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
 struct TsScanScope {
     parser_versions: std::collections::BTreeMap<String, u32>,
     full_history: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_floors: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Submission-level provenance (#888): history recovered from an aggregate
@@ -4916,6 +4918,27 @@ fn to_ts_token_contribution_data(
     device: Option<&device::SubmitDevice>,
     scan_scope: Option<TsScanScope>,
 ) -> TsTokenContributionData {
+    let scan_scope = scan_scope.map(|mut scope| {
+        if scope.full_history {
+            let mut floors = std::collections::BTreeMap::new();
+            for d in &graph.contributions {
+                for s in &d.clients {
+                    floors
+                        .entry(s.client.clone())
+                        .and_modify(|earliest: &mut String| {
+                            if d.date < *earliest {
+                                *earliest = d.date.clone();
+                            }
+                        })
+                        .or_insert_with(|| d.date.clone());
+                }
+            }
+            if !floors.is_empty() {
+                scope.retention_floors = Some(floors);
+            }
+        }
+        scope
+    });
     TsTokenContributionData {
         meta: TsExportMeta {
             generated_at: graph.meta.generated_at.clone(),
@@ -5036,6 +5059,7 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
     Some(TsScanScope {
         parser_versions,
         full_history,
+        retention_floors: None,
     })
 }
 
@@ -6034,9 +6058,57 @@ struct SubmitResponse {
     details: Option<Vec<String>>,
 }
 
+fn deserialize_optional_i64_from_any<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalI64Visitor;
+    impl<'de> serde::de::Visitor<'de> for OptionalI64Visitor {
+        type Value = Option<i64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer, a string representing an integer, or null")
+        }
+
+        fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v as i64))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            v.parse::<i64>().map(Some).map_err(E::custom)
+        }
+
+        fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<Self::Value, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+    deserializer.deserialize_option(OptionalI64Visitor)
+}
+
 #[derive(serde::Deserialize)]
 struct SubmitMetrics {
-    #[serde(rename = "totalTokens")]
+    #[serde(
+        rename = "totalTokens",
+        default,
+        deserialize_with = "deserialize_optional_i64_from_any"
+    )]
     total_tokens: Option<i64>,
     #[serde(rename = "totalCost")]
     total_cost: Option<f64>,
