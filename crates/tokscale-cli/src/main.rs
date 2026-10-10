@@ -1727,7 +1727,7 @@ fn auto_sync_cursor_for_local_report(
     clients: &Option<Vec<String>>,
 ) -> Option<cursor::SyncCursorResult> {
     if !should_auto_sync_cursor_for_local_report(home_dir, clients)
-        || !cursor::is_cursor_logged_in()
+        || !cursor::ensure_cursor_session_for_sync()
     {
         return None;
     }
@@ -6409,7 +6409,7 @@ fn run_submit_command(
         .is_none_or(|s| s.iter().any(|src| src == "cursor"));
     let report_home: Option<String> = None;
     let has_cursor_cache = has_cursor_usage_cache_for_report(&report_home);
-    if include_cursor && cursor::is_cursor_logged_in() {
+    if include_cursor && cursor::ensure_cursor_session_for_sync() {
         println!("{}", "  Syncing Cursor usage data...".bright_black());
         let rt_sync = Runtime::new()?;
         let sync_result = rt_sync.block_on(async { cursor::sync_cursor_cache(false).await });

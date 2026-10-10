@@ -919,6 +919,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cursor_events_json_keeps_rows_when_sync_marked_partial() {
+        // A sync that runs out of time writes the pages it already collected
+        // with `"partial": true`. That flag is cache metadata, not an event
+        // field, and must not drop the rows.
+        let json = r#"{
+            "partial": true,
+            "totalUsageEventsCount": 1,
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1788171994838",
+                    "model": "gpt-5",
+                    "chargedCents": 10,
+                    "tokenUsage": {"inputTokens": 4, "outputTokens": 6, "totalCents": 10},
+                    "conversationId": "session-partial"
+                }
+            ]
+        }"#;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "session-partial");
+        assert_eq!(messages[0].tokens.input, 4);
+        assert_eq!(messages[0].tokens.output, 6);
+        assert!((messages[0].cost - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_parse_cursor_events_json_plan_included_row_uses_metered_total_cents() {
         // Plan-included / free-credit rows debit the wallet nothing
         // (`chargedCents: 0`) while `tokenUsage.totalCents` still carries what

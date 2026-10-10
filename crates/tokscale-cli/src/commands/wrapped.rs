@@ -178,7 +178,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let until = format!("{}-12-31", year);
 
     let has_cursor_cache = cursor::has_cursor_usage_cache();
-    let cursor_logged_in = cursor::is_cursor_logged_in();
+    let cursor_logged_in = include_cursor && cursor::ensure_cursor_session_for_sync();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor_logged_in {

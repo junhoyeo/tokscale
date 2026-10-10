@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,11 +15,18 @@ use std::time::{Duration, Instant, SystemTime};
 /// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Per-request timeout for the usage-CSV download during an explicit
-/// `tokscale cursor sync`. Large accounts export CSVs that take well over the
-/// default [`CURSOR_HTTP_TIMEOUT`] to generate and stream (issue #1175); the
-/// user asked for the sync, so waiting longer beats failing fast.
+/// Per-request timeout for the usage download during an explicit
+/// `tokscale cursor sync`. Large accounts take well over the default
+/// [`CURSOR_HTTP_TIMEOUT`] to generate a page (issue #1175); the user asked
+/// for the sync, so waiting longer beats failing fast.
 const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wall-clock budget for the whole paginated walk on an explicit
+/// `tokscale cursor sync`. The per-page timeout must not also be the budget
+/// for every page: a full history is many round trips, and aborting the walk
+/// at 120s discarded every event already collected, so the cache stayed empty
+/// and reports showed no Cursor usage.
+const CURSOR_EXPLICIT_SYNC_OVERALL_BUDGET: Duration = Duration::from_secs(10 * 60);
 
 /// Skip implicit pre-report sync when every expected Cursor account cache file
 /// was modified within this window. Prevents `tokscale models` (and its
@@ -228,18 +235,83 @@ fn build_cursor_json_headers(session_token: &str) -> reqwest::header::HeaderMap 
     headers
 }
 
+/// One parse of an aggregated usage-events document. Invalid JSON is an empty
+/// non-partial document, so a corrupt cache counts as nothing to keep.
+struct CursorUsageDocument {
+    events: Vec<serde_json::Value>,
+    partial: bool,
+}
+
+fn parse_cursor_usage_document(json_text: &str) -> CursorUsageDocument {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return CursorUsageDocument {
+            events: Vec::new(),
+            partial: false,
+        };
+    };
+    let events = value
+        .get("usageEventsDisplay")
+        .and_then(|events| events.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let partial = value
+        .get("partial")
+        .and_then(|flag| flag.as_bool())
+        .unwrap_or(false);
+    CursorUsageDocument { events, partial }
+}
+
 /// Count events in an aggregated usage-events JSON document. Invalid JSON or a
 /// missing `usageEventsDisplay` array counts as zero.
 fn count_cursor_json_events(json_text: &str) -> usize {
-    serde_json::from_str::<serde_json::Value>(json_text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("usageEventsDisplay")
-                .and_then(|events| events.as_array())
-                .map(|events| events.len())
-        })
-        .unwrap_or(0)
+    parse_cursor_usage_document(json_text).events.len()
+}
+
+/// A fetch that ran out of time after collecting some pages is marked
+/// `partial`. A partial result is unioned with an existing JSON cache rather
+/// than replacing it, and it never archives a legacy CSV export.
+fn cursor_usage_json_is_partial(json_text: &str) -> bool {
+    parse_cursor_usage_document(json_text).partial
+}
+
+/// Union two usage-event lists. Identity is the event object itself, so a
+/// partial page that overlaps the cache does not double-count, and events that
+/// page never reached stay in the result.
+fn merge_cursor_usage_events(
+    existing: &[serde_json::Value],
+    incoming: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::with_capacity(existing.len().saturating_add(incoming.len()));
+    let mut merged = Vec::with_capacity(existing.len().saturating_add(incoming.len()));
+    for event in existing.iter().chain(incoming.iter()) {
+        let Ok(key) = serde_json::to_string(event) else {
+            merged.push(event.clone());
+            continue;
+        };
+        if seen.insert(key) {
+            merged.push(event.clone());
+        }
+    }
+    merged
+}
+
+fn error_is_reqwest_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|reqwest_err| reqwest_err.is_timeout())
+    })
+}
+
+fn aggregated_usage_events(events: Vec<serde_json::Value>, partial: bool) -> Result<String> {
+    let mut aggregated = serde_json::json!({
+        "totalUsageEventsCount": events.len(),
+        "usageEventsDisplay": events,
+    });
+    if partial {
+        aggregated["partial"] = serde_json::Value::Bool(true);
+    }
+    serde_json::to_string(&aggregated).context("Failed to serialize Cursor usage events cache")
 }
 
 fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
@@ -1072,6 +1144,19 @@ pub fn is_cursor_logged_in() -> bool {
     load_active_credentials().is_some()
 }
 
+/// True when a Cursor session can be synced.
+///
+/// A saved tokscale login counts. Otherwise this imports `cursorAuth/accessToken`
+/// from the desktop `state.vscdb` when the Cursor app itself is signed in.
+/// Report commands used to require `tokscale cursor login` before they would
+/// even try, so a desktop session produced no Cursor usage at all.
+pub fn ensure_cursor_session_for_sync() -> bool {
+    if is_cursor_logged_in() {
+        return true;
+    }
+    matches!(ensure_credentials_from_local_cursor(), Ok(Some(_)))
+}
+
 pub fn load_credentials_for(name_or_id: &str) -> Option<CursorCredentials> {
     let store = load_credentials_store()?;
     let resolved = resolve_account_id(&store, name_or_id)?;
@@ -1205,25 +1290,45 @@ async fn fetch_cursor_usage_events_json_from(
     let mut total_count: Option<u64> = None;
     let mut bytes_read: usize = 0;
 
-    // Overall wall-clock budget for the entire paginated walk. Without it the
-    // per-page timeout would multiply across every page, so a slow server could
-    // stall report startup (auto-sync runs first) for that timeout times the page
-    // count. Each page's timeout is clamped to what remains of this budget below,
-    // and the walk aborts once it is spent.
+    // Per-page timeout stays short so one hung request cannot stall forever.
+    // The overall budget is longer on an explicit sync: using the per-page
+    // timeout as the budget for the whole walk aborted multi-page histories
+    // before anything was cached. Auto-sync keeps the short overall budget so
+    // report startup stays bounded, and a walk that already collected events
+    // keeps them (marked partial) instead of throwing them away.
     let per_page_timeout = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
-    let fetch_deadline = Instant::now() + per_page_timeout;
+    let overall_budget = match timeout_override {
+        Some(per_page) => CURSOR_EXPLICIT_SYNC_OVERALL_BUDGET.max(per_page),
+        None => CURSOR_HTTP_TIMEOUT,
+    };
+    let fetch_deadline = Instant::now() + overall_budget;
+
+    // Dashboard `get-filtered-usage-events` returns the authenticated user's
+    // events for an explicit window. Omitting the window (and sending
+    // `teamId: 0`, which is not "no filter") comes back as a successful empty
+    // page, so the cache is written with zero events and reports show no
+    // Cursor usage. `startDate: 0` through now is the full history. `teamId`
+    // is omitted so personal accounts are not filtered to a nonexistent team.
+    let end_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
 
     let mut completed = false;
     for page in 1..=CURSOR_MAX_JSON_PAGES {
         let remaining_budget = fetch_deadline.saturating_duration_since(Instant::now());
         if remaining_budget.is_zero() {
-            anyhow::bail!(
-                "Cursor usage events fetch exceeded its overall time budget before the full history was collected"
-            );
+            if all_events.is_empty() {
+                anyhow::bail!(
+                    "Cursor usage events fetch exceeded its overall time budget before any events were collected"
+                );
+            }
+            return aggregated_usage_events(all_events, true);
         }
 
         let body = serde_json::json!({
-            "teamId": 0,
+            "startDate": "0",
+            "endDate": end_ms.to_string(),
             "page": page,
             "pageSize": page_size,
         });
@@ -1234,7 +1339,15 @@ async fn fetch_cursor_usage_events_json_from(
             .json(&body)
             .timeout(per_page_timeout.min(remaining_budget));
 
-        let response = req.send().await?;
+        let response = match req.send().await {
+            Ok(response) => response,
+            // A later page timing out must not discard the pages already in
+            // hand; those events are the usage a report would otherwise miss.
+            Err(err) if !all_events.is_empty() && err.is_timeout() => {
+                return aggregated_usage_events(all_events, true);
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -1257,7 +1370,17 @@ async fn fetch_cursor_usage_events_json_from(
                 "Cursor usage events JSON exceeded the {max_body_bytes} byte limit across pages"
             ),
         };
-        let text = read_cursor_body_with_cap(response, remaining, "usage events JSON").await?;
+        let text = match read_cursor_body_with_cap(response, remaining, "usage events JSON").await {
+            Ok(text) => text,
+            // A hung later page is the only body failure that should keep the
+            // pages already collected. A byte-cap refusal or a dropped
+            // connection has to stay an error, or every sync looks like a
+            // benign partial cache and the real diagnostic never surfaces.
+            Err(err) if !all_events.is_empty() && error_is_reqwest_timeout(&err) => {
+                return aggregated_usage_events(all_events, true);
+            }
+            Err(err) => return Err(err),
+        };
         bytes_read += text.len();
 
         let page_value: serde_json::Value = serde_json::from_str(&text)
@@ -1319,11 +1442,7 @@ async fn fetch_cursor_usage_events_json_from(
         );
     }
 
-    let aggregated = serde_json::json!({
-        "totalUsageEventsCount": all_events.len(),
-        "usageEventsDisplay": all_events,
-    });
-    serde_json::to_string(&aggregated).context("Failed to serialize Cursor usage events cache")
+    aggregated_usage_events(all_events, false)
 }
 
 /// Reads a Cursor response body (`label` names it for errors, e.g. "usage CSV"
@@ -1453,14 +1572,14 @@ where
                     ))
                 };
 
-                let event_count = count_cursor_json_events(&json_text);
+                let incoming = parse_cursor_usage_document(&json_text);
                 let legacy_csv = file_path.with_extension("csv");
 
                 // A zero-event result is suspicious once cached history exists:
                 // overwriting `usage.json` with nothing and archiving the legacy
                 // CSV would strip real usage from reports. Keep both caches intact
                 // and record it so the next sync can recover instead.
-                if event_count == 0 && (file_path.exists() || legacy_csv.exists()) {
+                if incoming.events.is_empty() && (file_path.exists() || legacy_csv.exists()) {
                     errors.push(format!(
                         "{}: sync returned zero events; keeping existing cache",
                         account_id
@@ -1468,7 +1587,44 @@ where
                     continue;
                 }
 
-                if let Err(e) = atomic_write_file(&file_path, &json_text) {
+                // A timed-out walk is marked partial. It must not archive a
+                // legacy CSV (the full pre-migration export). When JSON already
+                // exists, union the partial page with it: a longer partial can
+                // still omit older rows, and replacing by count would drop
+                // them. A partial that adds nothing leaves the file untouched.
+                // A first-time partial still writes, so the report shows the
+                // events already collected instead of zero usage.
+                let (event_count, stored) = if incoming.partial
+                    && legacy_csv.exists()
+                    && !file_path.exists()
+                {
+                    errors.push(format!(
+                            "{account_id}: sync hit its time budget before the full history was collected; keeping existing cache"
+                        ));
+                    continue;
+                } else if incoming.partial && file_path.exists() {
+                    let existing_text = fs::read_to_string(&file_path).unwrap_or_default();
+                    let existing = parse_cursor_usage_document(&existing_text);
+                    let merged = merge_cursor_usage_events(&existing.events, &incoming.events);
+                    if merged.len() <= existing.events.len() {
+                        errors.push(format!(
+                                "{account_id}: sync hit its time budget before the full history was collected; keeping existing cache"
+                            ));
+                        continue;
+                    }
+                    let event_count = merged.len();
+                    match aggregated_usage_events(merged, true) {
+                        Ok(text) => (event_count, text),
+                        Err(e) => {
+                            errors.push(format!("{account_id}: {e}"));
+                            continue;
+                        }
+                    }
+                } else {
+                    (incoming.events.len(), json_text)
+                };
+
+                if let Err(e) = atomic_write_file(&file_path, &stored) {
                     errors.push(format!("{}: {}", account_id, e));
                 } else {
                     total_rows += event_count;
@@ -2271,6 +2427,95 @@ mod tests {
             head.to_lowercase().contains("origin: https://cursor.com"),
             "the CSRF Origin header must be sent: {head}"
         );
+        assert!(
+            head.contains("\"startDate\":\"0\"") && head.contains("\"endDate\":"),
+            "the usage query must cover the full history; a missing window comes back empty: {head}"
+        );
+        assert!(
+            !head.contains("\"teamId\""),
+            "teamId 0 is not 'no filter' and drops personal usage: {head}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_timeout_keeps_events_already_collected() {
+        // Page 1 returns immediately. Page 2 accepts the connection and then
+        // holds it, so the per-page timeout fires with one event already in
+        // hand. That event has to be returned (marked partial) rather than
+        // discarded, or a multi-page history never reaches the cache.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let page1 = json_page(2, &[&json_event("c1", "1788171994001")]);
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    page1.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&page1);
+                let _ = stream.flush();
+            }
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                std::thread::sleep(Duration::from_secs(5));
+                let _ = stream;
+            }
+        });
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                CURSOR_MAX_JSON_BYTES,
+                1,
+            ))
+            .expect("a later-page timeout must keep the events already collected");
+
+        assert!(
+            cursor_usage_json_is_partial(&text),
+            "a budget-cut walk must be marked partial: {text}"
+        );
+        assert_eq!(count_cursor_json_events(&text), 1);
+    }
+
+    #[test]
+    fn test_usage_events_json_later_page_over_the_cap_is_an_error() {
+        // Page 1 fits. Page 2 blows the remaining byte budget. That refusal
+        // must stay an error: folding it into a partial success would hide
+        // the byte-limit diagnostic and cache a history that can never finish.
+        let page1 = json_page(2, &[&json_event("c1", "1788171994001")]);
+        let mut page2 = b"{\"usageEventsDisplay\":[".to_vec();
+        while page2.len() < 8 * 1024 {
+            page2.extend_from_slice(br#"{"conversationId":"x","timestamp":"2","model":"m"},"#);
+        }
+        let cap = page1.len() + 512;
+        let (url, _requests) = serve_json_pages(vec![
+            (format!("Content-Length: {}\r\n", page1.len()), page1),
+            (String::new(), page2),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                None,
+                cap,
+                1,
+            ))
+            .expect_err("a later page past the byte ceiling must stay an error");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("byte limit"),
+            "the byte-limit diagnostic must stay visible: {message}"
+        );
     }
 
     #[test]
@@ -2796,6 +3041,205 @@ mod tests {
             "a zero-event sync must not clobber existing cached usage"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_writes_partial_fetch_when_no_cache_exists() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let partial = r#"{"partial":true,"totalUsageEventsCount":1,"usageEventsDisplay":[{"conversationId":"s1","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |_session_token| {
+                let partial = partial.to_string();
+                async move { Ok(partial) }
+            },
+        ));
+
+        assert!(
+            result.synced,
+            "a first partial sync must still record usage"
+        );
+        assert_eq!(result.rows, 1);
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        assert_eq!(
+            count_cursor_json_events(&fs::read_to_string(cache_dir.join("usage.json"))?),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_merges_partial_fetch_without_dropping_cached_events() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+        let seeded = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1},{"conversationId":"keep2","timestamp":"2","model":"gpt-5","chargedCents":2}]}"#;
+        fs::write(cache_dir.join("usage.json"), seeded)?;
+
+        // More rows than the cache, but none of the cached conversations. A
+        // count-only replace would drop keep and keep2.
+        let partial = r#"{"partial":true,"usageEventsDisplay":[{"conversationId":"new","timestamp":"3","model":"gpt-5","chargedCents":1},{"conversationId":"keep2","timestamp":"2","model":"gpt-5","chargedCents":2},{"conversationId":"newer","timestamp":"4","model":"gpt-5","chargedCents":4}]}"#;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |_session_token| {
+                let partial = partial.to_string();
+                async move { Ok(partial) }
+            },
+        ));
+
+        assert!(result.synced, "a partial that adds rows must be stored");
+        assert_eq!(result.rows, 4);
+        let stored = fs::read_to_string(cache_dir.join("usage.json"))?;
+        assert!(cursor_usage_json_is_partial(&stored));
+        assert_eq!(count_cursor_json_events(&stored), 4);
+        assert!(
+            stored.contains("\"conversationId\":\"keep\""),
+            "cached events the partial never reached must survive: {stored}"
+        );
+        assert_eq!(
+            stored.matches("\"conversationId\":\"keep2\"").count(),
+            1,
+            "an overlapping event must not be stored twice: {stored}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_partial_subset_leaves_existing_cache_untouched() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+        let seeded = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1},{"conversationId":"keep2","timestamp":"2","model":"gpt-5","chargedCents":2}]}"#;
+        fs::write(cache_dir.join("usage.json"), seeded)?;
+
+        let partial = r#"{"partial":true,"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |_session_token| {
+                let partial = partial.to_string();
+                async move { Ok(partial) }
+            },
+        ));
+
+        assert!(!result.synced);
+        assert_eq!(
+            fs::read_to_string(cache_dir.join("usage.json"))?,
+            seeded,
+            "a partial that adds no rows must not rewrite the cache"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_partial_fetch_does_not_replace_legacy_csv() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+        fs::write(
+            cache_dir.join("usage.csv"),
+            "Date,Model\n2026-01-01,gpt-5\n",
+        )?;
+
+        let partial = r#"{"partial":true,"usageEventsDisplay":[{"conversationId":"s1","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |_session_token| {
+                let partial = partial.to_string();
+                async move { Ok(partial) }
+            },
+        ));
+
+        assert!(!result.synced);
+        assert!(
+            cache_dir.join("usage.csv").exists(),
+            "a partial JSON sync must not archive the legacy CSV"
+        );
+        assert!(!cache_dir.join("usage.json").exists());
         Ok(())
     }
 

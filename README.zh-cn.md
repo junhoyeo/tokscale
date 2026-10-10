@@ -411,7 +411,7 @@ tokscale --client opencode,claude
 # 重复使用：效果相同（与 shell 别名搭配使用很方便）
 tokscale -c opencode -c claude
 
-# Cursor IDE 需要先运行 `tokscale cursor login`
+# Cursor IDE 使用 Tokscale 的 API 缓存；尚未保存登录时会导入桌面端会话
 tokscale --client cursor
 
 # Synthetic（synthetic.new）从其他 agent 会话中检测
@@ -609,15 +609,15 @@ tokscale autosubmit disable
 
 ### Cursor IDE 命令
 
-Cursor IDE 通过 Cursor 的网页用量导出 API 获取数据，并缓存在 `~/.config/tokscale/cursor-cache/usage*.csv`。Tokscale **不会**解析 `~/.cursor` 下的 Cursor Agent CLI 本地会话，也不会把桌面端 SQLite 当作用量账本。
+Cursor IDE 使用 Cursor 的 usage-events API。Tokscale 把当前账户的导出缓存在 `~/.config/tokscale/cursor-cache/usage.json`，其他账户缓存在 `usage.<account>.json`。旧版本的 `usage.csv` 仍会被读取；一次完整同步会把它移到 `cursor-cache/archive/`，避免和 JSON 重复计算。Tokscale **不会**解析 `~/.cursor` 下的 Cursor Agent CLI 本地会话，也不会把桌面端 SQLite 当作用量账本。
 
-若本机已安装并登录 Cursor 桌面端，`tokscale cursor login` 会优先从 Cursor 的 `state.vscdb` 读取 `cursorAuth/accessToken` 并自动构造会话 cookie；`tokscale cursor sync` 在可用时也会刷新该 token。用量数据仍只来自 Cursor 的 usage-export API。
+本机已安装并登录 Cursor 桌面端时，如果 tokscale 还没有已保存的 Cursor 登录，报告、提交或 `tokscale cursor sync` 会在同步前从 `state.vscdb` 导入 `cursorAuth/accessToken`。已保存的登录保持不变。用量缓存仍新鲜时，报告会跳过同步，因此新登录的桌面账号不会自行替换该登录或一份新鲜缓存。只有缺少桌面端会话时才需要 `tokscale cursor login`。用量数据仍只来自 Cursor 的 usage-events API，而不是本地 `~/.cursor` 记录。
 
 设置（桌面端自动登录）：
 
 1. 登录 Cursor 桌面端。
-2. 运行 `tokscale cursor login --name work`（有本地桌面会话时会自动检测）。
-3. 运行 `tokscale cursor sync --json`，填充 `~/.config/tokscale/cursor-cache/usage.csv`。
+2. 可选：运行 `tokscale cursor login --name work`，把该桌面会话保存为一个名称。尚未保存 Cursor 登录时，报告、提交和同步会自动导入它。
+3. 可选：运行 `tokscale cursor sync --json`，立即刷新 `~/.config/tokscale/cursor-cache/usage.json`。缓存过期时，报告自己会同步。
 4. 运行 `tokscale --client cursor` 或任意报告命令。
 
 回退（手动粘贴浏览器 cookie）：桌面端不可用时：
@@ -642,7 +642,7 @@ tokscale cursor accounts
 # 手动刷新缓存的 Cursor 使用量
 tokscale cursor sync --json
 
-# 切换活动账户（同步到 cursor-cache/usage.csv 的账户）
+# 切换活动账户（同步到 cursor-cache/usage.json 的账户）
 tokscale cursor switch work
 
 # 登出指定账户（保留历史，但不再参与合并统计）
@@ -658,9 +658,9 @@ tokscale cursor logout --all
 tokscale cursor logout --all --purge-cache
 ```
 
-**凭据存储**：Cursor 账户保存到 `~/.config/tokscale/cursor-credentials.json`。使用量数据缓存在 `~/.config/tokscale/cursor-cache/`（活动账户使用 `usage.csv`，其他账户使用 `usage.<account>.csv`）。
+**凭据存储**：Cursor 账户保存到 `~/.config/tokscale/cursor-credentials.json`。使用量数据缓存在 `~/.config/tokscale/cursor-cache/`（活动账户使用 `usage.json`，其他账户使用 `usage.<account>.json`）。
 
-默认情况下，tokscale 会 **合并统计所有已保存 Cursor 账户的使用量**（`cursor-cache/usage*.csv`）。为保持兼容性，活动账户会同步到 `cursor-cache/usage.csv`。
+默认情况下，tokscale 会 **合并统计所有已保存 Cursor 账户的使用量**（`cursor-cache/usage*.json`）。活动账户同步到 `usage.json`，其他账户同步到 `usage.<account>.json`。旧的 `usage*.csv` 在一次完整同步将其归档之前仍会计入。
 
 登出时，tokscale 会将缓存的历史记录移动到 `cursor-cache/archive/`（因此不会参与合并统计）。如需彻底删除缓存，请使用 `--purge-cache`。
 
