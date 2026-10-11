@@ -51,13 +51,13 @@ function parseDateKey(value: string | null | undefined): Date | null {
 }
 
 /**
- * The day every profile window ends on: the later of UTC today and the newest
+ * The day trailing profile windows end on: the later of UTC today and the newest
  * date the data itself carries.
  *
  * Contribution dates are calendar-day buckets computed by the CLI in the
  * *submitting* machine's local timezone, so a user ahead of UTC legitimately
  * reports a date that is still tomorrow here. Anchoring to the data keeps that
- * day inside every window for every viewer, wherever they are, and keeps the
+ * day inside trailing windows for every viewer, wherever they are, and keeps the
  * range-scoped stats on the same window the chart draws. Validation caps
  * contribution dates at UTC today + 2 days, so the anchor can never run more
  * than two days past the present.
@@ -71,7 +71,7 @@ function getProfileRangeAnchor(
   return latest && latest > utcToday ? latest : utcToday;
 }
 
-/** Trailing seven- or thirty-day window ending on `end`; null for lifetime. */
+/** Resolve a rolling or UTC calendar period; null for lifetime. */
 function getProfilePeriodDateRange(
   period: ProfilePeriod,
   end: Date,
@@ -276,12 +276,16 @@ export async function getPublicProfileResponse(
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
-    // Rolling ranges can include the newest submitted date; calendar months use UTC today.
+    // Calendar months stay anchored to UTC today; ahead-of-UTC day buckets remain in their month.
     const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
     const periodRange = getProfilePeriodDateRange(
       period,
       period === "this-month" || period === "last-month" ? now : rangeAnchor,
     );
+    if (period === "this-month" && periodRange) {
+      const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
+      periodRange.end = toUtcDateString(new Date(Math.min(rangeAnchor.getTime(), monthEnd.getTime())));
+    }
     const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
     // Ranks over rankable users only. A hidden user is absent from the CTE
     // entirely, so this returns no row and the profile reports rank null. The
