@@ -1,18 +1,18 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Timeout for every Cursor HTTP request. Picked to bound the worst case for
-/// auto-sync (which runs synchronously before local reports and the TUI) while
-/// still tolerating routine API latency. If the network is hung, the report
-/// proceeds against cached data after this timeout instead of stalling forever.
-/// Explicit `tokscale cursor sync` overrides this for the usage-CSV download
-/// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
+/// Timeout for every Cursor HTTP request, and the wall-clock budget for an
+/// implicit pre-report sync. A cached account only downloads events at or after
+/// its newest stored timestamp, so one new page fits here. If the network is
+/// hung, the report proceeds against cached data after this timeout instead of
+/// stalling forever. Explicit `tokscale cursor sync` overrides it with
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Environment variable overriding the explicit sync timeout budget in milliseconds.
@@ -21,10 +21,11 @@ pub const CURSOR_SYNC_TIMEOUT_MS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_MS";
 /// Environment variable overriding the explicit sync timeout budget in seconds.
 pub const CURSOR_SYNC_TIMEOUT_SECS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_SECS";
 
-/// Per-request timeout for the usage-CSV download during an explicit
-/// `tokscale cursor sync`. Large accounts export CSVs that take well over the
-/// default [`CURSOR_HTTP_TIMEOUT`] to generate and stream (issue #1175); the
-/// user asked for the sync, so waiting longer beats failing fast.
+/// Per-request timeout for the usage download during an explicit
+/// `tokscale cursor sync`. Large accounts take well over the default
+/// [`CURSOR_HTTP_TIMEOUT`] to page (issue #1175); the user asked for the sync,
+/// so waiting longer beats failing fast. When this default is in use, the walk
+/// may expand it from the advertised event count up to 30 minutes.
 pub const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Seconds allocated per page when dynamically scaling the explicit sync budget
@@ -267,15 +268,219 @@ fn build_cursor_json_headers(session_token: &str) -> reqwest::header::HeaderMap 
 /// Count events in an aggregated usage-events JSON document. Invalid JSON or a
 /// missing `usageEventsDisplay` array counts as zero.
 fn count_cursor_json_events(json_text: &str) -> usize {
+    cached_usage_events(Some(json_text)).len()
+}
+
+/// Events already stored in an aggregated usage-events cache. Invalid JSON or a
+/// missing `usageEventsDisplay` array is an empty history, so a corrupt cache
+/// cannot watermark an incremental sync.
+fn cached_usage_events(json_text: Option<&str>) -> Vec<serde_json::Value> {
+    let Some(json_text) = json_text else {
+        return Vec::new();
+    };
     serde_json::from_str::<serde_json::Value>(json_text)
         .ok()
         .and_then(|value| {
             value
                 .get("usageEventsDisplay")
                 .and_then(|events| events.as_array())
-                .map(|events| events.len())
+                .cloned()
         })
-        .unwrap_or(0)
+        .unwrap_or_default()
+}
+
+/// Unix milliseconds on one usage event. The dashboard sends this as a string;
+/// a number and an RFC 3339 datetime are accepted so either shape still yields
+/// a watermark.
+fn cursor_event_timestamp_ms(event: &serde_json::Value) -> i64 {
+    let Some(value) = event.get("timestamp") else {
+        return 0;
+    };
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .unwrap_or(0),
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            trimmed.parse::<i64>().unwrap_or_else(|_| {
+                chrono::DateTime::parse_from_rfc3339(trimmed)
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(0)
+            })
+        }
+        _ => 0,
+    }
+}
+
+/// Newest event timestamp in a cache. `None` when the cache has no positive
+/// timestamp, which forces a full download instead of an empty incremental sync.
+fn usage_events_watermark_ms(events: &[serde_json::Value]) -> Option<i64> {
+    events
+        .iter()
+        .map(cursor_event_timestamp_ms)
+        .filter(|timestamp| *timestamp > 0)
+        .max()
+}
+
+/// Identity of a usage event for incremental merge.
+///
+/// Billing fields (`chargedCents`, `tokenUsage.totalCents`) are left out so a
+/// boundary event re-fetched on the next sync replaces the stored row instead
+/// of being appended beside it. Everything else participates, and object keys
+/// are sorted so a cache rewrite cannot fail to match the dashboard's key order.
+fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut sorted = serde_json::Map::new();
+                for key in keys {
+                    if key == "chargedCents" || key == "cursorTokenFee" {
+                        continue;
+                    }
+                    let child = &map[key];
+                    let child = if key == "tokenUsage" {
+                        strip_metered_cents(child)
+                    } else {
+                        normalize(child)
+                    };
+                    sorted.insert(key.clone(), child);
+                }
+                serde_json::Value::Object(sorted)
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(normalize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    fn strip_metered_cents(value: &serde_json::Value) -> serde_json::Value {
+        let mut normalized = normalize(value);
+        if let Some(map) = normalized.as_object_mut() {
+            map.remove("totalCents");
+        }
+        normalized
+    }
+
+    serde_json::to_string(&normalize(event)).unwrap_or_default()
+}
+
+/// Union `incoming` (just fetched, newest first) with `existing` (the cache).
+/// Incoming wins on identity so a re-fetched boundary row picks up a billing
+/// update, and cached rows the new pages never reached stay in the result.
+fn merge_cursor_usage_events(
+    existing: Vec<serde_json::Value>,
+    incoming: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::with_capacity(existing.len().saturating_add(incoming.len()));
+    let mut merged = Vec::with_capacity(existing.len().saturating_add(incoming.len()));
+    for event in incoming.into_iter().chain(existing) {
+        if seen.insert(cursor_usage_event_identity(&event)) {
+            merged.push(event);
+        }
+    }
+    merged
+}
+
+/// Keep events at or after `watermark`. The dashboard lists newest first, so a
+/// page that also contains an older event is the overlap with the cache.
+fn fresh_usage_events(
+    events: &[serde_json::Value],
+    watermark: Option<i64>,
+) -> Vec<&serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| match watermark {
+            Some(watermark) => {
+                let timestamp = cursor_event_timestamp_ms(event);
+                timestamp == 0 || timestamp >= watermark
+            }
+            None => true,
+        })
+        .collect()
+}
+
+fn page_crosses_watermark(events: &[serde_json::Value], watermark: Option<i64>) -> bool {
+    let Some(watermark) = watermark else {
+        return false;
+    };
+    events.iter().any(|event| {
+        let timestamp = cursor_event_timestamp_ms(event);
+        timestamp > 0 && timestamp < watermark
+    })
+}
+
+fn usage_events_request_body(
+    page: usize,
+    page_size: usize,
+    watermark: Option<i64>,
+) -> serde_json::Value {
+    match watermark {
+        Some(watermark) => serde_json::json!({
+            "teamId": 0,
+            "startDate": watermark,
+            "page": page,
+            "pageSize": page_size,
+        }),
+        None => serde_json::json!({
+            "teamId": 0,
+            "page": page,
+            "pageSize": page_size,
+        }),
+    }
+}
+
+fn cursor_budget_label(budget: Duration) -> String {
+    if budget.as_secs() >= 1 {
+        format!("{}s", budget.as_secs())
+    } else {
+        format!("{}ms", budget.as_millis())
+    }
+}
+
+/// What to print when the paginated walk runs out of time. `reqwest`'s own
+/// `Display` is only "error sending request for url (...)", which is how a
+/// budget expiry was reported as a network failure.
+fn cursor_budget_exhausted_message(
+    budget: Duration,
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+    cause: &str,
+) -> String {
+    let pages_word = if pages_completed == 1 {
+        "page"
+    } else {
+        "pages"
+    };
+    let progress = match total {
+        Some(total) => format!("{events_collected}/{total} events"),
+        None => format!("{events_collected} events"),
+    };
+    let message = format!(
+        "Cursor usage events fetch exceeded its {} time budget ({pages_completed} {pages_word}, {progress} collected)",
+        cursor_budget_label(budget)
+    );
+    if cause.is_empty() {
+        message
+    } else {
+        format!("{message}: {cause}")
+    }
+}
+
+fn cursor_sync_error_text(err: &anyhow::Error) -> String {
+    tokscale_core::pricing::describe_error(err.as_ref())
+}
+
+fn error_is_reqwest_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|reqwest_err| reqwest_err.is_timeout())
+    })
 }
 
 fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
@@ -1205,16 +1410,28 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
     }
 }
 
-/// Fetch Cursor usage events JSON with the endpoint, byte ceiling,
+pub async fn fetch_cursor_usage_events_json(
+    session_token: &str,
+    timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
+    existing_cache: Option<&str>,
+) -> Result<String> {
+    fetch_cursor_usage_events_json_merging(
+        USAGE_EVENTS_JSON_ENDPOINT,
+        session_token,
+        timeout_override,
+        is_custom_timeout,
+        CURSOR_MAX_JSON_BYTES,
+        CURSOR_JSON_PAGE_SIZE,
+        existing_cache,
+    )
+    .await
+}
+
+/// Body of [`fetch_cursor_usage_events_json`] with the endpoint, byte ceiling,
 /// and page size injected so tests can drive the real paginating path against a
-/// local server.
-///
-/// Walks pages of `get-filtered-usage-events` (a POST endpoint carrying an
-/// `Origin` header for its CSRF check) until it has collected every event, then
-/// returns the dashboard response shape with all pages' `usageEventsDisplay`
-/// aggregated into one array. `max_body_bytes` is a cumulative ceiling spanning
-/// every page, and a page that omits the `usageEventsDisplay` array is an error
-/// so a malformed 200 never masquerades as an empty result.
+/// local server. No cached history is merged in.
+#[cfg(test)]
 async fn fetch_cursor_usage_events_json_from(
     url: &str,
     session_token: &str,
@@ -1223,8 +1440,47 @@ async fn fetch_cursor_usage_events_json_from(
     max_body_bytes: usize,
     page_size: usize,
 ) -> Result<String> {
+    fetch_cursor_usage_events_json_merging(
+        url,
+        session_token,
+        timeout_override,
+        is_custom_timeout,
+        max_body_bytes,
+        page_size,
+        None,
+    )
+    .await
+}
+
+/// Walks pages of `get-filtered-usage-events` (a POST endpoint carrying an
+/// `Origin` header for its CSRF check).
+///
+/// With no cached history this collects every event. With a cache, the request
+/// sends `startDate` at the newest stored timestamp and stops when a page
+/// overlaps that timestamp. The dashboard lists events newest-first, so the
+/// overlap is the end of the delta: steady-state sync is one page and fits in
+/// the 15s auto-sync budget instead of re-downloading the whole account.
+/// Returned JSON is the cache with that delta merged in, not the delta alone,
+/// so a caught-up account still rewrites a non-empty cache.
+///
+/// `max_body_bytes` is a cumulative ceiling spanning every page, and a page that
+/// omits the `usageEventsDisplay` array is an error so a malformed 200 never
+/// masquerades as an empty result. A timed-out walk returns an error and does
+/// not merge a partial delta: the newest cached timestamp would otherwise skip
+/// the gap on the next sync.
+async fn fetch_cursor_usage_events_json_merging(
+    url: &str,
+    session_token: &str,
+    timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
+    max_body_bytes: usize,
+    page_size: usize,
+    existing_cache: Option<&str>,
+) -> Result<String> {
+    let existing_events = cached_usage_events(existing_cache);
+    let watermark = usage_events_watermark_ms(&existing_events);
     let client = build_cursor_http_client()?;
-    let mut all_events: Vec<serde_json::Value> = Vec::new();
+    let mut fresh_events: Vec<serde_json::Value> = Vec::new();
     let mut total_count: Option<u64> = None;
     let mut bytes_read: usize = 0;
 
@@ -1242,27 +1498,19 @@ async fn fetch_cursor_usage_events_json_from(
     for page in 1..=CURSOR_MAX_JSON_PAGES {
         let remaining_budget = fetch_deadline.saturating_duration_since(Instant::now());
         if remaining_budget.is_zero() {
-            let budget_secs = overall_budget.as_secs();
-            let fetched_pages = page - 1;
-            let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
-            if let Some(total) = total_count {
-                anyhow::bail!(
-                    "Cursor usage events fetch exceeded its {budget_secs}s time budget before the full history was collected (fetched {fetched_pages} {pages_str}, {}/{total} events)",
-                    all_events.len()
-                );
-            } else {
-                anyhow::bail!(
-                    "Cursor usage events fetch exceeded its {budget_secs}s time budget before the full history was collected (fetched {fetched_pages} {pages_str}, {} events)",
-                    all_events.len()
-                );
-            }
+            anyhow::bail!(
+                "{}",
+                cursor_budget_exhausted_message(
+                    overall_budget,
+                    page - 1,
+                    fresh_events.len(),
+                    total_count,
+                    "",
+                )
+            );
         }
 
-        let body = serde_json::json!({
-            "teamId": 0,
-            "page": page,
-            "pageSize": page_size,
-        });
+        let body = usage_events_request_body(page, page_size, watermark);
 
         let page_timeout = initial_budget.min(remaining_budget);
         let req = client
@@ -1272,26 +1520,25 @@ async fn fetch_cursor_usage_events_json_from(
             .timeout(page_timeout);
 
         let response = match req.send().await {
-            Ok(resp) => resp,
+            Ok(response) => response,
             Err(err) => {
-                let now = Instant::now();
-                if fetch_deadline.saturating_duration_since(now).is_zero() {
-                    let budget_secs = overall_budget.as_secs();
-                    let fetched_pages = page - 1;
-                    let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
-                    if let Some(total) = total_count {
-                        anyhow::bail!(
-                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while requesting page {page} ({fetched_pages} {pages_str}, {}/{total} events collected before timeout): {err}",
-                            all_events.len()
-                        );
-                    } else {
-                        anyhow::bail!(
-                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while requesting page {page} ({fetched_pages} {pages_str}, {} events collected before timeout): {err}",
-                            all_events.len()
-                        );
-                    }
+                if err.is_timeout()
+                    || fetch_deadline
+                        .saturating_duration_since(Instant::now())
+                        .is_zero()
+                {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_budget_exhausted_message(
+                            overall_budget,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &tokscale_core::pricing::describe_error(&err),
+                        )
+                    );
                 }
-                return Err(err.into());
+                anyhow::bail!("{}", tokscale_core::pricing::describe_error(&err));
             }
         };
 
@@ -1319,24 +1566,21 @@ async fn fetch_cursor_usage_events_json_from(
         let text = match read_cursor_body_with_cap(response, remaining, "usage events JSON").await {
             Ok(text) => text,
             Err(err) => {
-                if fetch_deadline
-                    .saturating_duration_since(Instant::now())
-                    .is_zero()
+                if error_is_reqwest_timeout(&err)
+                    || fetch_deadline
+                        .saturating_duration_since(Instant::now())
+                        .is_zero()
                 {
-                    let budget_secs = overall_budget.as_secs();
-                    let fetched_pages = page - 1;
-                    let pages_str = if fetched_pages == 1 { "page" } else { "pages" };
-                    if let Some(total) = total_count {
-                        anyhow::bail!(
-                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while reading page {page} ({fetched_pages} {pages_str}, {}/{total} events collected before timeout): {err}",
-                            all_events.len()
-                        );
-                    } else {
-                        anyhow::bail!(
-                            "Cursor usage events fetch exceeded its {budget_secs}s time budget while reading page {page} ({fetched_pages} {pages_str}, {} events collected before timeout): {err}",
-                            all_events.len()
-                        );
-                    }
+                    anyhow::bail!(
+                        "{}",
+                        cursor_budget_exhausted_message(
+                            overall_budget,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cursor_sync_error_text(&err),
+                        )
+                    );
                 }
                 return Err(err);
             }
@@ -1369,7 +1613,20 @@ async fn fetch_cursor_usage_events_json_from(
             }
         };
         let received = page_events.len();
-        all_events.extend(page_events);
+        // Newest-first pages: once an event is older than the cached watermark
+        // the rest of the history is already stored. Keep only the fresh prefix
+        // of this page and stop, even when `totalUsageEventsCount` still names
+        // the unfiltered account (the server ignored `startDate`).
+        let crossed = page_crosses_watermark(&page_events, watermark);
+        fresh_events.extend(
+            fresh_usage_events(&page_events, watermark)
+                .into_iter()
+                .cloned(),
+        );
+        if crossed {
+            completed = true;
+            break;
+        }
 
         // When running an explicit sync with the default budget (no custom
         // override specified via flag or environment variable), dynamically
@@ -1397,7 +1654,7 @@ async fn fetch_cursor_usage_events_json_from(
         // heuristic only when no total was reported.
         let done = match total_count {
             Some(total) => {
-                if all_events.len() as u64 >= total {
+                if fresh_events.len() as u64 >= total {
                     true
                 } else if received == 0 {
                     anyhow::bail!(
@@ -1423,9 +1680,14 @@ async fn fetch_cursor_usage_events_json_from(
         );
     }
 
+    let events = if watermark.is_some() {
+        merge_cursor_usage_events(existing_events, fresh_events)
+    } else {
+        fresh_events
+    };
     let aggregated = serde_json::json!({
-        "totalUsageEventsCount": all_events.len(),
-        "usageEventsDisplay": all_events,
+        "totalUsageEventsCount": events.len(),
+        "usageEventsDisplay": events,
     });
     serde_json::to_string(&aggregated).context("Failed to serialize Cursor usage events cache")
 }
@@ -1477,9 +1739,16 @@ async fn read_cursor_body_with_cap(
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// One account's usage download. `existing_cache` is the aggregated JSON already
+/// on disk, when there is one, so the fetcher can request only newer events.
+struct CursorUsageFetch {
+    session_token: String,
+    existing_cache: Option<String>,
+}
+
 async fn sync_cursor_cache_with_fetcher<F, Fut>(fetch_usage_json: F) -> SyncCursorResult
 where
-    F: Fn(String) -> Fut,
+    F: Fn(CursorUsageFetch) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
 {
     let home_dir = match home_dir() {
@@ -1501,7 +1770,7 @@ async fn sync_cursor_cache_with_fetcher_in_home<F, Fut>(
     fetch_usage_json: F,
 ) -> SyncCursorResult
 where
-    F: Fn(String) -> Fut,
+    F: Fn(CursorUsageFetch) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
 {
     migrate_cache_dir_from_old_path_in_home(home_dir);
@@ -1545,18 +1814,23 @@ where
 
     for (account_id, credentials) in &store.accounts {
         let is_active = account_id == &store.active_account_id;
+        let file_path = if is_active {
+            cache_dir.join("usage.json")
+        } else {
+            cache_dir.join(format!(
+                "usage.{}.json",
+                sanitize_account_id_for_filename(account_id)
+            ))
+        };
+        let existing_cache = fs::read_to_string(&file_path).ok();
 
-        match fetch_usage_json(credentials.session_token.clone()).await {
+        match fetch_usage_json(CursorUsageFetch {
+            session_token: credentials.session_token.clone(),
+            existing_cache,
+        })
+        .await
+        {
             Ok(json_text) => {
-                let file_path = if is_active {
-                    cache_dir.join("usage.json")
-                } else {
-                    cache_dir.join(format!(
-                        "usage.{}.json",
-                        sanitize_account_id_for_filename(account_id)
-                    ))
-                };
-
                 let event_count = count_cursor_json_events(&json_text);
                 let legacy_csv = file_path.with_extension("csv");
 
@@ -1590,7 +1864,7 @@ where
                 }
             }
             Err(e) => {
-                errors.push(format!("{}: {}", account_id, e));
+                errors.push(format!("{account_id}: {}", cursor_sync_error_text(&e)));
             }
         }
     }
@@ -1714,14 +1988,12 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     let _ = ensure_credentials_from_local_cursor();
 
     let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout);
-    sync_cursor_cache_with_fetcher(move |session_token| async move {
-        fetch_cursor_usage_events_json_from(
-            USAGE_EVENTS_JSON_ENDPOINT,
-            &session_token,
+    sync_cursor_cache_with_fetcher(move |fetch| async move {
+        fetch_cursor_usage_events_json(
+            &fetch.session_token,
             timeout,
             is_custom,
-            CURSOR_MAX_JSON_BYTES,
-            CURSOR_JSON_PAGE_SIZE,
+            fetch.existing_cache.as_deref(),
         )
         .await
     })
@@ -2823,6 +3095,191 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_events_json_merges_only_events_after_the_cached_watermark() {
+        // A warm cache must not walk the rest of the account. Page 1 is a full
+        // page (so the unfiltered total would demand another request) and it
+        // already overlaps the cached timestamp, including a new event that
+        // shares that millisecond.
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("boundary", "200"),
+            json_event("old", "150"),
+        );
+        let body = json_page(
+            10_000,
+            &[
+                &json_event("new", "300"),
+                &json_event("same-ms", "200"),
+                &json_event("boundary", "200"),
+                &json_event("older", "100"),
+            ],
+        );
+        let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                4,
+                Some(&cached),
+            ))
+            .expect("an overlapping page must finish the sync");
+
+        assert_eq!(count_cursor_json_events(&text), 4);
+        assert!(text.contains("\"conversationId\":\"new\""));
+        assert!(text.contains("\"conversationId\":\"same-ms\""));
+        assert!(text.contains("\"conversationId\":\"old\""));
+        assert_eq!(text.matches("\"conversationId\":\"boundary\"").count(), 1);
+        assert!(
+            !text.contains("\"conversationId\":\"older\""),
+            "events older than the watermark are already represented by the cache: {text}"
+        );
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "the walk must stop on the overlapping page"
+        );
+        assert!(
+            captured[0].contains("\"startDate\":200"),
+            "the cached timestamp must bound the dashboard query: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_keeps_paging_until_the_watermark() {
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("base", "100"),
+            json_event("cached-old", "80"),
+        );
+        let (url, requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(10_000, &[&json_event("a", "400"), &json_event("b", "300")]),
+            ),
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[&json_event("c", "200"), &json_event("ancient", "50")],
+                ),
+            ),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+                Some(&cached),
+            ))
+            .expect("pages newer than the cache must be collected");
+
+        assert_eq!(count_cursor_json_events(&text), 5);
+        for id in ["a", "b", "c", "base", "cached-old"] {
+            assert!(
+                text.contains(&format!("\"conversationId\":\"{id}\"")),
+                "{id} must be in the merged cache: {text}"
+            );
+        }
+        assert!(!text.contains("\"conversationId\":\"ancient\""));
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "must walk the fresh page and the overlap"
+        );
+        assert!(captured[0].contains("\"page\":1"));
+        assert!(captured[1].contains("\"page\":2"));
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_replaces_boundary_row_when_billing_changes() {
+        let stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        let mut updated = stored.clone();
+        updated["chargedCents"] = serde_json::json!(9);
+        updated["tokenUsage"]["totalCents"] = serde_json::json!(9);
+
+        let merged = merge_cursor_usage_events(vec![stored], vec![updated]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["chargedCents"], serde_json::json!(9));
+    }
+
+    #[test]
+    fn test_usage_events_json_timeout_names_the_budget() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = stream;
+            }
+        });
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(1)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("a stalled page must hit the time budget");
+        let message = format!("{err}");
+        assert!(
+            message.contains("1s time budget"),
+            "a timeout must name the budget, not only the transport error: {message}"
+        );
+        assert!(
+            message.contains("0 pages"),
+            "the first page timing out has not collected a page: {message}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_connect_error_includes_the_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("a refused connection must fail");
+        let message = cursor_sync_error_text(&err);
+        assert!(
+            message.to_lowercase().contains("refused"),
+            "the source chain must name the refused connection: {message}"
+        );
+    }
+
+    #[test]
     fn test_cursor_usage_cache_is_fresh_returns_false_when_cache_missing() {
         let temp = tempfile::tempdir().unwrap();
         // No cache dir created yet.
@@ -3070,8 +3527,8 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |session_token| {
-                let json = match session_token.as_str() {
+            |fetch| {
+                let json = match fetch.session_token.as_str() {
                     "token-active" => {
                         r#"{"usageEventsDisplay":[{"conversationId":"s1","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#
                     }
@@ -3153,7 +3610,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |_session_token| async move { Ok(r#"{"usageEventsDisplay":[]}"#.to_string()) },
+            |_fetch| async move { Ok(r#"{"usageEventsDisplay":[]}"#.to_string()) },
         ));
 
         // The empty result is refused; the seeded cache is left untouched.
@@ -3204,7 +3661,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |_session_token| async move { Err(anyhow::anyhow!("network down")) },
+            |_fetch| async move { Err(anyhow::anyhow!("network down")) },
         ));
 
         // The fetch failed, but the good cache survives and the duplicate is
@@ -3526,9 +3983,9 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let _result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |session_token| {
+            |fetch| {
                 // Secondary deliberately fails to simulate a broken account.
-                let result: Result<String> = match session_token.as_str() {
+                let result: Result<String> = match fetch.session_token.as_str() {
                     "token-active" => Ok("Date,Model,Tokens\n2026-01-01,gpt-5,10\n".to_string()),
                     _ => Err(anyhow::anyhow!("simulated fetch failure")),
                 };
