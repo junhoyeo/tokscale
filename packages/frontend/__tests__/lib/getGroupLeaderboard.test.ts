@@ -226,6 +226,19 @@ afterEach(() => {
 });
 
 describe("group leaderboard data", () => {
+  it("uses a new cache key when the group's local calendar crosses midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T07:59:00Z"));
+    const before = await getGroupLeaderboardData("group-1", "month", 1, 50, "tokens", "", "America/Los_Angeles");
+    const beforeKey = vi.mocked(unstable_cache).mock.calls.at(-1)?.[1];
+    vi.setSystemTime(new Date("2026-03-01T08:01:00Z"));
+    const after = await getGroupLeaderboardData("group-1", "month", 1, 50, "tokens", "", "America/Los_Angeles");
+    const afterKey = vi.mocked(unstable_cache).mock.calls.at(-1)?.[1];
+    expect(before.dateRange).toEqual({ start: "2026-02-01", end: "2026-02-28" });
+    expect(after.dateRange).toEqual({ start: "2026-03-01", end: "2026-03-01" });
+    expect(afterKey).not.toEqual(beforeKey);
+  });
+
   it.each([
     ["month", "2026-02-01", "2026-02-28"],
     ["last-month", "2026-01-01", "2026-01-31"],
