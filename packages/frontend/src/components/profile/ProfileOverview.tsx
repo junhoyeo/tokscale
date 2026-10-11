@@ -8,11 +8,13 @@ import { formatCurrency, formatNumber } from "@/lib/utils";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 import type { ProfileStatsData, ProfileUser } from "./types";
 
+import { PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
+
 export interface ProfileOverviewProps {
   user: ProfileUser;
   stats: ProfileStatsData;
   lastUpdated?: string | null;
-  period?: "all" | "month" | "week";
+  period?: ProfilePeriod;
   /**
    * Zone for the two absolute instants rendered here — "Updated" and "Joined".
    * Defaults to the viewer's browser zone. Never applies to contribution
@@ -27,6 +29,7 @@ export function getProfileRankLabel(
 ): string {
   if (period === "month") return "30d rank";
   if (period === "week") return "7d rank";
+  if (period === "this-month" || period === "last-month") return `${PROFILE_PERIOD_LABELS[period]} rank`;
   return "All-time rank";
 }
 
@@ -389,7 +392,7 @@ export function ProfileOverview({
           ? "All-time tokens"
           : period === "month"
             ? "30d tokens"
-            : "7d tokens",
+            : `${PROFILE_PERIOD_LABELS[period]} tokens`,
       value: formatNumber(stats.totalTokens),
       title: stats.totalTokens.toLocaleString("en-US"),
     },
@@ -399,7 +402,7 @@ export function ProfileOverview({
           ? "All-time cost"
           : period === "month"
             ? "30d cost"
-            : "7d cost",
+            : `${PROFILE_PERIOD_LABELS[period]} cost`,
       value: formatCurrency(stats.totalCost),
       title: stats.totalCost.toLocaleString("en-US", {
         style: "currency",
@@ -412,7 +415,7 @@ export function ProfileOverview({
           ? "Active days (1y)"
           : period === "month"
             ? "Active days (30d)"
-            : "Active days (7d)",
+            : `Active days (${PROFILE_PERIOD_LABELS[period]})`,
       value: stats.activeDays.toLocaleString("en-US"),
       title: stats.activeDays.toLocaleString("en-US"),
     },

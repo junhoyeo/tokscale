@@ -7,6 +7,7 @@ import { revalidateGroupCaches } from "@/lib/groups/cache";
 import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug, getGroupMemberCount } from "@/lib/groups/queries";
 import { generateUniqueGroupSlug } from "@/lib/groups/slugs";
+import { isValidTimeZone } from "@/lib/timezone";
 
 const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
 
@@ -112,8 +113,23 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       description?: string | null;
       isPublic?: boolean;
       avatarUrl?: string | null;
+      timeZone?: string;
+      weekStartsOn?: number;
       updatedAt: Date;
     } = { updatedAt: new Date() };
+
+    if (b.timeZone !== undefined) {
+      if (typeof b.timeZone !== "string" || b.timeZone.length > 100 || !isValidTimeZone(b.timeZone)) {
+        return NextResponse.json({ error: "A valid IANA time zone is required" }, { status: 400 });
+      }
+      updateData.timeZone = b.timeZone;
+    }
+    if (b.weekStartsOn !== undefined) {
+      if (typeof b.weekStartsOn !== "number" || !Number.isInteger(b.weekStartsOn) || b.weekStartsOn < 0 || b.weekStartsOn > 6) {
+        return NextResponse.json({ error: "weekStartsOn must be an integer from 0 (Sunday) to 6 (Saturday)" }, { status: 400 });
+      }
+      updateData.weekStartsOn = b.weekStartsOn;
+    }
 
     if (b.name !== undefined) {
       const name = parseString(b.name);

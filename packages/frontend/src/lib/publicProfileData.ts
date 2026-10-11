@@ -11,14 +11,12 @@ import {
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import { calculateIntensity } from "@/lib/utils";
+import { PROFILE_PERIODS, getCalendarDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
   return LEGACY_CLIENT_ALIASES[id] ?? id;
 }
-
-const PROFILE_PERIODS = ["all", "week", "month"] as const;
-type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
 
 export type PublicProfilePeriod = ProfilePeriod;
 
@@ -80,6 +78,10 @@ function getProfilePeriodDateRange(
 ): ProfilePeriodDateRange | null {
   if (period === "all") {
     return null;
+  }
+
+  if (period === "this-month" || period === "last-month") {
+    return getCalendarDateRange(period === "this-month" ? "month" : period, end);
   }
 
   const start = new Date(end);
@@ -274,10 +276,12 @@ export async function getPublicProfileResponse(
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
-    // Resolved only once the newest submitted date is known, so every window —
-    // lifetime and period alike — ends on the data instead of on UTC "today".
+    // Rolling ranges can include the newest submitted date; calendar months use UTC today.
     const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
-    const periodRange = getProfilePeriodDateRange(period, rangeAnchor);
+    const periodRange = getProfilePeriodDateRange(
+      period,
+      period === "this-month" || period === "last-month" ? now : rangeAnchor,
+    );
     const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
     // Ranks over rankable users only. A hidden user is absent from the CTE
     // entirely, so this returns no row and the profile reports rank null. The

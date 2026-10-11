@@ -1,7 +1,8 @@
 import { unstable_cache } from "next/cache";
 import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db, dailyBreakdown, groupMembers, submissions, users } from "@/lib/db";
-import type { LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
+import type { LeaderboardUser, SortBy } from "@/lib/leaderboard/types";
+import { getCalendarDateRange, type GroupPeriod } from "@/lib/reportingPeriods";
 import { hasDirectives, parseSearchDirectives } from "@/lib/leaderboard/searchDirectives";
 import {
   scopeBreakdownToDirectives,
@@ -49,29 +50,14 @@ export interface GroupLeaderboardData {
     activeUsers: number;
     totalMembers: number;
   };
-  period: Period;
+  period: GroupPeriod;
   sortBy: SortBy;
+  dateRange: { start: string; end: string } | null;
+  timeZone: string;
+  weekStartsOn: number;
 }
 
-function toUtcDateString(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function getPeriodDateRange(period: Period, now: Date = new Date()) {
-  if (period === "all") {
-    return null;
-  }
-
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  if (period === "week") {
-    const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 6);
-    return { start: toUtcDateString(start), end: toUtcDateString(end) };
-  }
-
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  return { start: toUtcDateString(start), end: toUtcDateString(end) };
-}
+type GroupRankingData = Omit<GroupLeaderboardData, "dateRange" | "timeZone" | "weekStartsOn">;
 
 function compareGroupUsers(
   left: Omit<GroupLeaderboardUser, "rank">,
@@ -106,11 +92,11 @@ function paginateRankedUsers(
   usersWithRanks: GroupLeaderboardUser[],
   page: number,
   limit: number,
-  period: Period,
+  period: GroupPeriod,
   sortBy: SortBy,
   search: string,
   totalMembers: number
-): GroupLeaderboardData {
+): GroupRankingData {
   const offset = (page - 1) * limit;
   const normalizedText = parseSearchDirectives(search).text.toLowerCase();
   const filteredUsers = usersWithRanks.filter((user) => matchesSearch(user, normalizedText));
@@ -141,11 +127,11 @@ function buildPeriodGroupLeaderboardData(
   rows: GroupLeaderboardPeriodRow[],
   page: number,
   limit: number,
-  period: Period,
+  period: GroupPeriod,
   sortBy: SortBy,
   search: string,
   totalMembers: number
-): GroupLeaderboardData {
+): GroupRankingData {
   const parsed = parseSearchDirectives(search);
 
   let filteredRows = rows;
@@ -203,10 +189,8 @@ async function countGroupMembers(groupId: string): Promise<number> {
 
 async function fetchPeriodRows(
   groupId: string,
-  period: Exclude<Period, "all">
+  dateRange: { start: string; end: string },
 ): Promise<GroupLeaderboardPeriodRow[]> {
-  const dateRange = getPeriodDateRange(period);
-  if (!dateRange) return [];
 
   const rows = await db
     .select({
@@ -377,16 +361,17 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy, search: string 
 
 async function fetchGroupLeaderboardData(
   groupId: string,
-  period: Period,
+  period: GroupPeriod,
   page: number,
   limit: number,
   sortBy: SortBy,
-  search: string
-): Promise<GroupLeaderboardData> {
+  search: string,
+  dateRange: { start: string; end: string } | null,
+): Promise<GroupRankingData> {
   const totalMembers = await countGroupMembers(groupId);
 
-  if (period !== "all") {
-    const rows = await fetchPeriodRows(groupId, period);
+  if (dateRange) {
+    const rows = await fetchPeriodRows(groupId, dateRange);
     return buildPeriodGroupLeaderboardData(rows, page, limit, period, sortBy, search, totalMembers);
   }
 
@@ -405,15 +390,18 @@ async function fetchGroupLeaderboardData(
 
 export function getGroupLeaderboardData(
   groupId: string,
-  period: Period = "all",
+  period: GroupPeriod = "all",
   page: number = 1,
   limit: number = 50,
   sortBy: SortBy = "tokens",
-  search: string = ""
+  search: string = "",
+  timeZone: string = "UTC",
+  weekStartsOn: number = 1,
 ): Promise<GroupLeaderboardData> {
+  const dateRange = period === "all" ? null : getCalendarDateRange(period, new Date(), timeZone, weekStartsOn);
   return unstable_cache(
-    () => fetchGroupLeaderboardData(groupId, period, page, limit, sortBy, search),
-    [`group-leaderboard:${groupId}:${period}:${page}:${limit}:${sortBy}:${search}`],
+    () => fetchGroupLeaderboardData(groupId, period, page, limit, sortBy, search, dateRange),
+    [`group-leaderboard:${groupId}:${period}:${page}:${limit}:${sortBy}:${search}:${timeZone}:${weekStartsOn}:${dateRange?.start ?? ""}:${dateRange?.end ?? ""}`],
     {
       tags: [
         `group:${groupId}`,
@@ -422,5 +410,5 @@ export function getGroupLeaderboardData(
       ],
       revalidate: 60,
     }
-  )();
+  )().then((data) => ({ ...data, dateRange, timeZone, weekStartsOn }));
 }

@@ -1094,7 +1094,7 @@ describe("GET /api/users/[username]", () => {
     period,
     start,
   }: {
-    period: "week" | "month";
+    period: "week" | "month" | "this-month" | "last-month";
     start: string;
   }) {
     vi.useFakeTimers();
@@ -1120,7 +1120,7 @@ describe("GET /api/users/[username]", () => {
         reasoningTokens: 25,
         submissionCount: 3,
         earliestDate: "2026-01-01",
-        latestDate: "2026-06-28",
+        latestDate: period === "this-month" || period === "last-month" ? "2026-06-29" : "2026-06-28",
         sessionCount: 8,
       },
     ]);
@@ -1135,7 +1135,7 @@ describe("GET /api/users/[username]", () => {
     ]);
     mockState.pushSelectResult([
       {
-        date: "2026-06-22",
+        date: period === "last-month" ? "2026-05-22" : "2026-06-22",
         timestampMs: 100,
         tokens: 200,
         cost: "2.0000",
@@ -1167,7 +1167,7 @@ describe("GET /api/users/[username]", () => {
         },
       },
       {
-        date: "2026-06-28",
+        date: period === "last-month" ? "2026-05-28" : "2026-06-28",
         timestampMs: 200,
         tokens: 300,
         cost: "3.0000",
@@ -1217,7 +1217,9 @@ describe("GET /api/users/[username]", () => {
     // when the query is built, and no row can sit above it anyway.
     expect(mockState.lte).not.toHaveBeenCalled();
     expect(body.period).toBe(period);
-    expect(body.dateRange).toEqual({ start, end: "2026-06-28" });
+    const end = period === "last-month" ? "2026-05-31" : "2026-06-28";
+    expect(body.dateRange).toEqual({ start, end });
+    expect(body.chartRange).toEqual({ start, end });
     expect(body.user.rank).toBe(4);
     expect(
       sqlTexts.some(
@@ -1225,12 +1227,12 @@ describe("GET /api/users/[username]", () => {
           text.includes("FROM daily_breakdown d") &&
           text.includes("ROW_NUMBER() OVER") &&
           text.includes(`d.date >= ${start}`) &&
-          text.includes("d.date <= 2026-06-28"),
+          text.includes(`d.date <= ${end}`),
       ),
     ).toBe(true);
     expect(unstableCacheMock).toHaveBeenCalledWith(
       expect.any(Function),
-      ["profile-period-rank", "user-1", start, "2026-06-28"],
+      ["profile-period-rank", "user-1", start, end],
       {
         revalidate: 60,
         tags: ["leaderboard", "user:alice"],
@@ -1256,6 +1258,8 @@ describe("GET /api/users/[username]", () => {
   it.each([
     { period: "week", start: "2026-06-22" },
     { period: "month", start: "2026-05-30" },
+    { period: "this-month", start: "2026-06-01" },
+    { period: "last-month", start: "2026-05-01" },
   ] as const)(
     "recalculates profile overview stats and rank for the $period period",
     assertRollingProfilePeriod,

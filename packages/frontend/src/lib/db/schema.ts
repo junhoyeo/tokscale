@@ -671,6 +671,8 @@ export const groups = pgTable(
     description: text("description"),
     avatarUrl: text("avatar_url"),
     isPublic: boolean("is_public").notNull().default(true),
+    timeZone: varchar("time_zone", { length: 100 }).notNull().default("UTC"),
+    weekStartsOn: integer("week_starts_on").notNull().default(1),
     createdBy: uuid("created_by")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),

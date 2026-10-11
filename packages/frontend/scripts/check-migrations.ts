@@ -235,10 +235,19 @@ try {
       AND (
         (table_name = 'submissions' AND column_name IN ('reasoning_tokens', 'schema_version', 'submit_count'))
         OR (table_name = 'daily_breakdown' AND column_name IN ('submitted_device_id', 'active_time_ms'))
+        OR (table_name = 'groups' AND column_name IN ('time_zone', 'week_starts_on'))
       )
   `;
   const columns = new Map(
     columnRows.map((row) => [`${row.table_name}.${row.column_name}`, row])
+  );
+
+  expect(
+    "group reporting calendar has required defaults",
+    columns.get("groups.time_zone")?.is_nullable === "NO" &&
+      columns.get("groups.time_zone")?.column_default?.includes("'UTC'") === true &&
+      columns.get("groups.week_starts_on")?.is_nullable === "NO" &&
+      columns.get("groups.week_starts_on")?.column_default === "1"
   );
 
   expect(

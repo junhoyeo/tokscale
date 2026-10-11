@@ -7,9 +7,7 @@ import { profileUrl } from '@/lib/seo/urls';
 import { getSession } from '@/lib/auth/session';
 import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
-
-const PROFILE_PERIODS = ["all", "week", "month"] as const;
-type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
+import { PROFILE_PERIODS, type ProfilePeriod } from '@/lib/reportingPeriods';
 
 function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
   const period = Array.isArray(value) ? value[0] : value;
