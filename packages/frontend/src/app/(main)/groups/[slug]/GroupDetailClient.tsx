@@ -495,6 +495,7 @@ export default function GroupDetailClient({
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const didMountLeaderboard = useRef(false);
+  const leaderboardRequestId = useRef(0);
 
   const canInvite = isAdminRole(group.membership?.role);
 
@@ -507,6 +508,7 @@ export default function GroupDetailClient({
   }, [search]);
 
   const loadLeaderboard = useCallback((signal?: AbortSignal) => {
+    const requestId = ++leaderboardRequestId.current;
     const params = new URLSearchParams({
       period,
       sortBy,
@@ -526,21 +528,23 @@ export default function GroupDetailClient({
         return response.json();
       })
       .then((payload) => {
-        setData(payload);
+        if (requestId === leaderboardRequestId.current && !signal?.aborted) setData(payload);
       })
       .catch((err) => {
-        if (err.name !== "AbortError") {
+        if (requestId === leaderboardRequestId.current && err.name !== "AbortError") {
           setError(err.message || "Failed to load leaderboard");
         }
       })
       .finally(() => {
-        if (!signal?.aborted) {
+        if (requestId === leaderboardRequestId.current && !signal?.aborted) {
           setIsLoading(false);
         }
       });
   }, [debouncedSearch, group.slug, page, period, sortBy]);
+  const currentLeaderboardLoader = useRef(loadLeaderboard);
 
   useEffect(() => {
+    currentLeaderboardLoader.current = loadLeaderboard;
     if (!didMountLeaderboard.current) {
       didMountLeaderboard.current = true;
       return;
@@ -556,7 +560,7 @@ export default function GroupDetailClient({
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Failed to refresh group");
     setGroup(payload);
-    await loadLeaderboard();
+    await currentLeaderboardLoader.current();
   }
 
   async function createInvite() {
