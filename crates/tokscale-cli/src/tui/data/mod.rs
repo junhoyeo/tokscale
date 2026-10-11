@@ -173,6 +173,12 @@ pub struct SessionUsage {
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title.
     pub title: Option<String>,
+    /// Canonical workspace / project directory path where the session ran.
+    pub workspace_key: Option<String>,
+    /// Friendly workspace / project name when available.
+    pub workspace_label: Option<String>,
+    /// Distinct agent roles observed in this session in first-seen order.
+    pub agents: Vec<String>,
     /// Distinct models used across messages in this session, in first-seen
     /// order. Most sessions use a single model; a few switch mid-conversation.
     pub models: Vec<SessionModel>,
@@ -197,6 +203,9 @@ impl SessionUsage {
             session_id: session_id.to_string(),
             client: client.to_string(),
             title: None,
+            workspace_key: None,
+            workspace_label: None,
+            agents: Vec::new(),
             models: Vec::new(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
@@ -239,6 +248,17 @@ impl SessionUsage {
         self.last_active_ms = self.last_active_ms.max(branch.last_active_ms);
         if self.title.is_none() {
             self.title = branch.title.clone();
+        }
+        if self.workspace_key.is_none() {
+            self.workspace_key = branch.workspace_key.clone();
+        }
+        if self.workspace_label.is_none() {
+            self.workspace_label = branch.workspace_label.clone();
+        }
+        for agent in &branch.agents {
+            if !self.agents.contains(agent) {
+                self.agents.push(agent.clone());
+            }
         }
         for model in &branch.models {
             if !self
@@ -314,6 +334,32 @@ fn accumulate_session_entry(
         let trimmed = title.trim();
         if !trimmed.is_empty() && (owner_msg || entry.title.is_none()) {
             entry.title = Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(ref wk) = msg.workspace_key {
+        let trimmed = wk.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_key.is_none()) {
+            entry.workspace_key = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref wl) = msg.workspace_label {
+        let trimmed = wl.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_label.is_none()) {
+            entry.workspace_label = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref agent) = msg.agent {
+        let normalized = if msg.client == "opencode" {
+            sessions::normalize_opencode_agent_name(agent)
+        } else if msg.client == "copilot" {
+            sessions::normalize_copilot_agent_name(agent)
+        } else {
+            sessions::normalize_agent_name(agent)
+        };
+        let trimmed = normalized.trim();
+        if !trimmed.is_empty() && !entry.agents.iter().any(|a| a == trimmed) {
+            entry.agents.push(trimmed.to_string());
         }
     }
 
@@ -763,6 +809,9 @@ impl DataLoader {
         // key), recorded once per link. Messages name only their immediate
         // parent, so sub-sub-agent chains are resolved to the root session
         // from these edges after the pass.
+        // With --since/--until, an intermediate session may have no surviving
+        // usage and therefore no edge: its descendants roll up under their
+        // immediate parent instead of the root. Totals are preserved.
         let mut rolled_parent_of: HashMap<String, String> = HashMap::new();
 
         for msg in &messages {
@@ -1980,6 +2029,41 @@ mod tests {
     use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+
+    #[test]
+    fn accumulate_session_entry_normalizes_and_deduplicates_agents() {
+        let mut entry = SessionUsage::new("opencode", "sess-test");
+        let mut msg = UnifiedMessage {
+            client: "opencode".to_string(),
+            model_id: "test-model".to_string(),
+            provider_id: "test-provider".to_string(),
+            session_id: "sess-test".to_string(),
+            workspace_key: Some("/path/to/project".to_string()),
+            workspace_label: Some("project".to_string()),
+            timestamp: 1_700_000_000,
+            date: "2023-11-14".to_string(),
+            tokens: tokscale_core::TokenBreakdown::default(),
+            cost: 0.0,
+            cost_source: tokscale_core::sessions::CostSource::default(),
+            service_tier: None,
+            duration_ms: None,
+            message_count: 1,
+            agent: Some("hephaestus".to_string()),
+            dedup_key: None,
+            session_title: None,
+            parent_session_id: None,
+            is_turn_start: false,
+            model_attribution_conflicted: false,
+        };
+
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+
+        // Duplicate with variant formatting doesn't add duplicate
+        msg.agent = Some(" Hephaestus ".to_string());
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+    }
 
     #[test]
     fn find_peak_hour_breaks_token_ties_by_earliest_hour() {
@@ -4605,5 +4689,113 @@ after"#,
         let monthly = aggregate_monthly_from_daily(&daily);
         assert_eq!(monthly[0].month, "2026-05");
         assert_eq!(monthly[1].month, "2026-03");
+    }
+}
+
+#[cfg(test)]
+mod subagent_rollup_tests {
+    use super::*;
+
+    fn session_message(id: &str, parent: Option<&str>, n: i64) -> UnifiedMessage {
+        let mut m = UnifiedMessage::new(
+            "omp",
+            "gpt-5",
+            "openai",
+            id,
+            1_735_689_600_000 + n * 1000,
+            tokscale_core::TokenBreakdown {
+                input: n,
+                output: n * 2,
+                cache_read: n * 3,
+                cache_write: n * 4,
+                cache_write_1h: n,
+                reasoning: n * 5,
+            },
+            n as f64 * 0.25,
+        );
+        m.parent_session_id = parent.map(str::to_owned);
+        m.is_turn_start = true;
+        m
+    }
+
+    fn assert_rollup_usage_conserved(u: &UsageData) {
+        for field in [0, 1, 2, 3, 4] {
+            let sum = |rows: &[SessionUsage]| -> u64 {
+                rows.iter()
+                    .map(|r| match field {
+                        0 => r.tokens.input,
+                        1 => r.tokens.output,
+                        2 => r.tokens.cache_read,
+                        3 => r.tokens.cache_write,
+                        _ => r.tokens.reasoning,
+                    })
+                    .sum()
+            };
+            assert_eq!(
+                sum(&u.sessions),
+                sum(&u.sessions_rolled),
+                "token bucket {field} must be conserved"
+            );
+        }
+        let cost = |rows: &[SessionUsage]| rows.iter().map(|s| s.cost).sum::<f64>();
+        assert_eq!(cost(&u.sessions), cost(&u.sessions_rolled));
+        assert_eq!(
+            u.sessions.iter().map(|s| s.message_count).sum::<u32>(),
+            u.sessions_rolled
+                .iter()
+                .map(|s| s.message_count)
+                .sum::<u32>()
+        );
+        assert_eq!(
+            u.sessions.iter().map(|s| s.turn_count).sum::<u32>(),
+            u.sessions_rolled.iter().map(|s| s.turn_count).sum::<u32>()
+        );
+    }
+
+    #[test]
+    fn rollup_conserves_all_buckets_across_deep_chains_and_message_order() {
+        for offset in 0..100 {
+            let mut messages = vec![
+                session_message("root", None, 1),
+                session_message("mid", Some("root"), 2),
+                session_message("leaf", Some("mid"), 3),
+                session_message("twig", Some("leaf"), 4),
+                session_message("sibling", Some("root"), 5),
+                session_message("other", None, 6),
+            ];
+            messages[0].session_title = Some("Owner".into());
+            messages[1].session_title = Some("Child".into());
+            messages.rotate_left(offset % 6);
+            let u = DataLoader::new(None)
+                .aggregate_messages(messages, &GroupBy::Model)
+                .unwrap();
+            assert_rollup_usage_conserved(&u);
+            assert_eq!(u.sessions_rolled.len(), 2);
+            let root = u
+                .sessions_rolled
+                .iter()
+                .find(|s| s.session_id == "root")
+                .unwrap();
+            assert_eq!(root.subagent_count, 4);
+            assert_eq!(root.title.as_deref(), Some("Owner"));
+        }
+    }
+
+    #[test]
+    fn rollup_preserves_usage_for_cyclic_and_self_parent_links() {
+        for _ in 0..100 {
+            let u = DataLoader::new(None)
+                .aggregate_messages(
+                    vec![
+                        session_message("a", Some("b"), 1),
+                        session_message("b", Some("a"), 2),
+                        session_message("leaf", Some("a"), 3),
+                        session_message("self", Some("self"), 4),
+                    ],
+                    &GroupBy::Model,
+                )
+                .unwrap();
+            assert_rollup_usage_conserved(&u);
+        }
     }
 }

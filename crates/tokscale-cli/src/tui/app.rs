@@ -1055,6 +1055,12 @@ impl App {
             KeyCode::Enter if self.current_tab == Tab::Models => {
                 self.open_selected_model_trend();
             }
+            KeyCode::Enter if self.current_tab == Tab::Sessions => {
+                self.open_selected_session_detail();
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') if self.current_tab == Tab::Sessions => {
+                self.open_selected_session_detail();
+            }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
             }
@@ -2273,6 +2279,19 @@ impl App {
 
         self.set_status("Returned to models");
         self.clamp_selection();
+    }
+
+    pub fn open_selected_session_detail(&mut self) {
+        use super::ui::dialog::SessionDetailDialog;
+        let selected_session = {
+            let sessions = self.get_sorted_sessions();
+            sessions.get(self.selected_index).copied().cloned()
+        };
+
+        if let Some(session) = selected_session {
+            let dialog = SessionDetailDialog::new(session, self.settings.tui_language);
+            self.dialog_stack.show(Box::new(dialog));
+        }
     }
 
     fn toggle_auto_refresh(&mut self) {
@@ -6056,5 +6075,51 @@ mod tests {
             "개요"
         );
         assert_eq!(Tab::Daily.localized_name(app.settings.tui_language), "일별");
+    }
+
+    #[test]
+    fn test_sessions_hotkey_opens_and_closes_detail_dialog() {
+        let mut app = make_app();
+        app.current_tab = Tab::Sessions;
+
+        let mut session = SessionUsage::new("opencode", "sess-test-42");
+        session.workspace_key = Some("/path/to/project".to_string());
+        session.workspace_label = Some("project".to_string());
+        session.cost = 0.50;
+        app.data.sessions.push(session);
+
+        assert!(!app.dialog_stack.is_active());
+
+        // On Tab::Overview, 'i' does not open dialog
+        app.current_tab = Tab::Overview;
+        app.handle_key_event(key(KeyCode::Char('i')));
+        assert!(!app.dialog_stack.is_active());
+
+        // Switch to Sessions tab
+        app.current_tab = Tab::Sessions;
+
+        // Press 'i' to open session detail dialog
+        app.handle_key_event(key(KeyCode::Char('i')));
+        assert!(app.dialog_stack.is_active());
+
+        // Press 'q' to close it
+        app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(!app.dialog_stack.is_active());
+
+        // Press Enter to open it
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.dialog_stack.is_active());
+
+        // Press Esc to close it
+        app.handle_key_event(key(KeyCode::Esc));
+        assert!(!app.dialog_stack.is_active());
+
+        // Press uppercase 'I' to open it
+        app.handle_key_event(key(KeyCode::Char('I')));
+        assert!(app.dialog_stack.is_active());
+
+        // Press 'i' to close it (hotkey dismiss)
+        app.handle_key_event(key(KeyCode::Char('i')));
+        assert!(!app.dialog_stack.is_active());
     }
 }

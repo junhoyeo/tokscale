@@ -2,6 +2,7 @@ pub mod confirm;
 pub mod group_by_picker;
 pub mod language_picker;
 pub mod overlay;
+pub mod session_detail;
 pub mod source_picker;
 pub mod stack;
 
@@ -13,6 +14,7 @@ use crate::tui::themes::Theme;
 pub use confirm::ConfirmDialog;
 pub use group_by_picker::GroupByPickerDialog;
 pub use language_picker::LanguagePickerDialog;
+pub use session_detail::SessionDetailDialog;
 pub use source_picker::ClientPickerDialog;
 pub use stack::DialogStack;
 

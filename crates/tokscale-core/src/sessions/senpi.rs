@@ -8,12 +8,13 @@
 //! `session_info.name` carries a human session title rather than Pi's
 //! `subagent-<name>-<id>` marker.
 //!
-//! OmO task children are senpi sessions too. The scanner honors
-//! `SENPI_CODING_AGENT_SESSION_DIR`, discovers `.omo/senpi-task/children`
-//! under both the supplied home and the current project, and recovers every
-//! other project's children root from the `cwd` recorded in global session
-//! headers, so redirected child sessions are counted no matter where tokscale
-//! runs from.
+//! OmO task children are senpi sessions too. The scanner checks both
+//! `~/.senpi/agent/sessions` and `~/.omo/agent/sessions` (the `omo-ai` 5.1.0+ layout),
+//! honors `SENPI_CODING_AGENT_SESSION_DIR` and `OMO_CODING_AGENT_SESSION_DIR`,
+//! discovers `.omo/senpi-task/children` under both the supplied home and the
+//! current project, and recovers every other project's children root from the `cwd`
+//! recorded in session headers (including those in `extraScanPaths`), so child
+//! sessions are counted no matter where tokscale runs from.
 
 use super::pi::parse_pi_format_file;
 use super::UnifiedMessage;

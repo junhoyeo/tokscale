@@ -1538,4 +1538,37 @@ not valid json
         assert_eq!(parent_key, child_key);
         assert!(parent_key.starts_with("pi:message:entry-no-resp:"));
     }
+
+    #[test]
+    fn test_parent_path_inference_is_omp_only_across_shared_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir
+            .path()
+            .join("2026-07-28T20-45-44-298Z_019faa79-e9ea-7000-a4cd-be6083d214ab");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("Child.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"child","title":"Shared title"}
+{"type":"message","message":{"role":"assistant","model":"gpt-5","usage":{"input":5,"output":2}}}"#,
+        )
+        .unwrap();
+        for client in [
+            ClientId::Pi,
+            ClientId::Senpi,
+            ClientId::Kimchi,
+            ClientId::PrimeAgent,
+            ClientId::Omp,
+        ] {
+            let client = client.as_str();
+            let rows = parse_pi_format_file(&path, client, "openai");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].parent_session_id.is_some(),
+                client == "omp",
+                "{client}"
+            );
+            assert_eq!(rows[0].session_title.as_deref(), Some("Shared title"));
+        }
+    }
 }

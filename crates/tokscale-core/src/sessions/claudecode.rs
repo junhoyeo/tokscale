@@ -1055,7 +1055,25 @@ pub(crate) fn merge_message_completeness(
     existing: &mut UnifiedMessage,
     candidate: &UnifiedMessage,
 ) {
-    existing.tokens.input = existing.tokens.input.max(candidate.tokens.input);
+    // `input` follows the same rule as `merge_claude_duplicate` (#1392): a copy
+    // whose cache buckets are populated reports Anthropic's uncached
+    // remainder, while a copy with empty cache buckets may be a bare prompt
+    // snapshot counting the whole prompt. Max-ing the two would describe one
+    // prompt in `input` and another in `cache_read`, so the cache-bearing copy
+    // wins outright. The per-message flag the in-file merge uses does not
+    // survive the cache, so presence of cached tokens stands in for it; when
+    // both or neither copy has cached tokens the units agree and max stands
+    // (with no cached tokens the remainder IS the whole prompt).
+    let existing_has_cache = existing.tokens.cache_read > 0 || existing.tokens.cache_write > 0;
+    let candidate_has_cache = candidate.tokens.cache_read > 0 || candidate.tokens.cache_write > 0;
+    // A cache-bearing copy can still be silent about `input_tokens` (parsed as
+    // 0, see `merge_claude_duplicate`); silence is not a claim of zero, so it
+    // only wins when it actually states a positive remainder.
+    existing.tokens.input = match (existing_has_cache, candidate_has_cache) {
+        (true, false) if existing.tokens.input > 0 => existing.tokens.input,
+        (false, true) if candidate.tokens.input > 0 => candidate.tokens.input,
+        _ => existing.tokens.input.max(candidate.tokens.input),
+    };
     existing.tokens.output = existing.tokens.output.max(candidate.tokens.output);
     existing.tokens.cache_read = existing.tokens.cache_read.max(candidate.tokens.cache_read);
     existing.tokens.cache_write = existing
@@ -3681,6 +3699,58 @@ mod tests {
             Some("Executor".to_string()),
             "Second agent should be executor"
         );
+    }
+
+    #[test]
+    fn test_merge_message_completeness_prefers_the_cache_bearing_copy_for_input() {
+        // Cross-file/cache dedup (#1392 review): a bare prompt snapshot restored
+        // from another file must not max its whole-prompt `input` against a
+        // split copy's uncached remainder, in either merge direction.
+        let message = |input: i64, cache_read: i64, output: i64| {
+            UnifiedMessage::new(
+                "claude",
+                "claude-3-5-sonnet",
+                "anthropic",
+                "session",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input,
+                    output,
+                    cache_read,
+                    ..Default::default()
+                },
+                0.0,
+            )
+        };
+
+        let mut split = message(265, 42_000, 120);
+        merge_message_completeness(&mut split, &message(42_494, 0, 0));
+        assert_eq!(split.tokens.input, 265);
+        assert_eq!(split.tokens.cache_read, 42_000);
+        assert_eq!(split.tokens.output, 120);
+
+        let mut snapshot = message(42_494, 0, 0);
+        merge_message_completeness(&mut snapshot, &message(265, 42_000, 120));
+        assert_eq!(snapshot.tokens.input, 265);
+        assert_eq!(snapshot.tokens.cache_read, 42_000);
+
+        // Units agree on both sides: per-field max still decides.
+        let mut both = message(100, 500, 0);
+        merge_message_completeness(&mut both, &message(300, 400, 0));
+        assert_eq!(both.tokens.input, 300);
+        let mut neither = message(10, 0, 0);
+        merge_message_completeness(&mut neither, &message(50, 0, 0));
+        assert_eq!(neither.tokens.input, 50);
+
+        // A cache-bearing copy silent about input (parsed as 0) must not erase
+        // a snapshot's real input, in either direction.
+        let mut silent = message(0, 42_000, 120);
+        merge_message_completeness(&mut silent, &message(42_494, 0, 0));
+        assert_eq!(silent.tokens.input, 42_494);
+        let mut snapshot_first = message(42_494, 0, 0);
+        merge_message_completeness(&mut snapshot_first, &message(0, 42_000, 120));
+        assert_eq!(snapshot_first.tokens.input, 42_494);
+        assert_eq!(snapshot_first.tokens.cache_read, 42_000);
     }
 
     #[test]

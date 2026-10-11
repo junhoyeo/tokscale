@@ -249,6 +249,8 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         }
         if app.current_tab == Tab::Sessions {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            spans.push(Span::styled("↵/i", hint_style));
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             spans.push(Span::styled("b", hint_style));
         }
         spans
@@ -296,6 +298,11 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         }
         if app.current_tab == Tab::Sessions {
+            spans.push(Span::styled(
+                tr(lang, MessageKey::HelpSessionDetails),
+                hint_style,
+            ));
+            spans.push(Span::styled(" ", Style::default()));
             spans.push(Span::styled(
                 if app.roll_up_subagents {
                     tr(lang, MessageKey::HelpRollupOn)

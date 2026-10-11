@@ -498,6 +498,12 @@ const CompactSelect = styled.select`
   font: inherit;
   font-weight: 500;
   cursor: pointer;
+  color-scheme: dark;
+
+  option {
+    color: var(--service-text);
+    background: var(--service-surface);
+  }
 `;
 
 const PlotRegion = styled.div`

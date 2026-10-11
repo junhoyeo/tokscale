@@ -68,6 +68,7 @@ const state = vi.hoisted(() => {
     return builder;
   });
   return {
+    renderSql,
     results,
     scopedResults,
     queries,
@@ -112,17 +113,9 @@ vi.mock("@/lib/db/usernameLookup", () => ({
 vi.mock("drizzle-orm", () => ({ sql: state.sql }));
 let getLeaderboardData: (typeof import("../../src/lib/leaderboard/getLeaderboard"))["getLeaderboardData"];
 let getUserRank: (typeof import("../../src/lib/leaderboard/getLeaderboard"))["getUserRank"];
-function text(value: unknown): string {
-  if (!value || typeof value !== "object") return String(value ?? "");
-  const q = value as { strings?: string[]; values?: unknown[] };
-  return q.strings
-    ? q.strings.reduce(
-        (s, p, i) =>
-          `${s}${p}${i < q.values!.length ? text(q.values![i]) : ""}`,
-        "",
-      )
-    : "";
-}
+// One renderer for both mock dispatch (hoisted, so it must live in
+// `vi.hoisted`) and query assertions, so the two cannot drift.
+const text = state.renderSql;
 function query() {
   return state.queries.map(text).join("\n");
 }
