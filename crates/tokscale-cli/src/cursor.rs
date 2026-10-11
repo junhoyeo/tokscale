@@ -268,7 +268,15 @@ fn build_cursor_json_headers(session_token: &str) -> reqwest::header::HeaderMap 
 /// Count events in an aggregated usage-events JSON document. Invalid JSON or a
 /// missing `usageEventsDisplay` array counts as zero.
 fn count_cursor_json_events(json_text: &str) -> usize {
-    cached_usage_events(Some(json_text)).len()
+    serde_json::from_str::<serde_json::Value>(json_text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("usageEventsDisplay")
+                .and_then(|events| events.as_array())
+                .map(|events| events.len())
+        })
+        .unwrap_or(0)
 }
 
 /// Events already stored in an aggregated usage-events cache. Invalid JSON or a
@@ -291,26 +299,33 @@ fn cached_usage_events(json_text: Option<&str>) -> Vec<serde_json::Value> {
 
 /// Unix milliseconds on one usage event. The dashboard sends this as a string;
 /// a number and an RFC 3339 datetime are accepted so either shape still yields
-/// a watermark.
-fn cursor_event_timestamp_ms(event: &serde_json::Value) -> i64 {
-    let Some(value) = event.get("timestamp") else {
-        return 0;
-    };
+/// a watermark. An unrecognized value is `None` so identity matching can keep
+/// it distinct instead of collapsing every unreadable timestamp to zero.
+fn timestamp_ms_from_value(value: &serde_json::Value) -> Option<i64> {
     match value {
         serde_json::Value::Number(number) => number
             .as_i64()
-            .or_else(|| number.as_f64().map(|value| value as i64))
-            .unwrap_or(0),
+            .or_else(|| number.as_f64().map(|value| value as i64)),
         serde_json::Value::String(text) => {
             let trimmed = text.trim();
-            trimmed.parse::<i64>().unwrap_or_else(|_| {
-                chrono::DateTime::parse_from_rfc3339(trimmed)
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(0)
-            })
+            if let Ok(ms) = trimmed.parse::<i64>() {
+                return Some(ms);
+            }
+            chrono::DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
         }
-        _ => 0,
+        _ => None,
     }
+}
+
+/// Unix milliseconds on one usage event. Missing or unrecognized timestamps
+/// count as zero and do not form a watermark.
+fn cursor_event_timestamp_ms(event: &serde_json::Value) -> i64 {
+    event
+        .get("timestamp")
+        .and_then(timestamp_ms_from_value)
+        .unwrap_or(0)
 }
 
 /// Newest event timestamp in a cache. `None` when the cache has no positive
@@ -327,8 +342,10 @@ fn usage_events_watermark_ms(events: &[serde_json::Value]) -> Option<i64> {
 ///
 /// Billing fields (`chargedCents`, `tokenUsage.totalCents`) are left out so a
 /// boundary event re-fetched on the next sync replaces the stored row instead
-/// of being appended beside it. Everything else participates, and object keys
-/// are sorted so a cache rewrite cannot fail to match the dashboard's key order.
+/// of being appended beside it. `timestamp` is stored as integer milliseconds
+/// so a string, a number, and an RFC 3339 datetime for the same instant match.
+/// Everything else participates, and object keys are sorted so a cache rewrite
+/// cannot fail to match the dashboard's key order.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
     fn normalize(value: &serde_json::Value) -> serde_json::Value {
         match value {
@@ -341,7 +358,12 @@ fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
                         continue;
                     }
                     let child = &map[key];
-                    let child = if key == "tokenUsage" {
+                    let child = if key == "timestamp" {
+                        match timestamp_ms_from_value(child) {
+                            Some(ms) => serde_json::Value::Number(ms.into()),
+                            None => normalize(child),
+                        }
+                    } else if key == "tokenUsage" {
                         strip_metered_cents(child)
                     } else {
                         normalize(child)
@@ -441,9 +463,34 @@ fn cursor_budget_label(budget: Duration) -> String {
     }
 }
 
-/// What to print when the paginated walk runs out of time. `reqwest`'s own
-/// `Display` is only "error sending request for url (...)", which is how a
-/// budget expiry was reported as a network failure.
+fn cursor_fetch_progress(
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+) -> String {
+    let pages_word = if pages_completed == 1 {
+        "page"
+    } else {
+        "pages"
+    };
+    let events = match total {
+        Some(total) => format!("{events_collected}/{total} events"),
+        None => format!("{events_collected} events"),
+    };
+    format!("{pages_completed} {pages_word}, {events} collected")
+}
+
+fn cursor_with_cause(message: String, cause: &str) -> String {
+    if cause.is_empty() {
+        message
+    } else {
+        format!("{message}: {cause}")
+    }
+}
+
+/// What to print when the paginated walk runs out of its wall-clock budget.
+/// `reqwest`'s own `Display` is only "error sending request for url (...)",
+/// which is how a budget expiry was reported as a network failure.
 fn cursor_budget_exhausted_message(
     budget: Duration,
     pages_completed: usize,
@@ -451,24 +498,34 @@ fn cursor_budget_exhausted_message(
     total: Option<u64>,
     cause: &str,
 ) -> String {
-    let pages_word = if pages_completed == 1 {
-        "page"
-    } else {
-        "pages"
-    };
-    let progress = match total {
-        Some(total) => format!("{events_collected}/{total} events"),
-        None => format!("{events_collected} events"),
-    };
-    let message = format!(
-        "Cursor usage events fetch exceeded its {} time budget ({pages_completed} {pages_word}, {progress} collected)",
-        cursor_budget_label(budget)
-    );
-    if cause.is_empty() {
-        message
-    } else {
-        format!("{message}: {cause}")
-    }
+    cursor_with_cause(
+        format!(
+            "Cursor usage events fetch exceeded its {} time budget ({})",
+            cursor_budget_label(budget),
+            cursor_fetch_progress(pages_completed, events_collected, total)
+        ),
+        cause,
+    )
+}
+
+/// A single page hit its request timeout while the overall walk budget remains.
+/// Naming `page_timeout` here keeps a scaled explicit sync from claiming the
+/// expanded overall budget was used up.
+fn cursor_request_timeout_message(
+    page_timeout: Duration,
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+    cause: &str,
+) -> String {
+    cursor_with_cause(
+        format!(
+            "Cursor usage events request timed out after its {} time budget ({})",
+            cursor_budget_label(page_timeout),
+            cursor_fetch_progress(pages_completed, events_collected, total)
+        ),
+        cause,
+    )
 }
 
 fn cursor_sync_error_text(err: &anyhow::Error) -> String {
@@ -1522,10 +1579,10 @@ async fn fetch_cursor_usage_events_json_merging(
         let response = match req.send().await {
             Ok(response) => response,
             Err(err) => {
-                if err.is_timeout()
-                    || fetch_deadline
-                        .saturating_duration_since(Instant::now())
-                        .is_zero()
+                let cause = tokscale_core::pricing::describe_error(&err);
+                if fetch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero()
                 {
                     anyhow::bail!(
                         "{}",
@@ -1534,11 +1591,23 @@ async fn fetch_cursor_usage_events_json_merging(
                             page - 1,
                             fresh_events.len(),
                             total_count,
-                            &tokscale_core::pricing::describe_error(&err),
+                            &cause,
                         )
                     );
                 }
-                anyhow::bail!("{}", tokscale_core::pricing::describe_error(&err));
+                if err.is_timeout() {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_request_timeout_message(
+                            page_timeout,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
+                        )
+                    );
+                }
+                anyhow::bail!("{cause}");
             }
         };
 
@@ -1566,10 +1635,10 @@ async fn fetch_cursor_usage_events_json_merging(
         let text = match read_cursor_body_with_cap(response, remaining, "usage events JSON").await {
             Ok(text) => text,
             Err(err) => {
-                if error_is_reqwest_timeout(&err)
-                    || fetch_deadline
-                        .saturating_duration_since(Instant::now())
-                        .is_zero()
+                let cause = cursor_sync_error_text(&err);
+                if fetch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero()
                 {
                     anyhow::bail!(
                         "{}",
@@ -1578,7 +1647,19 @@ async fn fetch_cursor_usage_events_json_merging(
                             page - 1,
                             fresh_events.len(),
                             total_count,
-                            &cursor_sync_error_text(&err),
+                            &cause,
+                        )
+                    );
+                }
+                if error_is_reqwest_timeout(&err) {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_request_timeout_message(
+                            page_timeout,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
                         )
                     );
                 }
@@ -3219,6 +3300,39 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_cursor_usage_events_collapses_equivalent_timestamps() {
+        let string_ts =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        let mut number_ts = string_ts.clone();
+        number_ts["timestamp"] = serde_json::json!(200);
+        let mut rfc3339 = string_ts.clone();
+        rfc3339["timestamp"] = serde_json::json!("1970-01-01T00:00:00.200Z");
+        rfc3339["chargedCents"] = serde_json::json!(4);
+
+        assert_eq!(
+            cursor_usage_event_identity(&string_ts),
+            cursor_usage_event_identity(&number_ts)
+        );
+        assert_eq!(
+            cursor_usage_event_identity(&string_ts),
+            cursor_usage_event_identity(&rfc3339)
+        );
+        let merged = merge_cursor_usage_events(vec![string_ts, number_ts], vec![rfc3339]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["chargedCents"], serde_json::json!(4));
+
+        let mut unread_a =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        unread_a["timestamp"] = serde_json::json!("not-a-time");
+        let mut unread_b = unread_a.clone();
+        unread_b["timestamp"] = serde_json::json!("also-not");
+        assert_eq!(
+            merge_cursor_usage_events(vec![unread_a], vec![unread_b]).len(),
+            2
+        );
+    }
+
+    #[test]
     fn test_usage_events_json_timeout_names_the_budget() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3251,6 +3365,61 @@ mod tests {
         assert!(
             message.contains("0 pages"),
             "the first page timing out has not collected a page: {message}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_page_timeout_names_the_request_budget() {
+        // Page 1 advertises a huge history so the default explicit budget scales
+        // toward 30 minutes. Page 2 then stalls. The failure is the 1s request
+        // timeout, and the message must not claim the scaled overall budget ran out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let body = json_page(40_000, &[&json_event("c1", "1788171994001")]);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = stream;
+            }
+        });
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(1)),
+                false,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("a stalled later page must time out");
+        let message = format!("{err}");
+        assert!(
+            message.contains("timed out after its 1s time budget"),
+            "the stalled request must name its own timeout: {message}"
+        );
+        assert!(
+            !message.contains("1800s"),
+            "a single stalled page must not be reported as the scaled overall budget: {message}"
+        );
+        assert!(
+            message.contains("1 page"),
+            "page 1 was collected before the stall: {message}"
         );
     }
 
