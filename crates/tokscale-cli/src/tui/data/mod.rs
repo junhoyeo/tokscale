@@ -173,6 +173,12 @@ pub struct SessionUsage {
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title.
     pub title: Option<String>,
+    /// Canonical workspace / project directory path where the session ran.
+    pub workspace_key: Option<String>,
+    /// Friendly workspace / project name when available.
+    pub workspace_label: Option<String>,
+    /// Distinct agent roles observed in this session in first-seen order.
+    pub agents: Vec<String>,
     /// Distinct models used across messages in this session, in first-seen
     /// order. Most sessions use a single model; a few switch mid-conversation.
     pub models: Vec<SessionModel>,
@@ -197,6 +203,9 @@ impl SessionUsage {
             session_id: session_id.to_string(),
             client: client.to_string(),
             title: None,
+            workspace_key: None,
+            workspace_label: None,
+            agents: Vec::new(),
             models: Vec::new(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
@@ -239,6 +248,17 @@ impl SessionUsage {
         self.last_active_ms = self.last_active_ms.max(branch.last_active_ms);
         if self.title.is_none() {
             self.title = branch.title.clone();
+        }
+        if self.workspace_key.is_none() {
+            self.workspace_key = branch.workspace_key.clone();
+        }
+        if self.workspace_label.is_none() {
+            self.workspace_label = branch.workspace_label.clone();
+        }
+        for agent in &branch.agents {
+            if !self.agents.contains(agent) {
+                self.agents.push(agent.clone());
+            }
         }
         for model in &branch.models {
             if !self
@@ -314,6 +334,32 @@ fn accumulate_session_entry(
         let trimmed = title.trim();
         if !trimmed.is_empty() && (owner_msg || entry.title.is_none()) {
             entry.title = Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(ref wk) = msg.workspace_key {
+        let trimmed = wk.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_key.is_none()) {
+            entry.workspace_key = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref wl) = msg.workspace_label {
+        let trimmed = wl.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_label.is_none()) {
+            entry.workspace_label = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref agent) = msg.agent {
+        let normalized = if msg.client == "opencode" {
+            sessions::normalize_opencode_agent_name(agent)
+        } else if msg.client == "copilot" {
+            sessions::normalize_copilot_agent_name(agent)
+        } else {
+            sessions::normalize_agent_name(agent)
+        };
+        let trimmed = normalized.trim();
+        if !trimmed.is_empty() && !entry.agents.iter().any(|a| a == trimmed) {
+            entry.agents.push(trimmed.to_string());
         }
     }
 
@@ -1983,6 +2029,41 @@ mod tests {
     use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+
+    #[test]
+    fn accumulate_session_entry_normalizes_and_deduplicates_agents() {
+        let mut entry = SessionUsage::new("opencode", "sess-test");
+        let mut msg = UnifiedMessage {
+            client: "opencode".to_string(),
+            model_id: "test-model".to_string(),
+            provider_id: "test-provider".to_string(),
+            session_id: "sess-test".to_string(),
+            workspace_key: Some("/path/to/project".to_string()),
+            workspace_label: Some("project".to_string()),
+            timestamp: 1_700_000_000,
+            date: "2023-11-14".to_string(),
+            tokens: tokscale_core::TokenBreakdown::default(),
+            cost: 0.0,
+            cost_source: tokscale_core::sessions::CostSource::default(),
+            service_tier: None,
+            duration_ms: None,
+            message_count: 1,
+            agent: Some("hephaestus".to_string()),
+            dedup_key: None,
+            session_title: None,
+            parent_session_id: None,
+            is_turn_start: false,
+            model_attribution_conflicted: false,
+        };
+
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+
+        // Duplicate with variant formatting doesn't add duplicate
+        msg.agent = Some(" Hephaestus ".to_string());
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+    }
 
     #[test]
     fn find_peak_hour_breaks_token_ties_by_earliest_hour() {

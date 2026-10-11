@@ -1182,14 +1182,16 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
         members: &[
             (ClientId::RooCode, 0),
             (ClientId::KiloCode, 0),
-            // +2 for Cline's independent history. v1->v2: standalone Cline
+            // +3 for Cline's independent history. v1->v2: standalone Cline
             // messages subtract cache buckets from gross input tokens,
             // reject non-finite costs, and preserve zero-cost reports.
             // v2->v3: content-aware Cline CLI turn-start classification
             // now recognizes user tool-result records as continuations
             // instead of beginning a new turn, so cached turns must be
             // reparsed.
-            (ClientId::Cline, 2),
+            // v4->v5: clamp CLI input after signed cache subtraction so warm
+            // sources cannot replay negative tokens into submission totals.
+            (ClientId::Cline, 3),
         ],
     },
     SharedParserFamily {
@@ -1335,9 +1337,13 @@ fn parser_version(client: ClientId) -> u32 {
         // so it could land without another bump.
         // v10->v11: standalone `task_started` events reset duration anchors so
         // resumed turns cannot inherit the idle gap from a previous turn.
-        // v11->v12: support zstd-compressed transcripts (`.jsonl.zst`) in Codex
-        // sessions and archives.
-        ClientId::Codex => 12,
+        // v11->v12: retain own-activity and supported-usage flags so a warm
+        // scan can diagnose active rollouts with no ledger, including zero
+        // counters and appended usage that clears the diagnostic.
+        // v12->v13: also retain gateway activity for Synthetic-only scans.
+        // v13->v14: support zstd-compressed transcripts (`.jsonl.zst`) in
+        // Codex sessions and archives.
+        ClientId::Codex => 14,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -1407,12 +1413,10 @@ fn parser_version(client: ClientId) -> u32 {
         // an invalidation debt forward, and a further bump would have had
         // nothing to invalidate.
         ClientId::OpenCodeReview => 3,
-        // Kiro's structured messages.jsonl turns now back-calculate the
-        // start anchor from `turn_end - elapsedTime` when the user prompt's
-        // own timestamp is missing/unparseable, instead of falling through
-        // to the (end-anchored) turn_end timestamp. Second-round follow-up
-        // to #890.
-        ClientId::Kiro => 2,
+        // v3 assigns CLI metering credits per turn instead of putting the
+        // conversation sum on the first message. Reparse unchanged sources
+        // so cached Unknown costs cannot be token-priced a second time.
+        ClientId::Kiro => 3,
         // Kimi v2 checks token buckets without an overflowing sum. v2->v3:
         // symbolic usage-record models now resolve from the latest llm.request.
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
@@ -4329,6 +4333,71 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn cline_input_rebuilds_predecessor_cache_for_unchanged_transcript() {
+        let home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(home.path());
+        let session = home.path().join(".cline/data/sessions/s1");
+        fs::create_dir_all(&session).unwrap();
+        let path = session.join("s1.messages.json");
+        fs::write(&path, r#"{"sessionId":"s1","messages":[{"id":"a1","role":"assistant","ts":1786406085634,"modelInfo":{"id":"deepseek-v4-flash","provider":"opencode-go"},"metrics":{"inputTokens":10,"outputTokens":10,"cacheReadTokens":100,"cacheWriteTokens":50,"cost":0.01}}]}"#).unwrap();
+        let fingerprint = match SourceFingerprint::check_cline_path_samples_only(&path, None) {
+            Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+            other => panic!("expected initial fingerprint, got {other:?}"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Cline);
+        let predecessor = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
+        };
+        let mut legacy = crate::sessions::cline::parse_cline_file(&path);
+        assert_eq!(legacy.len(), 1);
+        legacy[0].tokens.input = -140;
+        let entry = CachedSourceEntry::new(
+            predecessor,
+            &path,
+            fingerprint.clone(),
+            legacy,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, predecessor, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let parsed = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["cline".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].tokens.input, 0,
+            "unchanged warm sources must not retain negative input"
+        );
+        assert_eq!(parsed[0].tokens.total(), 160);
+        assert!(matches!(
+            SourceFingerprint::check_cline_path_samples_only(&path, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache.get(identity, &path).unwrap();
+        assert_eq!(rebuilt.parser_version, identity.parser_version);
+        assert_eq!(rebuilt.messages, parsed);
+        let warm = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["cline".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(warm, parsed);
+        assert_eq!(cache.get(identity, &path).unwrap().messages, parsed);
+    }
+
+    #[test]
     fn test_devin_parser_versions_invalidate_v3_entries() {
         assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
@@ -4341,11 +4410,12 @@ mod tests {
         // v8->v9 buckets agent attribution into "Codex" / "Codex Subagent" /
         // "Codex Guardian" / "Codex Headless" instead of the per-thread random
         // nickname; v9->v10 retains service_tier for Fast mode pricing,
-        // v10->v11 resets duration anchors at standalone task_started events, and
-        // v11->v12 decodes compressed archives (.jsonl.zst).
+        // v10->v11 resets duration anchors at standalone task_started events.
+        // v11->v13 retains source completeness and gateway activity for empty
+        // results, and v13->v14 decodes compressed archives (.jsonl.zst).
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 12);
+        assert_eq!(parser_version(ClientId::Codex), 14);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -4373,7 +4443,7 @@ mod tests {
         assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
-        assert_eq!(parser_version(ClientId::Kiro), 2);
+        assert_eq!(parser_version(ClientId::Kiro), 3);
     }
 
     #[test]
@@ -5808,7 +5878,7 @@ mod tests {
                 &[
                     (ClientId::RooCode, 0),
                     (ClientId::KiloCode, 0),
-                    (ClientId::Cline, 2),
+                    (ClientId::Cline, 3),
                 ],
             ),
             (
@@ -6366,6 +6436,94 @@ mod tests {
         );
         assert_eq!(third[0].tokens, first[0].tokens);
         assert_warm("a re-parsed session");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kiro_cli_credit_cache_is_rebuilt_without_source_changes() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let source = PathBuf::from(
+            ClientId::Kiro
+                .data()
+                .resolve_path_with_env_strategy(&source_home.path().to_string_lossy(), false),
+        )
+        .join("credits.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            r#"{"session_id":"cached-credits","session_state":{"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1,"output_token_count":2,"metering_usage":[{"value":0.25,"unit":"credit"}]},{"input_token_count":3,"output_token_count":4,"metering_usage":[{"value":0.25,"unit":"credit"}]}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(source.with_extension("jsonl"), "").unwrap();
+        let fingerprint = match SourceFingerprint::check_kiro_path_samples_only(&source, None)
+            .unwrap()
+        {
+            FingerprintStatus::Changed(fingerprint) => fingerprint,
+            FingerprintStatus::Unchanged => panic!("an uncached source must build a fingerprint"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Kiro);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: 2,
+        };
+        let mut stale_messages = crate::sessions::kiro::parse_kiro_file(&source);
+        assert_eq!(stale_messages.len(), 2);
+        stale_messages[0].cost = 0.02;
+        stale_messages[0].mark_provider_reported_cost();
+        stale_messages[1].cost = 0.0;
+        stale_messages[1].cost_source = crate::sessions::CostSource::Unknown;
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            stale_messages,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+        assert!(SourceMessageCache::load().get(identity, &source).is_none());
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&source, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let parse = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["kiro".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let first = parse();
+        assert_eq!(first.len(), 2);
+        for message in &first {
+            assert!((message.cost - 0.01).abs() < 1e-9);
+            assert_eq!(
+                message.cost_source,
+                crate::sessions::CostSource::ProviderReported
+            );
+        }
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt.get(identity, &source).unwrap();
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages, first);
+        assert_eq!(
+            parse(),
+            first,
+            "warm cache must retain per-turn cost authority"
+        );
     }
 
     #[test]
