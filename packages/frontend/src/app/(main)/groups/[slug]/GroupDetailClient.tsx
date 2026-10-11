@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
+import { GroupManagement } from "@/components/leaderboard/GroupManagement";
 import { CheckIcon, CopyIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
 import {
   CompactBadge,
@@ -471,11 +472,12 @@ function GroupMobileRow({
 }
 
 export default function GroupDetailClient({
-  group,
+  group: initialGroup,
   currentUser,
   initialData,
 }: GroupDetailClientProps) {
   const router = useRouter();
+  const [group, setGroup] = useState(initialGroup);
   const [data, setData] = useState(initialData);
   const [period, setPeriod] = useState<Period>(initialData.period);
   const [sortBy, setSortBy] = useState<SortBy>(initialData.sortBy);
@@ -515,7 +517,7 @@ export default function GroupDetailClient({
     setIsLoading(true);
     setError(null);
 
-    fetch(`/api/groups/${group.slug}/leaderboard?${params}`, { signal })
+    return fetch(`/api/groups/${group.slug}/leaderboard?${params}`, { signal, cache: "no-store" })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -546,6 +548,14 @@ export default function GroupDetailClient({
     return () => abortController.abort();
   }, [loadLeaderboard]);
 
+  async function refreshGroup() {
+    const response = await fetch(`/api/groups/${group.slug}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Failed to refresh group");
+    setGroup(payload);
+    await loadLeaderboard();
+  }
+
   async function createInvite() {
     setInviteError(null);
     setInviteUrl(null);
@@ -555,7 +565,7 @@ export default function GroupDetailClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          role: inviteRole,
+          role: group.membership?.role === "owner" ? inviteRole : "member",
           invitedUsername: inviteUsername.trim() || null,
         }),
       });
@@ -626,8 +636,8 @@ export default function GroupDetailClient({
           </MetricItem>
           <MetricItem>
             <MetricLabel>Members</MetricLabel>
-            <MetricValue aria-label={formatGroupMemberCount(data.stats.totalMembers || group.memberCount)}>
-              {(data.stats.totalMembers || group.memberCount).toLocaleString("en-US")}
+            <MetricValue aria-label={formatGroupMemberCount(group.memberCount)}>
+              {group.memberCount.toLocaleString("en-US")}
             </MetricValue>
           </MetricItem>
           <MetricItem>
@@ -776,11 +786,11 @@ export default function GroupDetailClient({
             <Select
               name="invite-role"
               aria-label="Invite role"
-              value={inviteRole}
+              value={group.membership?.role === "owner" ? inviteRole : "member"}
               onChange={(event) => setInviteRole(event.target.value as Exclude<GroupRole, "owner">)}
             >
               <option value="member">Member</option>
-              <option value="admin">Admin</option>
+              {group.membership?.role === "owner" && <option value="admin">Admin</option>}
             </Select>
             <Button type="button" onClick={createInvite}>Create invite</Button>
           </InviteForm>
@@ -795,6 +805,14 @@ export default function GroupDetailClient({
             </LinkBox>
           )}
         </InvitePanel>
+      )}
+      {canInvite && currentUser && group.membership && (
+        <GroupManagement
+          slug={group.slug}
+          userId={currentUser.id}
+          role={group.membership.role}
+          onChanged={refreshGroup}
+        />
       )}
     </>
   );
