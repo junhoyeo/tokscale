@@ -218,6 +218,13 @@
       "when": 1791699256982,
       "tag": "0030_group_reporting_calendar",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1791710130180,
+      "tag": "0031_group_week_start_constraint",
+      "breakpoints": true
     }
   ]
 }
