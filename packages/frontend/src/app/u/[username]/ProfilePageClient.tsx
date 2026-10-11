@@ -658,6 +658,8 @@ const TabsScroller = styled.div`
 
 const PeriodSelectorContainer = styled.nav`
   display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
@@ -683,6 +685,7 @@ const PeriodLink = styled(Link)<{ $active: boolean }>`
   font-size: 13px;
   font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
 
   &:hover {
     color: var(--service-text);
