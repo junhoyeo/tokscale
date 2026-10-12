@@ -4,15 +4,15 @@
 
 use crate::sessions::UnifiedMessage;
 use crate::{
-    ClientContribution, CostProvenance, CostProvenanceKind, DailyContribution, DailyTotals,
-    DataSummary, EstimateSource, GraphMeta, GraphResult, SessionContribution, TokenBreakdown,
-    YearSummary,
+    ClientContributionV2, CostProvenance, CostProvenanceKind, DailyContributionV2, DailyTotalsV2,
+    DataSummaryV2, EstimateSource, GraphMeta, GraphResultV2, SessionContributionV2, TokenBreakdown,
+    YearSummaryV2,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
-pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
+pub fn aggregate_by_date_v2(messages: Vec<UnifiedMessage>) -> Vec<DailyContributionV2> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -41,34 +41,43 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
             },
         );
 
-    DailyFold { days: daily_map }.finish()
+    DailyFoldV2 { days: daily_map }.finish()
 }
 
-/// Incremental form of [`aggregate_by_date`].
+/// Incremental form of [`aggregate_by_date_v2`].
 ///
-/// [`aggregate_by_date`] takes a `Vec<UnifiedMessage>`, which means the caller
+/// [`aggregate_by_date_v2`] takes a `Vec<UnifiedMessage>`, which means the caller
 /// has already paid to materialize every message. Callers that receive
 /// messages one at a time can fold each one in and drop it immediately, so
 /// peak memory is the day map (a few hundred entries) rather than the corpus.
 ///
-/// [`aggregate_by_date`] delegates its own tail here, so both paths produce
+/// [`aggregate_by_date_v2`] delegates its own tail here, so both paths produce
 /// byte-identical contributions.
 #[derive(Default)]
-pub struct DailyFold {
+pub struct DailyFoldV2 {
     days: HashMap<String, DayAccumulator>,
 }
 
-impl DailyFold {
+impl DailyFoldV2 {
     pub fn add(&mut self, message: &UnifiedMessage) {
+        self.add_with_estimate_source(message, None);
+    }
+
+    /// Fold pricing metadata without changing the public message/cache layout.
+    pub fn add_with_estimate_source(
+        &mut self,
+        message: &UnifiedMessage,
+        estimate_source: Option<EstimateSource>,
+    ) {
         self.days
             .entry(message.date.clone())
             .or_default()
-            .add_message(message);
+            .add_message_with_estimate_source(message, estimate_source);
     }
 
-    pub fn finish(self) -> Vec<DailyContribution> {
+    pub fn finish(self) -> Vec<DailyContributionV2> {
         // Convert to sorted vector with pre-allocated capacity
-        let mut contributions: Vec<DailyContribution> = Vec::with_capacity(self.days.len());
+        let mut contributions: Vec<DailyContributionV2> = Vec::with_capacity(self.days.len());
         contributions.extend(
             self.days
                 .into_iter()
@@ -79,7 +88,7 @@ impl DailyFold {
         contributions.sort_by(|a, b| a.date.cmp(&b.date));
 
         // Calculate intensities based on max cost
-        calculate_intensities(&mut contributions);
+        calculate_intensities_v2(&mut contributions);
 
         contributions
     }
@@ -87,11 +96,11 @@ impl DailyFold {
 
 /// Aggregate messages into per-session contributions, keyed on `session_id`.
 ///
-/// Each returned [`SessionContribution`] sums all token buckets and cost for a
+/// Each returned [`SessionContributionV2`] sums all token buckets and cost for a
 /// single session and exposes the same client/model breakdown shape as
-/// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
+/// [`aggregate_by_date_v2`].  Sessions are sorted by `last_seen` descending so the
 /// most recently active sessions appear first.
-pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+pub fn aggregate_by_session_v2(messages: Vec<UnifiedMessage>) -> Vec<SessionContributionV2> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -113,7 +122,7 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
             a
         });
 
-    let mut contributions: Vec<SessionContribution> = session_map
+    let mut contributions: Vec<SessionContributionV2> = session_map
         .into_iter()
         .map(|(session_id, acc)| acc.into_contribution(session_id))
         .collect();
@@ -129,7 +138,7 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
 }
 
 /// Calculate summary statistics
-pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
+pub fn calculate_summary_v2(contributions: &[DailyContributionV2]) -> DataSummaryV2 {
     // Daily totals already saturate at i64::MAX (clamped extreme inputs), so
     // summing several such days must saturate too rather than overflow.
     let total_tokens: i64 = contributions
@@ -160,22 +169,14 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     let mut provenance = CostProvenanceAccumulator::default();
 
     for c in contributions {
-        if c.totals.tokens > 0
-            || c.totals.cost > 0.0
-            || c.totals
-                .cost_provenance
-                .as_ref()
-                .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
-        {
-            provenance.add_provenance(&c.totals.cost_provenance());
-        }
+        provenance.add_usage(c.totals.tokens, c.totals.cost, &c.totals.cost_provenance());
         for s in &c.clients {
             clients_set.insert(s.client.clone());
             models_set.insert(s.model_id.clone());
         }
     }
 
-    DataSummary {
+    DataSummaryV2 {
         total_tokens,
         total_cost,
         total_days: contributions.len() as i32,
@@ -201,7 +202,7 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
 }
 
 /// Calculate year summaries
-pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> {
+pub fn calculate_years_v2(contributions: &[DailyContributionV2]) -> Vec<YearSummaryV2> {
     let mut years_map: HashMap<String, YearAccumulator> = HashMap::with_capacity(5);
 
     for c in contributions {
@@ -218,15 +219,9 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         entry.tokens = entry.tokens.saturating_add(c.totals.tokens);
         entry.cost += c.totals.cost;
 
-        if c.totals.tokens > 0
-            || c.totals.cost > 0.0
-            || c.totals
-                .cost_provenance
-                .as_ref()
-                .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
-        {
-            entry.provenance.add_provenance(&c.totals.cost_provenance());
-        }
+        entry
+            .provenance
+            .add_usage(c.totals.tokens, c.totals.cost, &c.totals.cost_provenance());
 
         if entry.start.is_empty() || c.date < entry.start {
             entry.start = c.date.clone();
@@ -236,8 +231,8 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
     }
 
-    let mut years: Vec<YearSummary> = Vec::with_capacity(years_map.len());
-    years.extend(years_map.into_iter().map(|(year, acc)| YearSummary {
+    let mut years: Vec<YearSummaryV2> = Vec::with_capacity(years_map.len());
+    years.extend(years_map.into_iter().map(|(year, acc)| YearSummaryV2 {
         year,
         total_tokens: acc.tokens,
         total_cost: acc.cost,
@@ -251,12 +246,12 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
 }
 
 /// Generate complete graph result
-pub fn generate_graph_result(
-    contributions: Vec<DailyContribution>,
+pub fn generate_graph_result_v2(
+    contributions: Vec<DailyContributionV2>,
     processing_time_ms: u32,
-) -> GraphResult {
-    let summary = calculate_summary(&contributions);
-    let years = calculate_years(&contributions);
+) -> GraphResultV2 {
+    let summary = calculate_summary_v2(&contributions);
+    let years = calculate_years_v2(&contributions);
 
     let date_range_start = contributions
         .first()
@@ -267,7 +262,7 @@ pub fn generate_graph_result(
         .map(|c| c.date.clone())
         .unwrap_or_default();
 
-    GraphResult {
+    GraphResultV2 {
         meta: GraphMeta {
             generated_at: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -304,35 +299,30 @@ impl CostProvenanceAccumulator {
     }
 
     pub fn add_message(&mut self, msg: &UnifiedMessage) {
-        let has_usage = msg.tokens.total() > 0;
-        let has_cost = msg.cost > 0.0;
-        let is_explicit_source = msg.cost_source != crate::sessions::CostSource::Unknown;
+        self.add_message_with_estimate_source(msg, None);
+    }
 
-        if !has_usage && !has_cost && !is_explicit_source {
-            return;
-        }
+    pub fn add_message_with_estimate_source(
+        &mut self,
+        msg: &UnifiedMessage,
+        estimate_source: Option<EstimateSource>,
+    ) {
+        let provenance = match msg.cost_source {
+            crate::CostSource::Unknown => CostProvenance::unknown(),
+            crate::CostSource::ProviderReported => CostProvenance::provider_reported(),
+            crate::CostSource::Estimated => {
+                CostProvenance::estimated(estimate_source.unwrap_or(EstimateSource::Unknown))
+            }
+        };
+        self.add_usage(msg.tokens.total(), msg.cost, &provenance);
+    }
 
-        match msg.cost_source {
-            crate::sessions::CostSource::ProviderReported => {
-                self.has_provider_reported = true;
-            }
-            crate::sessions::CostSource::Estimated => {
-                self.has_estimated = true;
-                match msg.estimate_source {
-                    Some(EstimateSource::Catalog) => self.has_catalog = true,
-                    Some(EstimateSource::Custom) => self.has_custom = true,
-                    Some(EstimateSource::Mixed) => {
-                        self.has_catalog = true;
-                        self.has_custom = true;
-                    }
-                    Some(EstimateSource::Unknown) | None => {
-                        self.has_estimate_unknown = true;
-                    }
-                }
-            }
-            crate::sessions::CostSource::Unknown => {
-                self.has_unknown = true;
-            }
+    /// Fold a row using the same participation rule at every aggregation level.
+    /// Unknown rows with neither usage nor cost do not affect cost provenance;
+    /// an explicit reported or estimated zero still participates.
+    pub fn add_usage(&mut self, tokens: i64, cost: f64, provenance: &CostProvenance) {
+        if tokens > 0 || cost > 0.0 || provenance.kind != CostProvenanceKind::Unknown {
+            self.add_provenance(provenance);
         }
     }
 
@@ -436,9 +426,9 @@ impl CostProvenanceAccumulator {
 }
 
 struct DayAccumulator {
-    totals: DailyTotals,
+    totals: DailyTotalsV2,
     token_breakdown: TokenBreakdown,
-    clients: HashMap<String, ClientContribution>,
+    clients: HashMap<String, ClientContributionV2>,
     provenance: CostProvenanceAccumulator,
     client_provenance: HashMap<String, CostProvenanceAccumulator>,
 }
@@ -446,7 +436,7 @@ struct DayAccumulator {
 impl Default for DayAccumulator {
     fn default() -> Self {
         Self {
-            totals: DailyTotals::default(),
+            totals: DailyTotalsV2::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(8),
             provenance: CostProvenanceAccumulator::default(),
@@ -457,6 +447,14 @@ impl Default for DayAccumulator {
 
 impl DayAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
+        self.add_message_with_estimate_source(msg, None);
+    }
+
+    fn add_message_with_estimate_source(
+        &mut self,
+        msg: &UnifiedMessage,
+        estimate_source: Option<EstimateSource>,
+    ) {
         let total_tokens = msg.tokens.total();
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
@@ -467,7 +465,8 @@ impl DayAccumulator {
             .saturating_add(msg.message_count.max(0));
 
         self.token_breakdown += &msg.tokens;
-        self.provenance.add_message(msg);
+        self.provenance
+            .add_message_with_estimate_source(msg, estimate_source);
 
         // Update client contribution
         // Canonical (alias-free) id: this contribution is serialized into the
@@ -481,11 +480,11 @@ impl DayAccumulator {
         self.client_provenance
             .entry(key.clone())
             .or_default()
-            .add_message(msg);
+            .add_message_with_estimate_source(msg, estimate_source);
         let client_entry = self
             .clients
             .entry(key)
-            .or_insert_with(|| ClientContribution {
+            .or_insert_with(|| ClientContributionV2 {
                 client: msg.client.clone(),
                 model_id: crate::canonical_model_id(&msg.model_id),
                 provider_id: msg.provider_id.clone(),
@@ -533,7 +532,7 @@ impl DayAccumulator {
             let entry = self
                 .clients
                 .entry(key)
-                .or_insert_with(|| ClientContribution {
+                .or_insert_with(|| ClientContributionV2 {
                     client: client_contrib.client.clone(),
                     model_id: client_contrib.model_id.clone(),
                     provider_id: client_contrib.provider_id.clone(),
@@ -564,7 +563,7 @@ impl DayAccumulator {
         }
     }
 
-    fn into_contribution(self, date: String) -> DailyContribution {
+    fn into_contribution(self, date: String) -> DailyContributionV2 {
         let token_breakdown = TokenBreakdown {
             input: self.token_breakdown.input.max(0),
             output: self.token_breakdown.output.max(0),
@@ -575,7 +574,7 @@ impl DayAccumulator {
         };
 
         let mut client_provenance = self.client_provenance;
-        let clients: Vec<ClientContribution> = self
+        let clients: Vec<ClientContributionV2> = self
             .clients
             .into_iter()
             .map(|(key, mut s)| {
@@ -596,9 +595,9 @@ impl DayAccumulator {
             })
             .collect();
 
-        DailyContribution {
+        DailyContributionV2 {
             date,
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
                 messages: self.totals.messages.max(0),
@@ -613,13 +612,13 @@ impl DayAccumulator {
 }
 
 struct SessionAccumulator {
-    totals: DailyTotals,
+    totals: DailyTotalsV2,
     token_breakdown: TokenBreakdown,
-    clients: HashMap<String, ClientContribution>,
+    clients: HashMap<String, ClientContributionV2>,
     provenance: CostProvenanceAccumulator,
     client_provenance: HashMap<String, CostProvenanceAccumulator>,
     /// Tracks the most-active (client, provider, model) for the session, used
-    /// as the canonical top-level fields on `SessionContribution`.
+    /// as the canonical top-level fields on `SessionContributionV2`.
     top_client: String,
     top_provider: String,
     top_model: String,
@@ -631,7 +630,7 @@ struct SessionAccumulator {
 impl Default for SessionAccumulator {
     fn default() -> Self {
         Self {
-            totals: DailyTotals::default(),
+            totals: DailyTotalsV2::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(2),
             provenance: CostProvenanceAccumulator::default(),
@@ -672,7 +671,7 @@ impl SessionAccumulator {
         let client_entry = self
             .clients
             .entry(key)
-            .or_insert_with(|| ClientContribution {
+            .or_insert_with(|| ClientContributionV2 {
                 client: msg.client.clone(),
                 model_id: normalized_model.clone(),
                 provider_id: msg.provider_id.clone(),
@@ -725,7 +724,7 @@ impl SessionAccumulator {
             let entry = self
                 .clients
                 .entry(key)
-                .or_insert_with(|| ClientContribution {
+                .or_insert_with(|| ClientContributionV2 {
                     client: contrib.client.clone(),
                     model_id: contrib.model_id.clone(),
                     provider_id: contrib.provider_id.clone(),
@@ -754,7 +753,7 @@ impl SessionAccumulator {
         }
     }
 
-    fn into_contribution(self, session_id: String) -> SessionContribution {
+    fn into_contribution(self, session_id: String) -> SessionContributionV2 {
         let token_breakdown = TokenBreakdown {
             input: self.token_breakdown.input.max(0),
             output: self.token_breakdown.output.max(0),
@@ -765,7 +764,7 @@ impl SessionAccumulator {
         };
 
         let mut client_provenance = self.client_provenance;
-        let mut clients: Vec<ClientContribution> = self
+        let mut clients: Vec<ClientContributionV2> = self
             .clients
             .into_iter()
             .map(|(key, mut c)| {
@@ -804,12 +803,12 @@ impl SessionAccumulator {
             self.last_seen
         };
 
-        SessionContribution {
+        SessionContributionV2 {
             session_id,
             client: self.top_client,
             provider: self.top_provider,
             model: self.top_model,
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
                 messages: self.totals.messages.max(0),
@@ -834,7 +833,7 @@ struct YearAccumulator {
 
 /// Cost-relative intensity buckets (0-4): each day's intensity is a function
 /// of its cost relative to the maximum cost across all `contributions`.
-pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
+pub fn calculate_intensities_v2(contributions: &mut [DailyContributionV2]) {
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
@@ -907,14 +906,13 @@ mod tests {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
-            estimate_source: None,
         }
     }
 
     #[test]
     fn test_aggregate_by_date_empty() {
         let messages = Vec::new();
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 0);
     }
 
@@ -928,7 +926,7 @@ mod tests {
             "opencode",
         )];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, "2024-01-01");
         assert_eq!(result[0].totals.tokens, 1000);
@@ -944,7 +942,7 @@ mod tests {
             mock_unified_message("2024-01-03", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 3);
 
         // Verify sorted by date
@@ -966,7 +964,7 @@ mod tests {
             mock_unified_message("2024-01-01", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, "2024-01-01");
         assert_eq!(result[0].totals.tokens, 4500);
@@ -987,7 +985,7 @@ mod tests {
             reasoning: 10,
         };
 
-        let result = aggregate_by_date(vec![msg]);
+        let result = aggregate_by_date_v2(vec![msg]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].token_breakdown.input, 600);
         assert_eq!(result[0].token_breakdown.output, 300);
@@ -999,7 +997,7 @@ mod tests {
     #[test]
     fn test_calculate_summary_empty() {
         let contributions = Vec::new();
-        let summary = calculate_summary(&contributions);
+        let summary = calculate_summary_v2(&contributions);
 
         assert_eq!(summary.total_tokens, 0);
         assert_eq!(summary.total_cost, 0.0);
@@ -1018,7 +1016,7 @@ mod tests {
 
     #[test]
     fn empty_summary_cost_does_not_format_as_negative_zero() {
-        let summary = calculate_summary(&[]);
+        let summary = calculate_summary_v2(&[]);
         assert_eq!(format!("${:.2}", summary.total_cost), "$0.00");
     }
 
@@ -1035,8 +1033,8 @@ mod tests {
             "claude-sonnet-4-20250514",
             "claude",
         )];
-        let contributions = aggregate_by_date(messages);
-        let summary = calculate_summary(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let summary = calculate_summary_v2(&contributions);
 
         assert!(!summary.total_cost.is_sign_negative());
         assert_eq!(format!("${:.2}", summary.total_cost), "$0.00");
@@ -1051,8 +1049,8 @@ mod tests {
             "claude-3-5-sonnet",
             "opencode",
         )];
-        let contributions = aggregate_by_date(messages);
-        let summary = calculate_summary(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let summary = calculate_summary_v2(&contributions);
 
         assert_eq!(summary.total_tokens, 1000);
         assert_eq!(summary.total_cost, 0.05);
@@ -1069,8 +1067,8 @@ mod tests {
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
             mock_unified_message("2024-01-03", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
         ];
-        let contributions = aggregate_by_date(messages);
-        let summary = calculate_summary(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let summary = calculate_summary_v2(&contributions);
 
         assert_eq!(summary.total_tokens, 4500);
         assert!((summary.total_cost - 0.23).abs() < 0.0001);
@@ -1083,9 +1081,9 @@ mod tests {
     #[test]
     fn test_calculate_summary_with_zero_token_days() {
         let contributions = vec![
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-01".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 1000,
                     cost: 0.05,
                     messages: 1,
@@ -1096,9 +1094,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-02".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 0,
                     cost: 0.0,
                     messages: 0,
@@ -1111,7 +1109,7 @@ mod tests {
             },
         ];
 
-        let summary = calculate_summary(&contributions);
+        let summary = calculate_summary_v2(&contributions);
         assert_eq!(summary.total_days, 2);
         assert_eq!(summary.active_days, 1);
         assert!((summary.average_per_day - 0.05).abs() < 0.0001);
@@ -1120,9 +1118,9 @@ mod tests {
     #[test]
     fn test_calculate_summary_counts_cost_only_days_as_active() {
         let contributions = vec![
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-01".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 1000,
                     cost: 0.05,
                     messages: 1,
@@ -1133,9 +1131,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-02".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 0,
                     cost: 1.25,
                     messages: 0,
@@ -1146,9 +1144,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-03".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 0,
                     cost: 0.0,
                     messages: 0,
@@ -1161,7 +1159,7 @@ mod tests {
             },
         ];
 
-        let summary = calculate_summary(&contributions);
+        let summary = calculate_summary_v2(&contributions);
         assert_eq!(summary.total_days, 3);
         assert_eq!(summary.active_days, 2);
         assert!((summary.average_per_day - 0.65).abs() < 0.0001);
@@ -1171,9 +1169,9 @@ mod tests {
     fn test_extreme_day_totals_saturate_in_summary_and_years() {
         // Daily totals clamp extreme inputs to i64::MAX; summing several such
         // days must saturate rather than overflow (debug panic / release wrap).
-        let saturated_day = |date: &str| DailyContribution {
+        let saturated_day = |date: &str| DailyContributionV2 {
             date: date.to_string(),
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: i64::MAX,
                 cost: 1.0,
                 messages: 1,
@@ -1186,10 +1184,10 @@ mod tests {
         };
         let contributions = vec![saturated_day("2024-01-01"), saturated_day("2024-01-02")];
 
-        let summary = calculate_summary(&contributions);
+        let summary = calculate_summary_v2(&contributions);
         assert_eq!(summary.total_tokens, i64::MAX);
 
-        let years = calculate_years(&contributions);
+        let years = calculate_years_v2(&contributions);
         assert_eq!(years.len(), 1);
         assert_eq!(years[0].total_tokens, i64::MAX);
     }
@@ -1197,7 +1195,7 @@ mod tests {
     #[test]
     fn test_calculate_years_empty() {
         let contributions = Vec::new();
-        let years = calculate_years(&contributions);
+        let years = calculate_years_v2(&contributions);
         assert_eq!(years.len(), 0);
     }
 
@@ -1208,8 +1206,8 @@ mod tests {
             mock_unified_message("2024-06-15", 2000, 0.10, "gpt-4", "claude"),
             mock_unified_message("2024-12-31", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
         ];
-        let contributions = aggregate_by_date(messages);
-        let years = calculate_years(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let years = calculate_years_v2(&contributions);
 
         assert_eq!(years.len(), 1);
         assert_eq!(years[0].year, "2024");
@@ -1227,8 +1225,8 @@ mod tests {
             mock_unified_message("2024-06-15", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
             mock_unified_message("2025-01-01", 3000, 0.15, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
-        let years = calculate_years(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let years = calculate_years_v2(&contributions);
 
         assert_eq!(years.len(), 3);
 
@@ -1250,8 +1248,8 @@ mod tests {
             mock_unified_message("2024-12-31", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
             mock_unified_message("2025-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
-        let years = calculate_years(&contributions);
+        let contributions = aggregate_by_date_v2(messages);
+        let years = calculate_years_v2(&contributions);
 
         assert_eq!(years.len(), 2);
         assert_eq!(years[0].year, "2024");
@@ -1262,9 +1260,9 @@ mod tests {
 
     #[test]
     fn test_calculate_years_invalid_date() {
-        let contributions = vec![DailyContribution {
+        let contributions = vec![DailyContributionV2 {
             date: "abc".to_string(), // Invalid date (less than 4 chars)
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: 1000,
                 cost: 0.05,
                 messages: 1,
@@ -1276,14 +1274,14 @@ mod tests {
             active_time_ms: None,
         }];
 
-        let years = calculate_years(&contributions);
+        let years = calculate_years_v2(&contributions);
         assert_eq!(years.len(), 0); // Should skip invalid dates
     }
 
     #[test]
     fn test_generate_graph_result_empty() {
         let contributions = Vec::new();
-        let result = generate_graph_result(contributions, 100);
+        let result = generate_graph_result_v2(contributions, 100);
 
         assert_eq!(result.contributions.len(), 0);
         assert_eq!(result.summary.total_tokens, 0);
@@ -1299,8 +1297,8 @@ mod tests {
             mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
-        let result = generate_graph_result(contributions, 150);
+        let contributions = aggregate_by_date_v2(messages);
+        let result = generate_graph_result_v2(contributions, 150);
 
         assert_eq!(result.contributions.len(), 2);
         assert_eq!(result.summary.total_tokens, 3000);
@@ -1314,16 +1312,16 @@ mod tests {
     #[test]
     fn test_calculate_intensities_empty() {
         let mut contributions = Vec::new();
-        calculate_intensities(&mut contributions);
+        calculate_intensities_v2(&mut contributions);
         assert_eq!(contributions.len(), 0);
     }
 
     #[test]
     fn test_calculate_intensities_zero_cost() {
         let mut contributions = vec![
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-01".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 1000,
                     cost: 0.0,
                     messages: 1,
@@ -1334,9 +1332,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-02".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 2000,
                     cost: 0.0,
                     messages: 1,
@@ -1349,7 +1347,7 @@ mod tests {
             },
         ];
 
-        calculate_intensities(&mut contributions);
+        calculate_intensities_v2(&mut contributions);
         assert_eq!(contributions[0].intensity, 0);
         assert_eq!(contributions[1].intensity, 0);
     }
@@ -1357,9 +1355,9 @@ mod tests {
     #[test]
     fn test_calculate_intensities_levels() {
         let mut contributions = vec![
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-01".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 1000,
                     cost: 1.0, // 100% of max
                     messages: 1,
@@ -1370,9 +1368,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-02".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 800,
                     cost: 0.8, // 80% of max (>= 0.75)
                     messages: 1,
@@ -1383,9 +1381,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-03".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 600,
                     cost: 0.6, // 60% of max (>= 0.5)
                     messages: 1,
@@ -1396,9 +1394,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-04".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 300,
                     cost: 0.3, // 30% of max (>= 0.25)
                     messages: 1,
@@ -1409,9 +1407,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-05".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 100,
                     cost: 0.1, // 10% of max (> 0.0)
                     messages: 1,
@@ -1424,7 +1422,7 @@ mod tests {
             },
         ];
 
-        calculate_intensities(&mut contributions);
+        calculate_intensities_v2(&mut contributions);
 
         assert_eq!(contributions[0].intensity, 4); // 100%
         assert_eq!(contributions[1].intensity, 4); // 80%
@@ -1436,9 +1434,9 @@ mod tests {
     #[test]
     fn test_calculate_intensities_boundary_values() {
         let mut contributions = vec![
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-01".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 1000,
                     cost: 1.0,
                     messages: 1,
@@ -1449,9 +1447,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-02".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 750,
                     cost: 0.75, // Exactly 0.75 (should be level 4)
                     messages: 1,
@@ -1462,9 +1460,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-03".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 500,
                     cost: 0.5, // Exactly 0.5 (should be level 3)
                     messages: 1,
@@ -1475,9 +1473,9 @@ mod tests {
                 clients: Vec::new(),
                 active_time_ms: None,
             },
-            DailyContribution {
+            DailyContributionV2 {
                 date: "2024-01-04".to_string(),
-                totals: DailyTotals {
+                totals: DailyTotalsV2 {
                     tokens: 250,
                     cost: 0.25, // Exactly 0.25 (should be level 2)
                     messages: 1,
@@ -1490,7 +1488,7 @@ mod tests {
             },
         ];
 
-        calculate_intensities(&mut contributions);
+        calculate_intensities_v2(&mut contributions);
 
         assert_eq!(contributions[0].intensity, 4);
         assert_eq!(contributions[1].intensity, 4); // >= 0.75
@@ -1505,7 +1503,7 @@ mod tests {
             mock_unified_message("2024-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].clients.len(), 2);
 
@@ -1536,7 +1534,7 @@ mod tests {
             }
         }
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date_v2(messages);
         assert_eq!(result.len(), 10);
 
         // Each day should have 10 messages aggregated
@@ -1579,13 +1577,12 @@ mod tests {
             is_turn_start: false,
             model_attribution_conflicted: false,
             duration_ms: None,
-            estimate_source: None,
         }
     }
 
     #[test]
     fn test_aggregate_by_session_empty() {
-        assert!(aggregate_by_session(Vec::new()).is_empty());
+        assert!(aggregate_by_session_v2(Vec::new()).is_empty());
     }
 
     #[test]
@@ -1702,7 +1699,7 @@ mod tests {
             ),
         ];
 
-        let result = aggregate_by_session(messages);
+        let result = aggregate_by_session_v2(messages);
         assert_eq!(result.len(), 3, "expected 3 sessions");
 
         // Most-recent-first ordering: s-c last_seen=1_700_000_102 wins.
@@ -1775,7 +1772,7 @@ mod tests {
             ),
         ];
 
-        let result = aggregate_by_session(messages);
+        let result = aggregate_by_session_v2(messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].client, "codex");
         assert_eq!(result[0].provider, "openai");
@@ -1788,12 +1785,12 @@ mod tests {
 
     #[test]
     fn test_session_contribution_serde_round_trip() {
-        let contrib = SessionContribution {
+        let contrib = SessionContributionV2 {
             session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".to_string(),
             client: "codex".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5".to_string(),
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: 25298,
                 cost: 0.0123,
                 messages: 12,
@@ -1807,7 +1804,7 @@ mod tests {
                 cache_write_1h: 0,
                 reasoning: 40,
             },
-            clients: vec![ClientContribution {
+            clients: vec![ClientContributionV2 {
                 client: "codex".to_string(),
                 model_id: "gpt-5".to_string(),
                 provider_id: "openai".to_string(),
@@ -1828,7 +1825,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&contrib).expect("serialize");
-        let parsed: SessionContribution = serde_json::from_str(&json).expect("deserialize");
+        let parsed: SessionContributionV2 = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, contrib);
         // Spot-check key field is present in JSON.
         assert!(json.contains("\"session_id\":\"019e1e27"));
@@ -1849,15 +1846,25 @@ mod tests {
         let parsed_reported: CostProvenance = serde_json::from_str(&json_reported).unwrap();
         assert_eq!(parsed_reported, prov_reported);
 
-        // Backward compatibility: missing costProvenance in DailyTotals deserializes as unknown
+        // Backward compatibility: missing costProvenance in DailyTotalsV2 deserializes as unknown
         let legacy_json = r#"{"tokens":100,"cost":0.5,"messages":2}"#;
-        let parsed_totals: DailyTotals = serde_json::from_str(legacy_json).unwrap();
+        let parsed_totals: DailyTotalsV2 = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(parsed_totals.cost_provenance(), CostProvenance::unknown());
 
-        // Backward compatibility: missing costProvenance in ClientContribution
+        // Backward compatibility: missing costProvenance in ClientContributionV2
         let legacy_client = r#"{"client":"test","model_id":"m","provider_id":"p","tokens":{"input":10,"output":20,"cache_read":0,"cache_write":0,"cache_write_1h":0,"reasoning":0},"cost":0.1,"messages":1}"#;
-        let parsed_client: ClientContribution = serde_json::from_str(legacy_client).unwrap();
+        let parsed_client: ClientContributionV2 = serde_json::from_str(legacy_client).unwrap();
         assert_eq!(parsed_client.cost_provenance(), CostProvenance::unknown());
+    }
+
+    fn aggregate_priced(
+        messages: Vec<(UnifiedMessage, Option<EstimateSource>)>,
+    ) -> Vec<DailyContributionV2> {
+        let mut fold = DailyFoldV2::default();
+        for (message, source) in messages {
+            fold.add_with_estimate_source(&message, source);
+        }
+        fold.finish()
     }
 
     #[test]
@@ -1866,11 +1873,10 @@ mod tests {
             cost_source: crate::sessions::CostSource,
             estimate_source: Option<EstimateSource>,
             cost: f64,
-        ) -> UnifiedMessage {
+        ) -> (UnifiedMessage, Option<EstimateSource>) {
             let mut msg = mock_unified_message("2024-01-01", 100, cost, "model-a", "client-a");
             msg.cost_source = cost_source;
-            msg.estimate_source = estimate_source;
-            msg
+            (msg, estimate_source)
         }
 
         // Provider reported
@@ -1879,7 +1885,7 @@ mod tests {
             None,
             1.0,
         )];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::provider_reported()
@@ -1895,7 +1901,7 @@ mod tests {
             Some(EstimateSource::Catalog),
             1.0,
         )];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Catalog)
@@ -1911,7 +1917,7 @@ mod tests {
             Some(EstimateSource::Custom),
             1.0,
         )];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Custom)
@@ -1927,7 +1933,7 @@ mod tests {
             None,
             1.0,
         )];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Unknown)
@@ -1939,7 +1945,7 @@ mod tests {
             None,
             0.0,
         )];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(daily[0].totals.cost_provenance(), CostProvenance::unknown());
     }
 
@@ -1949,11 +1955,10 @@ mod tests {
             model: &str,
             cost_source: crate::sessions::CostSource,
             estimate_source: Option<EstimateSource>,
-        ) -> UnifiedMessage {
+        ) -> (UnifiedMessage, Option<EstimateSource>) {
             let mut msg = mock_unified_message("2024-01-01", 100, 0.5, model, "client-a");
             msg.cost_source = cost_source;
-            msg.estimate_source = estimate_source;
-            msg
+            (msg, estimate_source)
         }
 
         // Provider reported + Estimated
@@ -1969,7 +1974,7 @@ mod tests {
                 Some(EstimateSource::Catalog),
             ),
         ];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance().kind,
             CostProvenanceKind::Mixed
@@ -1988,7 +1993,7 @@ mod tests {
                 Some(EstimateSource::Custom),
             ),
         ];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Mixed)
@@ -2003,7 +2008,7 @@ mod tests {
             ),
             make_msg("model-2", crate::sessions::CostSource::Unknown, None),
         ];
-        let daily = aggregate_by_date(msgs);
+        let daily = aggregate_priced(msgs);
         assert_eq!(
             daily[0].totals.cost_provenance().kind,
             CostProvenanceKind::Mixed
@@ -2015,7 +2020,7 @@ mod tests {
         // Provider-reported $0 with tokens participates as ProviderReported
         let mut msg1 = mock_unified_message("2024-01-01", 100, 0.0, "model-free", "client-a");
         msg1.cost_source = crate::sessions::CostSource::ProviderReported;
-        let daily = aggregate_by_date(vec![msg1]);
+        let daily = aggregate_by_date_v2(vec![msg1]);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::provider_reported()
@@ -2025,8 +2030,7 @@ mod tests {
         let mut msg2 =
             mock_unified_message("2024-01-01", 100, 0.0, "model-custom-free", "client-a");
         msg2.cost_source = crate::sessions::CostSource::Estimated;
-        msg2.estimate_source = Some(EstimateSource::Custom);
-        let daily = aggregate_by_date(vec![msg2]);
+        let daily = aggregate_priced(vec![(msg2, Some(EstimateSource::Custom))]);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Custom)
@@ -2037,7 +2041,7 @@ mod tests {
         msg_empty.cost_source = crate::sessions::CostSource::Unknown;
         let mut msg_prov = mock_unified_message("2024-01-01", 100, 0.5, "model-real", "client-a");
         msg_prov.cost_source = crate::sessions::CostSource::ProviderReported;
-        let daily = aggregate_by_date(vec![msg_empty, msg_prov]);
+        let daily = aggregate_by_date_v2(vec![msg_empty, msg_prov]);
         assert_eq!(
             daily[0].totals.cost_provenance(),
             CostProvenance::provider_reported()
@@ -2055,8 +2059,7 @@ mod tests {
 
         let mut msg_b = mock_unified_message("2024-01-01", 100, 1.0, "m2", "c2");
         msg_b.cost_source = crate::sessions::CostSource::Estimated;
-        msg_b.estimate_source = Some(EstimateSource::Catalog);
-        acc2.add_message(&msg_b);
+        acc2.add_message_with_estimate_source(&msg_b, Some(EstimateSource::Catalog));
 
         let mut merge_1_then_2 = acc1;
         merge_1_then_2.merge(acc2);
@@ -2071,20 +2074,21 @@ mod tests {
     fn test_cost_provenance_propagates_to_summary_and_years() {
         let mut msg1 = mock_unified_message("2024-01-01", 100, 1.0, "model-1", "client-1");
         msg1.cost_source = crate::sessions::CostSource::Estimated;
-        msg1.estimate_source = Some(EstimateSource::Catalog);
 
         let mut msg2 = mock_unified_message("2024-02-01", 200, 2.0, "model-2", "client-2");
         msg2.cost_source = crate::sessions::CostSource::Estimated;
-        msg2.estimate_source = Some(EstimateSource::Catalog);
 
-        let contributions = aggregate_by_date(vec![msg1, msg2]);
-        let summary = calculate_summary(&contributions);
+        let contributions = aggregate_priced(vec![
+            (msg1, Some(EstimateSource::Catalog)),
+            (msg2, Some(EstimateSource::Catalog)),
+        ]);
+        let summary = calculate_summary_v2(&contributions);
         assert_eq!(
             summary.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Catalog)
         );
 
-        let years = calculate_years(&contributions);
+        let years = calculate_years_v2(&contributions);
         assert_eq!(years.len(), 1);
         assert_eq!(
             years[0].cost_provenance(),
@@ -2098,15 +2102,15 @@ mod tests {
             CostProvenance::estimated(EstimateSource::Catalog),
         ] {
             for (tokens, cost) in [(100, 2.0), (100, 0.0), (0, 2.0)] {
-                let mut days = aggregate_by_date(vec![
+                let mut days = aggregate_by_date_v2(vec![
                     mock_unified_message("2024-01-01", 100, 1.0, "known", "client"),
                     mock_unified_message("2024-01-02", tokens, cost, "legacy", "client"),
                 ]);
                 days[0].totals.cost_provenance = Some(known);
                 days[1].totals.cost_provenance = None;
                 let expected = CostProvenance::mixed(known.estimate_source);
-                let summary = calculate_summary(&days);
-                let years = calculate_years(&days);
+                let summary = calculate_summary_v2(&days);
+                let years = calculate_years_v2(&days);
                 assert_eq!(summary.total_cost, 1.0 + cost);
                 assert_eq!(summary.total_tokens, 100 + tokens);
                 assert_eq!(summary.cost_provenance(), expected);
@@ -2122,14 +2126,20 @@ mod tests {
             known.cost_source = crate::CostSource::ProviderReported;
             let empty = mock_unified_message(date, 0, 0.0, "empty", "client");
             assert_eq!(empty.message_count, 1);
-            let days = aggregate_by_date(vec![known, empty]);
-            let summary = calculate_summary(&days);
-            assert_eq!(summary.cost_provenance(), CostProvenance::provider_reported());
+            let days = aggregate_by_date_v2(vec![known, empty]);
+            let summary = calculate_summary_v2(&days);
+            assert_eq!(
+                summary.cost_provenance(),
+                CostProvenance::provider_reported()
+            );
             assert_eq!(summary.total_cost, 1.0);
             assert_eq!(summary.total_tokens, 100);
             assert_eq!(summary.active_days, days.len() as i32);
-            let years = calculate_years(&days);
-            assert_eq!(years[0].cost_provenance(), CostProvenance::provider_reported());
+            let years = calculate_years_v2(&days);
+            assert_eq!(
+                years[0].cost_provenance(),
+                CostProvenance::provider_reported()
+            );
             if years.len() > 1 {
                 assert_eq!(years[1].cost_provenance(), CostProvenance::unknown());
             }
@@ -2142,10 +2152,9 @@ mod tests {
         reported.cost_source = crate::CostSource::ProviderReported;
         let mut estimated = mock_unified_message("2024-01-02", 0, 0.0, "estimated", "client");
         estimated.cost_source = crate::CostSource::Estimated;
-        let days = aggregate_by_date(vec![reported, estimated]);
+        let days = aggregate_by_date_v2(vec![reported, estimated]);
         let expected = CostProvenance::mixed(Some(EstimateSource::Unknown));
-        assert_eq!(calculate_summary(&days).cost_provenance(), expected);
-        assert_eq!(calculate_years(&days)[0].cost_provenance(), expected);
+        assert_eq!(calculate_summary_v2(&days).cost_provenance(), expected);
+        assert_eq!(calculate_years_v2(&days)[0].cost_provenance(), expected);
     }
-
 }

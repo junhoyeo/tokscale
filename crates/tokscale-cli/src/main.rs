@@ -4920,7 +4920,7 @@ struct TsTokenContributionData {
 }
 
 fn to_ts_token_contribution_data(
-    graph: &tokscale_core::GraphResult,
+    graph: &tokscale_core::GraphResultV2,
     device: Option<&device::SubmitDevice>,
     scan_scope: Option<TsScanScope>,
 ) -> TsTokenContributionData {
@@ -5499,7 +5499,7 @@ fn run_graph_command(
     no_spinner: bool,
 ) -> Result<()> {
     use colored::Colorize;
-    use tokscale_core::{generate_local_graph_report, GroupBy};
+    use tokscale_core::{generate_local_graph_report_v2, GroupBy};
 
     let show_progress = output.is_some() && !no_spinner;
     let mut context = LocalReportContext::new(home_dir, clients, date, None);
@@ -5515,7 +5515,7 @@ fn run_graph_command(
     let rt = tokio::runtime::Runtime::new()?;
     let graph_result = rt
         .block_on(async {
-            generate_local_graph_report(context.report_options(GroupBy::default())).await
+            generate_local_graph_report_v2(context.report_options(GroupBy::default())).await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
     emit_cursor_sync_warning(
@@ -5926,10 +5926,10 @@ fn submit_imported_graph(payload: &TsTokenContributionData) -> Result<()> {
 /// the local recovery overlay reconstructs, which submission never sends and
 /// which therefore must not count as coverage.
 fn drop_locally_scanned_usage(
-    graph: &mut tokscale_core::GraphResult,
+    graph: &mut tokscale_core::GraphResultV2,
     imported_clients: &[String],
 ) -> Result<Vec<(String, String)>> {
-    use tokscale_core::{generate_source_graph_report, GroupBy, ReportOptions};
+    use tokscale_core::{generate_source_graph_report_v2, GroupBy, ReportOptions};
 
     // This scan only feeds overlap detection, which reads (date, client)
     // identities and non-zero token flags — never costs — so the lenient local
@@ -5937,14 +5937,14 @@ fn drop_locally_scanned_usage(
     // must not abort the whole import over a scan whose costs nobody reads.
     // The imported costs come from the export itself.
     //
-    // Source-only, not `generate_local_graph_report`: the question here is
+    // Source-only, not `generate_local_graph_report_v2`: the question here is
     // "does `tokscale submit` already report this row?", and submission reads
     // source messages alone. The local recovery overlay is never submitted, so
     // counting it as coverage would drop an imported row that nothing else ever
     // uploads (#1364).
     let rt = tokio::runtime::Runtime::new()?;
     let local = rt
-        .block_on(generate_source_graph_report(ReportOptions {
+        .block_on(generate_source_graph_report_v2(ReportOptions {
             home_dir: None,
             use_env_roots: true,
             clients: Some(imported_clients.to_vec()),
@@ -5960,8 +5960,8 @@ fn drop_locally_scanned_usage(
 }
 
 fn drop_overlapping_rows(
-    graph: &mut tokscale_core::GraphResult,
-    local: &tokscale_core::GraphResult,
+    graph: &mut tokscale_core::GraphResultV2,
+    local: &tokscale_core::GraphResultV2,
 ) -> Vec<(String, String)> {
     let scanned: std::collections::HashSet<(&str, &str)> = local
         .contributions
@@ -6011,11 +6011,11 @@ fn drop_overlapping_rows(
 /// rollups, and the meta date range from what remains. Shared by
 /// [`drop_overlapping_rows`] and the tokenless-cost exclusion path in
 /// `run_import_command`, where exclusion can empty every client of a day.
-fn normalize_graph_after_row_removal(graph: &mut tokscale_core::GraphResult) {
+fn normalize_graph_after_row_removal(graph: &mut tokscale_core::GraphResultV2) {
     graph.contributions.retain(|day| !day.clients.is_empty());
-    tokscale_core::calculate_intensities(&mut graph.contributions);
-    graph.summary = tokscale_core::calculate_summary(&graph.contributions);
-    graph.years = tokscale_core::calculate_years(&graph.contributions);
+    tokscale_core::calculate_intensities_v2(&mut graph.contributions);
+    graph.summary = tokscale_core::calculate_summary_v2(&graph.contributions);
+    graph.years = tokscale_core::calculate_years_v2(&graph.contributions);
     if let (Some(first), Some(last)) = (graph.contributions.first(), graph.contributions.last()) {
         graph.meta.date_range_start = first.date.clone();
         graph.meta.date_range_end = last.date.clone();
@@ -6025,7 +6025,10 @@ fn normalize_graph_after_row_removal(graph: &mut tokscale_core::GraphResult) {
 /// The submit payload for an imported graph. MCP names stay the local ones, as
 /// `submit` sends them: the server stores the latest list per profile, and an
 /// empty one would clear it.
-fn backfill_payload(graph: &tokscale_core::GraphResult, importer: &str) -> TsTokenContributionData {
+fn backfill_payload(
+    graph: &tokscale_core::GraphResultV2,
+    importer: &str,
+) -> TsTokenContributionData {
     let mut payload = to_ts_token_contribution_data(graph, None, None);
     payload.provenance = Some(TsSubmissionProvenance {
         origin: "backfill",
@@ -6081,13 +6084,13 @@ fn client_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
 /// drop them either — otherwise that legitimate cost silently disappears from
 /// the submission. Keep in sync with `CURSOR_LEGACY_TOKENLESS_MODELS` in
 /// packages/frontend/src/lib/validation/submission.ts.
-fn is_legacy_tokenless_cursor_row(client: &tokscale_core::ClientContribution) -> bool {
+fn is_legacy_tokenless_cursor_row(client: &tokscale_core::ClientContributionV2) -> bool {
     client.client == "cursor"
         && client.model_id == "premium-tool-call"
         && client_token_total(&client.tokens) == 0
 }
 
-fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContribution) -> bool {
+fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContributionV2) -> bool {
     client.client == "warp"
         && client.model_id == "aggregate-requests"
         && client_token_total(&client.tokens) == 0
@@ -6096,7 +6099,7 @@ fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContribution) -> boo
 /// A row the server's "Cost submitted without tokens" sanity check would
 /// reject: real cost with every token bucket at zero, excluding the Cursor
 /// `premium-tool-call` carve-out above.
-fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
+fn is_tokenless_costed_row(client: &tokscale_core::ClientContributionV2) -> bool {
     (is_aggregate_only_warp_row(client) || client.cost > 0.0)
         && client_token_total(&client.tokens) == 0
         && !is_legacy_tokenless_cursor_row(client)
@@ -6116,7 +6119,7 @@ fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
 /// totals, breakdowns, and intensities are untouched. Summary and year rollups
 /// are recomputed from the trimmed contributions.
 fn exclude_tokenless_cost_contributions(
-    graph_result: &mut tokscale_core::GraphResult,
+    graph_result: &mut tokscale_core::GraphResultV2,
 ) -> Vec<ExcludedTokenlessRow> {
     let mut excluded: Vec<ExcludedTokenlessRow> = Vec::new();
 
@@ -6150,15 +6153,19 @@ fn exclude_tokenless_cost_contributions(
             // it from the clients that remain.
             let mut provenance = tokscale_core::CostProvenanceAccumulator::default();
             for client in &day.clients {
-                provenance.add_provenance(&client.cost_provenance());
+                provenance.add_usage(
+                    client.tokens.total(),
+                    client.cost,
+                    &client.cost_provenance(),
+                );
             }
             day.totals.cost_provenance = Some(provenance.finish());
         }
     }
 
     if !excluded.is_empty() {
-        graph_result.summary = tokscale_core::calculate_summary(&graph_result.contributions);
-        graph_result.years = tokscale_core::calculate_years(&graph_result.contributions);
+        graph_result.summary = tokscale_core::calculate_summary_v2(&graph_result.contributions);
+        graph_result.years = tokscale_core::calculate_years_v2(&graph_result.contributions);
     }
 
     excluded
@@ -6231,7 +6238,7 @@ fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissio
     // (dozens in practice), burying the submittable summary. Cap the per-row
     // detail exactly like `report_excluded_tokenless_rows` and report the
     // aggregate instead. This print is the only place the rows surface at all:
-    // `GraphResult::unpriced_submission_usage` is `#[serde(skip)]` and never
+    // `GraphResultV2::unpriced_submission_usage` is `#[serde(skip)]` and never
     // reaches a payload, and `--dry-run` runs this same reporter — so the
     // capped rows are still named by id below rather than dropped.
     const MAX_DETAIL_ROWS: usize = 20;
@@ -6385,7 +6392,7 @@ fn run_submit_command(
     use colored::Colorize;
     use std::io::IsTerminal;
     use tokio::runtime::Runtime;
-    use tokscale_core::{generate_submission_graph, GroupBy, ReportOptions};
+    use tokscale_core::{generate_submission_graph_v2, GroupBy, ReportOptions};
 
     let auth_token = match auth::resolve_api_token() {
         Some(token) => token,
@@ -6502,7 +6509,7 @@ fn run_submit_command(
     let rt = Runtime::new()?;
     let mut graph_result = rt
         .block_on(async {
-            generate_submission_graph(ReportOptions {
+            generate_submission_graph_v2(ReportOptions {
                 home_dir: None,
                 use_env_roots: true,
                 clients,
@@ -7410,8 +7417,8 @@ mod tests {
     use clap::Parser;
     use reqwest::StatusCode;
     use tokscale_core::{
-        calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
-        GraphMeta, GraphResult, TokenBreakdown,
+        calculate_summary_v2, calculate_years_v2, ClientContributionV2, DailyContributionV2,
+        DailyTotalsV2, GraphMeta, GraphResultV2, TokenBreakdown,
     };
 
     /// The overwhelming majority of the pricing sheet is at or above a cent
@@ -7662,10 +7669,10 @@ mod tests {
         total_cost: f64,
         client: &str,
         model_id: &str,
-    ) -> DailyContribution {
-        DailyContribution {
+    ) -> DailyContributionV2 {
+        DailyContributionV2 {
             date: date.to_string(),
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens: total_tokens,
                 cost: total_cost,
                 messages: 1,
@@ -7673,7 +7680,7 @@ mod tests {
             },
             intensity: 0,
             token_breakdown: token_breakdown(total_tokens),
-            clients: vec![ClientContribution {
+            clients: vec![ClientContributionV2 {
                 client: client.to_string(),
                 model_id: model_id.to_string(),
                 provider_id: "openai".to_string(),
@@ -7686,8 +7693,8 @@ mod tests {
         }
     }
 
-    fn graph_result_with_contributions(contributions: Vec<DailyContribution>) -> GraphResult {
-        GraphResult {
+    fn graph_result_with_contributions(contributions: Vec<DailyContributionV2>) -> GraphResultV2 {
+        GraphResultV2 {
             meta: GraphMeta {
                 generated_at: "2026-03-24T00:00:00Z".to_string(),
                 version: "test".to_string(),
@@ -7701,8 +7708,8 @@ mod tests {
                     .unwrap_or_default(),
                 processing_time_ms: 0,
             },
-            summary: calculate_summary(&contributions),
-            years: calculate_years(&contributions),
+            summary: calculate_summary_v2(&contributions),
+            years: calculate_years_v2(&contributions),
             contributions,
             time_metrics: None,
             unpriced_submission_usage: Vec::new(),
@@ -9028,8 +9035,8 @@ mod tests {
         total_tokens: i64,
         cost: f64,
         messages: i32,
-    ) -> ClientContribution {
-        ClientContribution {
+    ) -> ClientContributionV2 {
+        ClientContributionV2 {
             client: client.to_string(),
             model_id: model_id.to_string(),
             provider_id: provider_id.to_string(),
@@ -9043,14 +9050,14 @@ mod tests {
     fn day_with_clients(
         date: &str,
         token_breakdown_total: i64,
-        clients: Vec<ClientContribution>,
-    ) -> DailyContribution {
+        clients: Vec<ClientContributionV2>,
+    ) -> DailyContributionV2 {
         let tokens: i64 = clients.iter().map(|c| client_token_total(&c.tokens)).sum();
         let cost: f64 = clients.iter().map(|c| c.cost).sum();
         let messages: i32 = clients.iter().map(|c| c.messages).sum();
-        DailyContribution {
+        DailyContributionV2 {
             date: date.to_string(),
-            totals: DailyTotals {
+            totals: DailyTotalsV2 {
                 tokens,
                 cost,
                 messages,
@@ -9109,7 +9116,8 @@ mod tests {
         dropped.cost_provenance = Some(tokscale_core::CostProvenance::estimated(
             tokscale_core::EstimateSource::Catalog,
         ));
-        let mut day = day_with_clients("2025-05-28", 100, vec![kept, dropped]);
+        let empty = client_contribution("cursor", "empty", "cursor", 0, 0.0, 1);
+        let mut day = day_with_clients("2025-05-28", 100, vec![kept, dropped, empty]);
         day.totals.cost_provenance = Some(tokscale_core::CostProvenance::mixed(None));
         let mut graph = graph_result_with_contributions(vec![day]);
 

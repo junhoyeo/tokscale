@@ -348,7 +348,6 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
-            estimate_source: None,
         });
     }
 
@@ -390,7 +389,6 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
                 parent_session_id: None,
                 is_turn_start: false,
                 model_attribution_conflicted: false,
-                estimate_source: None,
             });
         }
     }
