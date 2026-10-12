@@ -162,15 +162,12 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     for c in contributions {
         if c.totals.tokens > 0
             || c.totals.cost > 0.0
-            || c.totals.messages > 0
             || c.totals
                 .cost_provenance
                 .as_ref()
                 .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
         {
-            if let Some(prov) = &c.totals.cost_provenance {
-                provenance.add_provenance(prov);
-            }
+            provenance.add_provenance(&c.totals.cost_provenance());
         }
         for s in &c.clients {
             clients_set.insert(s.client.clone());
@@ -223,15 +220,12 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
 
         if c.totals.tokens > 0
             || c.totals.cost > 0.0
-            || c.totals.messages > 0
             || c.totals
                 .cost_provenance
                 .as_ref()
                 .is_some_and(|p| p.kind != CostProvenanceKind::Unknown)
         {
-            if let Some(prov) = &c.totals.cost_provenance {
-                entry.provenance.add_provenance(prov);
-            }
+            entry.provenance.add_provenance(&c.totals.cost_provenance());
         }
 
         if entry.start.is_empty() || c.date < entry.start {
@@ -2097,4 +2091,61 @@ mod tests {
             CostProvenance::estimated(EstimateSource::Catalog)
         );
     }
+    #[test]
+    fn test_cost_provenance_missing_source_participates_in_rollups() {
+        for known in [
+            CostProvenance::provider_reported(),
+            CostProvenance::estimated(EstimateSource::Catalog),
+        ] {
+            for (tokens, cost) in [(100, 2.0), (100, 0.0), (0, 2.0)] {
+                let mut days = aggregate_by_date(vec![
+                    mock_unified_message("2024-01-01", 100, 1.0, "known", "client"),
+                    mock_unified_message("2024-01-02", tokens, cost, "legacy", "client"),
+                ]);
+                days[0].totals.cost_provenance = Some(known);
+                days[1].totals.cost_provenance = None;
+                let expected = CostProvenance::mixed(known.estimate_source);
+                let summary = calculate_summary(&days);
+                let years = calculate_years(&days);
+                assert_eq!(summary.total_cost, 1.0 + cost);
+                assert_eq!(summary.total_tokens, 100 + tokens);
+                assert_eq!(summary.cost_provenance(), expected);
+                assert_eq!(years[0].cost_provenance(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cost_provenance_empty_activity_is_independent_of_day_boundary() {
+        for date in ["2024-01-01", "2024-01-02", "2025-01-01"] {
+            let mut known = mock_unified_message("2024-01-01", 100, 1.0, "known", "client");
+            known.cost_source = crate::CostSource::ProviderReported;
+            let empty = mock_unified_message(date, 0, 0.0, "empty", "client");
+            assert_eq!(empty.message_count, 1);
+            let days = aggregate_by_date(vec![known, empty]);
+            let summary = calculate_summary(&days);
+            assert_eq!(summary.cost_provenance(), CostProvenance::provider_reported());
+            assert_eq!(summary.total_cost, 1.0);
+            assert_eq!(summary.total_tokens, 100);
+            assert_eq!(summary.active_days, days.len() as i32);
+            let years = calculate_years(&days);
+            assert_eq!(years[0].cost_provenance(), CostProvenance::provider_reported());
+            if years.len() > 1 {
+                assert_eq!(years[1].cost_provenance(), CostProvenance::unknown());
+            }
+        }
+    }
+
+    #[test]
+    fn test_cost_provenance_explicit_zero_without_tokens_participates_in_rollups() {
+        let mut reported = mock_unified_message("2024-01-01", 0, 0.0, "reported", "client");
+        reported.cost_source = crate::CostSource::ProviderReported;
+        let mut estimated = mock_unified_message("2024-01-02", 0, 0.0, "estimated", "client");
+        estimated.cost_source = crate::CostSource::Estimated;
+        let days = aggregate_by_date(vec![reported, estimated]);
+        let expected = CostProvenance::mixed(Some(EstimateSource::Unknown));
+        assert_eq!(calculate_summary(&days).cost_provenance(), expected);
+        assert_eq!(calculate_years(&days)[0].cost_provenance(), expected);
+    }
+
 }
