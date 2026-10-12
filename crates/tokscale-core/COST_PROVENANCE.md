@@ -15,7 +15,7 @@ async fn report() -> Result<(), String> {
 }
 ```
 
-For messages with externally known pricing origins, use `DailyFoldV2::add_with_estimate_source`. `add` and `aggregate_by_date_v2` preserve `CostSource`, but estimated messages without separate pricing metadata have `estimateSource: "unknown"`. Graph generation resolves pricing origin against the included estimate, including service-tier and hosted-provider multipliers. A retained estimate that differs from the current resolved amount keeps an unknown pricing origin. Imported exports that do not establish their pricing origin also stay unknown.
+For messages with externally known pricing origins, use `DailyFoldV2::add_with_estimate_source` or the parallel `aggregate_by_date_v2_with_estimate_sources` API, which accepts `(UnifiedMessage, Option<EstimateSource>)` pairs. `add` and `aggregate_by_date_v2` preserve `CostSource`, but estimated messages without separate pricing metadata have `estimateSource: "unknown"`. Graph generation carries the source from the original pricing application, including service-tier and hosted-provider multipliers, without repeating the cost calculation during aggregation. Retained estimates and imported exports without captured pricing metadata keep an unknown pricing origin.
 
 Every aggregation level applies the same participation rule: token-bearing rows, positive-cost rows, and rows with explicit reported or estimated provenance participate. Empty unknown activity does not affect provenance, even when it spans separate days or years. An absent provenance field on a participating row counts as unknown; combining it with known provenance produces mixed. Provider-reported zero and covered estimated zero retain their explicit source.
 

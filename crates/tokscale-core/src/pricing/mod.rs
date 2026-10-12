@@ -6,6 +6,7 @@ pub mod litellm;
 pub mod lookup;
 pub mod models_dev;
 pub mod openrouter;
+pub(crate) mod provenance;
 mod self_hosted;
 
 use custom::CustomPricing;
@@ -60,8 +61,11 @@ pub fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 pub struct PricingService {
-    custom: CustomPricing,
-    lookup: PricingLookup,
+    custom: Arc<CustomPricing>,
+    lookup: Arc<PricingLookup>,
+    cost_estimates: Option<provenance::CostEstimateCapture>,
+    #[cfg(test)]
+    detailed_calculations: std::sync::atomic::AtomicUsize,
 }
 
 impl PricingService {
@@ -87,15 +91,61 @@ impl PricingService {
         models_dev_data: HashMap<String, ModelPricing>,
     ) -> Self {
         Self {
-            custom,
-            lookup: PricingLookup::new_with_archive(
+            custom: Arc::new(custom),
+            lookup: Arc::new(PricingLookup::new_with_archive(
                 litellm_data,
                 openrouter_data,
                 Self::build_cursor_overrides(),
                 Self::build_sakana_overrides(),
                 models_dev_data,
                 Self::build_archive_overrides(),
-            ),
+            )),
+            cost_estimates: None,
+            #[cfg(test)]
+            detailed_calculations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detailed_calculation_count(&self) -> usize {
+        self.detailed_calculations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A graph scan shares immutable rates, but owns its captured origins so
+    /// concurrent reports cannot consume each other's message metadata.
+    pub(crate) fn with_cost_provenance_capture(&self) -> Self {
+        Self {
+            custom: Arc::clone(&self.custom),
+            lookup: Arc::clone(&self.lookup),
+            cost_estimates: Some(provenance::CostEstimateCapture::default()),
+            #[cfg(test)]
+            detailed_calculations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn record_cost_estimate_source(
+        &self,
+        message: &crate::sessions::UnifiedMessage,
+        source: EstimateSource,
+    ) {
+        if let Some(capture) = &self.cost_estimates {
+            capture.record(message, source);
+        }
+    }
+
+    pub(crate) fn take_cost_estimate_source(
+        &self,
+        message: &crate::sessions::UnifiedMessage,
+    ) -> Option<EstimateSource> {
+        self.cost_estimates
+            .as_ref()
+            .and_then(|capture| capture.take(message))
+    }
+
+    pub(crate) fn clear_cost_estimate_sources(&self) {
+        if let Some(capture) = &self.cost_estimates {
+            capture.clear();
         }
     }
 
@@ -637,6 +687,9 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> (f64, Option<crate::EstimateSource>) {
+        #[cfg(test)]
+        self.detailed_calculations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(result) = self.custom.lookup_with_key(model_id) {
             let cost = compute_cost(
                 result.pricing,

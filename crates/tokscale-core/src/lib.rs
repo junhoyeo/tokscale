@@ -956,6 +956,39 @@ fn opencode_json_superseded_by_sqlite(
 /// Callers that genuinely want the whole vector still get one: `Vec` is a sink.
 trait MessageSink {
     fn accept(&mut self, message: UnifiedMessage);
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        _source: Option<EstimateSource>,
+    ) {
+        self.accept(message);
+    }
+}
+
+/// Recovery already needs the collected native rows. Carry their captured
+/// origins separately through reconciliation without changing cached messages.
+#[derive(Default)]
+struct GraphMessageCollector {
+    messages: Vec<UnifiedMessage>,
+    cost_estimates: pricing::provenance::CostEstimateCapture,
+}
+
+impl MessageSink for GraphMessageCollector {
+    fn accept(&mut self, message: UnifiedMessage) {
+        self.messages.push(message);
+    }
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        source: Option<EstimateSource>,
+    ) {
+        if let Some(source) = source {
+            self.cost_estimates.record(&message, source);
+        }
+        self.accept(message);
+    }
 }
 
 impl MessageSink for Vec<UnifiedMessage> {
@@ -1024,6 +1057,7 @@ impl RecordedCodexTurns {
 }
 
 struct FlushContext<'a> {
+    pricing: Option<&'a pricing::PricingService>,
     include_all: bool,
     requested: HashSet<&'a str>,
     include_synthetic: bool,
@@ -1060,6 +1094,9 @@ fn flush_lane<S: MessageSink>(
     for message in buffer.drain(..) {
         flush_message(message, context, sink);
     }
+    if let Some(pricing) = context.pricing {
+        pricing.clear_cost_estimate_sources();
+    }
 }
 
 /// Apply the parse tail to one message and release it into the consumer.
@@ -1071,6 +1108,11 @@ fn flush_message<S: MessageSink>(
     context: &FlushContext<'_>,
     sink: &mut S,
 ) {
+    // Take the source before gateway normalization changes model/provider
+    // identity. Rebucketing and filtering never need another price lookup.
+    let estimate_source = context
+        .pricing
+        .and_then(|pricing| pricing.take_cost_estimate_source(&message));
     if !context.include_all
         && !retain_for_requested_clients(
             &message.client,
@@ -1093,7 +1135,7 @@ fn flush_message<S: MessageSink>(
         message.rebucket_date(timezone);
     }
 
-    sink.accept(message);
+    sink.accept_with_estimate_source(message, estimate_source);
 }
 
 fn parse_all_messages_with_pricing_with_cache_policy(
@@ -2176,6 +2218,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let flush_context = {
         let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
         FlushContext {
+            pricing,
             include_all,
             requested: clients.iter().map(String::as_str).collect(),
             include_synthetic,
@@ -4621,6 +4664,8 @@ async fn generate_graph_with_loaded_pricing(
     pricing_requirement: GraphPricingRequirement,
 ) -> Result<GraphResultV2, String> {
     let start = Instant::now();
+    let captured_pricing = pricing.map(pricing::PricingService::with_cost_provenance_capture);
+    let pricing = captured_pricing.as_ref();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
 
@@ -4648,14 +4693,24 @@ async fn generate_graph_with_loaded_pricing(
         // always streams only the verifiable source messages, and so does
         // `LenientSourceOnly`, whose callers compare against what submission
         // sends and must not see the never-submitted overlay.
-        for message in parse_all_messages_with_pricing_with_env_strategy(
+        let mut collector = GraphMessageCollector::default();
+        parse_all_messages_streaming_with_env_strategy(
             &home_dir,
             &clients,
             pricing,
             options.use_env_roots,
             &options.scanner_settings,
-        ) {
-            sink.accept(message);
+            &mut collector,
+        );
+        recovery::apply(
+            &mut collector.messages,
+            &home_dir,
+            &clients,
+            bucket_timezone.is_pinned().then_some(&bucket_timezone),
+        );
+        for message in collector.messages {
+            let source = collector.cost_estimates.take(&message);
+            sink.accept_with_estimate_source(message, source);
         }
     } else {
         parse_all_messages_streaming_with_env_strategy(
@@ -4696,7 +4751,7 @@ struct GraphSink<'a> {
     filter: Option<&'a ReportOptions>,
     pricing: Option<&'a pricing::PricingService>,
     requirement: GraphPricingRequirement,
-    buffer: Vec<UnifiedMessage>,
+    buffer: Vec<(UnifiedMessage, Option<EstimateSource>)>,
     daily: aggregator::DailyFoldV2,
     interner: sessionize::SpanInterner,
     spans: Vec<sessionize::SessionSpan>,
@@ -4740,8 +4795,20 @@ impl<'a> GraphSink<'a> {
             // priced, so the two share this arm.
             GraphPricingRequirement::Lenient | GraphPricingRequirement::LenientSourceOnly => batch,
             GraphPricingRequirement::Submission => {
+                // Submission may reorder rows and zero unsafe estimates. Keep
+                // only metadata matching the amounts that survive preparation.
+                let sources = pricing::provenance::CostEstimateCapture::default();
+                let messages = batch
+                    .into_iter()
+                    .map(|(message, source)| {
+                        if let Some(source) = source {
+                            sources.record(&message, source);
+                        }
+                        message
+                    })
+                    .collect();
                 let (mut submitted, zeroed, unpriced_usage, incomplete_cost_dates) =
-                    prepare_submission_pricing(batch, self.pricing);
+                    prepare_submission_pricing(messages, self.pricing);
                 for usage in unpriced_usage {
                     let entry = self
                         .unpriced_usage
@@ -4762,29 +4829,18 @@ impl<'a> GraphSink<'a> {
                 }
                 submitted.extend(zeroed);
                 submitted
+                    .into_iter()
+                    .map(|message| {
+                        let source = sources.take(&message);
+                        (message, source)
+                    })
+                    .collect()
             }
         };
 
-        for message in &batch {
-            // Pricing origin is report metadata, not a field on the existing
-            // public/cache message type. Only attach a source when the current
-            // resolver reproduces the included estimate; retained historical
-            // amounts that differ from it have an unknown pricing origin.
-            let estimate_source = if message.cost_source == CostSource::Estimated {
-                self.pricing.and_then(|pricing| {
-                    let (cost, source) = pricing.calculate_cost_detailed_with_provider(
-                        &message.model_id,
-                        Some(&message.provider_id),
-                        &message.tokens,
-                    );
-                    let cost = cost * pricing_multiplier(message, pricing);
-                    (cost == message.cost).then_some(source).flatten()
-                })
-            } else {
-                None
-            };
+        for (message, estimate_source) in &batch {
             self.daily
-                .add_with_estimate_source(message, estimate_source);
+                .add_with_estimate_source(message, *estimate_source);
             if message.timestamp > 0 {
                 self.spans.push(sessionize::SessionSpan::from_message(
                     message,
@@ -4859,12 +4915,23 @@ impl<'a> GraphSink<'a> {
 
 impl MessageSink for GraphSink<'_> {
     fn accept(&mut self, message: UnifiedMessage) {
+        let source = self
+            .pricing
+            .and_then(|pricing| pricing.take_cost_estimate_source(&message));
+        self.accept_with_estimate_source(message, source);
+    }
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        source: Option<EstimateSource>,
+    ) {
         if let Some(options) = self.filter {
             if !message_passes_report_filter(&message, options) {
                 return;
             }
         }
-        self.buffer.push(message);
+        self.buffer.push((message, source));
         if self.buffer.len() >= GRAPH_SINK_BATCH {
             self.drain_batch();
         }
@@ -5440,13 +5507,14 @@ fn apply_pricing_if_available(
     );
     let calculated_cost = calculated_cost * pricing_multiplier(message, pricing);
 
-    if estimate_source.is_some() {
+    if let Some(source) = estimate_source {
         // A covered zero rate may classify a message that carries no cost, but
         // must never zero out a positive cost already on a non-authoritative
         // message (e.g. after a cross-file merge).
         if calculated_cost > 0.0 || message.cost <= 0.0 {
             message.cost = calculated_cost;
             message.mark_estimated_cost();
+            pricing.record_cost_estimate_source(message, source);
         }
     }
 }
@@ -15311,7 +15379,8 @@ mod tests {
             ])),
             HashMap::from([("catalog-model".into(), rate)]),
             HashMap::new(),
-        );
+        )
+        .with_cost_provenance_capture();
         let cases = [
             ("custom-model", "test", "openai", EstimateSource::Custom),
             ("custom-free", "test", "openai", EstimateSource::Custom),
@@ -15338,6 +15407,7 @@ mod tests {
             );
             apply_pricing_if_available(&mut message, Some(&pricing));
             let expected_cost = message.cost;
+            let calculations = pricing.detailed_calculation_count();
             let graph = build_graph_from_messages(
                 vec![message],
                 Some(&pricing),
@@ -15346,6 +15416,11 @@ mod tests {
                 &crate::bucket_tz::BucketTimezone::Local,
             )
             .unwrap();
+            assert_eq!(
+                pricing.detailed_calculation_count(),
+                calculations,
+                "graph folding must reuse the original pricing result"
+            );
             let expected = CostProvenance::estimated(source);
             assert_eq!(graph.summary.total_cost, expected_cost);
             assert_eq!(graph.summary.cost_provenance(), expected);
@@ -15384,6 +15459,146 @@ mod tests {
         assert_eq!(
             graph.summary.cost_provenance(),
             CostProvenance::estimated(EstimateSource::Unknown)
+        );
+    }
+
+    #[test]
+    fn captured_origins_survive_gateway_normalization_and_recovery() {
+        use super::{
+            flush_lane, recovery, CostProvenance, EstimateSource, FlushContext,
+            GraphMessageCollector,
+        };
+        use std::time::Instant;
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(HashMap::from([(
+                "hf:deepseek-ai/DeepSeek-V3-0324".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    ..Default::default()
+                },
+            )])),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let scan = pricing.with_cost_provenance_capture();
+        let other_scan = pricing.with_cost_provenance_capture();
+        let mut message = UnifiedMessage::new(
+            "opencode",
+            "hf:deepseek-ai/DeepSeek-V3-0324",
+            "unknown",
+            "native",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        apply_pricing_if_available(&mut message, Some(&scan));
+        assert_eq!(other_scan.take_cost_estimate_source(&message), None);
+        // A repeated pricing observation dropped by deduplication must not
+        // survive the lane boundary and classify a historical row later.
+        apply_pricing_if_available(&mut message, Some(&scan));
+        let mut collector = GraphMessageCollector::default();
+        let context = FlushContext {
+            pricing: Some(&scan),
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+        };
+        flush_lane(&mut vec![message.clone()], &context, &mut collector);
+        assert_eq!(scan.take_cost_estimate_source(&message), None);
+        assert_eq!(collector.messages[0].model_id, "deepseek-v3-0324");
+        assert_eq!(collector.messages[0].provider_id, "synthetic");
+        let mut recovered = collector.messages[0].clone();
+        recovered.session_id = "archived".into();
+        recovered.timestamp += 1;
+        recovered.dedup_key = Some("archived-request".into());
+        // Same amount as the current custom estimate, but no original rate
+        // metadata: equality must not invent a historical pricing origin.
+        recovery::merge(&mut collector.messages, vec![recovered], vec![], |_| true);
+        assert_eq!(collector.messages.len(), 2);
+        let calculations = scan.detailed_calculation_count();
+        let mut sink = GraphSink::new(None, Some(&scan), GraphPricingRequirement::Lenient);
+        for message in collector.messages {
+            let source = collector.cost_estimates.take(&message);
+            if message.session_id == "native" {
+                assert_eq!(source, Some(EstimateSource::Custom));
+            } else {
+                assert_eq!(source, None);
+            }
+            sink.accept_with_estimate_source(message, source);
+        }
+        let graph = sink
+            .finish(Instant::now(), &crate::bucket_tz::BucketTimezone::Local)
+            .unwrap();
+        assert_eq!(scan.detailed_calculation_count(), calculations);
+        assert_eq!(graph.summary.total_cost, 0.2);
+        assert_eq!(
+            graph.summary.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Mixed)
+        );
+    }
+
+    #[test]
+    fn captured_submission_origins_follow_retained_and_zeroed_costs() {
+        use super::{CostProvenance, EstimateSource};
+        use std::time::Instant;
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(HashMap::from([(
+                "model".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    ..Default::default()
+                },
+            )])),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_cost_provenance_capture();
+        let mut messages: Vec<_> = ["unsafe", "safe"]
+            .into_iter()
+            .map(|client| {
+                UnifiedMessage::new(
+                    client,
+                    "model",
+                    "provider",
+                    client,
+                    1_736_510_400_000,
+                    TokenBreakdown {
+                        input: 100,
+                        output: if client == "unsafe" { 10 } else { 0 },
+                        ..Default::default()
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+        for message in &mut messages {
+            apply_pricing_if_available(message, Some(&pricing));
+        }
+        let graph = build_graph_from_messages(
+            messages,
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .unwrap();
+        let clients = &graph.contributions[0].clients;
+        let safe = clients.iter().find(|row| row.client == "safe").unwrap();
+        let unsafe_row = clients.iter().find(|row| row.client == "unsafe").unwrap();
+        assert_eq!(safe.cost, 0.1);
+        assert_eq!(
+            safe.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Custom)
+        );
+        assert_eq!(unsafe_row.cost, 0.0);
+        assert_eq!(unsafe_row.cost_provenance(), CostProvenance::unknown());
+        assert_eq!(
+            graph.summary.cost_provenance(),
+            CostProvenance::mixed(Some(EstimateSource::Custom))
         );
     }
 

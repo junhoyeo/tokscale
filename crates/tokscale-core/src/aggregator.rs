@@ -75,21 +75,38 @@ impl DailyFold {
 
 /// Aggregate messages into daily contributions
 pub fn aggregate_by_date_v2(messages: Vec<UnifiedMessage>) -> Vec<DailyContributionV2> {
-    if messages.is_empty() {
+    let message_count = messages.len();
+    aggregate_by_date_parallel(
+        messages.into_par_iter().map(|message| (message, None)),
+        message_count,
+    )
+}
+
+/// Parallel aggregation with pricing origins supplied alongside each message.
+/// This preserves the original public message/cache layout.
+pub fn aggregate_by_date_v2_with_estimate_sources(
+    messages: Vec<(UnifiedMessage, Option<EstimateSource>)>,
+) -> Vec<DailyContributionV2> {
+    let message_count = messages.len();
+    aggregate_by_date_parallel(messages.into_par_iter(), message_count)
+}
+
+fn aggregate_by_date_parallel(
+    messages: impl ParallelIterator<Item = (UnifiedMessage, Option<EstimateSource>)>,
+    message_count: usize,
+) -> Vec<DailyContributionV2> {
+    if message_count == 0 {
         return Vec::new();
     }
 
-    // Estimate unique days (typically 1-365) - use message count / 10 as heuristic
-    let estimated_days = (messages.len() / 10).clamp(30, 400);
-
-    // Parallel aggregation using fold/reduce pattern
+    let estimated_days = (message_count / 10).clamp(30, 400);
     let daily_map: HashMap<String, DayAccumulator> = messages
-        .into_par_iter()
         .fold(
             || HashMap::with_capacity(estimated_days),
-            |mut acc: HashMap<String, DayAccumulator>, msg| {
-                let entry = acc.entry(msg.date.clone()).or_default();
-                entry.add_message(&msg);
+            |mut acc: HashMap<String, DayAccumulator>, (message, source)| {
+                acc.entry(message.date.clone())
+                    .or_default()
+                    .add_message_with_estimate_source(&message, source);
                 acc
             },
         )
@@ -508,10 +525,6 @@ impl Default for DayAccumulator {
 }
 
 impl DayAccumulator {
-    fn add_message(&mut self, msg: &UnifiedMessage) {
-        self.add_message_with_estimate_source(msg, None);
-    }
-
     fn add_message_with_estimate_source(
         &mut self,
         msg: &UnifiedMessage,
@@ -2243,5 +2256,47 @@ mod tests {
         let days: Vec<crate::DailyContribution> = fold.finish();
         assert_eq!(days[0].totals.tokens, 100);
         assert_eq!(days[0].totals.cost, 1.0);
+    }
+    #[test]
+    fn source_aware_parallel_aggregation_matches_streaming_and_order() {
+        let messages: Vec<_> = (0..1024)
+            .map(|index| {
+                let date = if index % 2 == 0 {
+                    "2024-01-01"
+                } else {
+                    "2024-01-02"
+                };
+                let mut message = mock_unified_message(date, 100, 1.0, "model", "client");
+                message.cost_source = crate::CostSource::Estimated;
+                let source = if index % 3 == 0 {
+                    EstimateSource::Catalog
+                } else {
+                    EstimateSource::Custom
+                };
+                (message, Some(source))
+            })
+            .collect();
+        let streaming = serde_json::to_value(aggregate_priced(messages.clone())).unwrap();
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let parallel =
+                pool.install(|| aggregate_by_date_v2_with_estimate_sources(messages.clone()));
+            assert_eq!(serde_json::to_value(&parallel).unwrap(), streaming);
+            let reversed = pool.install(|| {
+                aggregate_by_date_v2_with_estimate_sources(messages.iter().cloned().rev().collect())
+            });
+            assert_eq!(serde_json::to_value(reversed).unwrap(), streaming);
+            assert_eq!(
+                calculate_summary_v2(&parallel).cost_provenance(),
+                CostProvenance::estimated(EstimateSource::Mixed)
+            );
+            assert_eq!(
+                calculate_years_v2(&parallel)[0].cost_provenance(),
+                CostProvenance::estimated(EstimateSource::Mixed)
+            );
+        }
     }
 }
