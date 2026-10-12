@@ -6440,32 +6440,53 @@ fn run_submit_command(
         .is_none_or(|s| s.iter().any(|src| src == "antigravity"));
     let has_antigravity_cache = antigravity::has_antigravity_cache();
     if include_antigravity {
-        let active_connections = antigravity::detect_antigravity_connections().unwrap_or_default();
-        if !active_connections.is_empty() {
-            println!("{}", "  Syncing Antigravity usage data...".bright_black());
-            let sync_result =
-                antigravity::sync_antigravity_cache_with_connections(&active_connections, false);
-            if sync_result.synced {
-                println!(
-                    "{}",
-                    format!(
-                        "  Antigravity: {} session{} synced from {} active connection{}",
-                        sync_result.sessions,
-                        if sync_result.sessions == 1 { "" } else { "s" },
-                        sync_result.connections,
-                        if sync_result.connections == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
-                    )
-                    .bright_black()
+        match antigravity::detect_antigravity_connections() {
+            Ok(active_connections) if !active_connections.is_empty() => {
+                println!("{}", "  Syncing Antigravity usage data...".bright_black());
+                let sync_result = antigravity::sync_antigravity_cache_with_connections(
+                    &active_connections,
+                    false,
                 );
-            } else if let Some(err) = sync_result.error {
+                if sync_result.synced {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity: {} session{} synced from {} active connection{}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.connections,
+                            if sync_result.connections == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                        .bright_black()
+                    );
+                } else if let Some(err) = sync_result.error {
+                    if has_antigravity_cache {
+                        println!(
+                            "{}",
+                            format!("  Antigravity sync failed; using cached data: {}", err)
+                                .yellow()
+                        );
+                    } else {
+                        println!("{}", format!("  Antigravity sync failed: {}", err).yellow());
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
                 if has_antigravity_cache {
                     println!(
                         "{}",
-                        format!("  Antigravity sync failed; using cached data: {}", err).yellow()
+                        format!("  Antigravity discovery failed; using cached data: {}", err)
+                            .yellow()
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed: {}", err).yellow()
                     );
                 }
             }

@@ -312,6 +312,7 @@ fn sync_antigravity_cache_impl(
     // One budget for the whole sync: the enrichment RPCs it bounds all run
     // under the exclusive cache lock acquired above.
     let mut enrichment = TrajectoryEnrichmentBudget::new();
+    let mut synced_sessions: usize = 0;
 
     for candidate in &export_candidates {
         if let Some(summary) = find_summary_for_candidate(&summaries, &candidate.session_id) {
@@ -327,6 +328,7 @@ fn sync_antigravity_cache_impl(
                     connection_fingerprint: summary.connection_fingerprint.clone(),
                     artifact_hash: artifact.artifact_hash,
                 });
+                synced_sessions += 1;
                 continue;
             } else if let Some(previous) = manifest
                 .sessions
@@ -352,6 +354,7 @@ fn sync_antigravity_cache_impl(
             &mut enrichment,
         )? {
             next_manifest.sessions.push(entry);
+            synced_sessions += 1;
             continue;
         }
 
@@ -421,7 +424,7 @@ fn sync_antigravity_cache_impl(
         println!();
     }
 
-    Ok(count)
+    Ok(synced_sessions)
 }
 
 pub fn run_antigravity_sync() -> Result<()> {
