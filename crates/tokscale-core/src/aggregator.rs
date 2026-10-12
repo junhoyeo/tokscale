@@ -8,8 +8,70 @@ use crate::{
     DataSummaryV2, EstimateSource, GraphMeta, GraphResultV2, SessionContributionV2, TokenBreakdown,
     YearSummaryV2,
 };
+use crate::{DailyContribution, DataSummary, GraphResult, SessionContribution, YearSummary};
 use rayon::prelude::*;
 use std::collections::HashMap;
+
+// Keep the original aggregation entry points in this module as well as at
+// the crate root. Internal consumers use this path directly.
+pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
+    crate::aggregate_by_date_v2(messages)
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+    crate::aggregate_by_session_v2(messages)
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
+    let days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
+    crate::calculate_summary_v2(&days).into()
+}
+
+pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> {
+    let days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
+    crate::calculate_years_v2(&days)
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+pub fn generate_graph_result(
+    contributions: Vec<DailyContribution>,
+    processing_time_ms: u32,
+) -> GraphResult {
+    crate::generate_graph_result_v2(
+        contributions.into_iter().map(Into::into).collect(),
+        processing_time_ms,
+    )
+    .into()
+}
+
+pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
+    let mut days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
+    crate::calculate_intensities_v2(&mut days);
+    for (day, updated) in contributions.iter_mut().zip(days) {
+        day.intensity = updated.intensity;
+    }
+}
+
+#[derive(Default)]
+pub struct DailyFold(crate::DailyFoldV2);
+
+impl DailyFold {
+    pub fn add(&mut self, message: &UnifiedMessage) {
+        self.0.add(message);
+    }
+
+    pub fn finish(self) -> Vec<DailyContribution> {
+        self.0.finish().into_iter().map(Into::into).collect()
+    }
+}
 
 /// Aggregate messages into daily contributions
 pub fn aggregate_by_date_v2(messages: Vec<UnifiedMessage>) -> Vec<DailyContributionV2> {
@@ -2156,5 +2218,30 @@ mod tests {
         let expected = CostProvenance::mixed(Some(EstimateSource::Unknown));
         assert_eq!(calculate_summary_v2(&days).cost_provenance(), expected);
         assert_eq!(calculate_years_v2(&days)[0].cost_provenance(), expected);
+    }
+    #[test]
+    fn original_aggregator_module_paths_remain_available() {
+        let _: fn(Vec<UnifiedMessage>) -> Vec<crate::DailyContribution> =
+            crate::aggregator::aggregate_by_date;
+        let _: fn(Vec<UnifiedMessage>) -> Vec<crate::SessionContribution> =
+            crate::aggregator::aggregate_by_session;
+        let _: fn(&[crate::DailyContribution]) -> crate::DataSummary =
+            crate::aggregator::calculate_summary;
+        let _: fn(&[crate::DailyContribution]) -> Vec<crate::YearSummary> =
+            crate::aggregator::calculate_years;
+        let _: fn(Vec<crate::DailyContribution>, u32) -> crate::GraphResult =
+            crate::aggregator::generate_graph_result;
+        let _: fn(&mut [crate::DailyContribution]) = crate::aggregator::calculate_intensities;
+        let mut fold = crate::aggregator::DailyFold::default();
+        fold.add(&mock_unified_message(
+            "2024-01-01",
+            100,
+            1.0,
+            "model",
+            "client",
+        ));
+        let days: Vec<crate::DailyContribution> = fold.finish();
+        assert_eq!(days[0].totals.tokens, 100);
+        assert_eq!(days[0].totals.cost, 1.0);
     }
 }

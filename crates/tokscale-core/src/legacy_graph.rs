@@ -2,7 +2,7 @@
 //! Use the `V2` types and `_v2` functions to retain cost provenance.
 
 use crate::sessionize;
-use crate::{GraphMeta, ReportOptions, TokenBreakdown, UnifiedMessage, UnpricedSubmissionUsage};
+use crate::{GraphMeta, ReportOptions, TokenBreakdown, UnpricedSubmissionUsage};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -276,65 +276,6 @@ impl From<crate::GraphResultV2> for GraphResult {
             unpriced_submission_usage: value.unpriced_submission_usage,
             incomplete_cost_dates: value.incomplete_cost_dates,
         }
-    }
-}
-
-pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
-    crate::aggregate_by_date_v2(messages)
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
-pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
-    crate::aggregate_by_session_v2(messages)
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
-pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
-    crate::calculate_summary_v2(&days).into()
-}
-
-pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> {
-    let days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
-    crate::calculate_years_v2(&days)
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
-pub fn generate_graph_result(
-    contributions: Vec<DailyContribution>,
-    processing_time_ms: u32,
-) -> GraphResult {
-    crate::generate_graph_result_v2(
-        contributions.into_iter().map(Into::into).collect(),
-        processing_time_ms,
-    )
-    .into()
-}
-
-pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
-    let mut days: Vec<_> = contributions.iter().cloned().map(Into::into).collect();
-    crate::calculate_intensities_v2(&mut days);
-    for (day, updated) in contributions.iter_mut().zip(days) {
-        day.intensity = updated.intensity;
-    }
-}
-
-#[derive(Default)]
-pub struct DailyFold(crate::DailyFoldV2);
-
-impl DailyFold {
-    pub fn add(&mut self, message: &UnifiedMessage) {
-        self.0.add(message);
-    }
-
-    pub fn finish(self) -> Vec<DailyContribution> {
-        self.0.finish().into_iter().map(Into::into).collect()
     }
 }
 
