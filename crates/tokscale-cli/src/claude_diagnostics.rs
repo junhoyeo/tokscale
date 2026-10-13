@@ -20,9 +20,9 @@ pub struct ClientDiagnostic {
 }
 
 const CLAUDE_DESKTOP_MESSAGE: &str =
-    "Claude Desktop app data was detected, but Tokscale counts Claude Code JSONL transcripts only.";
+    "Claude Desktop app data was detected. Local transcripts and available conversation-cache counters are included; the cache is not a complete account history.";
 
-const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. Use `tokscale usage` for Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
+const CLAUDE_DESKTOP_HELP: &str = "All model IDs with recorded usage are accepted. Undated cumulative balances appear only in all-time local totals; truncated trees, counter resets and chats without usage can leave gaps. Dates and tokens are never inferred from chat text.";
 
 pub fn diagnostics_for_clients_row(home_dir: &Path, use_env_roots: bool) -> Vec<ClientDiagnostic> {
     claude_diagnostics(home_dir, use_env_roots, true)
@@ -32,9 +32,9 @@ pub fn diagnostics_for_empty_explicit_report(
     home_dir: &Path,
     use_env_roots: bool,
     clients: &Option<Vec<String>>,
-    claude_message_count: i32,
+    _claude_message_count: i32,
 ) -> Vec<ClientDiagnostic> {
-    if !explicitly_requests_claude(clients) || claude_message_count > 0 {
+    if clients.as_ref().is_some_and(|ids| !ids.is_empty()) && !explicitly_requests_claude(clients) {
         return Vec::new();
     }
 
@@ -62,7 +62,7 @@ fn claude_diagnostics(
 
     if !desktop_paths.is_empty() {
         diagnostics.push(ClientDiagnostic {
-            code: "claude_desktop_not_scanned",
+            code: "claude_desktop_partial_history",
             severity: "warning",
             message: CLAUDE_DESKTOP_MESSAGE,
             help: CLAUDE_DESKTOP_HELP,

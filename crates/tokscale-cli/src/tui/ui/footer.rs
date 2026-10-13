@@ -138,6 +138,17 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
 
+    if app.data.undated_tokens > 0 {
+        right_spans.push(Span::styled(
+            format!(
+                " ({} {})",
+                format_tokens(app.data.undated_tokens),
+                tr(lang, MessageKey::FooterUndated)
+            ),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
     right_spans.push(Span::styled(" | ", Style::default().fg(app.theme.muted)));
 
     // Total cost
@@ -522,6 +533,26 @@ mod tests {
         let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
         app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app
+    }
+
+    #[test]
+    fn desktop_undated_tokens_are_visible_in_rendered_footer() {
+        let mut app = make_app_on(Tab::Models);
+        app.data.total_tokens = 2000;
+        app.data.undated_tokens = 1000;
+        let backend = ratatui::backend::TestBackend::new(194, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("undated"), "{text}");
     }
 
     #[test]

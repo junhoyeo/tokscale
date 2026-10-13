@@ -2259,7 +2259,7 @@ fn run_models_report(
     hide_zero: bool,
 ) -> Result<()> {
     use tokio::runtime::Runtime;
-    use tokscale_core::{get_model_report, GroupBy};
+    use tokscale_core::{get_model_report_v2, GroupBy};
 
     let mut context = LocalReportContext::new(
         home_dir,
@@ -2270,11 +2270,17 @@ fn run_models_report(
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
-            get_model_report(context.report_options_with_rollup(group_by.clone(), worktree_rollup))
-                .await
+            get_model_report_v2(
+                context.report_options_with_rollup(group_by.clone(), worktree_rollup),
+            )
+            .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut report = report;
+    let tokscale_core::ModelReportV2 {
+        mut report,
+        undated_tokens,
+        claude_desktop_cache,
+    } = report;
     if hide_zero {
         // Display-only filter: totals were computed in core over the full
         // entry set and intentionally still include the hidden rows.
@@ -2316,6 +2322,8 @@ fn run_models_report(
         })
         .unwrap_or_default();
 
+    let desktop_cache = claude_desktop_cache;
+
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -2352,6 +2360,9 @@ fn run_models_report(
             total_messages: i32,
             total_cost: f64,
             processing_time_ms: u32,
+            undated_tokens: tokscale_core::TokenBreakdown,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            claude_desktop_cache: Option<tokscale_core::claude_desktop::Coverage>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2404,6 +2415,8 @@ fn run_models_report(
             total_messages: report.total_messages,
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
+            undated_tokens,
+            claude_desktop_cache: desktop_cache,
             warnings: context.cursor_setup_warnings,
             diagnostics,
         };
@@ -2411,6 +2424,18 @@ fn run_models_report(
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
         emit_client_diagnostics(&diagnostics);
+
+        if undated_tokens.total() > 0 {
+            eprintln!("  Claude Desktop: {} tokens included in all-time totals have no known usage date. They are excluded from dated reports and submissions.", undated_tokens.total());
+        }
+        if let Some(coverage) = desktop_cache {
+            if coverage.decode_errors > 0 {
+                eprintln!(
+                    "  Claude Desktop: {} cache read/decode errors; cached totals are incomplete.",
+                    coverage.decode_errors
+                );
+            }
+        }
 
         emit_cursor_setup_warnings(&context.cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);

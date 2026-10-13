@@ -31,6 +31,10 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
+# Read Chromium's local conversation cache without opening or modifying its DB.
+leveldb-core = "0.1.2"
+snap = "1"
+crc32c = "0.6"
 
 # Same per-target TLS gates as tokscale-cli; see the long rationale there.
 # Both crates need them: `use_native_tls()` and `use_rustls_tls()` only exist
