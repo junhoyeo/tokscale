@@ -1541,6 +1541,10 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
+        // v1->v2: `amp threads export` payloads carry a per-message
+        // `usage.timestamp`. Reparse old rows so those messages move off the
+        // synthesized `created + messageId * 1000` time onto their real day.
+        ClientId::Amp => 2,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating
@@ -1555,7 +1559,6 @@ fn parser_version(client: ClientId) -> u32 {
         // either added to a shared family (its version then derives from
         // the family's driver base) or given an explicit independent arm.
         ClientId::Gemini => 1,
-        ClientId::Amp => 1,
         ClientId::Qwen => 1,
         ClientId::Mux => 1,
         ClientId::Crush => 1,

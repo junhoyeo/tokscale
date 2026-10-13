@@ -1,6 +1,8 @@
 //! Amp (Sourcegraph) session parser
 //!
-//! Parses JSON files from ~/.local/share/amp/threads/
+//! Parses thread JSON exported by `tokscale amp sync` into
+//! `~/.config/tokscale/amp-cache/threads/`, plus legacy local thread files
+//! from `~/.local/share/amp/threads/`.
 
 use super::utils::read_file_or_none;
 use super::UnifiedMessage;
@@ -46,6 +48,8 @@ pub struct AmpMessageUsage {
     #[serde(rename = "cacheCreationInputTokens")]
     pub cache_creation_input_tokens: Option<i64>,
     pub credits: Option<f64>,
+    /// Present in `amp threads export` payloads; absent in legacy local files.
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,12 +197,14 @@ fn parse_amp_message_records(
             let usage = msg.usage?;
             let model = usage.model?;
             let message_id = msg.message_id.unwrap_or(0).max(0);
-            let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
+            let explicit_timestamp = parse_amp_timestamp(usage.timestamp);
+            let timestamp = explicit_timestamp
+                .unwrap_or_else(|| base_timestamp.saturating_add(message_id.saturating_mul(1000)));
 
             Some(AmpUsageRecord {
                 model,
                 timestamp,
-                has_explicit_timestamp: false,
+                has_explicit_timestamp: explicit_timestamp.is_some(),
                 message_id: Some(message_id).filter(|id| *id > 0),
                 ledger_to_message_id: None,
                 tokens: TokenBreakdown {
@@ -258,7 +264,7 @@ fn merge_amp_records(
         AmpUsageRecord {
             model: ledger_record.model,
             timestamp: message_record.timestamp,
-            has_explicit_timestamp: false,
+            has_explicit_timestamp: message_record.has_explicit_timestamp,
             message_id: message_record.message_id,
             ledger_to_message_id: ledger_record.ledger_to_message_id,
             tokens: ledger_record.tokens,
@@ -589,6 +595,72 @@ mod tests {
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].timestamp, thread_created + 7000);
+    }
+
+    #[test]
+    fn test_parse_amp_export_uses_per_message_usage_timestamp() {
+        // Shape of `amp threads export` output (redacted): no `usageLedger`,
+        // user messages carry `usage: null`, and assistant usage carries its
+        // own RFC 3339 timestamp plus fields the parser ignores.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("T-export.json");
+        let thread_created = timestamp_ms("2026-04-04T12:00:00Z");
+        let first_ts = "2026-04-04T12:00:05.164Z";
+        let second_ts = "2026-04-09T08:30:00.000Z";
+
+        write_amp_thread(
+            &path,
+            &serde_json::json!({
+                "v": 458,
+                "id": "T-export",
+                "created": thread_created,
+                "title": "redacted",
+                "messages": [
+                    { "role": "user", "messageId": 1, "usage": null, "content": [] },
+                    {
+                        "role": "assistant",
+                        "messageId": 2,
+                        "content": [],
+                        "usage": {
+                            "model": "claude-sonnet-4-0",
+                            "features": [],
+                            "timestamp": first_ts,
+                            "inputTokens": 4,
+                            "outputTokens": 194,
+                            "maxInputTokens": 204000,
+                            "totalInputTokens": 48126,
+                            "cacheReadInputTokens": 0,
+                            "cacheCreationInputTokens": 48122
+                        }
+                    },
+                    { "role": "user", "messageId": 3, "usage": null, "content": [] },
+                    {
+                        "role": "assistant",
+                        "messageId": 4,
+                        "content": [],
+                        "usage": {
+                            "model": "claude-sonnet-4-0",
+                            "features": [],
+                            "timestamp": second_ts,
+                            "inputTokens": 2,
+                            "outputTokens": 154,
+                            "cacheReadInputTokens": 48122,
+                            "cacheCreationInputTokens": 872
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let messages = parse_amp_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, timestamp_ms(first_ts));
+        assert_eq!(messages[1].timestamp, timestamp_ms(second_ts));
+        assert_ne!(messages[1].timestamp, thread_created + 4000);
+        assert_eq!(messages[1].date, local_date(timestamp_ms(second_ts)));
+        assert_eq!(messages[0].tokens.cache_write, 48122);
+        assert_eq!(messages[1].tokens.cache_read, 48122);
     }
 
     #[test]
