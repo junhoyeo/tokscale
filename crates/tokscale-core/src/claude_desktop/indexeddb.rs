@@ -117,31 +117,45 @@ fn files(dir: &Path, manifest: &str) -> Result<Vec<(PathBuf, u64, std::time::Sys
 }
 
 pub(super) fn read(dir: &Path) -> Result<(Vec<StoreValue>, Vec<String>), String> {
-    // A concurrent app write/compaction must not produce a mixed snapshot.
-    for _ in 0..2 {
-        let manifest = super::manifest::current(dir)?;
-        let before = files(dir, &manifest)?;
-        let mut records = Vec::new();
-        for (path, _, _) in &before {
-            if path.file_name().is_some_and(|n| n == manifest.as_str()) {
-                continue;
-            }
-            let bytes = read_bounded(path)?;
-            let parsed = if path.extension().is_some_and(|s| s == "log") {
-                super::manifest::log_records(&bytes).ok_or("incomplete or corrupt cache log")?;
-                leveldb_core::parse_log_bytes(&bytes, path)
-            } else {
-                leveldb_core::parse_table_bytes(&bytes, path)
-            };
-            records.extend(parsed.map_err(|_| "invalid LevelDB cache file")?);
+    read_with(dir, read_bounded)
+}
+
+fn read_with(
+    dir: &Path,
+    mut read_file: impl FnMut(&Path) -> Result<Vec<u8>, String>,
+) -> Result<(Vec<StoreValue>, Vec<String>), String> {
+    // Compaction can remove a file or replace CURRENT at any point, including
+    // during discovery, parsing and final validation. Retry the whole attempt;
+    // never return records from an incomplete or mixed snapshot.
+    read_snapshot(dir, &mut read_file).or_else(|_| read_snapshot(dir, &mut read_file))
+}
+
+fn read_snapshot(
+    dir: &Path,
+    read_file: &mut impl FnMut(&Path) -> Result<Vec<u8>, String>,
+) -> Result<(Vec<StoreValue>, Vec<String>), String> {
+    let manifest = super::manifest::current(dir)?;
+    let before = files(dir, &manifest)?;
+    let mut records = Vec::new();
+    for (path, _, _) in &before {
+        if path.file_name().is_some_and(|n| n == manifest.as_str()) {
+            continue;
         }
-        let records = latest_records(records);
-        let result = decode(&records, &dir.with_extension("blob"));
-        if manifest == super::manifest::current(dir)? && before == files(dir, &manifest)? {
-            return Ok(result);
-        }
+        let bytes = read_file(path)?;
+        let parsed = if path.extension().is_some_and(|s| s == "log") {
+            super::manifest::log_records(&bytes).ok_or("incomplete or corrupt cache log")?;
+            leveldb_core::parse_log_bytes(&bytes, path)
+        } else {
+            leveldb_core::parse_table_bytes(&bytes, path)
+        };
+        records.extend(parsed.map_err(|_| "invalid LevelDB cache file")?);
     }
-    Err("Claude cache changed during reading; retry when idle".into())
+    let records = latest_records(records);
+    let result = decode(&records, &dir.with_extension("blob"));
+    if manifest != super::manifest::current(dir)? || before != files(dir, &manifest)? {
+        return Err("Claude cache changed during reading; retry when idle".into());
+    }
+    Ok(result)
 }
 
 fn decode(records: &BTreeMap<Vec<u8>, Record>, blobs: &Path) -> (Vec<StoreValue>, Vec<String>) {
@@ -303,6 +317,56 @@ fn json(value: V8Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_during_read_retries_the_entire_snapshot() {
+        use super::super::manifest::encode_log;
+        for failure in ["missing-file", "partial-log", "changed-manifest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("CURRENT"), "MANIFEST-000001\n").unwrap();
+            std::fs::write(root.join("MANIFEST-000001"), encode_log(&[2, 2])).unwrap();
+            let empty_batch = encode_log(&[0; 12]);
+            std::fs::write(root.join("000002.log"), &empty_batch).unwrap();
+            let mut attempts = 0;
+            let (values, errors) = read_with(root, |path| {
+                attempts += 1;
+                if attempts == 1 {
+                    std::fs::write(root.join("MANIFEST-000003"), encode_log(&[2, 4])).unwrap();
+                    std::fs::write(root.join("000004.log"), &empty_batch).unwrap();
+                    std::fs::write(root.join("CURRENT"), "MANIFEST-000003\n").unwrap();
+                    match failure {
+                        "missing-file" => std::fs::remove_file(path).unwrap(),
+                        "partial-log" => return Ok(vec![1]),
+                        _ => {}
+                    }
+                } else {
+                    assert!(path.ends_with("000004.log"));
+                }
+                read_bounded(path)
+            })
+            .unwrap();
+            assert_eq!(attempts, 2, "{failure}");
+            assert!(values.is_empty());
+            assert!(errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn persistent_read_failure_stops_after_one_retry() {
+        use super::super::manifest::encode_log;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CURRENT"), "MANIFEST-000001\n").unwrap();
+        std::fs::write(dir.path().join("MANIFEST-000001"), encode_log(&[2, 2])).unwrap();
+        std::fs::write(dir.path().join("000002.log"), []).unwrap();
+        let mut attempts = 0;
+        let result = read_with(dir.path(), |_| {
+            attempts += 1;
+            Err("cache file unavailable".into())
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!(result.err().as_deref(), Some("cache file unavailable"));
+    }
 
     #[test]
     fn deletion_and_latest_version_win_before_decode() {

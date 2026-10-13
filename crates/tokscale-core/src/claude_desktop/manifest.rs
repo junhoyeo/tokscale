@@ -60,14 +60,14 @@ fn skip_string(data: &[u8], pos: &mut usize) -> Option<()> {
 
 fn live_files(edits: &[Vec<u8>]) -> Option<(BTreeSet<u64>, u64, u64)> {
     let mut tables = BTreeSet::new();
-    let mut log = 0;
+    let mut log = None;
     let mut prev_log = 0;
     for edit in edits {
         let mut pos = 0;
         while pos < edit.len() {
             match varint(edit, &mut pos)? {
                 1 => skip_string(edit, &mut pos)?,
-                2 => log = varint(edit, &mut pos)?,
+                2 => log = Some(varint(edit, &mut pos)?),
                 9 => prev_log = varint(edit, &mut pos)?,
                 3 | 4 => {
                     varint(edit, &mut pos)?;
@@ -91,7 +91,9 @@ fn live_files(edits: &[Vec<u8>]) -> Option<(BTreeSet<u64>, u64, u64)> {
             }
         }
     }
-    Some((tables, log, prev_log))
+    // Without an explicit current log number, obsolete WALs cannot be
+    // distinguished from live ones. Never fall back to scanning all logs.
+    Some((tables, log?, prev_log))
 }
 
 pub(super) fn current(dir: &Path) -> Result<String, String> {
@@ -152,6 +154,34 @@ pub(super) fn encode_log(payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_log_number_never_selects_obsolete_wals() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("000001.log"), []).unwrap();
+        for payload in [vec![], vec![3, 10, 4, 20], vec![9, 1]] {
+            std::fs::write(dir.path().join("MANIFEST-000002"), encode_log(&payload)).unwrap();
+            assert!(active_paths(dir.path(), "MANIFEST-000002").is_err());
+        }
+        assert_eq!(live_files(&[vec![2, 0]]), Some((BTreeSet::new(), 0, 0)));
+    }
+
+    #[test]
+    fn current_and_previous_log_numbers_exclude_obsolete_wals() {
+        let dir = tempfile::tempdir().unwrap();
+        for number in 1..=4 {
+            std::fs::write(dir.path().join(format!("{number:06}.log")), []).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("MANIFEST-000005"),
+            encode_log(&[2, 3, 9, 2]),
+        )
+        .unwrap();
+        assert_eq!(
+            active_paths(dir.path(), "MANIFEST-000005").unwrap(),
+            [2, 3, 4].map(|n| dir.path().join(format!("{n:06}.log")))
+        );
+    }
     #[test]
     fn respects_manifest_deletions_and_rejects_corruption() {
         let edits = vec![
