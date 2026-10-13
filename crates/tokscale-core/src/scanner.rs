@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::clients::ClientId;
+use crate::clients::{ClientId, PathRoot};
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -796,6 +796,18 @@ pub fn built_in_extra_scan_paths_for(
                 .into_iter()
                 .map(|path| (ClientId::Claude, path)),
         );
+    }
+
+    if enabled.contains(&ClientId::Amp) {
+        // Amp moved threads server-side; the primary root is now the
+        // `tokscale amp sync` cache. Older Amp builds wrote thread files here,
+        // so keep reading them. `prefer_amp_cache_over_legacy` drops a legacy
+        // file when the cache holds the same thread.
+        let xdg_data = PathRoot::XdgData.resolve_with_env_strategy(home_dir, use_env_roots);
+        paths.push((
+            ClientId::Amp,
+            PathBuf::from(join_native(&xdg_data, "amp/threads")),
+        ));
     }
 
     if enabled.contains(&ClientId::Senpi) {
@@ -3021,7 +3033,36 @@ fn scan_all_clients_with_env_strategy_inner(
     // twice.
     prefer_cursor_json_over_csv(result.get_mut(ClientId::Cursor));
 
+    if enabled.contains(&ClientId::Amp) {
+        let amp_cache_root = ClientId::Amp
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        prefer_amp_cache_over_legacy(result.get_mut(ClientId::Amp), Path::new(&amp_cache_root));
+    }
+
     result
+}
+
+/// Drop each legacy Amp thread file whose `T-*.json` name also exists under
+/// the synced cache root, so a thread is parsed from exactly one file. The
+/// cached copy always wins: it is exported from the server, which holds a
+/// superset of what the legacy local file recorded.
+fn prefer_amp_cache_over_legacy(files: &mut Vec<PathBuf>, cache_root: &Path) {
+    let cached_names: HashSet<std::ffi::OsString> = files
+        .iter()
+        .filter(|path| path.starts_with(cache_root))
+        .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+        .collect();
+    if cached_names.is_empty() {
+        return;
+    }
+
+    files.retain(|path| {
+        path.starts_with(cache_root)
+            || path
+                .file_name()
+                .is_none_or(|name| !cached_names.contains(name))
+    });
 }
 
 /// Drop each Cursor `usage[.account].csv` whose `usage[.account].json` sibling
@@ -3703,6 +3744,54 @@ mod tests {
                 "usage.json".to_string(),
                 "usage.team-a.json".to_string(),
                 "usage.team-b.csv".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_amp_scan_prefers_cache_over_legacy_thread_with_same_name() {
+        let home = TempDir::new().unwrap();
+        let config = home.path().join("config");
+        let mut env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_DATA_HOME"]);
+        env.set("TOKSCALE_CONFIG_DIR", &config);
+        env.remove("XDG_DATA_HOME");
+
+        let cache_dir = config.join("amp-cache/threads");
+        let legacy_dir = home.path().join(".local/share/amp/threads");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&legacy_dir).unwrap();
+        // Same thread in both roots, one only in the cache, one only legacy.
+        for (dir, name) in [
+            (&cache_dir, "T-shared.json"),
+            (&legacy_dir, "T-shared.json"),
+            (&cache_dir, "T-cache-only.json"),
+            (&legacy_dir, "T-legacy-only.json"),
+        ] {
+            File::create(dir.join(name)).unwrap();
+        }
+
+        let result = scan_without_extra_dirs(home.path().to_str().unwrap(), &["amp".to_string()]);
+        let mut files: Vec<_> = result
+            .get(ClientId::Amp)
+            .iter()
+            .map(|path| {
+                let root = if path.starts_with(&cache_dir) {
+                    "cache"
+                } else {
+                    "legacy"
+                };
+                format!("{root}/{}", path.file_name().unwrap().to_string_lossy())
+            })
+            .collect();
+        files.sort();
+
+        assert_eq!(
+            files,
+            vec![
+                "cache/T-cache-only.json",
+                "cache/T-shared.json",
+                "legacy/T-legacy-only.json",
             ]
         );
     }

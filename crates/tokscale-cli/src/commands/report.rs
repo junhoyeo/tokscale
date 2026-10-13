@@ -1047,7 +1047,7 @@ const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
 /// returned, which callers treat as a recoverable "skip this backend" signal.
-fn run_command_with_timeout(
+pub(crate) fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
     stdin_bytes: Option<&[u8]>,
@@ -1101,7 +1101,7 @@ fn run_command_with_timeout(
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "summarizer backend timed out",
+                "subprocess timed out",
             ));
         }
         thread::sleep(Duration::from_millis(25));

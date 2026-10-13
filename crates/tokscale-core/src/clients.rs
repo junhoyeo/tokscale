@@ -463,8 +463,8 @@ define_clients!(
     Amp = 5 => {
         id: "amp",
         display: "Amp",
-        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::XdgData,
-        relative: "amp/threads",
+        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::Config,
+        relative: "amp-cache/threads",
         pattern: "T-*.json",
         headless: false,
         parse_local: true,

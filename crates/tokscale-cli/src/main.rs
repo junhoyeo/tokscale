@@ -1,3 +1,4 @@
+mod amp;
 mod antigravity;
 mod auth;
 mod claude_diagnostics;
@@ -346,6 +347,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CodexSubcommand,
     },
+    #[command(about = "Amp thread sync commands (exports threads via the amp CLI)")]
+    Amp {
+        #[command(subcommand)]
+        subcommand: AmpSubcommand,
+    },
     #[command(about = "Cursor API cache integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -575,6 +581,17 @@ enum TraeSubcommand {
 }
 
 #[derive(Subcommand)]
+enum AmpSubcommand {
+    #[command(about = "Export Amp threads into the local cache via the amp CLI")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Total sync timeout in seconds (default: 60)")]
+        timeout: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum WarpSubcommand {
     #[command(about = "Save Warp GraphQL authentication for aggregate usage sync")]
     Login {
@@ -702,7 +719,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_cursor_before_tui(&cli.home, &clients)?;
+                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -742,7 +759,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_cursor_before_tui(&cli.home, &clients)?;
+                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -780,7 +797,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_cursor_before_tui(&cli.home, &clients)?;
+                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -853,7 +870,7 @@ fn main() -> Result<()> {
             let (since, until) = build_date_filter(&date, &cli.home);
             let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
-            auto_sync_cursor_before_tui(&cli.home, &clients)?;
+            auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
             tui::run(
                 cli.theme.as_deref().unwrap_or(""),
                 cli.refresh,
@@ -924,6 +941,12 @@ fn main() -> Result<()> {
                 show_clients,
                 disable_pinned,
             )
+        }
+        Some(Commands::Amp { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "amp")?;
+            match subcommand {
+                AmpSubcommand::Sync { json, timeout } => amp::run_amp_sync(json, timeout),
+            }
         }
         Some(Commands::Cursor { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "cursor")?;
@@ -1055,7 +1078,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&cli.date, &cli.home);
                 let year = normalize_year_filter(&cli.date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_cursor_before_tui(&cli.home, &clients)?;
+                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -1505,6 +1528,12 @@ fn client_filter_includes_cursor(clients: &Option<Vec<String>>) -> bool {
         .is_none_or(|sources| sources.iter().any(|source| source == "cursor"))
 }
 
+fn client_filter_includes_amp(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_none_or(|sources| sources.iter().any(|source| source == "amp"))
+}
+
 fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<String>>) -> bool {
     clients
         .as_ref()
@@ -1769,10 +1798,30 @@ where
     }
 }
 
-fn auto_sync_cursor_before_tui(
+/// The Amp cache lives under the Tokscale config dir, so `--home` reports
+/// never sync it.
+fn auto_sync_amp_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Option<String> {
+    if home_dir.is_some() || !client_filter_includes_amp(clients) {
+        return None;
+    }
+    amp::auto_sync()
+}
+
+fn emit_amp_sync_warning(warning: Option<&str>) {
+    if let Some(warning) = warning {
+        use colored::Colorize;
+        eprintln!("{}", warning.yellow());
+    }
+}
+
+fn auto_sync_remote_caches_before_tui(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> Result<()> {
+    emit_amp_sync_warning(auto_sync_amp_for_local_report(home_dir, clients).as_deref());
     let had_cursor_cache = has_cursor_usage_cache_for_report(home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(clients);
     let cursor_sync_result = auto_sync_cursor_for_local_report(home_dir, clients);
@@ -2157,6 +2206,8 @@ struct LocalReportContext {
     spinner: Option<LightSpinner>,
     cursor_sync_result: Option<cursor::SyncCursorResult>,
     cursor_setup_warnings: Vec<String>,
+    /// Shown once the spinner stops so it does not interleave with it.
+    pending_amp_sync_warning: Option<String>,
     use_env_roots: bool,
     start: std::time::Instant,
 }
@@ -2173,6 +2224,10 @@ impl LocalReportContext {
         let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
         let spinner = spinner_message.map(LightSpinner::start);
         let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
+        let mut pending_amp_sync_warning = auto_sync_amp_for_local_report(&home_dir, &clients);
+        if spinner.is_none() {
+            emit_amp_sync_warning(pending_amp_sync_warning.take().as_deref());
+        }
         let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
         let use_env_roots = use_env_roots(&home_dir);
 
@@ -2189,6 +2244,7 @@ impl LocalReportContext {
             spinner,
             cursor_sync_result,
             cursor_setup_warnings,
+            pending_amp_sync_warning,
             use_env_roots,
             start: std::time::Instant::now(),
         }
@@ -2209,6 +2265,7 @@ impl LocalReportContext {
         if let Some(spinner) = self.spinner.take() {
             spinner.stop();
         }
+        emit_amp_sync_warning(self.pending_amp_sync_warning.take().as_deref());
     }
 
     fn report_options(&self, group_by: tokscale_core::GroupBy) -> tokscale_core::ReportOptions {
@@ -6434,6 +6491,7 @@ fn run_submit_command(
             }
         }
     }
+    emit_amp_sync_warning(auto_sync_amp_for_local_report(&report_home, &clients).as_deref());
     if explicit_cursor_filter || explicit_warp_filter || explicit_hindsight_filter {
         let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
         emit_cursor_setup_warnings(&cursor_setup_warnings);

@@ -65,7 +65,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` および `$HERMES_HOME/profiles/*/state.db`（フォールバック: `~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（フォールバック: `~/.gemini/tmp/*/chats/*.json`） |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API のエクスポートを `~/.config/tokscale/cursor-cache/usage*.csv` にキャッシュ（デスクトップ自動ログインまたは Cookie 貼り付け；`~/.cursor` ではない） |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`、`manicode-staging`; `CODEBUFF_DATA_DIR` でオーバーライド可能) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff と同じ `~/.config/manicode/` を共有（同一ランタイム）；トークン使用量はトランスクリプトから推定（ローカル使用量なし；`FREEBUFF_DATA_DIR` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -1481,7 +1481,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 使用イベントは `session-store.db` から取得（OTEL 不要）。`COPILOT_OTEL_FILE_EXPORTER_PATH` と Desktop `data.db` も自動取り込み |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME`環境変数で設定可能（[ソース](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | `GEMINI_CLI_HOME`環境変数で設定可能 |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCodeと同様に`xdg-basedir`を使用 |
+| Amp | `~/.config/tokscale/amp-cache/`（+ レガシー `~/.local/share/amp/`） | `%APPDATA%\tokscale\amp-cache\`（+ レガシー `%USERPROFILE%\.local\share\amp\`） | `tokscale amp sync` で同期。レガシーパスは OpenCode と同様に `xdg-basedir` を使用 |
 | Cursor | API同期 | API同期 | Cursor API から取得したデータを `usage*.csv` としてキャッシュ；デスクトップ自動ログインは `state.vscdb` の認証のみ；ローカルの `~/.cursor` セッションデータは解析しない |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | すべてのプラットフォームで同じパス |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | すべてのプラットフォームで同じパス |

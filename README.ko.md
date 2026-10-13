@@ -65,7 +65,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 및 `$HERMES_HOME/profiles/*/state.db` (폴백: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (데스크톱 자동 로그인 또는 쿠키 붙여넣기; `~/.cursor` 아님) |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; `CODEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff와 동일한 `~/.config/manicode/` 공유 (동일 런타임); 토큰 사용량은 트랜스크립트에서 추정 (로컬 사용량 없음; `FREEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -1482,7 +1482,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 사용량 이벤트는 `session-store.db`에서 수집 (OTEL 불필요); `COPILOT_OTEL_FILE_EXPORTER_PATH`와 Desktop `data.db`도 자동 수집 |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME` 환경변수로 설정 가능 ([소스](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | `GEMINI_CLI_HOME` 환경변수로 설정 가능 |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCode와 동일하게 `xdg-basedir` 사용 |
+| Amp | `~/.config/tokscale/amp-cache/` (+ 레거시 `~/.local/share/amp/`) | `%APPDATA%\tokscale\amp-cache\` (+ 레거시 `%USERPROFILE%\.local\share\amp\`) | `tokscale amp sync`로 동기화. 레거시 경로는 OpenCode와 동일하게 `xdg-basedir` 사용 |
 | Cursor | API 동기화 | API 동기화 | API로 가져와 `usage*.csv`로 캐시; 데스크톱 자동 로그인은 `state.vscdb` 인증만 읽음; 로컬 `~/.cursor` 세션 데이터는 파싱하지 않음 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 모든 플랫폼에서 동일한 경로 |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 모든 플랫폼에서 동일한 경로 |

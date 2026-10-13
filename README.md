@@ -65,7 +65,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` and `$HERMES_HOME/profiles/*/state.db` (fallback: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (fallback: `~/.gemini/tmp/*/chats/*.json`) |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API export cached at `~/.config/tokscale/cursor-cache/usage*.csv` (desktop auto-login or cookie paste; not `~/.cursor`) |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (synced via `amp` CLI) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | shares `~/.config/manicode/` with Codebuff (same runtime); token usage is estimated from the transcript (no local usage; override via `FREEBUFF_DATA_DIR`) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -609,6 +609,24 @@ tokscale autosubmit disable
 
 Scheduled runs are non-interactive: they never prompt for GitHub auth or star confirmation. Run `tokscale login --token tt_xxx` once, or set `TOKSCALE_API_TOKEN` in the scheduler environment. Tokscale records scheduler state in `settings.json`, writes logs under `~/.config/tokscale/autosubmit/`, and uses a lock file so overlapping scheduler ticks do not submit twice.
 
+### Amp Commands
+
+Amp keeps threads on its servers instead of writing local thread files. Tokscale exports them through your installed, logged-in [`amp` CLI](https://ampcode.com/) into a local cache and parses that cache like any other client. Tokscale never reads or stores Amp credentials for this; the `amp` CLI owns them.
+
+```bash
+# Export new and updated threads into the cache (incremental)
+tokscale amp sync
+
+# Allow more time for a large first sync
+tokscale amp sync --timeout 300
+```
+
+**Cache location**: `~/.config/tokscale/amp-cache/threads/T-*.json` (plus `index.json`; under `${TOKSCALE_CONFIG_DIR}/amp-cache/` when overridden)
+
+**How it works**: `tokscale amp sync` pages through `amp threads list --json --include-archived` and runs `amp threads export <id>` (up to 4 at a time) only for threads whose `updated` time changed since the last sync. Each cached file keeps only the thread id, creation time, and per-message usage; prompts and responses are not stored. A sync stops after 60 seconds by default (`--timeout` overrides) and the next run continues where it left off. A failed export is reported and retried next time. Cached threads are never deleted, even when a sync lists zero threads.
+
+Local reports, the TUI, `submit`, and `wrapped` run the same incremental sync automatically when Amp is included, the `amp` CLI is found (`PATH`, `~/.amp/bin`, or `~/.local/share/amp/bin`), and the last attempt is more than 5 minutes old. This implicit sync stops after about 10 seconds and the next run continues where it left off; run `tokscale amp sync` for a large backlog. If it fails, Tokscale prints a warning and uses the existing cache. Costs are estimated from token counts with Tokscale's pricing table.
+
 ### Cursor IDE Commands
 
 Cursor IDE support uses Cursor's web API export, cached by Tokscale at `~/.config/tokscale/cursor-cache/usage*.csv`. Tokscale does not parse local Cursor Agent CLI state under `~/.cursor`, and it does not treat the desktop SQLite DB as a usage ledger.
@@ -1016,7 +1034,7 @@ After restart, the Minutely tab appears between Hourly and Stats in the tab stri
 
 #### Cache directory layout
 
-The regenerable CLI/TUI/pricing/Wrapped caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden). Integration sync artifacts remain in client-specific cache roots such as `~/.config/tokscale/antigravity-cache/` and `~/.config/tokscale/trae-cache/`:
+The regenerable CLI/TUI/pricing/Wrapped caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden). Integration sync artifacts remain in client-specific cache roots such as `~/.config/tokscale/antigravity-cache/`, `~/.config/tokscale/trae-cache/`, and `~/.config/tokscale/amp-cache/`:
 
 - `tui-data-cache.json` — TUI startup cache
 - `source-message-cache-v2/` + `source-message-cache.lock` — sharded source-message cache + lock file
@@ -1519,7 +1537,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI usage events from `session-store.db` (no OTEL required); also auto-ingests `COPILOT_OTEL_FILE_EXPORTER_PATH` and Desktop `data.db` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | Configurable via `HERMES_HOME` env var ([source](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | Configurable via `GEMINI_CLI_HOME` env var |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | Uses `xdg-basedir` like OpenCode |
+| Amp | `~/.config/tokscale/amp-cache/` (+ legacy `~/.local/share/amp/`) | `%APPDATA%\tokscale\amp-cache\` (+ legacy `%USERPROFILE%\.local\share\amp\`) | Synced via `tokscale amp sync`; legacy path uses `xdg-basedir` like OpenCode |
 | Cursor | API sync | API sync | Data fetched from Cursor API and cached as `usage*.csv`; desktop auto-login reads auth only from `state.vscdb`; local `~/.cursor` session data is not parsed |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | Same path on all platforms |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | Same path on all platforms |
@@ -1780,6 +1798,12 @@ Session files containing message arrays:
   ]
 }
 ```
+
+### Amp
+
+Location: `~/.config/tokscale/amp-cache/threads/T-*.json` (synced via `amp` CLI), plus legacy local threads in `~/.local/share/amp/threads/`
+
+Amp threads are server-side. Run `tokscale amp sync` (or let reports auto-sync) to export them through the `amp` CLI. Tokscale uses each assistant message's `usage.timestamp` for its day. Older Amp builds wrote thread files under `~/.local/share/amp/threads/`; those are still read, and a thread present in both places is counted once from the cache. See [Amp Commands](#amp-commands).
 
 ### Cursor IDE
 
