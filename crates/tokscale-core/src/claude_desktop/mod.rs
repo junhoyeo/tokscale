@@ -396,17 +396,9 @@ fn message_id(message: &UnifiedMessage) -> Option<String> {
     {
         return None;
     }
-    let (parent, advisor) = key
-        .rsplit_once(":advisor:")
-        .map(|(parent, index)| (parent, Some(index)))
-        .unwrap_or((key, None));
-    let id = parent
-        .strip_prefix("message:")
-        .or_else(|| parent.split_once(':').map(|(id, _)| id))?;
-    Some(match advisor {
-        Some(index) => format!("{id}:advisor:{index}"),
-        None => id.to_string(),
-    })
+    // Match the transcript parser's full identity, including the request ID
+    // and advisor index. A message-only fallback cannot prove a request match.
+    Some(key.to_string())
 }
 
 fn merge_message(existing: &mut UnifiedMessage, incoming: &UnifiedMessage) {
@@ -622,14 +614,6 @@ mod tests {
         let cached = parse_tree(&value, &mut Coverage::default());
         assert_eq!(cached.messages.len(), 3);
         let mut local = cached.messages.clone();
-        // A transcript copy can have no request ID; match by provider message
-        // identity while preserving each advisor iteration's suffix.
-        for message in &mut local {
-            message.dedup_key = message
-                .dedup_key
-                .as_ref()
-                .map(|key| key.replace("parent:r", "message:parent"));
-        }
         DesktopUsage {
             coverage: Coverage::default(),
             conversations: vec![cached],
@@ -645,6 +629,83 @@ mod tests {
             .collect();
         assert_eq!(advisors.len(), 2);
         assert!(advisors.iter().all(|m| m.duration_ms.is_none()));
+    }
+
+    #[test]
+    fn different_requests_and_message_only_fallbacks_remain_distinct() {
+        let mut events = Vec::new();
+        for request in [Some("r1"), Some("r2"), None] {
+            for output in [1, 20] {
+                let mut event = assistant("shared", output);
+                event["payload"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("request_id");
+                if let Some(request) = request {
+                    event["payload"]["request_id"] = json!(request);
+                }
+                event["payload"]["message"]["usage"]["iterations"] = json!([
+                    {"type":"advisor_message", "model":"claude-advisor-100", "input_tokens":7}
+                ]);
+                events.push(event);
+            }
+        }
+        let parsed = parse_tree(&tree(json!(events)), &mut Coverage::default());
+        assert_eq!(parsed.messages.len(), 6);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|m| m.tokens.total())
+                .sum::<i64>(),
+            411
+        );
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.message_count).sum::<i32>(),
+            3
+        );
+
+        // Each local request and advisor copy must merge only with its exact
+        // cache counterpart, independently of input ordering.
+        let mut local = parsed.messages.clone();
+        local.reverse();
+        DesktopUsage {
+            coverage: Coverage::default(),
+            conversations: vec![parsed],
+        }
+        .merge_into(&mut local);
+        assert_eq!(local.len(), 6);
+        assert_eq!(local.iter().map(|m| m.tokens.total()).sum::<i64>(), 411);
+    }
+
+    #[test]
+    fn cache_request_does_not_merge_with_a_different_local_request() {
+        let mut event = assistant("shared", 20);
+        let mut local =
+            parse_tree(&tree(json!([event.clone()])), &mut Coverage::default()).messages;
+        event["payload"]["request_id"] = json!("different");
+        let cached = parse_tree(&tree(json!([event])), &mut Coverage::default());
+        DesktopUsage {
+            coverage: Coverage::default(),
+            conversations: vec![cached],
+        }
+        .merge_into(&mut local);
+        assert_eq!(local.len(), 2);
+        assert_eq!(local.iter().map(|m| m.tokens.total()).sum::<i64>(), 260);
+    }
+
+    #[test]
+    fn placeholder_models_are_excluded_but_unpriced_models_are_accepted() {
+        for model in ["", "   ", "unknown", "<synthetic>", "claude-future-999"] {
+            let mut event = assistant("model-test", 20);
+            event["payload"]["message"]["model"] = json!(model);
+            let parsed = parse_tree(&tree(json!([event])), &mut Coverage::default());
+            assert_eq!(
+                parsed.messages.len(),
+                usize::from(model == "claude-future-999"),
+                "{model}"
+            );
+        }
     }
 
     #[test]

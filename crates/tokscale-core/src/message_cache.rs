@@ -1091,7 +1091,7 @@ pub fn parser_generation() -> u64 {
     }
     // Desktop adds live cache balances to Claude's existing transcript lane.
     // Invalidate derived totals without discarding retained transcript history.
-    acc ^= 1; // Claude Desktop parser generation
+    acc ^= 2; // Claude Desktop parser generation: preserve full request identities
     acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
