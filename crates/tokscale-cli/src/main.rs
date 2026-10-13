@@ -2360,7 +2360,7 @@ fn run_models_report(
             total_messages: i32,
             total_cost: f64,
             processing_time_ms: u32,
-            undated_tokens: tokscale_core::TokenBreakdown,
+            undated_tokens: ModelTokenBreakdownJson,
             #[serde(skip_serializing_if = "Option::is_none")]
             claude_desktop_cache: Option<tokscale_core::claude_desktop::Coverage>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2415,7 +2415,7 @@ fn run_models_report(
             total_messages: report.total_messages,
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
-            undated_tokens,
+            undated_tokens: undated_tokens.into(),
             claude_desktop_cache: desktop_cache,
             warnings: context.cursor_setup_warnings,
             diagnostics,
@@ -4797,6 +4797,30 @@ fn format_number(n: i32) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelTokenBreakdownJson {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+    reasoning: i64,
+}
+
+impl From<tokscale_core::TokenBreakdown> for ModelTokenBreakdownJson {
+    fn from(tokens: tokscale_core::TokenBreakdown) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            cache_write_1h: tokens.cache_write_1h,
+            reasoning: tokens.reasoning,
+        }
     }
 }
 
@@ -7425,6 +7449,26 @@ mod tests {
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown,
     };
+
+    #[test]
+    fn model_token_breakdown_json_preserves_all_buckets_in_camel_case() {
+        let tokens = TokenBreakdown {
+            input: 11,
+            output: 22,
+            cache_read: 33,
+            cache_write: 44,
+            cache_write_1h: 15,
+            reasoning: 66,
+        };
+        let json = serde_json::to_value(ModelTokenBreakdownJson::from(tokens)).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "input":11, "output":22, "cacheRead":33, "cacheWrite":44,
+                "cacheWrite1h":15, "reasoning":66,
+            })
+        );
+    }
 
     /// The overwhelming majority of the pricing sheet is at or above a cent
     /// per 1M tokens, and that output must not move.
