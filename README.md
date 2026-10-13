@@ -862,7 +862,7 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 | **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, model-scoped quotas | Run `claude` to log in |
 | **Codex** (OpenAI) | OAuth (Codex auth, saved Tokscale accounts, or OpenCode's `$XDG_DATA_HOME/opencode/auth.json`) | Session, Weekly quotas | Use `[Add Codex]`, run `codex`, import with `tokscale codex import --name work`, or connect OpenAI with ChatGPT Plus/Pro in OpenCode |
 | **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
-| **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
+| **Amp** | `amp usage` via the installed Amp CLI; falls back to an API key from `AMP_API_KEY` or `~/.local/share/amp/secrets.json` | Subscription tier (agent dollars, orb hours), Free tier balance, Credits | Run `amp login` |
 | **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
 | **Grok Build** | OAuth (`~/.grok/auth.json`) | Credits, subscription plan | Run `grok login` |
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |

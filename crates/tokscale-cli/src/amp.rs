@@ -130,7 +130,7 @@ pub fn find_amp_binary() -> Option<PathBuf> {
     })
 }
 
-fn run_amp(binary: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
+pub(crate) fn run_amp(binary: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
     let mut cmd = Command::new(binary);
     // A logged-out CLI must fail instead of waiting on an interactive prompt.
     cmd.args(args).stdin(Stdio::null());
