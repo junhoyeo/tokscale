@@ -1,6 +1,7 @@
 // Adapted from blob-decoder 0.2.2, Apache-2.0 (see LICENSE-v8).
 // Source: https://crates.io/crates/blob-decoder/0.2.2 (src/v8_value.rs)
-// Local changes: padding, raw framing, varint bounds and container validation.
+// Local changes: padding, raw framing, varint/container validation, and resource
+// budgets for BigInt conversion, object registration and reference expansion.
 //! V8 / Blink structured-clone **value deserializer**.
 //!
 //! When Chromium persists a JavaScript value — an IndexedDB record, a
@@ -136,6 +137,9 @@ pub enum V8Error {
     /// Total materialized nodes exceeded [`V8Limits::max_nodes`] (DoS guard).
     #[error("value/node cap ({cap}) exceeded")]
     NodeCap { cap: usize },
+    /// Total materialized string/buffer bytes, including copies, exceeded the cap.
+    #[error("payload byte cap ({cap}) exceeded")]
+    ByteCap { cap: usize },
     #[error("invalid container metadata at offset {offset}")]
     BadContainer { offset: usize },
     /// A declared length exceeded the node cap (e.g. a huge sparse-array length or
@@ -150,8 +154,10 @@ pub enum V8Error {
 pub struct V8Limits {
     /// Maximum nesting depth of arrays/objects/maps/sets.
     pub max_depth: usize,
-    /// Maximum total materialized values (fresh reads **and** reference clones).
+    /// Maximum total materialized values, including registered and referenced copies.
     pub max_nodes: usize,
+    /// Maximum materialized string/buffer bytes, including keys and copies.
+    pub max_bytes: usize,
 }
 
 impl Default for V8Limits {
@@ -159,6 +165,7 @@ impl Default for V8Limits {
         Self {
             max_depth: 256,
             max_nodes: 4_000_000,
+            max_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -169,6 +176,10 @@ impl Default for V8Limits {
 // Mirrored from forensicnomicon-core::v8_serialization (the canonical tag table);
 // only the value-introducing tags this decoder implements are named here.
 // ---------------------------------------------------------------------------
+
+// More than sufficient for usage counters (2048 bits), while bounding the
+// quadratic base-256 to decimal conversion independently of the node budget.
+const MAX_BIGINT_BYTES: usize = 256;
 
 const TAG_VERSION: u8 = 0xFF;
 const TAG_THE_HOLE: u8 = b'-';
@@ -369,8 +380,9 @@ struct Reader<'a> {
     /// yet filled (an in-progress object; a reference to it before completion is a
     /// cyclic structure we decline rather than loop on).
     id_map: Vec<Option<V8Value>>,
-    /// Remaining node budget (fresh reads + reference clones).
+    /// Remaining budgets, including all registered and referenced copies.
     budget: usize,
+    byte_budget: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -382,6 +394,7 @@ impl<'a> Reader<'a> {
             limits,
             id_map: Vec::new(),
             budget,
+            byte_budget: limits.max_bytes,
         }
     }
 
@@ -482,10 +495,22 @@ impl<'a> Reader<'a> {
         id
     }
 
-    fn fill_id(&mut self, id: usize, value: &V8Value) {
-        if let Some(slot) = self.id_map.get_mut(id) {
-            *slot = Some(value.clone());
+    fn charge_bytes(&mut self, bytes: usize) -> Result<(), V8Error> {
+        if bytes > self.byte_budget {
+            return Err(V8Error::ByteCap {
+                cap: self.limits.max_bytes,
+            });
         }
+        self.byte_budget -= bytes;
+        Ok(())
+    }
+
+    fn fill_id(&mut self, id: usize, value: &V8Value) -> Result<(), V8Error> {
+        let (nodes, bytes, _) = materialized_size(value);
+        self.charge(nodes)?;
+        self.charge_bytes(bytes)?;
+        self.id_map[id] = Some(value.clone());
+        Ok(())
     }
 
     fn read_value(&mut self, depth: usize) -> Result<V8Value, V8Error> {
@@ -517,7 +542,7 @@ impl<'a> Reader<'a> {
             TAG_DATE => {
                 let id = self.reserve_id();
                 let v = V8Value::Date(self.read_f64_le()?);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
             TAG_BEGIN_OBJECT => self.read_js_object(depth),
@@ -530,19 +555,19 @@ impl<'a> Reader<'a> {
             TAG_NUMBER_OBJECT => {
                 let id = self.reserve_id();
                 let v = V8Value::NumberObject(self.read_f64_le()?);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
             TAG_TRUE_OBJECT => {
                 let id = self.reserve_id();
                 let v = V8Value::BooleanObject(true);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
             TAG_FALSE_OBJECT => {
                 let id = self.reserve_id();
                 let v = V8Value::BooleanObject(false);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
             TAG_STRING_OBJECT => {
@@ -552,16 +577,16 @@ impl<'a> Reader<'a> {
                     return Err(V8Error::UnsupportedTag { offset, tag });
                 };
                 let v = V8Value::StringObject(s);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
             TAG_BIGINT_OBJECT => {
                 let id = self.reserve_id();
                 let v = V8Value::BigIntObject(self.read_bigint()?);
-                self.fill_id(id, &v);
+                self.fill_id(id, &v)?;
                 Ok(v)
             }
-            TAG_OBJECT_REFERENCE => self.read_reference(),
+            TAG_OBJECT_REFERENCE => self.read_reference(depth),
             TAG_HOST_OBJECT => {
                 let blink_tag = self.read_u8().unwrap_or(0);
                 Err(V8Error::HostObject { offset, blink_tag })
@@ -574,6 +599,7 @@ impl<'a> Reader<'a> {
         let raw = self.read_varint()?;
         let len = self.checked_len(raw)?;
         let bytes = self.take(len)?;
+        self.charge_bytes(len.saturating_mul(3))?;
         Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 
@@ -581,6 +607,7 @@ impl<'a> Reader<'a> {
         let raw = self.read_varint()?;
         let len = self.checked_len(raw)?;
         let bytes = self.take(len)?;
+        self.charge_bytes(len.saturating_mul(2))?;
         // One-byte strings are Latin-1 (ISO-8859-1): each byte is a code point.
         Ok(bytes.iter().map(|&b| b as char).collect())
     }
@@ -593,6 +620,7 @@ impl<'a> Reader<'a> {
             return Err(V8Error::OddUtf16 { offset, len });
         }
         let bytes = self.take(len)?;
+        self.charge_bytes(len.saturating_mul(3) / 2)?;
         let units: Vec<u16> = bytes
             .as_chunks::<2>()
             .0
@@ -606,7 +634,16 @@ impl<'a> Reader<'a> {
         let offset = self.pos;
         let bitfield = self.read_varint()?;
         let negative = bitfield & 1 == 1;
-        let byte_len = self.checked_len(bitfield >> 1)?;
+        let raw_len = bitfield >> 1;
+        if raw_len > MAX_BIGINT_BYTES as u64 {
+            return Err(V8Error::LengthCap {
+                offset,
+                len: raw_len,
+                cap: MAX_BIGINT_BYTES,
+            });
+        }
+        let byte_len = self.checked_len(raw_len)?;
+        self.charge_bytes(byte_len.saturating_mul(3).saturating_add(1))?;
         let digits = self.take(byte_len)?;
         let magnitude = le_bytes_to_decimal(digits);
         if magnitude == "0" {
@@ -616,7 +653,6 @@ impl<'a> Reader<'a> {
         if negative {
             Ok(format!("-{magnitude}"))
         } else {
-            let _ = offset;
             Ok(magnitude)
         }
     }
@@ -625,9 +661,10 @@ impl<'a> Reader<'a> {
         let id = self.reserve_id();
         let raw = self.read_varint()?;
         let len = self.checked_len(raw)?;
+        self.charge_bytes(len)?;
         let bytes = self.take(len)?.to_vec();
         let v = V8Value::ArrayBuffer(bytes);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -639,7 +676,7 @@ impl<'a> Reader<'a> {
         };
         let flags = u32::try_from(self.read_varint()?).unwrap_or(u32::MAX);
         let v = V8Value::RegExp { source, flags };
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -659,7 +696,7 @@ impl<'a> Reader<'a> {
             return Err(V8Error::BadContainer { offset: self.pos });
         }
         let v = V8Value::Object(props);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -682,7 +719,7 @@ impl<'a> Reader<'a> {
             return Err(V8Error::BadContainer { offset: self.pos });
         }
         let v = V8Value::Array(elems);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -714,7 +751,7 @@ impl<'a> Reader<'a> {
         let _num_props = self.read_varint()?;
         let _length_again = self.read_varint()?;
         let v = V8Value::Array(elems);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -733,7 +770,7 @@ impl<'a> Reader<'a> {
         // Trailing count (= 2 × entries).
         let _count = self.read_varint()?;
         let v = V8Value::Map(entries);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
@@ -749,37 +786,44 @@ impl<'a> Reader<'a> {
         }
         let _count = self.read_varint()?;
         let v = V8Value::Set(members);
-        self.fill_id(id, &v);
+        self.fill_id(id, &v)?;
         Ok(v)
     }
 
     /// A property key is a serialized value; V8 emits strings and integer indices.
     fn read_property_key(&mut self, depth: usize) -> Result<String, V8Error> {
         let offset = self.pos;
-        match self.read_value(depth)? {
-            V8Value::String(s) => Ok(s),
-            V8Value::Int(i) => Ok(i.to_string()),
-            V8Value::Double(d) => Ok(format!("{d}")),
-            _ => Err(V8Error::BadKey { offset }),
-        }
+        let key = match self.read_value(depth)? {
+            V8Value::String(s) => return Ok(s), // Already charged by the string reader.
+            V8Value::Int(i) => i.to_string(),
+            V8Value::Double(d) => format!("{d}"),
+            _ => return Err(V8Error::BadKey { offset }),
+        };
+        self.charge_bytes(key.len())?;
+        Ok(key)
     }
 
-    fn read_reference(&mut self) -> Result<V8Value, V8Error> {
+    fn read_reference(&mut self, depth: usize) -> Result<V8Value, V8Error> {
         let offset = self.pos;
         let id = self.read_varint()?;
-        // cov:unreachable: usize::try_from(u64) is infallible on 64-bit targets (the
-        // CI/coverage platform); the map_err arm guards a 32-bit `id` overflow only.
         let idx = usize::try_from(id).map_err(|_| V8Error::BadReference { offset, id })?;
         let value = self
             .id_map
             .get(idx)
-            .cloned()
-            .flatten()
+            .and_then(Option::as_ref)
             .ok_or(V8Error::BadReference { offset, id })?;
-        // A referenced subtree is a fresh materialization — charge it so N
-        // references to a large object cannot amplify memory past the cap.
-        self.charge(count_nodes(&value))?;
-        Ok(value)
+        let (nodes, bytes, height) = materialized_size(value);
+        if depth.saturating_add(height) > self.limits.max_depth {
+            return Err(V8Error::DepthCap {
+                offset,
+                cap: self.limits.max_depth,
+            });
+        }
+        // Check all budgets BEFORE cloning: both explicit references and the
+        // ID registry hold owned copies, including large strings and buffers.
+        self.charge(nodes)?;
+        self.charge_bytes(bytes)?;
+        Ok(self.id_map[idx].as_ref().unwrap().clone())
     }
 
     /// Reject a declared length that exceeds the node cap before allocating.
@@ -804,21 +848,42 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Count materialized nodes in a value (for reference-clone budget charging).
-fn count_nodes(v: &V8Value) -> usize {
-    match v {
-        V8Value::Array(items) | V8Value::Set(items) => {
-            1 + items.iter().map(count_nodes).sum::<usize>()
+/// Nodes, owned payload bytes and subtree height of a materialized value.
+fn materialized_size(value: &V8Value) -> (usize, usize, usize) {
+    let mut nodes: usize = 1;
+    let mut bytes: usize = 0;
+    let mut height: usize = 0;
+    let mut add_child = |child: &V8Value| {
+        let (n, b, h) = materialized_size(child);
+        nodes = nodes.saturating_add(n);
+        bytes = bytes.saturating_add(b);
+        height = height.max(h.saturating_add(1));
+    };
+    match value {
+        V8Value::Array(items) | V8Value::Set(items) => items.iter().for_each(add_child),
+        V8Value::Object(items) => {
+            for (_, child) in items {
+                add_child(child);
+            }
+            for (key, _) in items {
+                bytes = bytes.saturating_add(key.len());
+            }
         }
-        V8Value::Object(kv) => 1 + kv.iter().map(|(_, val)| count_nodes(val)).sum::<usize>(),
-        V8Value::Map(kv) => {
-            1 + kv
-                .iter()
-                .map(|(k, val)| count_nodes(k) + count_nodes(val))
-                .sum::<usize>()
+        V8Value::Map(items) => {
+            for (key, child) in items {
+                add_child(key);
+                add_child(child);
+            }
         }
-        _ => 1,
+        V8Value::String(s)
+        | V8Value::BigInt(s)
+        | V8Value::StringObject(s)
+        | V8Value::BigIntObject(s)
+        | V8Value::RegExp { source: s, .. } => bytes = s.len(),
+        V8Value::ArrayBuffer(buffer) => bytes = buffer.len(),
+        _ => {}
     }
+    (nodes, bytes, height)
 }
 
 /// Render a little-endian byte magnitude to a decimal string (schoolbook
@@ -858,6 +923,154 @@ fn le_bytes_to_decimal(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn varint(mut n: usize, bytes: &mut Vec<u8>) {
+        while n >= 128 {
+            bytes.push((n as u8 & 127) | 128);
+            n >>= 7;
+        }
+        bytes.push(n as u8);
+    }
+
+    #[test]
+    fn bigint_conversion_has_a_separate_small_byte_limit() {
+        for tag in [TAG_BIGINT, TAG_BIGINT_OBJECT] {
+            for negative in [false, true] {
+                let mut bytes = vec![TAG_VERSION, 15, tag];
+                varint((MAX_BIGINT_BYTES << 1) | usize::from(negative), &mut bytes);
+                bytes.extend([255; MAX_BIGINT_BYTES]);
+                let value = deserialize(&bytes).unwrap();
+                let decimal = match value {
+                    V8Value::BigInt(s) | V8Value::BigIntObject(s) => s,
+                    _ => panic!("expected bigint"),
+                };
+                assert_eq!(decimal.starts_with('-'), negative);
+                assert!(decimal.len() > 600);
+
+                // Reject the declared length even before looking for payload bytes.
+                let mut oversized = vec![TAG_VERSION, 15, tag];
+                varint(
+                    ((MAX_BIGINT_BYTES + 1) << 1) | usize::from(negative),
+                    &mut oversized,
+                );
+                assert!(matches!(
+                    deserialize(&oversized),
+                    Err(V8Error::LengthCap {
+                        cap: MAX_BIGINT_BYTES,
+                        ..
+                    })
+                ));
+            }
+        }
+        assert_eq!(
+            deserialize(&[255, 15, b'Z', 0]).unwrap(),
+            V8Value::BigInt("0".into())
+        );
+        assert_eq!(
+            deserialize(&[255, 15, b'Z', 3, 42]).unwrap(),
+            V8Value::BigInt("-42".into())
+        );
+        assert_eq!(
+            deserialize(&[255, 15, b'Z', 3, 0]).unwrap(),
+            V8Value::BigInt("0".into())
+        );
+    }
+
+    #[test]
+    fn nested_object_registration_is_charged_against_node_budget() {
+        // Three wire values, but the inner and outer arrays retain copies of
+        // their complete subtrees even though there are no reference tags.
+        let bytes = [255, 15, b'A', 1, b'A', 1, b'T', b'$', 0, 1, b'$', 0, 1];
+        let limits = V8Limits {
+            max_nodes: 7,
+            ..V8Limits::default()
+        };
+        assert_eq!(
+            deserialize_with_limits(&bytes, limits),
+            Err(V8Error::NodeCap { cap: 7 })
+        );
+        assert!(deserialize_with_limits(
+            &bytes,
+            V8Limits {
+                max_nodes: 8,
+                ..limits
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn payload_copies_cannot_bypass_node_limits() {
+        // One large buffer has only one node. Each stored/referenced copy also
+        // consumes payload budget, including the final outer array registration.
+        let mut bytes = vec![255, 15, b'A', 2, b'B', 64];
+        bytes.extend([1; 64]);
+        bytes.extend([b'^', 1, b'$', 0, 2]);
+        let limits = V8Limits {
+            max_bytes: 191,
+            ..V8Limits::default()
+        };
+        assert_eq!(
+            deserialize_with_limits(&bytes, limits),
+            Err(V8Error::ByteCap { cap: 191 })
+        );
+        assert!(deserialize_with_limits(
+            &bytes,
+            V8Limits {
+                max_bytes: 320,
+                ..limits
+            }
+        )
+        .is_ok());
+
+        // Nested containers also duplicate property names and string payloads.
+        let bytes = [
+            255, 15, b'A', 1, b'o', b'S', 1, b'k', b'S', 1, b'v', b'{', 1, b'$', 0, 1,
+        ];
+        assert!(matches!(
+            deserialize_with_limits(
+                &bytes,
+                V8Limits {
+                    max_bytes: 9,
+                    ..limits
+                }
+            ),
+            Err(V8Error::ByteCap { .. })
+        ));
+        assert!(deserialize_with_limits(
+            &bytes,
+            V8Limits {
+                max_bytes: 10,
+                ..limits
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn references_cannot_expand_past_the_depth_limit() {
+        // Both inner arrays are shallow on the wire, but the second references
+        // the first, making the materialized tree one level deeper.
+        let bytes = [
+            255, 15, b'A', 2, b'A', 1, b'T', b'$', 0, 1, b'A', 1, b'^', 1, b'$', 0, 1, b'$', 0, 2,
+        ];
+        let limits = V8Limits {
+            max_depth: 2,
+            ..V8Limits::default()
+        };
+        assert!(matches!(
+            deserialize_with_limits(&bytes, limits),
+            Err(V8Error::DepthCap { .. })
+        ));
+        assert!(deserialize_with_limits(
+            &bytes,
+            V8Limits {
+                max_depth: 3,
+                ..limits
+            }
+        )
+        .is_ok());
+    }
     #[test]
     fn unicode_alignment_and_object_references() {
         let bytes = [
@@ -876,7 +1089,8 @@ mod tests {
             &[0xff, 15, b'A', 1, b'o', b'{', 0, b'$', 0, 1],
             V8Limits {
                 max_depth: 0,
-                max_nodes: 100
+                max_nodes: 100,
+                ..V8Limits::default()
             }
         )
         .is_err());
