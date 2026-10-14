@@ -8,12 +8,17 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Timeout for every Cursor HTTP request, and the wall-clock budget for an
-/// implicit pre-report sync. A cached account only downloads events at or after
-/// its newest stored timestamp, so one new page fits here. If the network is
+/// implicit pre-report sync. A cached account downloads new events plus a
+/// bounded correction overlap from its recent history. If the network is
 /// hung, the report proceeds against cached data after this timeout instead of
 /// stalling forever. Explicit `tokscale cursor sync` overrides it with
 /// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Re-fetch one hour before each account's newest cached event for delayed
+/// billing corrections. Older cached history is retained, but corrections
+/// outside this bounded window are not refreshed by incremental sync.
+const CURSOR_USAGE_CORRECTION_WINDOW_MS: i64 = 60 * 60 * 1000;
 
 /// Largest explicit sync budget a user can configure, through
 /// `tokscale cursor sync --timeout` or `cursor.syncTimeoutSeconds` in
@@ -438,43 +443,43 @@ fn merge_cursor_usage_events(
     merged
 }
 
-/// Keep events at or after `watermark`. The dashboard lists newest first, so a
-/// page that also contains an older event is the overlap with the cache.
+/// Keep events at or after the correction window's lower bound. Unknown
+/// timestamps remain untouched; a recognized older row ends the bounded walk.
 fn fresh_usage_events(
     events: &[serde_json::Value],
-    watermark: Option<i64>,
+    sync_start: Option<i64>,
 ) -> Vec<&serde_json::Value> {
     events
         .iter()
-        .filter(|event| match watermark {
-            Some(watermark) => {
+        .filter(|event| match sync_start {
+            Some(sync_start) => {
                 let timestamp = cursor_event_timestamp_ms(event);
-                timestamp == 0 || timestamp >= watermark
+                timestamp == 0 || timestamp >= sync_start
             }
             None => true,
         })
         .collect()
 }
 
-fn page_crosses_watermark(events: &[serde_json::Value], watermark: Option<i64>) -> bool {
-    let Some(watermark) = watermark else {
+fn page_crosses_sync_start(events: &[serde_json::Value], sync_start: Option<i64>) -> bool {
+    let Some(sync_start) = sync_start else {
         return false;
     };
     events.iter().any(|event| {
         let timestamp = cursor_event_timestamp_ms(event);
-        timestamp > 0 && timestamp < watermark
+        timestamp > 0 && timestamp < sync_start
     })
 }
 
 fn usage_events_request_body(
     page: usize,
     page_size: usize,
-    watermark: Option<i64>,
+    sync_start: Option<i64>,
 ) -> serde_json::Value {
-    match watermark {
-        Some(watermark) => serde_json::json!({
+    match sync_start {
+        Some(sync_start) => serde_json::json!({
             "teamId": 0,
-            "startDate": watermark,
+            "startDate": sync_start,
             "page": page,
             "pageSize": page_size,
         }),
@@ -1544,10 +1549,11 @@ async fn fetch_cursor_usage_events_json_from(
 /// `Origin` header for its CSRF check).
 ///
 /// With no cached history this collects every event. With a cache, the request
-/// sends `startDate` at the newest stored timestamp and stops when a page
-/// overlaps that timestamp. The dashboard lists events newest-first, so the
-/// overlap is the end of the delta: steady-state sync is one page and fits in
-/// the 15s auto-sync budget instead of re-downloading the whole account.
+/// sends `startDate` one hour before the newest stored timestamp and stops
+/// when a page crosses that lower bound. This bounded overlap refreshes recent
+/// billing corrections, including rows older than the newest cached event.
+/// Corrections outside that hour are not re-fetched. The dashboard lists events
+/// newest-first, so the overlap avoids re-downloading the full account.
 /// Returned JSON is the cache with that delta merged in, not the delta alone,
 /// so a caught-up account still rewrites a non-empty cache.
 ///
@@ -1567,6 +1573,8 @@ async fn fetch_cursor_usage_events_json_merging(
 ) -> Result<String> {
     let existing_events = cached_usage_events(existing_cache);
     let watermark = usage_events_watermark_ms(&existing_events);
+    let sync_start =
+        watermark.map(|ms| ms.saturating_sub(CURSOR_USAGE_CORRECTION_WINDOW_MS).max(0));
     let client = build_cursor_http_client()?;
     let mut fresh_events: Vec<serde_json::Value> = Vec::new();
     let mut total_count: Option<u64> = None;
@@ -1602,7 +1610,7 @@ async fn fetch_cursor_usage_events_json_merging(
             );
         }
 
-        let body = usage_events_request_body(page, page_size, watermark);
+        let body = usage_events_request_body(page, page_size, sync_start);
 
         let page_timeout = initial_budget.min(remaining_budget);
         let req = client
@@ -1729,13 +1737,12 @@ async fn fetch_cursor_usage_events_json_merging(
             }
         };
         let received = page_events.len();
-        // Newest-first pages: once an event is older than the cached watermark
-        // the rest of the history is already stored. Keep only the fresh prefix
-        // of this page and stop, even when `totalUsageEventsCount` still names
-        // the unfiltered account (the server ignored `startDate`).
-        let crossed = page_crosses_watermark(&page_events, watermark);
+        // Stop at the correction window even when the server ignores startDate
+        // and advertises the full account total. Older cached rows survive the
+        // merge; only the recent overlap is re-fetched for billing corrections.
+        let crossed = page_crosses_sync_start(&page_events, sync_start);
         fresh_events.extend(
-            fresh_usage_events(&page_events, watermark)
+            fresh_usage_events(&page_events, sync_start)
                 .into_iter()
                 .cloned(),
         );
@@ -3445,22 +3452,22 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_events_json_merges_only_events_after_the_cached_watermark() {
+    fn test_usage_events_json_merges_only_events_in_the_correction_window() {
         // A warm cache must not walk the rest of the account. Page 1 is a full
         // page (so the unfiltered total would demand another request) and it
-        // already overlaps the cached timestamp, including a new event that
-        // shares that millisecond.
+        // already crosses the correction window, including a new event that
+        // shares a cached event's millisecond.
         let cached = format!(
             r#"{{"usageEventsDisplay":[{},{}]}}"#,
-            json_event("boundary", "200"),
+            json_event("boundary", "3600200"),
             json_event("old", "150"),
         );
         let body = json_page(
             10_000,
             &[
-                &json_event("new", "300"),
-                &json_event("same-ms", "200"),
-                &json_event("boundary", "200"),
+                &json_event("new", "3600300"),
+                &json_event("same-ms", "3600200"),
+                &json_event("boundary", "3600200"),
                 &json_event("older", "100"),
             ],
         );
@@ -3486,7 +3493,7 @@ mod tests {
         assert_eq!(text.matches("\"conversationId\":\"boundary\"").count(), 1);
         assert!(
             !text.contains("\"conversationId\":\"older\""),
-            "events older than the watermark are already represented by the cache: {text}"
+            "events older than the correction window are already represented by the cache: {text}"
         );
 
         let captured = requests.lock().unwrap();
@@ -3497,28 +3504,31 @@ mod tests {
         );
         assert!(
             captured[0].contains("\"startDate\":200"),
-            "the cached timestamp must bound the dashboard query: {}",
+            "the correction window must bound the dashboard query: {}",
             captured[0]
         );
     }
 
     #[test]
-    fn test_usage_events_json_keeps_paging_until_the_watermark() {
+    fn test_usage_events_json_keeps_paging_until_the_correction_window() {
         let cached = format!(
             r#"{{"usageEventsDisplay":[{},{}]}}"#,
-            json_event("base", "100"),
+            json_event("base", "3600100"),
             json_event("cached-old", "80"),
         );
         let (url, requests) = serve_json_pages(vec![
             (
                 String::new(),
-                json_page(10_000, &[&json_event("a", "400"), &json_event("b", "300")]),
+                json_page(
+                    10_000,
+                    &[&json_event("a", "3600400"), &json_event("b", "3600300")],
+                ),
             ),
             (
                 String::new(),
                 json_page(
                     10_000,
-                    &[&json_event("c", "200"), &json_event("ancient", "50")],
+                    &[&json_event("c", "3600200"), &json_event("ancient", "50")],
                 ),
             ),
         ]);
@@ -3626,6 +3636,71 @@ mod tests {
             .len(),
             7,
             "distinct same-time rows and unknown fields must survive"
+        );
+    }
+
+    #[test]
+    fn test_regression_cursor_refreshes_billing_older_than_the_newest_cached_event() {
+        let newest = json_event("latest", "7200000");
+        let corrected = json_event("corrected", "5400000");
+        let archived = json_event("archived", "1000");
+        let cached = format!(r#"{{"usageEventsDisplay":[{newest},{corrected},{archived}]}}"#);
+        let mut updated: serde_json::Value = serde_json::from_str(&corrected).unwrap();
+        updated["chargedCents"] = serde_json::json!(9);
+        updated["tokenUsage"]["totalCents"] = serde_json::json!(9);
+        let updated = updated.to_string();
+        let body = json_page(
+            10_000,
+            &[
+                &json_event("new", "7201000"),
+                &newest,
+                &updated,
+                &json_event("outside-window", "3599999"),
+            ],
+        );
+        let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                4,
+                Some(&cached),
+            ))
+            .expect("the bounded correction overlap must complete");
+        let stored = cached_usage_events(Some(&text));
+        let revised: Vec<_> = stored
+            .iter()
+            .filter(|e| e["conversationId"] == "corrected")
+            .collect();
+        assert_eq!(revised.len(), 1);
+        assert_eq!(
+            revised[0]["chargedCents"],
+            serde_json::json!(9),
+            "a correction thirty minutes behind the newest row must replace its billing"
+        );
+        assert_eq!(revised[0]["tokenUsage"]["totalCents"], serde_json::json!(9));
+        assert_eq!(stored.len(), 4);
+        assert!(
+            stored.iter().any(|e| e["conversationId"] == "archived"),
+            "old cached history must survive"
+        );
+        assert!(!stored
+            .iter()
+            .any(|e| e["conversationId"] == "outside-window"));
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "stop at the overlap rather than walking all history"
+        );
+        assert!(
+            captured[0].contains("\"startDate\":3600000"),
+            "request only the hour before the newest cached event: {}",
+            captured[0]
         );
     }
 
@@ -4085,6 +4160,111 @@ mod tests {
             "both legacy CSVs must be archived, not deleted"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_correction_windows_and_cached_history_are_account_local() -> Result<()> {
+        let temp = TempDir::new()?;
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir)?;
+        let mut accounts = HashMap::new();
+        let mut endpoints = HashMap::new();
+        let mut captured = Vec::new();
+        for (id, newest) in [("active", 7_200_000_i64), ("secondary", 14_400_000)] {
+            accounts.insert(
+                id.to_string(),
+                CursorCredentials {
+                    session_token: id.to_string(),
+                    user_id: Some(id.to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    label: None,
+                },
+            );
+            let latest = json_event(&format!("{id}-latest"), &newest.to_string());
+            let previous = json_event(
+                &format!("{id}-corrected"),
+                &(newest - 1_800_000).to_string(),
+            );
+            let old = json_event(&format!("{id}-old"), "1");
+            let path = if id == "active" {
+                cache_dir.join("usage.json")
+            } else {
+                cache_dir.join("usage.secondary.json")
+            };
+            fs::write(
+                path,
+                format!(r#"{{"usageEventsDisplay":[{latest},{previous},{old}]}}"#),
+            )?;
+            let mut update: serde_json::Value = serde_json::from_str(&previous)?;
+            update["chargedCents"] = serde_json::json!(9);
+            let body = json_page(
+                10_000,
+                &[
+                    &update.to_string(),
+                    &json_event(&format!("{id}-outside"), &(newest - 3_600_001).to_string()),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            endpoints.insert(id.to_string(), url);
+            captured.push((id, newest, requests));
+        }
+        save_credentials_store_in_home(
+            temp.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active".to_string(),
+                accounts,
+            },
+        )?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp.path(),
+            |fetch| {
+                let url = endpoints[&fetch.session_token].clone();
+                async move {
+                    fetch_cursor_usage_events_json_merging(
+                        &url,
+                        &fetch.session_token,
+                        Some(Duration::from_secs(2)),
+                        true,
+                        CURSOR_MAX_JSON_BYTES,
+                        2,
+                        fetch.existing_cache.as_deref(),
+                    )
+                    .await
+                }
+            },
+        ));
+        assert!(result.synced, "{result:?}");
+        assert_eq!(result.rows, 6);
+        for (id, newest, requests) in captured {
+            let path = if id == "active" {
+                cache_dir.join("usage.json")
+            } else {
+                cache_dir.join("usage.secondary.json")
+            };
+            let stored = cached_usage_events(Some(&fs::read_to_string(path)?));
+            assert_eq!(stored.len(), 3, "unreturned cached history must survive");
+            assert!(
+                stored
+                    .iter()
+                    .all(|e| e["conversationId"].as_str().unwrap().starts_with(id)),
+                "account histories must not mix"
+            );
+            let revised = stored
+                .iter()
+                .find(|e| e["conversationId"] == format!("{id}-corrected"))
+                .unwrap();
+            assert_eq!(revised["chargedCents"], serde_json::json!(9));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0].contains(&format!("\"startDate\":{}", newest - 3_600_000)),
+                "each query must use its own account's overlap"
+            );
+        }
         Ok(())
     }
 
