@@ -6860,6 +6860,13 @@ fn resolve_light_cache_filter_set(
     }
 }
 
+fn light_cache_group_by(_report_group_by: &tokscale_core::GroupBy) -> tokscale_core::GroupBy {
+    // The light report may use a caller-selected grouping, but this file is the
+    // startup cache for the TUI, whose initial grouping key is always `model`.
+    // Writing the report grouping makes the next TUI launch miss its cache.
+    crate::tui::TUI_DEFAULT_GROUP_BY
+}
+
 fn write_light_cache(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
@@ -6895,8 +6902,9 @@ fn write_light_cache(
     // pattern in `run_warm_tui_cache` below.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    if let Ok(data) = loader.load(&scan_clients, group_by, include_synthetic) {
-        save_cached_data(&data, &enabled_set, group_by, &report_scope);
+    let cache_group_by = light_cache_group_by(group_by);
+    if let Ok(data) = loader.load(&scan_clients, &cache_group_by, include_synthetic) {
+        save_cached_data(&data, &enabled_set, &cache_group_by, &report_scope);
     }
 }
 
@@ -9852,6 +9860,86 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("runtime unavailable")));
+    }
+
+    #[test]
+    fn light_cache_uses_the_tui_grouping_key() {
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::default()),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::WorkspaceModel),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn light_cache_writer_round_trips_through_the_tui_key() {
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..).rev() {
+                    unsafe {
+                        match previous {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let values = vec![
+            ("HOME", home.path().as_os_str().to_owned()),
+            ("TOKSCALE_CONFIG_DIR", config.path().as_os_str().to_owned()),
+            (
+                "CLAUDE_CONFIG_DIR",
+                home.path().join(".claude").into_os_string(),
+            ),
+            ("CODEX_HOME", home.path().join(".codex").into_os_string()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", "1".into()),
+            ("TOKSCALE_EXTRA_DIRS", "".into()),
+            ("TOKSCALE_HEADLESS_DIR", "".into()),
+        ];
+        let _restore = EnvRestore(
+            values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        for (key, value) in values {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let clients = Some(vec!["claude".to_string(), "codex".to_string()]);
+        write_light_cache(
+            &None,
+            &clients,
+            &None,
+            &None,
+            &None,
+            &tokscale_core::GroupBy::default(),
+        );
+
+        let enabled = resolve_light_cache_filter_set(&clients);
+        let result = tui::load_cache(
+            &enabled,
+            &tui::TUI_DEFAULT_GROUP_BY,
+            &tui::CacheReportScope::default(),
+        );
+        assert!(matches!(result, tui::CacheResult::Fresh(_)));
+        assert!(matches!(
+            tui::load_cache(
+                &enabled,
+                &tokscale_core::GroupBy::default(),
+                &tui::CacheReportScope::default(),
+            ),
+            tui::CacheResult::Miss
+        ));
     }
 
     #[test]
