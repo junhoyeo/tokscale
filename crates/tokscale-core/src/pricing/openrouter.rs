@@ -304,15 +304,10 @@ fn select_endpoint_pricing(
             // The first match stands only when no author endpoint quotes the
             // listed price, so a model whose author price legitimately differs
             // from the listed one is left exactly as it was. When at least one
-            // endpoint does quote it, keep the listed card in the completeness
-            // arbitration too: a decoded endpoint must not erase cache/tier
-            // buckets that `/models` publishes for the same base deal.
+            // endpoint does quote it, see `select_same_base_card` for how the
+            // listed card corroborates and completes the chosen endpoint.
             if !standard_endpoints.is_empty() {
-                return fewest_unpriceable_buckets(
-                    standard_endpoints
-                        .into_iter()
-                        .chain(std::iter::once(listed.clone())),
-                );
+                return select_same_base_card(listed, standard_endpoints);
             }
         }
         return endpoint_pricing(first);
@@ -327,11 +322,105 @@ fn select_endpoint_pricing(
     if matching_endpoints.is_empty() {
         return None;
     }
-    fewest_unpriceable_buckets(
-        matching_endpoints
-            .into_iter()
-            .chain(std::iter::once(listed.clone())),
-    )
+    select_same_base_card(listed, matching_endpoints)
+}
+
+/// Pick the card for a model from the endpoints that quote its listed base
+/// price (input and output).
+///
+/// The listed `/models` card is checked against each endpoint on the optional
+/// rates both publish:
+///
+/// - An endpoint *corroborates* the listing when they share at least one
+///   optional rate and agree on every shared one ([`optional_rates_agree`]).
+///   When any endpoint corroborates it, only those compete. The choice then
+///   does not depend on the order OpenRouter returns the endpoints in, and a
+///   card from another deal (a regional or tiered price with the same base
+///   rates) cannot win on its field count.
+/// - When no endpoint corroborates the listing but one *contradicts* it,
+///   every same-base endpoint competes as before, and the listing is not
+///   used: an endpoint's own quote outranks it. The listing can show another
+///   provider's rate. `z-ai/glm-4.6v` lists Novita's cache-read price while
+///   Z.AI's own endpoint quotes a different one, and the author's price must
+///   win. An endpoint that publishes none of the listed optional rates does
+///   not count as corroboration, so it cannot bring the listing back in.
+/// - The candidate leaving the fewest buckets unpriceable wins
+///   ([`fewest_unpriceable_buckets`]). Unless an endpoint contradicts the
+///   listing with no endpoint corroborating it, the listing then fills the
+///   optional buckets the winner leaves empty, so a decoded endpoint cannot
+///   erase rates `/models` publishes for the same deal. The listed card never
+///   replaces a rate the endpoint quotes.
+fn select_same_base_card(
+    listed: &ModelPricing,
+    same_base_endpoints: Vec<ModelPricing>,
+) -> Option<ModelPricing> {
+    let corroborates = |candidate: &ModelPricing| {
+        shares_an_optional_rate(listed, candidate) && optional_rates_agree(listed, candidate)
+    };
+    if same_base_endpoints.iter().any(corroborates) {
+        return fewest_unpriceable_buckets(same_base_endpoints.into_iter().filter(corroborates))
+            .map(|card| with_missing_optional_rates_from(card, listed));
+    }
+    let contradicted = same_base_endpoints
+        .iter()
+        .any(|candidate| !optional_rates_agree(listed, candidate));
+    let card = fewest_unpriceable_buckets(same_base_endpoints.into_iter())?;
+    Some(if contradicted {
+        card
+    } else {
+        with_missing_optional_rates_from(card, listed)
+    })
+}
+
+/// Whether both cards publish at least one of the same optional rates.
+fn shares_an_optional_rate(listed: &ModelPricing, candidate: &ModelPricing) -> bool {
+    optional_rates(listed)
+        .into_iter()
+        .zip(optional_rates(candidate))
+        .any(|pair| matches!(pair, (Some(_), Some(_))))
+}
+
+/// `card` with each optional bucket it leaves empty taken from `listed`. It
+/// only fills empty buckets, so it adds rates and never changes one.
+fn with_missing_optional_rates_from(mut card: ModelPricing, listed: &ModelPricing) -> ModelPricing {
+    let fill = |slot: &mut Option<f64>, listed_rate: Option<f64>| {
+        if slot.is_none() {
+            *slot = listed_rate;
+        }
+    };
+    fill(
+        &mut card.cache_read_input_token_cost,
+        listed.cache_read_input_token_cost,
+    );
+    fill(
+        &mut card.cache_creation_input_token_cost,
+        listed.cache_creation_input_token_cost,
+    );
+    fill(
+        &mut card.cache_creation_input_token_cost_above_1hr,
+        listed.cache_creation_input_token_cost_above_1hr,
+    );
+    fill(
+        &mut card.input_cost_per_token_above_100k_tokens,
+        listed.input_cost_per_token_above_100k_tokens,
+    );
+    fill(
+        &mut card.output_cost_per_token_above_100k_tokens,
+        listed.output_cost_per_token_above_100k_tokens,
+    );
+    fill(
+        &mut card.cache_read_input_token_cost_above_100k_tokens,
+        listed.cache_read_input_token_cost_above_100k_tokens,
+    );
+    fill(
+        &mut card.cache_creation_input_token_cost_above_100k_tokens,
+        listed.cache_creation_input_token_cost_above_100k_tokens,
+    );
+    fill(
+        &mut card.cache_creation_input_token_cost_above_1hr_above_100k_tokens,
+        listed.cache_creation_input_token_cost_above_1hr_above_100k_tokens,
+    );
+    card
 }
 
 /// Reduce equally-priced candidates to the one that leaves the fewest token
@@ -340,18 +429,17 @@ fn select_endpoint_pricing(
 /// Cache buckets and long-context cards are independent fields, so the row
 /// publishing the most of them wins. On an equal count, retain cache-read
 /// pricing: it is the bucket required by Codex usage and must not be lost to
-/// an earlier write-only endpoint. A candidate only displaces the current
-/// best when the two agree on every optional rate they both publish (see
-/// [`optional_rates_agree`]).
+/// an earlier write-only endpoint. [`select_same_base_card`] decides which
+/// candidates reach it.
 fn fewest_unpriceable_buckets(
     candidates: impl Iterator<Item = ModelPricing>,
 ) -> Option<ModelPricing> {
     candidates.reduce(|best, candidate| {
-        let fuller = published_optional_rates(&candidate) > published_optional_rates(&best)
+        if published_optional_rates(&candidate) > published_optional_rates(&best)
             || (published_optional_rates(&candidate) == published_optional_rates(&best)
                 && candidate.cache_read_input_token_cost.is_some()
-                && best.cache_read_input_token_cost.is_none());
-        if fuller && optional_rates_agree(&best, &candidate) {
+                && best.cache_read_input_token_cost.is_none())
+        {
             candidate
         } else {
             best
@@ -379,20 +467,17 @@ fn published_optional_rates(pricing: &ModelPricing) -> usize {
         .count()
 }
 
-/// Whether two same-base candidates quote the same rate for every optional
-/// bucket they both publish.
-///
-/// [`quotes_same_base_price`] compares only input and output, while the count
-/// in [`fewest_unpriceable_buckets`] weighs eight optional rates. A candidate
-/// that publishes more of them but quotes a different rate for one both
-/// publish is a different deal (a regional or tiered card), not a fuller copy
-/// of this one, so it must not displace the earlier candidate.
-fn optional_rates_agree(current: &ModelPricing, candidate: &ModelPricing) -> bool {
-    optional_rates(current)
+/// Whether `candidate` quotes the same rate as `reference` for every optional
+/// bucket both publish. A bucket only one of them publishes does not count
+/// against agreement.
+fn optional_rates_agree(reference: &ModelPricing, candidate: &ModelPricing) -> bool {
+    optional_rates(reference)
         .into_iter()
         .zip(optional_rates(candidate))
         .all(|pair| match pair {
-            (Some(current), Some(candidate)) => (current - candidate).abs() <= current.abs() * 1e-9,
+            (Some(reference), Some(candidate)) => {
+                (reference - candidate).abs() <= reference.abs() * 1e-9
+            }
             _ => true,
         })
 }
@@ -637,47 +722,173 @@ mod tests {
     }
 
     #[test]
-    fn a_fuller_card_with_a_different_shared_rate_does_not_displace_the_endpoint() {
-        // The listed card matches the endpoint's base input/output and
-        // publishes more buckets, but quotes another cache-read rate: it is a
-        // different deal, so the endpoint keeps its own card.
-        let endpoints = vec![endpoint("OpenAI", "0.00001", "0.00005", Some("0.000001"))];
+    fn endpoints_the_listing_corroborates_win_in_any_order() {
+        // Two same-base endpoints disagree on the cache-read rate, and the
+        // listed `/models` card agrees with one of them. Whatever order
+        // OpenRouter returns the endpoints in, the corroborated one wins, and
+        // the listed card fills the cache-write rate it leaves empty.
+        let disagreeing = || endpoint("OpenAI", "0.00001", "0.00005", Some("0.000002"));
+        let agreeing = || endpoint("OpenAI", "0.00001", "0.00005", Some("0.000001"));
         let mut listed_card = listed(1e-5, 5e-5);
-        listed_card.cache_read_input_token_cost = Some(2e-6);
-        listed_card.cache_creation_input_token_cost = Some(1.25e-5);
-        let pricing = select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed_card)).unwrap();
-        assert_eq!(pricing.cache_read_input_token_cost, Some(1e-6));
-        assert_eq!(pricing.cache_creation_input_token_cost, None);
-
-        // When the shared rate agrees, the fuller card still wins.
         listed_card.cache_read_input_token_cost = Some(1e-6);
-        let pricing = select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed_card)).unwrap();
-        assert_eq!(pricing.cache_read_input_token_cost, Some(1e-6));
-        assert_eq!(pricing.cache_creation_input_token_cost, Some(1.25e-5));
+        listed_card.cache_creation_input_token_cost = Some(1.25e-5);
+
+        // "OpenAI" exercises the author branch, "Somebody Else" the branch
+        // for a model with no endpoint from its author.
+        for author in ["OpenAI", "Somebody Else"] {
+            for endpoints in [
+                vec![disagreeing(), agreeing()],
+                vec![agreeing(), disagreeing()],
+            ] {
+                let pricing =
+                    select_endpoint_pricing(&endpoints, author, Some(&listed_card)).unwrap();
+                assert_eq!(pricing.cache_read_input_token_cost, Some(1e-6), "{author}");
+                assert_eq!(
+                    pricing.cache_creation_input_token_cost,
+                    Some(1.25e-5),
+                    "{author}"
+                );
+            }
+        }
+    }
+
+    // Live shape of `z-ai/glm-4.6v` (2026-10-14): `/models` lists Novita's
+    // cache-read price, while Z.AI's own endpoint quotes another one. The
+    // author's own quote must win over the listing.
+    #[test]
+    fn an_endpoint_quote_outranks_a_listing_that_disagrees() {
+        let endpoints = vec![
+            endpoint("Novita", "0.0000003", "0.0000009", Some("0.000000055")),
+            endpoint("Z.AI", "0.0000003", "0.0000009", Some("0.00000005")),
+        ];
+        let mut listed_card = listed(3e-7, 9e-7);
+        listed_card.cache_read_input_token_cost = Some(5.5e-8);
+
+        let pricing = select_endpoint_pricing(&endpoints, "Z.AI", Some(&listed_card)).unwrap();
+        assert_eq!(pricing.cache_read_input_token_cost, Some(5e-8));
+    }
+
+    // `z-ai/glm-4.6v` with a second Z.AI endpoint that publishes no cache
+    // rate. That endpoint shares no optional rate with the listing, so it is
+    // not corroboration and cannot bring in the listed (Novita) rate over
+    // the cache-read rate Z.AI quotes.
+    #[test]
+    fn an_endpoint_without_optional_rates_does_not_corroborate_the_listing() {
+        let mut listed_card = listed(3e-7, 9e-7);
+        listed_card.cache_read_input_token_cost = Some(5.5e-8);
+        for endpoints in [
+            vec![
+                endpoint("Z.AI", "0.0000003", "0.0000009", None),
+                endpoint("Z.AI", "0.0000003", "0.0000009", Some("0.00000005")),
+            ],
+            vec![
+                endpoint("Z.AI", "0.0000003", "0.0000009", Some("0.00000005")),
+                endpoint("Z.AI", "0.0000003", "0.0000009", None),
+            ],
+        ] {
+            let pricing = select_endpoint_pricing(&endpoints, "Z.AI", Some(&listed_card)).unwrap();
+            assert_eq!(pricing.cache_read_input_token_cost, Some(5e-8));
+        }
+    }
+
+    // A decoded endpoint that publishes none of the listed optional rates
+    // contradicts nothing, so the listed card still fills them.
+    #[test]
+    fn the_listing_fills_an_endpoint_that_publishes_no_optional_rate() {
+        let mut listed_card = listed(1e-7, 5e-7);
+        listed_card.cache_read_input_token_cost = Some(1e-8);
+        listed_card.cache_creation_input_token_cost_above_1hr = Some(2e-7);
+        listed_card.input_cost_per_token_above_100k_tokens = Some(5e-7);
+        listed_card.output_cost_per_token_above_100k_tokens = Some(2.5e-6);
+        let endpoints = vec![endpoint("Anthropic", "0.0000001", "0.0000005", None)];
+
+        let pricing = select_endpoint_pricing(&endpoints, "Anthropic", Some(&listed_card)).unwrap();
+        assert_eq!(pricing.cache_read_input_token_cost, Some(1e-8));
+        assert_eq!(
+            pricing.cache_creation_input_token_cost_above_1hr,
+            Some(2e-7)
+        );
+        assert_eq!(pricing.input_cost_per_token_above_100k_tokens, Some(5e-7));
+        assert_eq!(
+            pricing.output_cost_per_token_above_100k_tokens,
+            Some(2.5e-6)
+        );
     }
 
     #[test]
-    fn endpoints_that_disagree_on_a_100k_rate_are_not_merged_by_count() {
-        let card = |input_above_100k: f64, output_above_100k: Option<f64>| ModelPricing {
+    fn a_regional_100k_card_never_outranks_a_corroborated_endpoint() {
+        let haiku_endpoint = |cache_write: Option<&str>,
+                              input_above: &str,
+                              output_above: &str,
+                              cache_read_above: Option<&str>| {
+            let mut above_100k = serde_json::json!({
+                "min_prompt_tokens": 100000,
+                "prompt": input_above,
+                "completion": output_above,
+            });
+            if let Some(rate) = cache_read_above {
+                above_100k["input_cache_read"] = serde_json::json!(rate);
+            }
+            Endpoint {
+                provider_name: "Anthropic".to_string(),
+                pricing: OpenRouterPricing {
+                    prompt: "0.0000001".to_string(),
+                    completion: "0.0000005".to_string(),
+                    input_cache_read: Some("0.00000001".to_string()),
+                    input_cache_write: cache_write.map(str::to_string),
+                    input_cache_write_1h: None,
+                    overrides: vec![above_100k],
+                },
+            }
+        };
+        let listed_card = ModelPricing {
             input_cost_per_token: Some(1e-7),
             output_cost_per_token: Some(5e-7),
             cache_read_input_token_cost: Some(1e-8),
-            input_cost_per_token_above_100k_tokens: Some(input_above_100k),
-            output_cost_per_token_above_100k_tokens: output_above_100k,
+            cache_creation_input_token_cost: Some(1.25e-7),
+            input_cost_per_token_above_100k_tokens: Some(5e-7),
+            output_cost_per_token_above_100k_tokens: Some(2.5e-6),
             ..Default::default()
         };
-        // A regional card publishes one more 100K rate but quotes a different
-        // input rate above 100K, so it must not win on the count alone.
-        let first = card(5e-7, None);
-        let regional = card(5.5e-7, Some(2.75e-6));
-        let chosen = fewest_unpriceable_buckets([first.clone(), regional].into_iter()).unwrap();
-        assert_eq!(chosen.input_cost_per_token_above_100k_tokens, Some(5e-7));
-        assert_eq!(chosen.output_cost_per_token_above_100k_tokens, None);
+        // Same base rates, more published buckets, but another deal's 100K card.
+        let regional = || haiku_endpoint(Some("0.000000125"), "0.00000055", "0.00000275", None);
+        // The listed deal, publishing fewer buckets than the regional card.
+        let sparser = || haiku_endpoint(None, "0.0000005", "0.0000025", None);
+        // The listed deal, publishing more buckets than the listed card.
+        let fuller = || {
+            haiku_endpoint(
+                Some("0.000000125"),
+                "0.0000005",
+                "0.0000025",
+                Some("0.00000005"),
+            )
+        };
 
-        // The same deal with one more published rate still wins.
-        let fuller = card(5e-7, Some(2.5e-6));
-        let chosen = fewest_unpriceable_buckets([first, fuller].into_iter()).unwrap();
-        assert_eq!(chosen.output_cost_per_token_above_100k_tokens, Some(2.5e-6));
+        for endpoints in [vec![regional(), sparser()], vec![sparser(), regional()]] {
+            let pricing =
+                select_endpoint_pricing(&endpoints, "Anthropic", Some(&listed_card)).unwrap();
+            assert_eq!(pricing.input_cost_per_token_above_100k_tokens, Some(5e-7));
+            assert_eq!(
+                pricing.output_cost_per_token_above_100k_tokens,
+                Some(2.5e-6)
+            );
+            // The endpoint omits the cache-write rate; the listed card fills it.
+            assert_eq!(pricing.cache_creation_input_token_cost, Some(1.25e-7));
+        }
+
+        for endpoints in [vec![regional(), fuller()], vec![fuller(), regional()]] {
+            let pricing =
+                select_endpoint_pricing(&endpoints, "Anthropic", Some(&listed_card)).unwrap();
+            assert_eq!(pricing.input_cost_per_token_above_100k_tokens, Some(5e-7));
+            assert_eq!(
+                pricing.output_cost_per_token_above_100k_tokens,
+                Some(2.5e-6)
+            );
+            assert_eq!(
+                pricing.cache_read_input_token_cost_above_100k_tokens,
+                Some(5e-8)
+            );
+        }
     }
 
     #[test]
