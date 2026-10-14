@@ -609,7 +609,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::SortCost => "Cost",
         MessageKey::SortTokens => "Tokens",
 
-        MessageKey::HelpScroll => "↑↓ scroll • ←→/tab view",
+        MessageKey::HelpScroll => "▴▾ scroll ∙ ◂▸/tab view",
         MessageKey::HelpSort => "[d/t/c:sort]",
         MessageKey::HelpBack => "[esc:back]",
         MessageKey::HelpDetails => "[enter:details]",
@@ -628,13 +628,13 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::DialogNoResults => "No results",
 
         MessageKey::LanguageDialogTitle => " Select Language ",
-        MessageKey::LanguageDialogHint => "↑↓ navigate • Enter select • Esc cancel",
+        MessageKey::LanguageDialogHint => "▴▾ navigate ∙ Enter select ∙ Esc cancel",
 
         MessageKey::ClientDialogTitle => " Clients ",
-        MessageKey::ClientDialogHint => "↑↓ navigate • Enter toggle • Esc close",
+        MessageKey::ClientDialogHint => "▴▾ navigate ∙ Enter toggle ∙ Esc close",
 
         MessageKey::GroupByDialogTitle => " Group By ",
-        MessageKey::GroupByDialogHint => "↑↓ navigate • Enter select • Esc close",
+        MessageKey::GroupByDialogHint => "▴▾ navigate ∙ Enter select ∙ Esc close",
         MessageKey::GroupByModelLabel => "Model",
         MessageKey::GroupByModelDesc => "One row per model (merge clients & providers)",
         MessageKey::GroupByClientModelLabel => "Client + Model",
@@ -655,7 +655,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
 
         MessageKey::HelpSessionDetails => "[enter/i:details]",
         MessageKey::SessionDetailDialogTitle => " Session Details ",
-        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i close • ↑↓/j/k scroll",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i close ∙ ▴▾/j/k scroll",
         MessageKey::SessionDetailId => "Session ID",
         MessageKey::SessionDetailTitle => "Title",
         MessageKey::SessionDetailDirectory => "Directory",
@@ -1030,7 +1030,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "비용",
         MessageKey::SortTokens => "토큰",
 
-        MessageKey::HelpScroll => "↑↓ 스크롤 • ←→/tab 보기",
+        MessageKey::HelpScroll => "▴▾ 스크롤 ∙ ◂▸/tab 보기",
         MessageKey::HelpSort => "[d/t/c:정렬]",
         MessageKey::HelpBack => "[esc:뒤로]",
         MessageKey::HelpDetails => "[enter:상세]",
@@ -1049,13 +1049,13 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "결과 없음",
 
         MessageKey::LanguageDialogTitle => " 언어 선택 ",
-        MessageKey::LanguageDialogHint => "↑↓ 탐색 • Enter 선택 • Esc 취소",
+        MessageKey::LanguageDialogHint => "▴▾ 탐색 ∙ Enter 선택 ∙ Esc 취소",
 
         MessageKey::ClientDialogTitle => " 클라이언트 ",
-        MessageKey::ClientDialogHint => "↑↓ 탐색 • Enter 전환 • Esc 닫기",
+        MessageKey::ClientDialogHint => "▴▾ 탐색 ∙ Enter 전환 ∙ Esc 닫기",
 
         MessageKey::GroupByDialogTitle => " 그룹화 기준 ",
-        MessageKey::GroupByDialogHint => "↑↓ 탐색 • Enter 선택 • Esc 닫기",
+        MessageKey::GroupByDialogHint => "▴▾ 탐색 ∙ Enter 선택 ∙ Esc 닫기",
         MessageKey::GroupByModelLabel => "모델",
         MessageKey::GroupByModelDesc => "모델별 1개 행 (클라이언트 및 공급자 병합)",
         MessageKey::GroupByClientModelLabel => "클라이언트 + 모델",
@@ -1074,7 +1074,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::HelpSessionDetails => "[enter/i:상세]",
         MessageKey::SessionDetailDialogTitle => " 세션 상세 ",
-        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 닫기 • ↑↓/j/k 스크롤",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 닫기 ∙ ▴▾/j/k 스크롤",
         MessageKey::SessionDetailId => "세션 ID",
         MessageKey::SessionDetailTitle => "제목",
         MessageKey::SessionDetailDirectory => "디렉터리",
@@ -1456,7 +1456,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "コスト",
         MessageKey::SortTokens => "トークン",
 
-        MessageKey::HelpScroll => "↑↓ スクロール • ←→/tab 表示切替",
+        MessageKey::HelpScroll => "▴▾ スクロール ∙ ◂▸/tab 表示切替",
         MessageKey::HelpSort => "[d/t/c:並替]",
         MessageKey::HelpBack => "[esc:戻る]",
         MessageKey::HelpDetails => "[enter:詳細]",
@@ -1475,13 +1475,13 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "結果がありません",
 
         MessageKey::LanguageDialogTitle => " 言語を選択 ",
-        MessageKey::LanguageDialogHint => "↑↓ 移動 • Enter 選択 • Esc キャンセル",
+        MessageKey::LanguageDialogHint => "▴▾ 移動 ∙ Enter 選択 ∙ Esc キャンセル",
 
         MessageKey::ClientDialogTitle => " クライアント ",
-        MessageKey::ClientDialogHint => "↑↓ 移動 • Enter 切替 • Esc 閉じる",
+        MessageKey::ClientDialogHint => "▴▾ 移動 ∙ Enter 切替 ∙ Esc 閉じる",
 
         MessageKey::GroupByDialogTitle => " グループ化 ",
-        MessageKey::GroupByDialogHint => "↑↓ 移動 • Enter 選択 • Esc 閉じる",
+        MessageKey::GroupByDialogHint => "▴▾ 移動 ∙ Enter 選択 ∙ Esc 閉じる",
         MessageKey::GroupByModelLabel => "モデル",
         MessageKey::GroupByModelDesc => "モデルごとに1行 (クライアント・プロバイダ統合)",
         MessageKey::GroupByClientModelLabel => "クライアント + モデル",
@@ -1500,7 +1500,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::HelpSessionDetails => "[enter/i:詳細]",
         MessageKey::SessionDetailDialogTitle => " セッション詳細 ",
-        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 閉じる • ↑↓/j/k スクロール",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 閉じる ∙ ▴▾/j/k スクロール",
         MessageKey::SessionDetailId => "セッションID",
         MessageKey::SessionDetailTitle => "タイトル",
         MessageKey::SessionDetailDirectory => "ディレクトリ",
@@ -1873,7 +1873,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "费用",
         MessageKey::SortTokens => "Token",
 
-        MessageKey::HelpScroll => "↑↓ 滚动 • ←→/tab 切换视图",
+        MessageKey::HelpScroll => "▴▾ 滚动 ∙ ◂▸/tab 切换视图",
         MessageKey::HelpSort => "[d/t/c:排序]",
         MessageKey::HelpBack => "[esc:返回]",
         MessageKey::HelpDetails => "[enter:详情]",
@@ -1892,13 +1892,13 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "无匹配结果",
 
         MessageKey::LanguageDialogTitle => " 选择语言 ",
-        MessageKey::LanguageDialogHint => "↑↓ 移动 • Enter 选择 • Esc 取消",
+        MessageKey::LanguageDialogHint => "▴▾ 移动 ∙ Enter 选择 ∙ Esc 取消",
 
         MessageKey::ClientDialogTitle => " 客户端 ",
-        MessageKey::ClientDialogHint => "↑↓ 移动 • Enter 切换 • Esc 关闭",
+        MessageKey::ClientDialogHint => "▴▾ 移动 ∙ Enter 切换 ∙ Esc 关闭",
 
         MessageKey::GroupByDialogTitle => " 分组依据 ",
-        MessageKey::GroupByDialogHint => "↑↓ 移动 • Enter 选择 • Esc 关闭",
+        MessageKey::GroupByDialogHint => "▴▾ 移动 ∙ Enter 选择 ∙ Esc 关闭",
         MessageKey::GroupByModelLabel => "模型",
         MessageKey::GroupByModelDesc => "每个模型一行 (合并客户端和供应商)",
         MessageKey::GroupByClientModelLabel => "客户端 + 模型",
@@ -1917,7 +1917,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::HelpSessionDetails => "[enter/i:详情]",
         MessageKey::SessionDetailDialogTitle => " 会话详情 ",
-        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 关闭 • ↑↓/j/k 滚动",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 关闭 ∙ ▴▾/j/k 滚动",
         MessageKey::SessionDetailId => "会话 ID",
         MessageKey::SessionDetailTitle => "标题",
         MessageKey::SessionDetailDirectory => "目录",
@@ -2282,7 +2282,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "Coût",
         MessageKey::SortTokens => "Jetons",
 
-        MessageKey::HelpScroll => "↑↓ défiler • ←→/tab vue",
+        MessageKey::HelpScroll => "▴▾ défiler ∙ ◂▸/tab vue",
         MessageKey::HelpSort => "[d/t/c:tri]",
         MessageKey::HelpBack => "[esc:retour]",
         MessageKey::HelpDetails => "[enter:détails]",
@@ -2301,13 +2301,13 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "Aucun résultat",
 
         MessageKey::LanguageDialogTitle => " Choisir la langue ",
-        MessageKey::LanguageDialogHint => "↑↓ naviguer • Enter sélectionner • Esc annuler",
+        MessageKey::LanguageDialogHint => "▴▾ naviguer ∙ Enter sélectionner ∙ Esc annuler",
 
         MessageKey::ClientDialogTitle => " Clients ",
-        MessageKey::ClientDialogHint => "↑↓ naviguer • Enter basculer • Esc fermer",
+        MessageKey::ClientDialogHint => "▴▾ naviguer ∙ Enter basculer ∙ Esc fermer",
 
         MessageKey::GroupByDialogTitle => " Grouper par ",
-        MessageKey::GroupByDialogHint => "↑↓ naviguer • Enter sélectionner • Esc fermer",
+        MessageKey::GroupByDialogHint => "▴▾ naviguer ∙ Enter sélectionner ∙ Esc fermer",
         MessageKey::GroupByModelLabel => "Modèle",
         MessageKey::GroupByModelDesc => "Une ligne par modèle (fusionner clients et fournisseurs)",
         MessageKey::GroupByClientModelLabel => "Client + Modèle",
@@ -2326,7 +2326,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::HelpSessionDetails => "[enter/i:détails]",
         MessageKey::SessionDetailDialogTitle => " Détails de la session ",
-        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i fermer • ↑↓/j/k défiler",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i fermer ∙ ▴▾/j/k défiler",
         MessageKey::SessionDetailId => "ID de session",
         MessageKey::SessionDetailTitle => "Titre",
         MessageKey::SessionDetailDirectory => "Répertoire",
@@ -2621,6 +2621,41 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_glyphs::{
+        AMBIENT_STABLE_HORIZONTAL_NAVIGATION, AMBIENT_STABLE_SEPARATOR,
+        AMBIENT_STABLE_VERTICAL_NAVIGATION,
+    };
+
+    #[test]
+    fn navigation_hints_use_shared_width_stable_chrome() {
+        for lang in TuiLanguage::ALL {
+            for key in [
+                MessageKey::HelpScroll,
+                MessageKey::LanguageDialogHint,
+                MessageKey::ClientDialogHint,
+                MessageKey::GroupByDialogHint,
+                MessageKey::SessionDetailDialogHint,
+            ] {
+                let hint = tr(lang, key);
+                assert!(
+                    hint.contains(AMBIENT_STABLE_VERTICAL_NAVIGATION),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+                assert!(
+                    hint.contains(AMBIENT_STABLE_SEPARATOR),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+                assert!(
+                    !hint.chars().any(|ch| "↑↓←→•".contains(ch)),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+            }
+            assert!(
+                tr(lang, MessageKey::HelpScroll).contains(AMBIENT_STABLE_HORIZONTAL_NAVIGATION),
+                "{lang:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_all_languages_have_valid_native_names() {

@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::AMBIENT_STABLE_SELECTED_RADIO;
 
 use super::{DialogContent, DialogResult};
 
@@ -96,7 +97,11 @@ impl DialogContent for LanguagePickerDialog {
             let is_cursor = i == self.cursor;
             let is_active = current_lang == lang;
 
-            let radio = if is_active { "(●)" } else { "( )" };
+            let radio = if is_active {
+                AMBIENT_STABLE_SELECTED_RADIO
+            } else {
+                "( )"
+            };
             let left = format!("{} {} [{}]", radio, lang.native_name(), lang.code());
             let usable = list_area.width.saturating_sub(4) as usize;
 

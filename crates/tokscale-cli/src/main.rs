@@ -9,9 +9,11 @@ mod paths;
 mod process_liveness;
 mod trae;
 mod tui;
+mod ui_glyphs;
 mod warp;
 
 use crate::tui::client_ui;
+use crate::ui_glyphs::{AMBIENT_STABLE_SCANNER_ACTIVE, AMBIENT_STABLE_SCANNER_INACTIVE};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -2060,9 +2062,16 @@ impl LightSpinner {
 
             if distance < Self::TRAIL_LENGTH {
                 let color = Self::TRAIL_COLORS[distance.min(Self::TRAIL_COLORS.len() - 1)];
-                out.push_str(&format!("\x1b[38;5;{}m■\x1b[0m", color));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    color, AMBIENT_STABLE_SCANNER_ACTIVE
+                ));
             } else {
-                out.push_str(&format!("\x1b[38;5;{}m⬝\x1b[0m", Self::INACTIVE_COLOR));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    Self::INACTIVE_COLOR,
+                    AMBIENT_STABLE_SCANNER_INACTIVE
+                ));
             }
         }
 
@@ -8999,22 +9008,22 @@ mod tests {
     #[test]
     fn test_light_spinner_frame_0() {
         let frame = LightSpinner::frame(0);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]
     fn test_light_spinner_frame_1() {
         let frame = LightSpinner::frame(1);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]
     fn test_light_spinner_frame_2() {
         let frame = LightSpinner::frame(2);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]

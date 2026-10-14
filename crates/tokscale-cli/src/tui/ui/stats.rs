@@ -8,6 +8,7 @@ use super::widgets::{
 use crate::tui::app::{App, ClickAction};
 use crate::tui::data::find_peak_hour;
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
+use crate::ui_glyphs::AMBIENT_STABLE_SEPARATOR as SEPARATOR;
 
 const CELL_WIDTH: u16 = 2;
 fn day_labels(lang: TuiLanguage) -> &'static [&'static str] {
@@ -749,17 +750,17 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                                 format_tokens(model_info.tokens.input),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · Out: ", subtle_text_style),
+                            Span::styled(format!(" {} Out: ", SEPARATOR), subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.output),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · CR: ", subtle_text_style),
+                            Span::styled(format!(" {} CR: ", SEPARATOR), subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_read),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · CW: ", subtle_text_style),
+                            Span::styled(format!(" {} CW: ", SEPARATOR), subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_write),
                                 secondary_text_style,

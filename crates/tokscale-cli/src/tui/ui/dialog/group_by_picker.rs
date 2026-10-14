@@ -14,6 +14,7 @@ use tokscale_core::GroupBy;
 
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::AMBIENT_STABLE_SELECTED_RADIO;
 
 use super::{DialogContent, DialogResult};
 
@@ -152,7 +153,11 @@ impl DialogContent for GroupByPickerDialog {
             let is_cursor = i == self.cursor;
             let is_active = *current == opt.value;
 
-            let radio = if is_active { "(●)" } else { "( )" };
+            let radio = if is_active {
+                AMBIENT_STABLE_SELECTED_RADIO
+            } else {
+                "( )"
+            };
             let usable = list_area.width.saturating_sub(4) as usize;
             let left = format!("{} {}", radio, opt.label);
             let desc = format!("    {}", opt.description);
