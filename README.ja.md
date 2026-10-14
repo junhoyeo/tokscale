@@ -44,6 +44,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -291,10 +295,6 @@ tokscale models --json > report.json   # ファイルに保存
 ### TUI機能
 
 インタラクティブTUIモードは以下を提供します：
-
-セッションビューでは、各セッションのメタデータ、アクティビティ、トークン内訳、コストを確認できます：
-
-![TUIセッション詳細](.github/assets/tui-sessions.png)
 
 - **10のビュー**: 概要（チャート + トップモデル）、Usage（サブスクリプションクォータ）、モデル、日別、時間別、月別、セッション、プロジェクト（ワークスペース別ロールアップ）、統計（貢献グラフ）、エージェント。プロジェクトでは、Codex Desktop の通常のチャットディレクトリ（`Documents/Codex/YYYY-MM-DD/<chat>`）はセッション数・トークン・コストを保持したまま **Codex Chat** に統合され、Git リポジトリを含むディレクトリは分離されたままになります。分単位の Minutely ビューはデフォルトで非表示で、`settings.json` の `minutelyTabEnabled` で有効化できます — [設定](#設定)を参照
 - **キーボードナビゲーション**:

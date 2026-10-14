@@ -44,6 +44,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -289,10 +293,6 @@ tokscale models --json > report.json   # Save to file
 ### TUI Features
 
 The interactive TUI mode provides:
-
-Inspect session metadata, activity, token breakdowns, and cost from the Sessions view:
-
-![TUI Session Details](.github/assets/tui-sessions.png)
 
 - **10 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Monthly, Sessions, Projects (per-workspace rollups), Stats (contribution graph), Agents. In Projects, Codex Desktop's ordinary chat directories (`Documents/Codex/YYYY-MM-DD/<chat>`) are combined into **Codex Chat**, preserving their session count, tokens, and cost; directories containing a Git repository remain separate. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
