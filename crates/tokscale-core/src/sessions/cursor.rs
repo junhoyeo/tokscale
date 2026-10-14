@@ -160,6 +160,26 @@ struct CursorUsageEvent {
     token_usage: Option<CursorTokenUsage>,
 }
 
+impl CursorUsageEvent {
+    fn usable_timestamp(&self) -> Option<i64> {
+        if self.model.as_deref()?.trim().is_empty() {
+            return None;
+        }
+        let timestamp = self.timestamp.as_ref().map(parse_ms_timestamp).unwrap_or(0);
+        (timestamp != 0).then_some(timestamp)
+    }
+}
+
+/// Return a row's timestamp only when the Cursor report parser accepts the row.
+///
+/// This shares the full row deserializer and model/timestamp checks with reports.
+/// Callers using the timestamp for sync progress must also check plausibility.
+pub fn parse_cursor_usage_event_timestamp(value: &serde_json::Value) -> Option<i64> {
+    CursorUsageEvent::deserialize(value)
+        .ok()?
+        .usable_timestamp()
+}
+
 /// The per-event token breakdown. `cacheWriteTokens` is absent on many events.
 /// Counts are coerced leniently so a single float (e.g. `10.0`) or numeric
 /// string doesn't fail the whole row.
@@ -386,20 +406,10 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
             Err(_) => continue,
         };
 
-        let model = event.model.unwrap_or_default();
-        let model = model.trim();
-        if model.is_empty() {
+        let Some(timestamp) = event.usable_timestamp() else {
             continue;
-        }
-
-        let timestamp = event
-            .timestamp
-            .as_ref()
-            .map(parse_ms_timestamp)
-            .unwrap_or(0);
-        if timestamp == 0 {
-            continue;
-        }
+        };
+        let model = event.model.as_deref().unwrap_or_default().trim();
 
         // Prefer the real Cursor session UUID; fall back to the legacy synthetic
         // per-day id only when the event carries no usable conversation id, so

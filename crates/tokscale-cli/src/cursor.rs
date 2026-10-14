@@ -19,6 +19,9 @@ const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// billing corrections. Older cached history is retained, but corrections
 /// outside this bounded window are not refreshed by incremental sync.
 const CURSOR_USAGE_CORRECTION_WINDOW_MS: i64 = 60 * 60 * 1000;
+// Allow small clock skew, but keep it below the correction overlap so an
+// accepted future row cannot move the next window beyond current usage.
+const CURSOR_USAGE_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// Largest explicit sync budget a user can configure, through
 /// `tokscale cursor sync --timeout` or `cursor.syncTimeoutSeconds` in
@@ -352,22 +355,18 @@ fn timestamp_ms_from_value(value: &serde_json::Value) -> Option<i64> {
     }
 }
 
-/// Unix milliseconds on one usage event. Missing or unrecognized timestamps
-/// count as zero and do not form a watermark.
-fn cursor_event_timestamp_ms(event: &serde_json::Value) -> i64 {
-    event
-        .get("timestamp")
-        .and_then(timestamp_ms_from_value)
-        .unwrap_or(0)
+/// Only report-usable rows with plausible positive timestamps can advance sync
+/// progress or establish pagination ordering. Other rows remain in the raw cache.
+fn usable_cursor_event_timestamp_ms(event: &serde_json::Value, max_timestamp: i64) -> Option<i64> {
+    tokscale_core::sessions::cursor::parse_cursor_usage_event_timestamp(event)
+        .filter(|timestamp| *timestamp > 0 && *timestamp <= max_timestamp)
 }
 
-/// Newest event timestamp in a cache. `None` when the cache has no positive
-/// timestamp, which forces a full download instead of an empty incremental sync.
-fn usage_events_watermark_ms(events: &[serde_json::Value]) -> Option<i64> {
+/// Newest usable timestamp in a cache. No usable timestamp forces a full fetch.
+fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -> Option<i64> {
     events
         .iter()
-        .map(cursor_event_timestamp_ms)
-        .filter(|timestamp| *timestamp > 0)
+        .filter_map(|event| usable_cursor_event_timestamp_ms(event, max_timestamp))
         .max()
 }
 
@@ -434,32 +433,31 @@ fn merge_cursor_usage_events(
     merged
 }
 
-/// Keep events at or after the correction window's lower bound. Unknown
-/// timestamps remain untouched; a recognized older row ends the bounded walk.
-fn fresh_usage_events(
+/// Keep recent rows and raw rows that cannot establish ordering. Only a usable,
+/// plausible older row can end the bounded walk through the correction window.
+fn filter_cursor_usage_page(
     events: &[serde_json::Value],
     sync_start: Option<i64>,
-) -> Vec<&serde_json::Value> {
-    events
-        .iter()
-        .filter(|event| match sync_start {
-            Some(sync_start) => {
-                let timestamp = cursor_event_timestamp_ms(event);
-                timestamp == 0 || timestamp >= sync_start
-            }
-            None => true,
-        })
-        .collect()
-}
-
-fn page_crosses_sync_start(events: &[serde_json::Value], sync_start: Option<i64>) -> bool {
+    max_timestamp: i64,
+) -> (Vec<&serde_json::Value>, bool) {
     let Some(sync_start) = sync_start else {
-        return false;
+        return (events.iter().collect(), false);
     };
-    events.iter().any(|event| {
-        let timestamp = cursor_event_timestamp_ms(event);
-        timestamp > 0 && timestamp < sync_start
-    })
+    let mut crossed = false;
+    let fresh = events
+        .iter()
+        .filter(|event| {
+            if usable_cursor_event_timestamp_ms(event, max_timestamp)
+                .is_some_and(|timestamp| timestamp < sync_start)
+            {
+                crossed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (fresh, crossed)
 }
 
 fn usage_events_request_body(
@@ -1563,7 +1561,10 @@ async fn fetch_cursor_usage_events_json_merging(
     existing_cache: Option<&str>,
 ) -> Result<String> {
     let existing_events = cached_usage_events(existing_cache);
-    let watermark = usage_events_watermark_ms(&existing_events);
+    let max_timestamp = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_add(CURSOR_USAGE_CLOCK_SKEW_MS);
+    let watermark = usage_events_watermark_ms(&existing_events, max_timestamp);
     let sync_start =
         watermark.map(|ms| ms.saturating_sub(CURSOR_USAGE_CORRECTION_WINDOW_MS).max(0));
     let client = build_cursor_http_client()?;
@@ -1731,12 +1732,8 @@ async fn fetch_cursor_usage_events_json_merging(
         // Stop at the correction window even when the server ignores startDate
         // and advertises the full account total. Older cached rows survive the
         // merge; only the recent overlap is re-fetched for billing corrections.
-        let crossed = page_crosses_sync_start(&page_events, sync_start);
-        fresh_events.extend(
-            fresh_usage_events(&page_events, sync_start)
-                .into_iter()
-                .cloned(),
-        );
+        let (fresh, crossed) = filter_cursor_usage_page(&page_events, sync_start, max_timestamp);
+        fresh_events.extend(fresh.into_iter().cloned());
         if crossed {
             completed = true;
             break;
@@ -1797,7 +1794,7 @@ async fn fetch_cursor_usage_events_json_merging(
         );
     }
 
-    let events = if watermark.is_some() {
+    let events = if !existing_events.is_empty() {
         merge_cursor_usage_events(existing_events, fresh_events)
     } else {
         fresh_events
@@ -3554,6 +3551,296 @@ mod tests {
         );
         assert!(captured[0].contains("\"page\":1"));
         assert!(captured[1].contains("\"page\":2"));
+    }
+
+    fn parser_timestamp_for_watermark_fixture(event: &serde_json::Value) -> Option<i64> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(parsed.len() <= 1);
+        parsed.first().map(|row| row.timestamp)
+    }
+
+    #[test]
+    fn test_watermark_parser_row_semantics() {
+        let base: serde_json::Value =
+            serde_json::from_str(&json_event("valid", "7200000")).unwrap();
+        let cases = [
+            ("model", None, None),
+            ("model", Some(serde_json::Value::Null), None),
+            ("model", Some(serde_json::json!("  ")), None),
+            ("model", Some(serde_json::json!(42)), None),
+            ("model", Some(serde_json::json!(" gpt-5 ")), Some(7_200_000)),
+            (
+                "conversationId",
+                Some(serde_json::Value::Null),
+                Some(7_200_000),
+            ),
+            ("conversationId", Some(serde_json::json!(42)), None),
+            ("tokenUsage", None, Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::Value::Null), Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::json!([])), Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::json!("0")), None),
+            (
+                "tokenUsage",
+                Some(serde_json::json!({"inputTokens":"bad"})),
+                Some(7_200_000),
+            ),
+            (
+                "chargedCents",
+                Some(serde_json::json!({"bad":true})),
+                Some(7_200_000),
+            ),
+            ("timestamp", None, None),
+            ("timestamp", Some(serde_json::json!(0)), None),
+            ("timestamp", Some(serde_json::json!(-1)), Some(-1)),
+            ("timestamp", Some(serde_json::json!(true)), None),
+            ("timestamp", Some(serde_json::json!("not-a-time")), None),
+            (
+                "timestamp",
+                Some(serde_json::json!("1970-01-01T02:00:00Z")),
+                Some(7_200_000),
+            ),
+            (
+                "timestamp",
+                Some(serde_json::json!(7_200_000.5)),
+                Some(7_200_000),
+            ),
+            (
+                "timestamp",
+                Some(serde_json::json!(i64::MAX)),
+                Some(i64::MAX),
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut event = base.clone();
+            if let Some(value) = value {
+                event[field] = value;
+            } else {
+                event.as_object_mut().unwrap().remove(field);
+            }
+            assert_eq!(
+                parser_timestamp_for_watermark_fixture(&event),
+                expected,
+                "real parser row: {event}"
+            );
+            assert_eq!(
+                tokscale_core::sessions::cursor::parse_cursor_usage_event_timestamp(&event),
+                expected,
+                "shared row projection: {event}"
+            );
+            assert_eq!(
+                usable_cursor_event_timestamp_ms(&event, 7_500_000),
+                expected.filter(|timestamp| *timestamp > 0 && *timestamp <= 7_500_000),
+                "sync-state eligibility: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_watermark_clock_skew_boundaries() {
+        let now = 7_200_000;
+        let max_timestamp = now + CURSOR_USAGE_CLOCK_SKEW_MS;
+        assert!(CURSOR_USAGE_CLOCK_SKEW_MS < CURSOR_USAGE_CORRECTION_WINDOW_MS);
+        for (timestamp, expected) in [
+            (1, Some(1)),
+            (now, Some(now)),
+            (max_timestamp, Some(max_timestamp)),
+            (max_timestamp + 1, None),
+            (0, None),
+            (-1, None),
+        ] {
+            let event: serde_json::Value =
+                serde_json::from_str(&json_event("valid", &timestamp.to_string())).unwrap();
+            assert_eq!(
+                usage_events_watermark_ms(&[event.clone()], max_timestamp),
+                expected
+            );
+            let (fresh, crossed) =
+                filter_cursor_usage_page(std::slice::from_ref(&event), Some(now), max_timestamp);
+            assert_eq!(crossed, expected.is_some_and(|timestamp| timestamp < now));
+            assert_eq!(fresh.is_empty(), crossed);
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(&json_event("all-history", "1")).unwrap();
+        let (fresh, crossed) =
+            filter_cursor_usage_page(std::slice::from_ref(&event), None, max_timestamp);
+        assert_eq!(fresh, [&event]);
+        assert!(!crossed);
+    }
+
+    #[test]
+    fn test_watermark_regression_valid_far_future_cannot_outrank_history() {
+        let valid: serde_json::Value =
+            serde_json::from_str(&json_event("valid", "7200000")).unwrap();
+        let future: serde_json::Value =
+            serde_json::from_str(&json_event("future", &i64::MAX.to_string())).unwrap();
+        assert_eq!(
+            parser_timestamp_for_watermark_fixture(&future),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            usage_events_watermark_ms(&[valid, future], 7_500_000),
+            Some(7_200_000),
+            "report acceptance alone must not promote an implausible future timestamp"
+        );
+    }
+
+    #[test]
+    fn test_watermark_regression_invalid_future_row_does_not_stall_later_syncs() {
+        let latest: serde_json::Value =
+            serde_json::from_str(&json_event("latest", "7200000")).unwrap();
+        let old: serde_json::Value = serde_json::from_str(&json_event("keep-old", "1000")).unwrap();
+        let bad =
+            serde_json::json!({"conversationId":"bad-future","timestamp":i64::MAX,"model":" "});
+        let valid_future: serde_json::Value =
+            serde_json::from_str(&json_event("future-raw", &i64::MAX.to_string())).unwrap();
+        assert_eq!(parser_timestamp_for_watermark_fixture(&bad), None);
+        let initial = vec![latest, old, bad.clone(), valid_future.clone()];
+        let mut cached = serde_json::json!({"usageEventsDisplay":initial}).to_string();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (id, timestamp, start) in [
+            ("first-new", 7_201_000_i64, 3_600_000),
+            ("second-new", 7_202_000, 3_601_000),
+        ] {
+            let body = json_page(
+                10_000,
+                &[
+                    &json_event(id, &timestamp.to_string()),
+                    &json_event("outside-window", "3599999"),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            cached = runtime
+                .block_on(fetch_cursor_usage_events_json_merging(
+                    &url,
+                    "session-token",
+                    Some(Duration::from_secs(2)),
+                    true,
+                    CURSOR_MAX_JSON_BYTES,
+                    2,
+                    Some(&cached),
+                ))
+                .expect("normal usage must still advance the cached history");
+            let rows = cached_usage_events(Some(&cached));
+            assert!(
+                rows.iter().any(|row| row["conversationId"] == id),
+                "future cache rows must not hide {id}"
+            );
+            assert!(
+                rows.contains(&bad) && rows.contains(&valid_future),
+                "keep raw history without using it as a watermark"
+            );
+            assert!(rows.iter().any(|row| row["conversationId"] == "keep-old"));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert!(
+                captured[0].contains(&format!("\"startDate\":{start}")),
+                "query must use the latest usable event: {}",
+                captured[0]
+            );
+        }
+        assert!(cached.contains("first-new") && cached.contains("second-new"));
+    }
+
+    #[test]
+    fn test_watermark_regression_all_invalid_cache_uses_full_fallback() {
+        let invalid = vec![
+            serde_json::json!({"conversationId":"bad-model","timestamp":i64::MAX,"model":null}),
+            serde_json::json!({"conversationId":"bad-shape","timestamp":"7200000","model":"gpt-5","tokenUsage":"bad"}),
+            serde_json::json!({"conversationId":"bad-time","timestamp":"invalid","model":"gpt-5"}),
+        ];
+        for row in &invalid {
+            assert_eq!(parser_timestamp_for_watermark_fixture(row), None);
+        }
+        let cached = serde_json::json!({"usageEventsDisplay":invalid}).to_string();
+        let (url, requests) = serve_json_pages(vec![(
+            String::new(),
+            json_page(1, &[&json_event("recovered", "7200000")]),
+        )]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+                Some(&cached),
+            ))
+            .expect("an unusable cache must fall back to a complete fetch");
+        let rows = cached_usage_events(Some(&text));
+        assert!(rows.iter().any(|row| row["conversationId"] == "recovered"));
+        for row in invalid {
+            assert!(
+                rows.contains(&row),
+                "watermark fallback must not discard cached rows"
+            );
+        }
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            !captured[0].contains("\"startDate\""),
+            "no usable watermark means a full-history request: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn test_watermark_regression_invalid_old_row_cannot_stop_pagination() {
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("latest", "7200000"),
+            json_event("keep-old", "1000")
+        );
+        let invalid =
+            serde_json::json!({"conversationId":"unusable-old","timestamp":"1","model":""});
+        assert_eq!(parser_timestamp_for_watermark_fixture(&invalid), None);
+        let (url, requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[&json_event("new-a", "7201000"), &invalid.to_string()],
+                ),
+            ),
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[
+                        &json_event("new-b", "7202000"),
+                        &json_event("old-boundary", "3599999"),
+                    ],
+                ),
+            ),
+        ]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+                Some(&cached),
+            ))
+            .expect("an unusable row must not hide the next valid page");
+        let rows = cached_usage_events(Some(&text));
+        assert!(
+            rows.iter().any(|row| row["conversationId"] == "new-b"),
+            "invalid ordering evidence must not stop paging"
+        );
+        assert!(rows.contains(&invalid), "unknown/unusable rows stay raw");
+        assert!(rows.iter().any(|row| row["conversationId"] == "keep-old"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     fn cursor_identity_token_fields() -> [&'static str; 4] {

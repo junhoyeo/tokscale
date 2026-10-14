@@ -680,7 +680,7 @@ When you log out, Tokscale moves cached usage to `cursor-cache/archive/` so it i
 }
 ```
 
-When an account has a JSON cache, Cursor sync fetches new usage plus the hour before that account's newest cached event. This bounded overlap refreshes recent billing corrections without downloading the full history on every report. Corrections older than this one-hour window remain as cached; older cached events are preserved, and a first sync without a usable cache still fetches the full history. Each account uses its own cache to determine the window. A timed-out delta leaves the cache unchanged so the next sync cannot skip an incomplete interval.
+When an account has a JSON cache, Cursor sync fetches new usage plus the hour before that account's newest cached event. This bounded overlap refreshes recent billing corrections without downloading the full history on every report. Corrections older than this one-hour window remain as cached; older cached events are preserved, and a first sync without a usable cache still fetches the full history. Each account uses its own cache to determine the window. Only rows accepted by the report parser with positive timestamps no more than five minutes ahead of the sync's start time can set that window or stop pagination; other raw rows are preserved without advancing sync progress. A timed-out delta leaves the cache unchanged so the next sync cannot skip an incomplete interval.
 
 ### Antigravity Commands
 
