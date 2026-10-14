@@ -3,6 +3,7 @@
 mod aggregator;
 pub mod bucket_tz;
 mod cc_mirror;
+pub mod claude_desktop;
 pub mod clients;
 pub mod content_extractor;
 pub mod fs_atomic;
@@ -648,6 +649,17 @@ pub struct ModelReport {
     pub processing_time_ms: u32,
 }
 
+/// Model totals with local source coverage. The original [`ModelReport`] and
+/// [`get_model_report`] keep their public shape for existing Rust consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelReportV2 {
+    #[serde(flatten)]
+    pub report: ModelReport,
+    /// Included in the all-time total, excluded from every dated report.
+    pub undated_tokens: TokenBreakdown,
+    pub claude_desktop_cache: Option<claude_desktop::Coverage>,
+}
+
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
@@ -979,8 +991,27 @@ fn parse_all_messages_with_pricing_with_cache_policy(
     scanner_settings: &scanner::ScannerSettings,
     cache_policy: SourceCachePolicy,
 ) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_coverage(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        cache_policy,
+    )
+    .0
+}
+
+fn parse_all_messages_with_coverage(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    cache_policy: SourceCachePolicy,
+) -> (Vec<UnifiedMessage>, Option<claude_desktop::Coverage>) {
     let mut messages: Vec<UnifiedMessage> = Vec::new();
-    parse_all_messages_streaming(
+    let coverage = parse_all_messages_streaming(
         home_dir,
         clients,
         pricing,
@@ -996,7 +1027,7 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         clients,
         timezone.is_pinned().then_some(&timezone),
     );
-    messages
+    (messages, coverage)
 }
 
 fn codex_missing_usage_warning(missing_files: usize, inspected_files: usize) -> Option<String> {
@@ -1099,7 +1130,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
     scanner_settings: &scanner::ScannerSettings,
     cache_policy: SourceCachePolicy,
     sink: &mut S,
-) {
+) -> Option<claude_desktop::Coverage> {
+    let mut desktop_coverage = None;
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
@@ -2357,7 +2389,21 @@ fn parse_all_messages_streaming<S: MessageSink>(
             source_cache.insert(entry);
         }
     }
-    all_messages.extend(claude_messages.into_iter().map(|(_, message)| message));
+    let mut claude_messages: Vec<_> = claude_messages
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    if clients.is_empty() || clients.iter().any(|client| client == "claude") {
+        let desktop = claude_desktop::read(Path::new(home_dir));
+        if desktop.coverage.cache_databases > 0 {
+            desktop_coverage = Some(desktop.coverage.clone());
+        }
+        desktop.merge_into(&mut claude_messages);
+        for message in &mut claude_messages {
+            apply_pricing_if_available(message, pricing);
+        }
+    }
+    all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
 
     // Rollouts OpenClaw drove through Codex app-server leave the codex parser
@@ -3761,6 +3807,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // They now run per message inside `flush_lane`, which is also where the
     // messages are released.
     flush_lane(&mut all_messages, &flush_context, sink);
+    desktop_coverage
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
@@ -3840,6 +3887,9 @@ fn filter_unified_messages(
     options: &LocalParseOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
+    if options.year.is_some() || options.since.is_some() || options.until.is_some() {
+        filtered.retain(|message| !claude_desktop::is_undated_balance(message));
+    }
 
     if let Some(year) = &options.year {
         let year_prefix = format!("{}-", year);
@@ -4346,6 +4396,11 @@ fn model_report_token_totals(entries: &[ModelUsage]) -> (i64, i64, i64, i64) {
 }
 
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    Ok(get_model_report_v2(options).await?.report)
+}
+
+/// Generate model totals together with undated usage and Desktop coverage.
+pub async fn get_model_report_v2(options: ReportOptions) -> Result<ModelReportV2, String> {
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -4360,15 +4415,22 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+    let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
         &home_dir,
         &clients,
         pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
+        SourceCachePolicy::Persistent,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
+    let mut undated_tokens = TokenBreakdown::default();
+    for message in &filtered {
+        if claude_desktop::is_undated_balance(message) {
+            undated_tokens.add_assign_saturating(&message.tokens);
+        }
+    }
     let entries = aggregate_model_usage_entries_with_rollup(
         filtered,
         &options.group_by,
@@ -4383,15 +4445,19 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     // any non-zero total.
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
-    Ok(ModelReport {
-        entries,
-        total_input,
-        total_output,
-        total_cache_read,
-        total_cache_write,
-        total_messages,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
+    Ok(ModelReportV2 {
+        undated_tokens,
+        claude_desktop_cache,
+        report: ModelReport {
+            entries,
+            total_input,
+            total_output,
+            total_cache_read,
+            total_cache_write,
+            total_messages,
+            total_cost,
+            processing_time_ms: start.elapsed().as_millis() as u32,
+        },
     })
 }
 
@@ -4522,7 +4588,7 @@ fn aggregate_hourly_usage_entries(
     let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
 
     for msg in messages {
-        if recovery::is_daily(&msg) {
+        if recovery::is_daily(&msg) || claude_desktop::is_undated_balance(&msg) {
             continue;
         }
         let hour_key = if msg.timestamp > 0 {
@@ -4873,6 +4939,11 @@ impl<'a> GraphSink<'a> {
 
 impl MessageSink for GraphSink<'_> {
     fn accept(&mut self, message: UnifiedMessage) {
+        // Cumulative Desktop balances have no day attribution. They belong in
+        // all-time local totals, never daily graphs or leaderboard submissions.
+        if claude_desktop::is_undated_balance(&message) {
+            return;
+        }
         if let Some(options) = self.filter {
             if !message_passes_report_filter(&message, options) {
                 return;
@@ -5258,6 +5329,11 @@ fn validate_priced_messages(
 /// caller can drop a message on arrival instead of materializing the whole
 /// corpus and then retaining over it.
 fn message_passes_report_filter(message: &UnifiedMessage, options: &ReportOptions) -> bool {
+    if claude_desktop::is_undated_balance(message)
+        && (options.year.is_some() || options.since.is_some() || options.until.is_some())
+    {
+        return false;
+    }
     if let Some(year) = &options.year {
         // Matching the prefix in place rather than building `format!("{year}-")`
         // keeps this predicate allocation-free. The streaming path runs it once
@@ -5669,7 +5745,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(micode_msgs);
 
     let claude_home = PathBuf::from(&home_dir);
-    let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
+    let claude_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
@@ -5678,27 +5754,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 parent_cache,
                 Some(&claude_home),
             )
-            .into_iter()
-            .map(|msg| {
-                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                (dedup_key, unified_to_parsed(&msg))
-            })
-            .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
-
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_msgs: Vec<ParsedMessage> = claude_msgs_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
-    // Advisor rows (#1398) carry `message_count = 0`: they add tokens and cost
-    // to the parent reply rather than a reply of their own, so the client's
-    // message count sums `message_count` like the reports do, not row count.
-    let claude_count = summed_parsed_message_count(&claude_msgs);
-    counts.set(ClientId::Claude, claude_count);
+    let mut claude_messages = Vec::new();
+    let mut indices = HashMap::new();
+    for message in claude_raw {
+        if let Some(key) = &message.dedup_key {
+            if let Some(index) = indices.get(key).copied() {
+                merge_claude_cross_file_duplicate(
+                    &mut claude_messages[index],
+                    &mut false,
+                    message,
+                    false,
+                    None,
+                );
+                continue;
+            }
+            indices.insert(key.clone(), claude_messages.len());
+        }
+        claude_messages.push(message);
+    }
+    if include_all || clients.iter().any(|client| client == "claude") {
+        claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
+    }
+    let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
+    // Advisor calls and undated Desktop balances add usage, not extra replies.
+    counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
     messages.extend(claude_msgs);
 
     type LocalCodexSourceOutcome = (
@@ -6988,6 +7070,9 @@ fn filter_parsed_messages(
     options: &LocalParseOptions,
 ) -> Vec<ParsedMessage> {
     let mut filtered = messages;
+    if options.year.is_some() || options.since.is_some() || options.until.is_some() {
+        filtered.retain(|m| !(m.timestamp == 0 && m.date == claude_desktop::UNKNOWN_DATE));
+    }
 
     if let Some(year) = &options.year {
         let year_prefix = format!("{}-", year);
@@ -7113,6 +7198,58 @@ mod tests {
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
         assert_eq!(daily[0].token_breakdown.output, 26);
+    }
+
+    #[test]
+    fn desktop_undated_balances_are_local_all_time_only() {
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "claude-future",
+            "anthropic",
+            "session",
+            0,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        message.date = crate::claude_desktop::UNKNOWN_DATE.into();
+        message.message_count = 0;
+        assert!(message_passes_report_filter(
+            &message,
+            &ReportOptions::default()
+        ));
+        for options in [
+            ReportOptions {
+                since: Some("2020-01-01".into()),
+                ..Default::default()
+            },
+            ReportOptions {
+                until: Some("2030-01-01".into()),
+                ..Default::default()
+            },
+            ReportOptions {
+                year: Some("2026".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(!message_passes_report_filter(&message, &options));
+        }
+        let mut sink = GraphSink::new(None, None, GraphPricingRequirement::Submission);
+        sink.accept(message.clone());
+        assert!(sink.buffer.is_empty());
+        assert!(crate::aggregate_by_date(vec![message.clone()]).is_empty());
+        assert!(aggregate_monthly_usage_v2_entries(vec![message.clone()]).is_empty());
+        assert!(aggregate_hourly_usage_entries(
+            vec![message.clone()],
+            crate::BucketTimezone::from_scanner_settings(&Default::default())
+        )
+        .is_empty());
+        assert_eq!(
+            aggregate_model_usage_entries(vec![message], &GroupBy::Model)[0].input,
+            100
+        );
     }
 
     #[test]

@@ -796,6 +796,11 @@ pub fn built_in_extra_scan_paths_for(
                 .into_iter()
                 .map(|path| (ClientId::Claude, path)),
         );
+        paths.extend(
+            crate::claude_desktop::transcript_roots(Path::new(home_dir))
+                .into_iter()
+                .map(|path| (ClientId::Claude, path)),
+        );
     }
 
     if enabled.contains(&ClientId::Senpi) {

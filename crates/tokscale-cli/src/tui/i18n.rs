@@ -138,6 +138,7 @@ pub enum MessageKey {
 
     // Footer counts & labels
     FooterTokens,
+    FooterUndated,
     CountModels,
     CountAgents,
     CountDay,
@@ -592,6 +593,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::EmptyNoModelTrendData => "No daily data for this model yet. Press Esc to go back.",
 
         MessageKey::FooterTokens => " tokens",
+        MessageKey::FooterUndated => "undated",
         MessageKey::CountModels => "models",
         MessageKey::CountAgents => "agents",
         MessageKey::CountDay => "day",
@@ -1012,6 +1014,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "이 모델의 일별 데이터가 아직 없습니다. Esc를 눌러 돌아가기.",
 
         MessageKey::FooterTokens => " 토큰",
+        MessageKey::FooterUndated => "날짜 미상",
         MessageKey::CountModels => "개 모델",
         MessageKey::CountAgents => "개 에이전트",
         MessageKey::CountDay => "일",
@@ -1437,6 +1440,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "このモデルの日別データはまだありません。Escで戻る。",
 
         MessageKey::FooterTokens => " トークン",
+        MessageKey::FooterUndated => "日付不明",
         MessageKey::CountModels => "モデル",
         MessageKey::CountAgents => "エージェント",
         MessageKey::CountDay => "日",
@@ -1853,6 +1857,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "该模型暂无每日数据。按 Esc 返回。",
 
         MessageKey::FooterTokens => " Token",
+        MessageKey::FooterUndated => "日期未知",
         MessageKey::CountModels => "个模型",
         MessageKey::CountAgents => "个智能体",
         MessageKey::CountDay => "天",
@@ -2261,6 +2266,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "Pas encore de données quotidiennes pour ce modèle. Appuyez sur Échap pour revenir.",
 
         MessageKey::FooterTokens => " jetons",
+        MessageKey::FooterUndated => "sans date",
         MessageKey::CountModels => "modèles",
         MessageKey::CountAgents => "agents",
         MessageKey::CountDay => "jour",
@@ -2806,6 +2812,7 @@ mod tests {
             MessageKey::EmptyNoModelDetailsDay,
             MessageKey::EmptyNoModelTrendData,
             MessageKey::FooterTokens,
+            MessageKey::FooterUndated,
             MessageKey::CountModels,
             MessageKey::CountAgents,
             MessageKey::CountDay,
