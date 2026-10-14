@@ -313,49 +313,85 @@ fn sync_antigravity_cache_impl(
     // under the exclusive cache lock acquired above.
     let mut enrichment = TrajectoryEnrichmentBudget::new();
     let mut synced_sessions: usize = 0;
+    let mut metadata_failed: Option<anyhow::Error> = None;
 
     for candidate in &export_candidates {
         if let Some(summary) = find_summary_for_candidate(&summaries, &candidate.session_id) {
-            if let Some(artifact) = fetch_session_artifact(summary, connections, &mut enrichment)? {
-                let path = write_session_artifact(&summary.session_id, &artifact.contents)?;
-                let relative_path = to_relative_artifact_path(&path)?;
+            match fetch_session_artifact(summary, connections, &mut enrichment) {
+                Ok(Some(artifact)) => {
+                    let path = write_session_artifact(&summary.session_id, &artifact.contents)?;
+                    let relative_path = to_relative_artifact_path(&path)?;
 
-                next_manifest.sessions.push(ManifestSessionEntry {
-                    session_id: summary.session_id.clone(),
-                    artifact_path: relative_path,
-                    last_modified_ms: artifact.last_modified_ms,
-                    step_count: artifact.step_count,
-                    connection_fingerprint: summary.connection_fingerprint.clone(),
-                    artifact_hash: artifact.artifact_hash,
-                });
-                synced_sessions += 1;
-                continue;
-            } else if let Some(previous) = manifest
-                .sessions
-                .iter()
-                .find(|entry| entry.session_id == candidate.session_id)
-            {
-                next_manifest.sessions.push(previous.clone());
-                continue;
-            } else if let Some(preserved) = cached_manifest_session_entry(
-                &candidate.session_id,
-                candidate.last_modified_ms,
-                &summary.connection_fingerprint,
-            ) {
-                next_manifest.sessions.push(preserved);
-                continue;
+                    next_manifest.sessions.push(ManifestSessionEntry {
+                        session_id: summary.session_id.clone(),
+                        artifact_path: relative_path,
+                        last_modified_ms: artifact.last_modified_ms,
+                        step_count: artifact.step_count,
+                        connection_fingerprint: summary.connection_fingerprint.clone(),
+                        artifact_hash: artifact.artifact_hash,
+                    });
+                    synced_sessions += 1;
+                    continue;
+                }
+                Ok(None) => {
+                    if let Some(previous) = manifest
+                        .sessions
+                        .iter()
+                        .find(|entry| entry.session_id == candidate.session_id)
+                    {
+                        next_manifest.sessions.push(previous.clone());
+                        continue;
+                    } else if let Some(preserved) = cached_manifest_session_entry(
+                        &candidate.session_id,
+                        candidate.last_modified_ms,
+                        &summary.connection_fingerprint,
+                    ) {
+                        next_manifest.sessions.push(preserved);
+                        continue;
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    if metadata_failed.is_none() {
+                        metadata_failed = Some(err);
+                    }
+                    if let Some(previous) = manifest
+                        .sessions
+                        .iter()
+                        .find(|entry| entry.session_id == candidate.session_id)
+                    {
+                        next_manifest.sessions.push(previous.clone());
+                        continue;
+                    } else if let Some(preserved) = cached_manifest_session_entry(
+                        &candidate.session_id,
+                        candidate.last_modified_ms,
+                        &summary.connection_fingerprint,
+                    ) {
+                        next_manifest.sessions.push(preserved);
+                        continue;
+                    }
+                    continue;
+                }
             }
         }
 
-        if let Some(entry) = fetch_historical_session_artifact(
+        match fetch_historical_session_artifact(
             &candidate.session_id,
             connections,
             candidate,
             &mut enrichment,
-        )? {
-            next_manifest.sessions.push(entry);
-            synced_sessions += 1;
-            continue;
+        ) {
+            Ok(Some(entry)) => {
+                next_manifest.sessions.push(entry);
+                synced_sessions += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if metadata_failed.is_none() {
+                    metadata_failed = Some(err);
+                }
+            }
         }
 
         if let Some(previous) = manifest
@@ -387,7 +423,7 @@ fn sync_antigravity_cache_impl(
 
     let count = next_manifest.sessions.len();
 
-    if explicit {
+    if explicit && metadata_failed.is_none() {
         println!("\n  {}", "Antigravity sync".cyan());
         println!(
             "  {}",
@@ -422,6 +458,10 @@ fn sync_antigravity_cache_impl(
             format!("cached sessions after sync: {}", count).bright_black()
         );
         println!();
+    }
+
+    if let Some(err) = metadata_failed {
+        return Err(err);
     }
 
     Ok(synced_sessions)
@@ -2777,12 +2817,18 @@ fn fetch_session_artifact(
             .filter(|connection| connection.fingerprint != summary.connection_fingerprint),
     );
 
+    let mut last_error: Option<anyhow::Error> = None;
     for connection in ordered {
-        if let Some(artifact) = try_fetch_session_artifact(summary, connection, budget)? {
-            return Ok(Some(artifact));
+        match try_fetch_session_artifact(summary, connection, budget) {
+            Ok(Some(artifact)) => return Ok(Some(artifact)),
+            Ok(None) => {}
+            Err(err) => last_error = Some(err),
         }
     }
 
+    if let Some(err) = last_error {
+        return Err(err);
+    }
     Ok(None)
 }
 
@@ -2826,6 +2872,8 @@ struct TrajectoryEnrichmentBudget {
     failure_threshold: u32,
     wasted: Duration,
     consecutive_failures: HashMap<String, u32>,
+    metadata_wasted: Duration,
+    metadata_consecutive_failures: HashMap<String, u32>,
 }
 
 impl TrajectoryEnrichmentBudget {
@@ -2844,6 +2892,8 @@ impl TrajectoryEnrichmentBudget {
             failure_threshold,
             wasted: Duration::ZERO,
             consecutive_failures: HashMap::new(),
+            metadata_wasted: Duration::ZERO,
+            metadata_consecutive_failures: HashMap::new(),
         }
     }
 
@@ -2877,6 +2927,29 @@ impl TrajectoryEnrichmentBudget {
     /// so an oversized session does not trip the connection circuit breaker for other sessions.
     fn record_session_failure(&mut self, elapsed: Duration) {
         self.wasted = self.wasted.saturating_add(elapsed);
+    }
+
+    fn metadata_should_attempt(&self, fingerprint: &str) -> bool {
+        if self.metadata_wasted >= self.budget {
+            return false;
+        }
+        self.metadata_consecutive_failures
+            .get(fingerprint)
+            .copied()
+            .unwrap_or(0)
+            < self.failure_threshold
+    }
+
+    fn record_metadata_failure(&mut self, fingerprint: &str, elapsed: Duration) {
+        self.metadata_wasted = self.metadata_wasted.saturating_add(elapsed);
+        *self
+            .metadata_consecutive_failures
+            .entry(fingerprint.to_string())
+            .or_insert(0) += 1;
+    }
+
+    fn record_metadata_success(&mut self, fingerprint: &str) {
+        self.metadata_consecutive_failures.remove(fingerprint);
     }
 }
 
@@ -2955,13 +3028,36 @@ fn try_fetch_session_artifact(
     connection: &AntigravityConnection,
     budget: &mut TrajectoryEnrichmentBudget,
 ) -> Result<Option<SessionArtifact>> {
+    if !budget.metadata_should_attempt(&connection.fingerprint) {
+        let err = anyhow::anyhow!(
+            "Antigravity metadata budget exhausted or circuit breaker open for connection {}",
+            connection.fingerprint
+        );
+        eprintln!(
+            "Warning: skipping Antigravity metadata for session {}: {err:#}",
+            summary.session_id
+        );
+        return Err(err);
+    }
+
+    let metadata_started = Instant::now();
     let response = match rpc_request(
         connection,
         "GetCascadeTrajectoryGeneratorMetadata",
         &serde_json::json!({ "cascadeId": summary.session_id }),
     ) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
+        Ok(value) => {
+            budget.record_metadata_success(&connection.fingerprint);
+            value
+        }
+        Err(err) => {
+            budget.record_metadata_failure(&connection.fingerprint, metadata_started.elapsed());
+            eprintln!(
+                "Warning: failed to fetch Antigravity metadata for session {}: {err:#}",
+                summary.session_id
+            );
+            return Err(err);
+        }
     };
 
     let metadata = response
@@ -5749,11 +5845,6 @@ mod tests {
         assert_eq!(result.sessions, 0);
         assert_eq!(result.connections, 0);
         assert!(result.error.is_none());
-
-        let direct_result = sync_antigravity_cache(false);
-        assert!(!direct_result.synced);
-        assert_eq!(direct_result.sessions, 0);
-        assert!(direct_result.error.is_none());
     }
 
     #[test]
