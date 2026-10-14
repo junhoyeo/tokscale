@@ -333,28 +333,6 @@ fn cached_usage_events(json_text: Option<&str>) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Unix milliseconds on one usage event. The dashboard sends this as a string;
-/// a number and an RFC 3339 datetime are accepted so either shape still yields
-/// a watermark. An unrecognized value is `None` so identity matching can keep
-/// it distinct instead of collapsing every unreadable timestamp to zero.
-fn timestamp_ms_from_value(value: &serde_json::Value) -> Option<i64> {
-    match value {
-        serde_json::Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|value| value as i64)),
-        serde_json::Value::String(text) => {
-            let trimmed = text.trim();
-            if let Ok(ms) = trimmed.parse::<i64>() {
-                return Some(ms);
-            }
-            chrono::DateTime::parse_from_rfc3339(trimmed)
-                .ok()
-                .map(|dt| dt.timestamp_millis())
-        }
-        _ => None,
-    }
-}
-
 /// Only report-usable rows with plausible positive timestamps can advance sync
 /// progress or establish pagination ordering. Other rows remain in the raw cache.
 fn usable_cursor_event_timestamp_ms(event: &serde_json::Value, max_timestamp: i64) -> Option<i64> {
@@ -372,44 +350,47 @@ fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -
 
 /// Identity of a usage event for incremental merge.
 ///
-/// Billing fields (`chargedCents`, `tokenUsage.totalCents`) are left out so a
-/// recent event re-fetched on the next sync replaces the stored row instead
-/// of being appended beside it. `timestamp` is stored as integer milliseconds
-/// so a string, a number, and an RFC 3339 datetime for the same instant match.
-/// Known token counts use the report parser's complete projection: missing or
-/// null buckets default to zero, numbers are coerced leniently, and negatives
-/// clamp to zero. Rejected tokenUsage containers stay distinct from valid rows.
-/// Everything else participates unchanged, including unknown nested fields;
-/// only object key ordering is canonicalized.
+/// Accepted rows use the report parser's projection of every immutable known
+/// field: trimmed model/session ids (one missing-id fallback), integer timestamp
+/// and defaulted/coerced/clamped token counts. Mutable billing fields are omitted
+/// so a re-fetched correction replaces its cached row. Unknown fields remain
+/// unchanged, including tokenUsage siblings and nested metadata. Rejected rows
+/// retain their raw identity; only object key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
     let mut identity = event.clone();
-    if let Some(fields) = identity.as_object_mut() {
+    if let Some(parsed) = tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
+    {
+        // Positional rows have no top-level extensions. Preserve the raw fifth
+        // field (tokenUsage), whose object may still carry unknown siblings.
+        if !identity.is_object() {
+            identity = serde_json::json!({"tokenUsage": event.get(4)});
+        }
+        let fields = identity
+            .as_object_mut()
+            .expect("normalized usage event object");
         fields.remove("chargedCents");
         fields.remove("cursorTokenFee");
-        if let Some(ms) = fields.get("timestamp").and_then(timestamp_ms_from_value) {
-            fields.insert("timestamp".to_string(), serde_json::json!(ms));
+        fields.insert(
+            "conversationId".to_string(),
+            serde_json::json!(parsed.conversation_id),
+        );
+        fields.insert("model".to_string(), serde_json::json!(parsed.model));
+        fields.insert("timestamp".to_string(), serde_json::json!(parsed.timestamp));
+        let usage = fields
+            .entry("tokenUsage")
+            .or_insert(serde_json::Value::Null);
+        if !usage.is_object() {
+            *usage = serde_json::json!({});
         }
-        if let Some(counts) =
-            tokscale_core::sessions::cursor::parse_cursor_token_usage(fields.get("tokenUsage"))
-        {
-            // Keep unknown object fields, but use one representation for every
-            // container/known bucket the report parser accepts as equivalent.
-            let usage = fields
-                .entry("tokenUsage")
-                .or_insert(serde_json::Value::Null);
-            if !usage.is_object() {
-                *usage = serde_json::json!({});
-            }
-            let usage = usage.as_object_mut().expect("normalized tokenUsage object");
-            usage.remove("totalCents");
-            for (field, count) in [
-                ("inputTokens", counts.input),
-                ("outputTokens", counts.output),
-                ("cacheReadTokens", counts.cache_read),
-                ("cacheWriteTokens", counts.cache_write),
-            ] {
-                usage.insert(field.to_string(), serde_json::json!(count));
-            }
+        let usage = usage.as_object_mut().expect("normalized tokenUsage object");
+        usage.remove("totalCents");
+        for (field, count) in [
+            ("inputTokens", parsed.tokens.input),
+            ("outputTokens", parsed.tokens.output),
+            ("cacheReadTokens", parsed.tokens.cache_read),
+            ("cacheWriteTokens", parsed.tokens.cache_write),
+        ] {
+            usage.insert(field.to_string(), serde_json::json!(count));
         }
     }
     identity.sort_all_objects();
@@ -4103,6 +4084,319 @@ mod tests {
         );
         for row in valid.iter().chain(rejected.iter()) {
             assert!(merged.contains(row), "stored rows must remain raw");
+        }
+    }
+
+    fn parser_key_for_identity_contract(event: &serde_json::Value) -> Option<serde_json::Value> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let rows = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(rows.len() <= 1);
+        rows.first().map(|row| serde_json::json!({
+            "session":row.session_id,"model":row.model_id,"provider":row.provider_id,
+            "timestamp":row.timestamp,"tokens":[row.tokens.input,row.tokens.output,row.tokens.cache_read,row.tokens.cache_write]
+        }))
+    }
+
+    fn assert_cursor_identity_contract_group(name: &str, rows: &[serde_json::Value]) {
+        let expected = parser_key_for_identity_contract(&rows[0]).expect("accepted fixture");
+        for row in rows {
+            assert_eq!(
+                parser_key_for_identity_contract(row),
+                Some(expected.clone()),
+                "parser: {name}: {row}"
+            );
+            for previous in rows {
+                let merged = merge_cursor_usage_events(vec![previous.clone()], vec![row.clone()]);
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "equivalent {name} must merge: {previous} / {row}"
+                );
+                assert_eq!(merged[0], *row, "incoming {name} row must stay raw");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_identity_regression_session_encodings() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut fallback = Vec::new();
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" \t\u{2003}")),
+        ] {
+            let mut row = base.clone();
+            if let Some(value) = value {
+                row["conversationId"] = value;
+            } else {
+                row.as_object_mut().unwrap().remove("conversationId");
+            }
+            fallback.push(row);
+        }
+        assert_cursor_identity_contract_group("synthetic session defaults", &fallback);
+        // An explicit real id remains distinct even if it spells the synthetic
+        // session label that reporting derives for this account and day.
+        let mut explicit = fallback[0].clone();
+        explicit["conversationId"] =
+            parser_key_for_identity_contract(&fallback[0]).unwrap()["session"].clone();
+        assert_eq!(
+            parser_key_for_identity_contract(&explicit),
+            parser_key_for_identity_contract(&fallback[0])
+        );
+        assert_eq!(
+            merge_cursor_usage_events(vec![fallback[0].clone()], vec![explicit]).len(),
+            2
+        );
+        let mut numeric = base.clone();
+        numeric["conversationId"] = serde_json::json!(42);
+        let mut textual = numeric.clone();
+        textual["conversationId"] = serde_json::json!("42");
+        assert_eq!(parser_key_for_identity_contract(&numeric), None);
+        assert!(parser_key_for_identity_contract(&textual).is_some());
+        assert_eq!(
+            merge_cursor_usage_events(vec![numeric], vec![textual]).len(),
+            2
+        );
+        let mut padded = base.clone();
+        padded["conversationId"] = serde_json::json!(" \tsame-request\u{2003}");
+        assert_cursor_identity_contract_group("trimmed explicit session", &[base, padded]);
+    }
+
+    #[test]
+    fn test_cursor_identity_regression_trimmed_model() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut padded = base.clone();
+        padded["model"] = serde_json::json!("\u{2003}gpt-5 \n");
+        assert_cursor_identity_contract_group("trimmed model", &[base, padded]);
+    }
+
+    #[test]
+    fn test_cursor_identity_known_field_contract_matrix() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut equivalents = vec![base.clone()];
+        for timestamp in [
+            serde_json::json!(7_200_000),
+            serde_json::json!(7_200_000.75),
+            serde_json::json!(" 7200000 "),
+            serde_json::json!("1970-01-01T03:00:00+01:00"),
+        ] {
+            let mut row = base.clone();
+            row["timestamp"] = timestamp;
+            equivalents.push(row);
+        }
+        let mut numeric = base.clone();
+        numeric["tokenUsage"] = serde_json::json!({"inputTokens":" 10.75 ","outputTokens":20.5,"cacheReadTokens":"3e1","cacheWriteTokens":40,"totalCents":"$1,234.50"});
+        equivalents.push(numeric);
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("$1,234.50")),
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!("inf")),
+            Some(serde_json::json!({"bad":true})),
+        ] {
+            for field in ["chargedCents", "cursorTokenFee", "totalCents"] {
+                let mut row = base.clone();
+                let object = if field == "totalCents" {
+                    row["tokenUsage"].as_object_mut().unwrap()
+                } else {
+                    row.as_object_mut().unwrap()
+                };
+                if let Some(value) = &value {
+                    object.insert(field.to_string(), value.clone());
+                } else {
+                    object.remove(field);
+                }
+                equivalents.push(row);
+            }
+        }
+        let mut token_sequence = base.clone();
+        token_sequence["tokenUsage"] = serde_json::json!([10, 20, 30, 40, 99]);
+        equivalents.push(token_sequence);
+        equivalents.push(serde_json::json!([
+            "same-request",
+            7200000,
+            "gpt-5",
+            99,
+            [10, 20, 30, 40, 99]
+        ]));
+        assert_cursor_identity_contract_group(
+            "recognized fields including mutable billing",
+            &equivalents,
+        );
+
+        for timestamp in [-1, i64::MAX] {
+            let mut number = base.clone();
+            number["timestamp"] = serde_json::json!(timestamp);
+            let mut text = number.clone();
+            text["timestamp"] = serde_json::json!(timestamp.to_string());
+            assert_cursor_identity_contract_group("accepted timestamp extremes", &[number, text]);
+        }
+
+        let zero = cursor_identity_canonical_fixture([0; 4]);
+        let mut defaults = vec![
+            zero.clone(),
+            serde_json::json!(["same-request", 7200000, "gpt-5"]),
+        ];
+        for (_, usage, counts) in cursor_identity_container_cases() {
+            if counts == Some([0; 4]) {
+                defaults.push(cursor_identity_fixture(usage));
+            }
+        }
+        let mut malformed_counts = zero.clone();
+        malformed_counts["tokenUsage"] = serde_json::json!({"inputTokens":null,"outputTokens":-1,"cacheReadTokens":"bad","cacheWriteTokens":true});
+        defaults.push(malformed_counts);
+        assert_cursor_identity_contract_group("token defaults and coercion", &defaults);
+
+        let mut distinct = vec![base.clone()];
+        for (field, value) in [
+            ("conversationId", serde_json::json!("other-request")),
+            ("model", serde_json::json!("gpt-5-mini")),
+            ("model", serde_json::json!("GPT-5")),
+            ("model", serde_json::json!("gpt- 5")),
+            ("timestamp", serde_json::json!(7200001)),
+        ] {
+            let mut row = base.clone();
+            row[field] = value;
+            distinct.push(row);
+        }
+        for field in cursor_identity_token_fields() {
+            let mut row = base.clone();
+            row["tokenUsage"][field] = serde_json::json!(99);
+            distinct.push(row);
+        }
+        for (i, row) in distinct.iter().enumerate() {
+            let parsed = parser_key_for_identity_contract(row).unwrap();
+            for previous in &distinct[..i] {
+                assert_ne!(
+                    Some(parsed.clone()),
+                    parser_key_for_identity_contract(previous)
+                );
+                assert_eq!(
+                    merge_cursor_usage_events(vec![previous.clone()], vec![row.clone()]).len(),
+                    2,
+                    "distinct event must survive: {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_identity_contract_preserves_unknown_fields_and_rejected_rows() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut unknown = vec![base.clone()];
+        for (nested, key, value) in [
+            (false, "metadata", serde_json::json!({"model":" gpt-5 "})),
+            (false, "metadata", serde_json::json!({"model":"gpt-5"})),
+            (true, "futureCount", serde_json::Value::Null),
+            (true, "futureCount", serde_json::json!(0)),
+            (true, "nested", serde_json::json!({"totalCents":1})),
+            (true, "nested", serde_json::json!({"totalCents":2})),
+        ] {
+            let mut row = base.clone();
+            if nested {
+                row["tokenUsage"][key] = value;
+            } else {
+                row[key] = value;
+            }
+            assert_eq!(
+                parser_key_for_identity_contract(&row),
+                parser_key_for_identity_contract(&base)
+            );
+            if nested {
+                let sequence =
+                    serde_json::json!(["same-request", 7200000, "gpt-5", 9, row["tokenUsage"]]);
+                assert_cursor_identity_contract_group(
+                    "positional token extensions",
+                    &[row.clone(), sequence],
+                );
+            }
+            unknown.push(row);
+        }
+        let mut rejected = vec![
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!("row"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(["same-request", 7200000, "gpt-5", 1, {}, "extra"]),
+        ];
+        for (field, values) in [
+            (
+                "model",
+                vec![
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::json!(" ")),
+                    Some(serde_json::json!(42)),
+                ],
+            ),
+            (
+                "conversationId",
+                vec![
+                    Some(serde_json::json!(42)),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!([])),
+                ],
+            ),
+            (
+                "timestamp",
+                vec![
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::json!(0)),
+                    Some(serde_json::json!("0")),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!("bad")),
+                ],
+            ),
+            (
+                "tokenUsage",
+                vec![
+                    Some(serde_json::json!("0")),
+                    Some(serde_json::json!(0)),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!([1, 2, 3, 4, 5, 6])),
+                ],
+            ),
+        ] {
+            for value in values {
+                let mut row = base.clone();
+                if let Some(value) = value {
+                    row[field] = value;
+                } else {
+                    row.as_object_mut().unwrap().remove(field);
+                }
+                assert_eq!(
+                    parser_key_for_identity_contract(&row),
+                    None,
+                    "rejected row: {row}"
+                );
+                rejected.push(row);
+            }
+        }
+        let mut invalid_numeric_timestamp = base.clone();
+        invalid_numeric_timestamp["model"] = serde_json::json!(42);
+        invalid_numeric_timestamp["timestamp"] = serde_json::json!(7200000);
+        rejected.push(invalid_numeric_timestamp);
+        let expected = unknown.len() + rejected.len();
+        let all = unknown.into_iter().chain(rejected).collect::<Vec<_>>();
+        let merged = merge_cursor_usage_events(all.clone(), Vec::new());
+        assert_eq!(
+            merged.len(),
+            expected,
+            "unknown fields and rejected representations remain distinct"
+        );
+        for row in all {
+            assert!(merged.contains(&row), "raw row retained: {row}");
         }
     }
 

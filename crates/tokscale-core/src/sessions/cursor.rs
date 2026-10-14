@@ -161,10 +161,22 @@ struct CursorUsageEvent {
 }
 
 impl CursorUsageEvent {
+    fn normalized_model(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    }
+
+    fn normalized_conversation_id(&self) -> Option<&str> {
+        self.conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
     fn usable_timestamp(&self) -> Option<i64> {
-        if self.model.as_deref()?.trim().is_empty() {
-            return None;
-        }
+        self.normalized_model()?;
         let timestamp = self.timestamp.as_ref().map(parse_ms_timestamp).unwrap_or(0);
         (timestamp != 0).then_some(timestamp)
     }
@@ -234,18 +246,32 @@ impl CursorTokenUsage {
     }
 }
 
-/// Project an optional `tokenUsage` value to the counts used by Cursor reports.
-///
-/// Uses the same deserializer and projection as [`parse_cursor_events_json`],
-/// including zero defaults, lenient numeric coercion and nonnegative clamping.
-/// Missing/null usage is empty; `None` means the container would reject the row.
-/// Borrowing the value avoids cloning unknown fields just to read its counts.
-pub fn parse_cursor_token_usage(value: Option<&serde_json::Value>) -> Option<TokenBreakdown> {
-    let usage = match value {
-        Some(value) => Option::<CursorTokenUsage>::deserialize(value).ok()?,
-        None => None,
-    };
-    Some(usage.unwrap_or_default().token_breakdown())
+/// Immutable recognized fields used to match accepted Cursor usage rows.
+/// Billing values are deliberately excluded so an incoming correction replaces
+/// the cached row. An absent conversation id denotes the synthetic-session
+/// fallback within the account's cache; explicit ids remain distinct from it.
+#[derive(Debug)]
+pub struct CursorUsageEventIdentity {
+    pub conversation_id: Option<String>,
+    pub model: String,
+    pub timestamp: i64,
+    pub tokens: TokenBreakdown,
+}
+
+/// Project a row using the report parser's full deserializer and normalization.
+/// Rejected rows return `None` so callers can retain their original identity.
+/// Unknown fields are not part of this projection and must be preserved by the
+/// caller when matching raw events.
+pub fn parse_cursor_usage_event_identity(
+    value: &serde_json::Value,
+) -> Option<CursorUsageEventIdentity> {
+    let event = CursorUsageEvent::deserialize(value).ok()?;
+    Some(CursorUsageEventIdentity {
+        timestamp: event.usable_timestamp()?,
+        model: event.normalized_model()?.to_string(),
+        conversation_id: event.normalized_conversation_id().map(str::to_string),
+        tokens: event.token_usage.unwrap_or_default().token_breakdown(),
+    })
 }
 
 /// Coerce a JSON number/string into `i64`, tolerating floats and numeric
@@ -409,21 +435,22 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
         let Some(timestamp) = event.usable_timestamp() else {
             continue;
         };
-        let model = event.model.as_deref().unwrap_or_default().trim();
+        let model = event.normalized_model().expect("usable model");
 
         // Prefer the real Cursor session UUID; fall back to the legacy synthetic
         // per-day id only when the event carries no usable conversation id, so
         // its cost still lands in the account's totals.
-        let session_id = match event.conversation_id.as_deref().map(str::trim) {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => format!(
+        let session_id = match event.normalized_conversation_id() {
+            Some(id) => id.to_string(),
+            None => format!(
                 "cursor-{}-{}",
                 account_id,
                 timestamp_to_date_with_timezone(timestamp, &chrono::Utc)
             ),
         };
 
-        let token_usage = event.token_usage.unwrap_or_default();
+        let default_usage = CursorTokenUsage::default();
+        let token_usage = event.token_usage.as_ref().unwrap_or(&default_usage);
 
         // Cursor reports two different amounts. `tokenUsage.totalCents` is the
         // metered cost of the event's own tokens; `chargedCents` is what the
