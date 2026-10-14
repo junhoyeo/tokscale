@@ -3842,27 +3842,34 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_events_json_connect_error_includes_the_cause() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
-
+    fn test_usage_events_json_invalid_url_includes_the_cause() {
+        // A closed localhost port can exhaust the 2s budget on Windows before
+        // its TCP stack reports refusal. URL parsing fails before any network
+        // I/O, but still exercises reqwest's source chain through the fetcher.
+        let url = "http://[not-an-ipv6-address]/api/dashboard/get-filtered-usage-events";
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let err = runtime
             .block_on(fetch_cursor_usage_events_json_from(
-                &url,
+                url,
                 "session-token",
                 Some(Duration::from_secs(2)),
                 true,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
-            .expect_err("a refused connection must fail");
+            .expect_err("an invalid URL must fail before connecting");
         let message = cursor_sync_error_text(&err);
         assert!(
-            message.to_lowercase().contains("refused"),
-            "the source chain must name the refused connection: {message}"
+            message.contains("builder error"),
+            "reqwest's outer error must survive: {message}"
+        );
+        assert!(
+            message.contains("invalid IPv6 address"),
+            "the source chain must name the URL parser's cause: {message}"
+        );
+        assert!(
+            !message.contains("time budget"),
+            "a parser error is not a timeout: {message}"
         );
     }
 
