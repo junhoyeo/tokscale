@@ -52,8 +52,16 @@ fn gh_keyring_service(host: &str) -> String {
 
 /// Normalise a host the way a user is likely to type it into `GH_HOST`:
 /// trims whitespace, drops an `https://` / `http://` scheme and a trailing
-/// slash, and lowercases. Returns `None` for anything that is not a bare
-/// `host[:port]`, so a malformed value can never be spliced into a URL.
+/// slash, and lowercases.
+///
+/// The result is parsed, not just filtered: a DNS hostname (dot-separated
+/// labels of ASCII letters, digits and inner hyphens, no empty label and so
+/// no trailing dot) optionally followed by one `:port` in `1..=65535`. The
+/// port is written back in canonical form and dropped when it is `443`, the
+/// port every request here goes to anyway. That keeps one spelling per
+/// destination, so `github.com:443` is `github.com` both when its credential
+/// is chosen and when its URL is built. Anything else returns `None`, so a
+/// malformed value can never be spliced into a URL.
 fn normalize_gh_host(raw: &str) -> Option<String> {
     let mut host = raw.trim();
     for scheme in ["https://", "http://"] {
@@ -65,31 +73,136 @@ fn normalize_gh_host(raw: &str) -> Option<String> {
             host = rest;
         }
     }
-    let host = host.trim_end_matches('/');
-    let valid = !host.is_empty()
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
-    valid.then(|| host.to_ascii_lowercase())
+    let host = host.trim_end_matches('/').to_ascii_lowercase();
+    let (name, port) = match host.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host.as_str(), None),
+    };
+    if !is_dns_hostname(name) {
+        return None;
+    }
+    let Some(port) = port else {
+        return Some(name.to_string());
+    };
+    // Digits only, so a second `:` (or a sign, or whitespace) is rejected
+    // here rather than by `parse`.
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match port.parse::<u16>().ok()? {
+        0 => None,
+        443 => Some(name.to_string()),
+        port => Some(format!("{name}:{port}")),
+    }
+}
+
+/// An ASCII DNS hostname: 1-253 characters of dot-separated labels, each
+/// 1-63 letters, digits or hyphens and not starting or ending with a hyphen.
+fn is_dns_hostname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// The hostname of a host returned by [`normalize_gh_host`], without its port.
+fn gh_host_name(host: &str) -> &str {
+    host.split_once(':').map_or(host, |(name, _port)| name)
+}
+
+/// One `key: value` line of a block-style YAML mapping, which is how `gh`
+/// writes `hosts.yml`. `value` is empty when the key opens a nested mapping.
+#[derive(Debug, PartialEq)]
+struct YamlEntry {
+    indent: usize,
+    key: String,
+    value: String,
+}
+
+/// Read a quoted YAML scalar at the start of `text` (which begins with its
+/// quote) and return it with whatever follows the closing quote.
+fn split_quoted_yaml_scalar(text: &str) -> Option<(String, &str)> {
+    let quote = text.chars().next()?;
+    let mut out = String::new();
+    let mut chars = text.char_indices().skip(1).peekable();
+    while let Some((i, c)) = chars.next() {
+        match (quote, c) {
+            ('\'', '\'') => {
+                // `''` is an escaped quote inside a single-quoted scalar.
+                if chars.peek().is_some_and(|&(_, next)| next == '\'') {
+                    chars.next();
+                    out.push('\'');
+                } else {
+                    return Some((out, &text[i + 1..]));
+                }
+            }
+            ('"', '"') => return Some((out, &text[i + 1..])),
+            ('"', '\\') => out.push(chars.next()?.1),
+            (_, c) => out.push(c),
+        }
+    }
+    None
+}
+
+/// Parse one line of a block mapping. Blank lines, comment lines, document
+/// markers and lines that are not `key: value` (sequence items, flow
+/// collections, continuation lines) yield `None`.
+fn parse_yaml_entry(line: &str) -> Option<YamlEntry> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let rest = line.trim_start_matches([' ', '\t']);
+    let indent = line.len() - rest.len();
+    if rest.is_empty() || rest.starts_with('#') || rest == "---" || rest == "..." {
+        return None;
+    }
+    let (key, after_key) = if rest.starts_with(['"', '\'']) {
+        let (key, after) = split_quoted_yaml_scalar(rest)?;
+        (
+            key,
+            after.trim_start_matches([' ', '\t']).strip_prefix(':')?,
+        )
+    } else {
+        // A plain key ends at the first `:` followed by whitespace or the end
+        // of the line, so `ghe.example.com:8443:` keeps its port.
+        let bytes = rest.as_bytes();
+        let colon = (0..bytes.len()).find(|&i| {
+            bytes[i] == b':' && bytes.get(i + 1).is_none_or(|b| matches!(b, b' ' | b'\t'))
+        })?;
+        (rest[..colon].trim_end().to_string(), &rest[colon + 1..])
+    };
+    if !after_key.is_empty() && !after_key.starts_with([' ', '\t']) {
+        return None;
+    }
+    let value_text = after_key.trim_start_matches([' ', '\t']);
+    let value = if value_text.starts_with(['"', '\'']) {
+        split_quoted_yaml_scalar(value_text)?.0
+    } else {
+        // In a plain scalar a comment starts at a `#` that begins the value
+        // or follows whitespace; `gho_a#b` keeps its `#`.
+        let end = value_text
+            .char_indices()
+            .find(|&(i, c)| c == '#' && (i == 0 || value_text[..i].ends_with([' ', '\t'])))
+            .map_or(value_text.len(), |(i, _)| i);
+        value_text[..end].trim_end().to_string()
+    };
+    Some(YamlEntry { indent, key, value })
 }
 
 /// Top-level keys of a `gh` `hosts.yml`, i.e. every host `gh` holds a login
 /// for, in file order.
 fn hosts_in_hosts_yml(content: &str) -> Vec<String> {
     let mut hosts = Vec::new();
-    for line in content.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') {
+    for entry in content.lines().filter_map(parse_yaml_entry) {
+        if entry.indent != 0 {
             continue;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some(key) = trimmed.strip_suffix(':') else {
-            continue;
-        };
-        let key = key.trim().trim_matches(|c| c == '"' || c == '\'');
-        if let Some(host) = normalize_gh_host(key) {
+        if let Some(host) = normalize_gh_host(&entry.key) {
             if !hosts.contains(&host) {
                 hosts.push(host);
             }
@@ -131,8 +244,12 @@ fn current_gh_host() -> String {
 
 /// `github.com` and GHE.com data-residency tenants (`*.ghe.com`) share
 /// github.com's token variables in `gh`; every other host is a GHES appliance.
+///
+/// Classified by hostname alone, so the port can never pick a different
+/// credential than the host the request is sent to.
 fn is_dotcom_style_host(host: &str) -> bool {
-    host == DEFAULT_GH_HOST || host.ends_with(".ghe.com")
+    let name = gh_host_name(host);
+    name == DEFAULT_GH_HOST || name.ends_with(".ghe.com")
 }
 
 /// Environment variables holding a token for `host`, in `gh`'s precedence
@@ -495,28 +612,26 @@ fn gh_config_dir() -> std::path::PathBuf {
     home.join(".config").join("gh")
 }
 
-/// The `oauth_token` stored under `host:` in a `hosts.yml`, if any.
+/// The active `oauth_token` stored under `host:` in a `hosts.yml`, if any.
+///
+/// Only a direct child of the host's mapping counts. `gh` also keeps a token
+/// per account under `users:`, and one of those is not necessarily the
+/// account `gh` is logged in as.
 fn token_for_host_in_hosts_yml(content: &str, host: &str) -> Option<String> {
     let mut in_host = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let top_level = !line.starts_with(' ') && !line.starts_with('\t');
-        if top_level && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            // A non-indented line starts a new section.
-            in_host = trimmed
-                .strip_suffix(':')
-                .map(|key| key.trim().trim_matches(|c| c == '"' || c == '\''))
-                .and_then(normalize_gh_host)
-                .is_some_and(|key| key == host);
+    let mut child_indent = None;
+    for entry in content.lines().filter_map(parse_yaml_entry) {
+        if entry.indent == 0 {
+            in_host = normalize_gh_host(&entry.key).is_some_and(|key| key == host);
+            child_indent = None;
             continue;
         }
-        if in_host {
-            if let Some(token) = trimmed.strip_prefix("oauth_token:") {
-                let token = token.trim().trim_matches(|c| c == '"' || c == '\'');
-                if !token.is_empty() {
-                    return Some(token.to_string());
-                }
-            }
+        if !in_host {
+            continue;
+        }
+        let indent = *child_indent.get_or_insert(entry.indent);
+        if entry.indent == indent && entry.key == "oauth_token" && !entry.value.is_empty() {
+            return Some(entry.value);
         }
     }
     None
@@ -1221,5 +1336,140 @@ mod tests {
         assert!(probe.contains("host=other.example"), "got: {probe}");
         assert!(probe.contains("GH_ENTERPRISE_TOKEN="), "got: {probe}");
         assert!(!probe.contains("gho_ghe"), "probe leaked a token: {probe}");
+    }
+
+    #[test]
+    fn host_ports_are_parsed_and_443_is_dropped() {
+        let cases = [
+            ("github.com:443", Some("github.com")),
+            ("tenant.ghe.com:443", Some("tenant.ghe.com")),
+            ("https://GitHub.com:0443/", Some("github.com")),
+            ("ghe.example.com:8443", Some("ghe.example.com:8443")),
+            ("ghe.example.com:08443", Some("ghe.example.com:8443")),
+            ("github.com:", None),
+            ("github.com:abc", None),
+            ("github.com:+443", None),
+            ("github.com:0", None),
+            ("github.com:65536", None),
+            ("github.com:443:1", None),
+            ("ghe.example.com::8443", None),
+            (":443", None),
+            ("github.com.", None),
+            ("github..com", None),
+            ("-ghe.example.com", None),
+            ("ghe-.example.com", None),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(normalize_gh_host(raw).as_deref(), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn credential_audience_matches_the_host_the_request_reaches() {
+        for raw in [
+            "github.com",
+            "github.com:443",
+            "acme.ghe.com:443",
+            "ghe.example.com",
+            "ghe.example.com:443",
+            "ghe.example.com:8443",
+        ] {
+            let host = normalize_gh_host(raw).unwrap();
+            // Parse the URL the way `fetch_api` sends it, and check the host
+            // it reaches is the one the credential was chosen for.
+            let url = reqwest::Url::parse(&copilot_user_url(&host)).unwrap();
+            let reached = url.host_str().unwrap().strip_prefix("api.").unwrap();
+            assert_eq!(reached, gh_host_name(&host), "input {raw:?}");
+            let dotcom = reached == "github.com" || reached.ends_with(".ghe.com");
+            assert_eq!(is_dotcom_style_host(&host), dotcom, "input {raw:?}");
+        }
+        assert_eq!(
+            token_env_vars(&normalize_gh_host("github.com:443").unwrap()),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert_eq!(
+            token_env_vars(&normalize_gh_host("tenant.ghe.com:443").unwrap()),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert_eq!(
+            token_env_vars("github.com:8443"),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        // A malformed GH_HOST is ignored, not classified on its own.
+        assert_eq!(select_gh_host(Some("github.com:"), &[]), "github.com");
+        assert_eq!(select_gh_host(Some("github.com:443"), &[]), "github.com");
+    }
+
+    #[test]
+    fn hosts_yml_allows_comments_and_quoted_keys() {
+        let yml = "# gh hosts\n\
+                   \"github.com\": # personal\n    oauth_token: gho_dotcom # active\n\
+                   'ghe.example.com':   # work\n    user: b\n    oauth_token: 'gho_ghe'\n\
+                   ghe2.example.com:8443:\n    oauth_token: \"gho_#2\"\n";
+        assert_eq!(
+            hosts_in_hosts_yml(yml),
+            vec!["github.com", "ghe.example.com", "ghe2.example.com:8443"]
+        );
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "github.com").as_deref(),
+            Some("gho_dotcom")
+        );
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "ghe.example.com").as_deref(),
+            Some("gho_ghe")
+        );
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "ghe2.example.com:8443").as_deref(),
+            Some("gho_#2")
+        );
+    }
+
+    #[test]
+    fn hosts_yml_reads_the_active_token_not_a_per_user_one() {
+        let yml = "ghe.example.com:\r\n    users:\r\n        other:\r\n            oauth_token: gho_other\r\n        me:\r\n            oauth_token: gho_me\r\n    oauth_token: gho_me # active\r\n    user: me\r\n";
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "ghe.example.com").as_deref(),
+            Some("gho_me")
+        );
+        let no_active =
+            "ghe.example.com:\n    users:\n        other:\n            oauth_token: gho_other\n";
+        assert_eq!(
+            token_for_host_in_hosts_yml(no_active, "ghe.example.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn hosts_yml_key_with_port_443_matches_the_bare_host() {
+        let yml = "github.com:443:\n    oauth_token: gho_dotcom\n";
+        assert_eq!(hosts_in_hosts_yml(yml), vec!["github.com"]);
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "github.com").as_deref(),
+            Some("gho_dotcom")
+        );
+    }
+
+    #[test]
+    fn yaml_entry_parsing() {
+        let entry = |indent, key: &str, value: &str| {
+            Some(YamlEntry {
+                indent,
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+        };
+        assert_eq!(parse_yaml_entry("a: b"), entry(0, "a", "b"));
+        assert_eq!(parse_yaml_entry("  a:"), entry(2, "a", ""));
+        assert_eq!(parse_yaml_entry("a: b#c"), entry(0, "a", "b#c"));
+        assert_eq!(parse_yaml_entry("a: b #c"), entry(0, "a", "b"));
+        assert_eq!(parse_yaml_entry("a: # c"), entry(0, "a", ""));
+        assert_eq!(
+            parse_yaml_entry("'it''s': \"x\\\"y\""),
+            entry(0, "it's", "x\"y")
+        );
+        assert_eq!(parse_yaml_entry("# a: b"), None);
+        assert_eq!(parse_yaml_entry("---"), None);
+        assert_eq!(parse_yaml_entry("- a"), None);
+        assert_eq!(parse_yaml_entry("\"unterminated: x"), None);
     }
 }
