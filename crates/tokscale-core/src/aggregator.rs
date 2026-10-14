@@ -22,6 +22,7 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
     // Parallel aggregation using fold/reduce pattern
     let daily_map: HashMap<String, DayAccumulator> = messages
         .into_par_iter()
+        .filter(|msg| !crate::claude_desktop::is_undated_balance(msg))
         .fold(
             || HashMap::with_capacity(estimated_days),
             |mut acc: HashMap<String, DayAccumulator>, msg| {
@@ -59,6 +60,9 @@ pub struct DailyFold {
 
 impl DailyFold {
     pub fn add(&mut self, message: &UnifiedMessage) {
+        if crate::claude_desktop::is_undated_balance(message) {
+            return;
+        }
         self.days
             .entry(message.date.clone())
             .or_default()

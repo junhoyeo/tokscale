@@ -105,6 +105,10 @@ impl CustomModelPricing {
 
         Ok(ModelPricing {
             input_cost_per_token,
+            // The upstream 100K fields have provider-specific request-wide
+            // semantics. Custom pricing keeps its existing generic tier schema
+            // instead of silently opting users into Anthropic's policy.
+            input_cost_per_token_above_100k_tokens: None,
             input_cost_per_token_above_128k_tokens: price_field(
                 self.input_cost_per_million_tokens_above_128k_tokens,
                 self.input_cost_per_token_above_128k_tokens,
@@ -130,6 +134,7 @@ impl CustomModelPricing {
                 "input_cost_per_token_above_272k_tokens",
             )?,
             output_cost_per_token,
+            output_cost_per_token_above_100k_tokens: None,
             output_cost_per_token_above_128k_tokens: price_field(
                 self.output_cost_per_million_tokens_above_128k_tokens,
                 self.output_cost_per_token_above_128k_tokens,
@@ -160,6 +165,7 @@ impl CustomModelPricing {
                 "cache_creation_input_token_cost_per_million_tokens",
                 "cache_creation_input_token_cost",
             )?,
+            cache_creation_input_token_cost_above_100k_tokens: None,
             cache_creation_input_token_cost_above_200k_tokens: price_field(
                 self.cache_creation_input_token_cost_per_million_tokens_above_200k_tokens,
                 self.cache_creation_input_token_cost_above_200k_tokens,
@@ -172,6 +178,7 @@ impl CustomModelPricing {
                 "cache_creation_input_token_cost_per_million_tokens_above_1hr",
                 "cache_creation_input_token_cost_above_1hr",
             )?,
+            cache_creation_input_token_cost_above_1hr_above_100k_tokens: None,
             cache_creation_input_token_cost_above_1hr_above_200k_tokens: price_field(
                 self.cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens,
                 self.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
@@ -184,6 +191,7 @@ impl CustomModelPricing {
                 "cache_read_input_token_cost_per_million_tokens",
                 "cache_read_input_token_cost",
             )?,
+            cache_read_input_token_cost_above_100k_tokens: None,
             cache_read_input_token_cost_above_200k_tokens: price_field(
                 self.cache_read_input_token_cost_per_million_tokens_above_200k_tokens,
                 self.cache_read_input_token_cost_above_200k_tokens,

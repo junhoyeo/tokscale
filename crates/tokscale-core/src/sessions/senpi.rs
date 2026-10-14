@@ -10,7 +10,8 @@
 //!
 //! OmO task children are senpi sessions too. The scanner checks both
 //! `~/.senpi/agent/sessions` and `~/.omo/agent/sessions` (the `omo-ai` 5.1.0+ layout),
-//! honors `SENPI_CODING_AGENT_SESSION_DIR` and `OMO_CODING_AGENT_SESSION_DIR`,
+//! honors `SENPI_CODING_AGENT_SESSION_DIR`, takes relocated OmO directories from
+//! `scanner.extraScanPaths.senpi` in settings.json (no OmO environment variable),
 //! discovers `.omo/senpi-task/children` under both the supplied home and the
 //! current project, and recovers every other project's children root from the `cwd`
 //! recorded in session headers (including those in `extraScanPaths`), so child

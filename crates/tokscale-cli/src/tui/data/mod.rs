@@ -444,6 +444,7 @@ pub struct UsageData {
     pub sessions_rolled: Vec<SessionUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
+    pub undated_tokens: u64,
     pub total_cost: f64,
     pub loading: bool,
     pub error: Option<String>,
@@ -1669,6 +1670,12 @@ impl DataLoader {
             sessions_rolled,
             graph: Some(graph),
             total_tokens,
+            undated_tokens: messages
+                .iter()
+                .filter(|m| tokscale_core::claude_desktop::is_undated_balance(m))
+                .fold(0u64, |total, m| {
+                    total.saturating_add(m.tokens.total().max(0) as u64)
+                }),
             total_cost,
             loading: false,
             error: None,
@@ -2089,6 +2096,35 @@ mod tests {
             find_peak_hour(&[hour(18, 50), hour(3, 80)]).map(|peak| peak.0),
             Some(3)
         );
+    }
+
+    #[test]
+    fn desktop_undated_balances_appear_in_models_but_not_calendar() {
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "claude-future",
+            "anthropic",
+            "s",
+            0,
+            CoreTokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        message.date = tokscale_core::claude_desktop::UNKNOWN_DATE.into();
+        message.message_count = 0;
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let data = loader
+            .aggregate_messages(vec![message], &GroupBy::Model)
+            .unwrap();
+        assert_eq!(data.total_tokens, 100);
+        assert_eq!(data.undated_tokens, 100);
+        assert_eq!(data.models.len(), 1);
+        assert!(data.daily.is_empty());
+        assert!(data.hourly.is_empty());
+        assert!(data.minutely.is_empty());
+        assert!(data.monthly.is_empty());
     }
 
     #[test]

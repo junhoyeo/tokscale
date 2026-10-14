@@ -3614,6 +3614,14 @@ fn test_models_json_output() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
+    assert_eq!(
+        json["undatedTokens"],
+        serde_json::json!({
+            "input":0, "output":0, "cacheRead":0, "cacheWrite":0,
+            "cacheWrite1h":0, "reasoning":0,
+        })
+    );
+
     assert!(json.get("groupBy").is_some(), "Missing groupBy field");
     assert!(json.get("entries").is_some(), "Missing entries field");
     assert!(json.get("totalInput").is_some(), "Missing totalInput");
@@ -5198,7 +5206,7 @@ fn test_clients_json_includes_claude_desktop_diagnostic() {
     let diagnostics = claude["diagnostics"].as_array().unwrap();
 
     assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
+        item["code"] == "claude_desktop_partial_history"
             && item["severity"] == "warning"
             && item["message"]
                 .as_str()
@@ -5332,8 +5340,8 @@ fn test_clients_home_override_ignores_conflicting_claude_config_dir_env() {
     let diagnostics = claude["diagnostics"].as_array().unwrap();
     let desktop_diagnostic = diagnostics
         .iter()
-        .find(|item| item["code"] == "claude_desktop_not_scanned")
-        .expect("claude_desktop_not_scanned diagnostic should be present");
+        .find(|item| item["code"] == "claude_desktop_partial_history")
+        .expect("claude_desktop_partial_history diagnostic should be present");
     let paths = desktop_diagnostic["paths"].as_array().unwrap();
 
     for label in ["claudeCodeProjects", "claudeCodeTranscripts"] {
@@ -5367,7 +5375,7 @@ fn test_clients_command_includes_claude_desktop_diagnostic_text() {
             "Claude Desktop app data was detected",
         ))
         .stdout(predicate::str::contains(
-            "Claude Code JSONL transcripts only",
+            "Local transcripts and available conversation-cache counters",
         ));
 }
 
@@ -5386,11 +5394,11 @@ fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude
     let diagnostics = json["diagnostics"].as_array().unwrap();
 
     assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
+        item["code"] == "claude_desktop_partial_history"
             && item["message"]
                 .as_str()
                 .unwrap()
-                .contains("Tokscale counts Claude Code JSONL transcripts")
+                .contains("Local transcripts and available conversation-cache counters")
     }));
 }
 

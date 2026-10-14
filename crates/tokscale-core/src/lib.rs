@@ -3,6 +3,7 @@
 mod aggregator;
 pub mod bucket_tz;
 mod cc_mirror;
+pub mod claude_desktop;
 pub mod clients;
 pub mod content_extractor;
 pub mod fs_atomic;
@@ -648,6 +649,17 @@ pub struct ModelReport {
     pub processing_time_ms: u32,
 }
 
+/// Model totals with local source coverage. The original [`ModelReport`] and
+/// [`get_model_report`] keep their public shape for existing Rust consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelReportV2 {
+    #[serde(flatten)]
+    pub report: ModelReport,
+    /// Included in the all-time total, excluded from every dated report.
+    pub undated_tokens: TokenBreakdown,
+    pub claude_desktop_cache: Option<claude_desktop::Coverage>,
+}
+
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
@@ -979,8 +991,27 @@ fn parse_all_messages_with_pricing_with_cache_policy(
     scanner_settings: &scanner::ScannerSettings,
     cache_policy: SourceCachePolicy,
 ) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_coverage(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        cache_policy,
+    )
+    .0
+}
+
+fn parse_all_messages_with_coverage(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    cache_policy: SourceCachePolicy,
+) -> (Vec<UnifiedMessage>, Option<claude_desktop::Coverage>) {
     let mut messages: Vec<UnifiedMessage> = Vec::new();
-    parse_all_messages_streaming(
+    let coverage = parse_all_messages_streaming(
         home_dir,
         clients,
         pricing,
@@ -996,16 +1027,99 @@ fn parse_all_messages_with_pricing_with_cache_policy(
         clients,
         timezone.is_pinned().then_some(&timezone),
     );
-    messages
+    (messages, coverage)
 }
 
-fn emit_missing_codex_usage_warning(missing_files: usize, inspected_files: usize) {
-    let message = (missing_files > 0).then(|| {
+fn codex_missing_usage_warning(missing_files: usize, inspected_files: usize) -> Option<String> {
+    (missing_files > 0).then(|| {
         format!(
             "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
         )
+    })
+}
+
+fn codex_archive_failure_warning(
+    mut failures: Vec<sessions::codex::CodexArchiveFailure>,
+) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+
+    failures.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.reason().cmp(&right.reason()))
     });
-    tui_signal::update_codex_usage_warning(message);
+    failures.dedup_by(|left, right| left.path == right.path);
+    let decode_failures = failures
+        .iter()
+        .filter(|failure| failure.reason() == sessions::codex::CodexArchiveFailureReason::Decode)
+        .count();
+    let size_limit_failures = failures
+        .iter()
+        .filter(|failure| {
+            failure.reason() == sessions::codex::CodexArchiveFailureReason::DecodedSizeLimit
+        })
+        .count();
+    let open_failures = failures
+        .iter()
+        .filter(|failure| failure.reason() == sessions::codex::CodexArchiveFailureReason::Open)
+        .count();
+    let mut categories = Vec::new();
+    if decode_failures > 0 {
+        categories.push(format!(
+            "{decode_failures} decode failure{}",
+            if decode_failures == 1 { "" } else { "s" }
+        ));
+    }
+    if size_limit_failures > 0 {
+        let limit_mib = sessions::utils::MAX_ARCHIVE_BYTES / (1024 * 1024);
+        categories.push(format!(
+            "{size_limit_failures} exceeded the {limit_mib} MiB decoded-size limit"
+        ));
+    }
+    if open_failures > 0 {
+        categories.push(format!(
+            "{open_failures} open failure{}",
+            if open_failures == 1 { "" } else { "s" }
+        ));
+    }
+
+    let total = failures.len();
+    let examples = failures
+        .iter()
+        .take(2)
+        .map(|failure| {
+            format!(
+                "{:?} ({})",
+                failure.path,
+                failure.cause_summary().escape_debug()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Warning: skipped {total} unreadable compressed Codex rollout file{} ({}). Recorded token totals may omit {}. Example{}: {examples}.",
+        if total == 1 { "" } else { "s" },
+        categories.join("; "),
+        if total == 1 { "this file" } else { "these files" },
+        if total == 1 { "" } else { "s" },
+    ))
+}
+
+fn emit_codex_scan_warnings(
+    missing_files: usize,
+    inspected_files: usize,
+    archive_failures: Vec<sessions::codex::CodexArchiveFailure>,
+) {
+    let mut warnings = Vec::new();
+    if let Some(warning) = codex_missing_usage_warning(missing_files, inspected_files) {
+        warnings.push(warning);
+    }
+    if let Some(warning) = codex_archive_failure_warning(archive_failures) {
+        warnings.push(warning);
+    }
+    tui_signal::update_codex_scan_warnings(warnings);
 }
 
 fn parse_all_messages_streaming<S: MessageSink>(
@@ -1016,7 +1130,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
     scanner_settings: &scanner::ScannerSettings,
     cache_policy: SourceCachePolicy,
     sink: &mut S,
-) {
+) -> Option<claude_desktop::Coverage> {
+    let mut desktop_coverage = None;
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
@@ -1053,12 +1168,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// outcome rather than on its messages because it is a property of the
     /// file: the openclaw lane matches OpenClaw's per-turn mirror rows against
     /// it whether the messages were parsed just now or served from the cache.
-    /// The final flag diagnoses own Codex activity without supported usage,
-    /// including sources that emit no messages at all.
+    /// The flags diagnose own Codex activity without supported usage, and the
+    /// optional archive failure keeps an unreadable compressed source visible
+    /// even though failed parses are deliberately never cached.
     type CodexSourceOutcome = (
         CachedParseOutcome,
         sessions::codex::CodexTurnCoverage,
         (bool, bool),
+        Option<sessions::codex::CodexArchiveFailure>,
     );
 
     fn parse_full_log_source(
@@ -1077,6 +1194,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             parsed.is_missing_usage(),
             parsed.state.has_own_synthetic_activity,
         );
+        let archive_failure = parsed.archive_failure.clone();
         let messages = finalize_codex_messages(
             parsed.messages.clone(),
             pricing,
@@ -1094,6 +1212,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 },
                 turn_coverage,
                 missing_usage,
+                archive_failure,
             );
         }
 
@@ -1114,6 +1233,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             },
             turn_coverage,
             missing_usage,
+            archive_failure,
         )
     }
 
@@ -1969,10 +2089,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
         if let Some(cached) = cached {
             let reparse_from_start = |invalidate_cache: bool| {
-                let (mut outcome, turn_coverage, missing_usage) =
+                let (mut outcome, turn_coverage, missing_usage, archive_failure) =
                     parse_full_log_source(path, pricing, is_headless);
                 outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
-                (outcome, turn_coverage, missing_usage)
+                (outcome, turn_coverage, missing_usage, archive_failure)
             };
 
             if cached.fingerprint == fingerprint {
@@ -2007,6 +2127,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         },
                         turn_coverage,
                         missing_usage,
+                        None,
                     );
                 }
 
@@ -2065,6 +2186,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                                     },
                                     turn_coverage,
                                     missing_usage,
+                                    None,
                                 );
                             }
                         }
@@ -2267,7 +2389,21 @@ fn parse_all_messages_streaming<S: MessageSink>(
             source_cache.insert(entry);
         }
     }
-    all_messages.extend(claude_messages.into_iter().map(|(_, message)| message));
+    let mut claude_messages: Vec<_> = claude_messages
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    if clients.is_empty() || clients.iter().any(|client| client == "claude") {
+        let desktop = claude_desktop::read(Path::new(home_dir));
+        if desktop.coverage.cache_databases > 0 {
+            desktop_coverage = Some(desktop.coverage.clone());
+        }
+        desktop.merge_into(&mut claude_messages);
+        for message in &mut claude_messages {
+            apply_pricing_if_available(message, pricing);
+        }
+    }
+    all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
 
     // Rollouts OpenClaw drove through Codex app-server leave the codex parser
@@ -2302,10 +2438,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let inspected_codex_files = codex_outcomes.len();
     let include_codex_diagnostic = include_all || clients.iter().any(|client| client == "codex");
     let mut missing_codex_usage_files = 0;
-    for (path, (outcome, turn_coverage, missing_usage)) in codex_outcomes {
+    let mut codex_archive_failures = Vec::new();
+    for (path, (outcome, turn_coverage, missing_usage, archive_failure)) in codex_outcomes {
         missing_codex_usage_files += usize::from(
             missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
         );
+        if let Some(failure) = archive_failure {
+            codex_archive_failures.push(failure);
+        }
         let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in outcome.messages {
@@ -2341,8 +2481,6 @@ fn parse_all_messages_streaming<S: MessageSink>(
             );
         }
     }
-
-    emit_missing_codex_usage_warning(missing_codex_usage_files, inspected_codex_files);
 
     // Release Codex before Copilot. This has to sit ahead of the Copilot
     // lane rather than after it: the desktop/vscode blocks below scan
@@ -2671,7 +2809,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
             })
             .collect();
         let mut rollout_messages = std::mem::take(&mut openclaw_owned_rollouts);
-        for (path, (outcome, turn_coverage, _missing_usage)) in rollout_outcomes {
+        for (path, (outcome, turn_coverage, _missing_usage, archive_failure)) in rollout_outcomes {
+            if let Some(failure) = archive_failure {
+                codex_archive_failures.push(failure);
+            }
             let thread_from_name = sessions::codex::thread_id_from_rollout_path(&path);
             let mut recorded_thread: Option<String> = None;
             for mut message in outcome.messages {
@@ -3652,6 +3793,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    emit_codex_scan_warnings(
+        missing_codex_usage_files,
+        inspected_codex_files,
+        codex_archive_failures,
+    );
+
     if cache_policy == SourceCachePolicy::Persistent {
         source_cache.save_if_dirty();
     }
@@ -3660,6 +3807,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // They now run per message inside `flush_lane`, which is also where the
     // messages are released.
     flush_lane(&mut all_messages, &flush_context, sink);
+    desktop_coverage
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
@@ -3739,6 +3887,9 @@ fn filter_unified_messages(
     options: &LocalParseOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
+    if options.year.is_some() || options.since.is_some() || options.until.is_some() {
+        filtered.retain(|message| !claude_desktop::is_undated_balance(message));
+    }
 
     if let Some(year) = &options.year {
         let year_prefix = format!("{}-", year);
@@ -4245,6 +4396,11 @@ fn model_report_token_totals(entries: &[ModelUsage]) -> (i64, i64, i64, i64) {
 }
 
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    Ok(get_model_report_v2(options).await?.report)
+}
+
+/// Generate model totals together with undated usage and Desktop coverage.
+pub async fn get_model_report_v2(options: ReportOptions) -> Result<ModelReportV2, String> {
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -4259,15 +4415,22 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+    let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
         &home_dir,
         &clients,
         pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
+        SourceCachePolicy::Persistent,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
+    let mut undated_tokens = TokenBreakdown::default();
+    for message in &filtered {
+        if claude_desktop::is_undated_balance(message) {
+            undated_tokens.add_assign_saturating(&message.tokens);
+        }
+    }
     let entries = aggregate_model_usage_entries_with_rollup(
         filtered,
         &options.group_by,
@@ -4282,15 +4445,19 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     // any non-zero total.
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
-    Ok(ModelReport {
-        entries,
-        total_input,
-        total_output,
-        total_cache_read,
-        total_cache_write,
-        total_messages,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
+    Ok(ModelReportV2 {
+        undated_tokens,
+        claude_desktop_cache,
+        report: ModelReport {
+            entries,
+            total_input,
+            total_output,
+            total_cache_read,
+            total_cache_write,
+            total_messages,
+            total_cost,
+            processing_time_ms: start.elapsed().as_millis() as u32,
+        },
     })
 }
 
@@ -4421,7 +4588,7 @@ fn aggregate_hourly_usage_entries(
     let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
 
     for msg in messages {
-        if recovery::is_daily(&msg) {
+        if recovery::is_daily(&msg) || claude_desktop::is_undated_balance(&msg) {
             continue;
         }
         let hour_key = if msg.timestamp > 0 {
@@ -4772,6 +4939,11 @@ impl<'a> GraphSink<'a> {
 
 impl MessageSink for GraphSink<'_> {
     fn accept(&mut self, message: UnifiedMessage) {
+        // Cumulative Desktop balances have no day attribution. They belong in
+        // all-time local totals, never daily graphs or leaderboard submissions.
+        if claude_desktop::is_undated_balance(&message) {
+            return;
+        }
         if let Some(options) = self.filter {
             if !message_passes_report_filter(&message, options) {
                 return;
@@ -5157,6 +5329,11 @@ fn validate_priced_messages(
 /// caller can drop a message on arrival instead of materializing the whole
 /// corpus and then retaining over it.
 fn message_passes_report_filter(message: &UnifiedMessage, options: &ReportOptions) -> bool {
+    if claude_desktop::is_undated_balance(message)
+        && (options.year.is_some() || options.since.is_some() || options.until.is_some())
+    {
+        return false;
+    }
     if let Some(year) = &options.year {
         // Matching the prefix in place rather than building `format!("{year}-")`
         // keeps this predicate allocation-free. The streaming path runs it once
@@ -5568,7 +5745,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(micode_msgs);
 
     let claude_home = PathBuf::from(&home_dir);
-    let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
+    let claude_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
@@ -5577,24 +5754,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 parent_cache,
                 Some(&claude_home),
             )
-            .into_iter()
-            .map(|msg| {
-                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                (dedup_key, unified_to_parsed(&msg))
-            })
-            .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
-
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_msgs: Vec<ParsedMessage> = claude_msgs_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
-    let claude_count = claude_msgs.len() as i32;
-    counts.set(ClientId::Claude, claude_count);
+    let mut claude_messages = Vec::new();
+    let mut indices = HashMap::new();
+    for message in claude_raw {
+        if let Some(key) = &message.dedup_key {
+            if let Some(index) = indices.get(key).copied() {
+                merge_claude_cross_file_duplicate(
+                    &mut claude_messages[index],
+                    &mut false,
+                    message,
+                    false,
+                    None,
+                );
+                continue;
+            }
+            indices.insert(key.clone(), claude_messages.len());
+        }
+        claude_messages.push(message);
+    }
+    if include_all || clients.iter().any(|client| client == "claude") {
+        claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
+    }
+    let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
+    // Advisor calls and undated Desktop balances add usage, not extra replies.
+    counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
     messages.extend(claude_msgs);
 
     type LocalCodexSourceOutcome = (
@@ -5602,6 +5788,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         Vec<UnifiedMessage>,
         sessions::codex::CodexTurnCoverage,
         (bool, bool),
+        Option<sessions::codex::CodexArchiveFailure>,
     );
     let codex_files: Vec<LocalCodexSourceOutcome> = scan_result
         .get(ClientId::Codex)
@@ -5617,6 +5804,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 parsed.is_missing_usage(),
                 parsed.state.has_own_synthetic_activity,
             );
+            let archive_failure = parsed.archive_failure.clone();
             let messages = parsed
                 .messages
                 .into_iter()
@@ -5630,6 +5818,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 messages,
                 parsed.state.turn_coverage,
                 missing_usage,
+                archive_failure,
             )
         })
         .collect();
@@ -5647,10 +5836,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let inspected_codex_files = codex_files.len();
     let include_codex_diagnostic = include_all || requested.contains("codex");
     let mut missing_codex_usage_files = 0;
-    for (path, file_messages, turn_coverage, missing_usage) in codex_files {
+    let mut codex_archive_failures = Vec::new();
+    for (path, file_messages, turn_coverage, missing_usage, archive_failure) in codex_files {
         missing_codex_usage_files += usize::from(
             missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
         );
+        if let Some(failure) = archive_failure {
+            codex_archive_failures.push(failure);
+        }
         let mut owned_thread: Option<String> = None;
         let mut counted_under_codex = false;
         for message in file_messages {
@@ -5680,7 +5873,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
     }
-    emit_missing_codex_usage_warning(missing_codex_usage_files, inspected_codex_files);
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
@@ -5851,33 +6043,40 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
         let mut rollout_messages: Vec<UnifiedMessage> = openclaw_owned_rollouts;
-        let location_rollouts: Vec<(Vec<UnifiedMessage>, sessions::codex::CodexTurnCoverage)> =
-            openclaw_codex_rollouts
-                .par_iter()
-                .map(|path| {
-                    let thread_from_name = sessions::codex::thread_id_from_rollout_path(path);
-                    let parsed = sessions::codex::parse_codex_file_incremental(
-                        path,
-                        0,
-                        sessions::codex::CodexParseState::default(),
-                    );
-                    let messages = parsed
-                        .messages
-                        .into_iter()
-                        .map(|mut message| {
-                            if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
-                                message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
-                                if let Some(thread) = &thread_from_name {
-                                    message.session_id = thread.clone();
-                                }
+        let location_rollouts: Vec<(
+            Vec<UnifiedMessage>,
+            sessions::codex::CodexTurnCoverage,
+            Option<sessions::codex::CodexArchiveFailure>,
+        )> = openclaw_codex_rollouts
+            .par_iter()
+            .map(|path| {
+                let thread_from_name = sessions::codex::thread_id_from_rollout_path(path);
+                let parsed = sessions::codex::parse_codex_file_incremental(
+                    path,
+                    0,
+                    sessions::codex::CodexParseState::default(),
+                );
+                let archive_failure = parsed.archive_failure.clone();
+                let messages = parsed
+                    .messages
+                    .into_iter()
+                    .map(|mut message| {
+                        if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
+                            message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                            if let Some(thread) = &thread_from_name {
+                                message.session_id = thread.clone();
                             }
-                            message
-                        })
-                        .collect::<Vec<_>>();
-                    (messages, parsed.state.turn_coverage)
-                })
-                .collect();
-        for (messages, turn_coverage) in location_rollouts {
+                        }
+                        message
+                    })
+                    .collect::<Vec<_>>();
+                (messages, parsed.state.turn_coverage, archive_failure)
+            })
+            .collect();
+        for (messages, turn_coverage, archive_failure) in location_rollouts {
+            if let Some(failure) = archive_failure {
+                codex_archive_failures.push(failure);
+            }
             if let Some(first) = messages.first() {
                 recorded_codex_turns.record(&first.session_id, &turn_coverage);
             }
@@ -5926,6 +6125,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let openclaw_count = openclaw_msgs.len() as i32;
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
+    emit_codex_scan_warnings(
+        missing_codex_usage_files,
+        inspected_codex_files,
+        codex_archive_failures,
+    );
 
     // Pi branch/fork copies prior assistant records into a new session file
     // (#1306); the parser stamps cross-session keys, drop the copies here too
@@ -6866,6 +7070,9 @@ fn filter_parsed_messages(
     options: &LocalParseOptions,
 ) -> Vec<ParsedMessage> {
     let mut filtered = messages;
+    if options.year.is_some() || options.since.is_some() || options.until.is_some() {
+        filtered.retain(|m| !(m.timestamp == 0 && m.date == claude_desktop::UNKNOWN_DATE));
+    }
 
     if let Some(year) = &options.year {
         let year_prefix = format!("{}-", year);
@@ -6991,6 +7198,58 @@ mod tests {
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
         assert_eq!(daily[0].token_breakdown.output, 26);
+    }
+
+    #[test]
+    fn desktop_undated_balances_are_local_all_time_only() {
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "claude-future",
+            "anthropic",
+            "session",
+            0,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        message.date = crate::claude_desktop::UNKNOWN_DATE.into();
+        message.message_count = 0;
+        assert!(message_passes_report_filter(
+            &message,
+            &ReportOptions::default()
+        ));
+        for options in [
+            ReportOptions {
+                since: Some("2020-01-01".into()),
+                ..Default::default()
+            },
+            ReportOptions {
+                until: Some("2030-01-01".into()),
+                ..Default::default()
+            },
+            ReportOptions {
+                year: Some("2026".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(!message_passes_report_filter(&message, &options));
+        }
+        let mut sink = GraphSink::new(None, None, GraphPricingRequirement::Submission);
+        sink.accept(message.clone());
+        assert!(sink.buffer.is_empty());
+        assert!(crate::aggregate_by_date(vec![message.clone()]).is_empty());
+        assert!(aggregate_monthly_usage_v2_entries(vec![message.clone()]).is_empty());
+        assert!(aggregate_hourly_usage_entries(
+            vec![message.clone()],
+            crate::BucketTimezone::from_scanner_settings(&Default::default())
+        )
+        .is_empty());
+        assert_eq!(
+            aggregate_model_usage_entries(vec![message], &GroupBy::Model)[0].input,
+            100
+        );
     }
 
     #[test]
@@ -7430,6 +7689,273 @@ mod tests {
                 message.contains("contain Codex activity but no supported usage records")
             })
             .collect()
+    }
+
+    fn take_codex_archive_warnings() -> Vec<String> {
+        crate::tui_signal::take_deferred_stderr_for_test()
+            .into_iter()
+            .filter(|message| message.contains("unreadable compressed Codex rollout"))
+            .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn codex_fallback_copy_dedup_is_content_sensitive_cold_warm_and_local() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let identical = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2}}}}"#,
+            "\n"
+        );
+        let diverged_archive = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":3}}}}"#,
+            "\n"
+        );
+        let diverged_live = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"output_tokens":4}}}}"#,
+            "\n"
+        );
+        let prefix_snapshot = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40,"output_tokens":5}}}}"#,
+            "\n"
+        );
+        let prefix_append = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"output_tokens":6}}}}"#,
+            "\n"
+        );
+        let timestamped = concat!(
+            r#"{"type":"session_meta","payload":{"id":"logical-timestamped"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":7,"output_tokens":1}}}}"#,
+            "\n"
+        );
+        for (name, plain, archive) in [
+            ("identical", identical, identical),
+            ("diverged", diverged_live, diverged_archive),
+            ("prefix", prefix_snapshot, prefix_snapshot),
+            ("timestamped", timestamped, timestamped),
+        ] {
+            std::fs::write(sessions.join(format!("{name}.jsonl")), plain).unwrap();
+            std::fs::write(
+                sessions.join(format!("{name}.jsonl.zst")),
+                zstd::encode_all(archive.as_bytes(), 0).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let clients = vec!["codex".to_string()];
+        let home = source_home.path().to_str().unwrap();
+        let cold = parse_all_messages_with_pricing(home, &clients, None);
+        assert_eq!(cold.len(), 5, "cold cache must retain both diverged rows");
+        assert_eq!(
+            cold.iter().map(|message| message.tokens.input).sum::<i64>(),
+            107
+        );
+        let cold_keys = cold
+            .iter()
+            .map(|message| message.dedup_key.as_deref().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(cold_keys.len(), 5);
+        assert!(cold_keys.contains("codex:usage-fallback:9:identical:0:5:gpt-5:10:2:0:0:0:0"));
+        assert!(cold_keys.contains("codex:usage-fallback:8:diverged:0:5:gpt-5:20:3:0:0:0:0"));
+        assert!(cold_keys.contains("codex:usage-fallback:8:diverged:0:5:gpt-5:30:4:0:0:0:0"));
+        assert!(cold_keys.contains("codex:usage-fallback:6:prefix:0:5:gpt-5:40:5:0:0:0:0"));
+        assert!(cold_keys.contains("codex:token_count:1790812801000:openai:gpt-5:7:1:0:0:0"));
+
+        let mut live_prefix = std::fs::OpenOptions::new()
+            .append(true)
+            .open(sessions.join("prefix.jsonl"))
+            .unwrap();
+        live_prefix.write_all(prefix_append.as_bytes()).unwrap();
+        live_prefix.flush().unwrap();
+        drop(live_prefix);
+
+        let assert_grown_usage = |label: &str, messages: &[UnifiedMessage]| {
+            assert_eq!(messages.len(), 6, "{label}");
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                157,
+                "{label}"
+            );
+            let keys = messages
+                .iter()
+                .map(|message| message.dedup_key.as_deref().unwrap())
+                .collect::<HashSet<_>>();
+            assert_eq!(keys.len(), 6, "{label}");
+            assert!(
+                keys.contains("codex:usage-fallback:9:identical:0:5:gpt-5:10:2:0:0:0:0"),
+                "identical copies must collapse ({label})"
+            );
+            assert!(
+                keys.contains("codex:usage-fallback:8:diverged:0:5:gpt-5:20:3:0:0:0:0")
+                    && keys.contains("codex:usage-fallback:8:diverged:0:5:gpt-5:30:4:0:0:0:0"),
+                "same-ordinal rows with different usage must both survive ({label})"
+            );
+            assert!(
+                keys.contains("codex:usage-fallback:6:prefix:0:5:gpt-5:40:5:0:0:0:0")
+                    && keys.contains("codex:usage-fallback:6:prefix:1:5:gpt-5:50:6:0:0:0:0"),
+                "a prefix snapshot must not duplicate the prefix or hide the live suffix ({label})"
+            );
+            assert!(
+                keys.contains("codex:token_count:1790812801000:openai:gpt-5:7:1:0:0:0"),
+                "the existing timestamp-derived key must remain byte-identical ({label})"
+            );
+        };
+
+        let warm_after_append = parse_all_messages_with_pricing(home, &clients, None);
+        assert_grown_usage("warm incremental append", &warm_after_append);
+        let warm_unchanged = parse_all_messages_with_pricing(home, &clients, None);
+        assert_grown_usage("warm unchanged cache", &warm_unchanged);
+
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string()),
+            use_env_roots: false,
+            clients: Some(clients),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(direct.counts.get(ClientId::Codex), 6);
+        assert_eq!(
+            direct
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            157
+        );
+    }
+
+    #[test]
+    fn codex_archive_warning_includes_tui_safe_underlying_cause() {
+        let warning =
+            super::codex_archive_failure_warning(vec![sessions::codex::CodexArchiveFailure::open(
+                std::path::Path::new("/tmp/permission.jsonl.zst"),
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied\nretry",
+                ),
+            )])
+            .unwrap();
+
+        assert!(warning.contains(
+            r#"/tmp/permission.jsonl.zst" (open failed: permission denied\nretry [PermissionDenied])"#
+        ));
+        assert_eq!(
+            warning.lines().count(),
+            1,
+            "the TUI warning must stay on one line"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn unreadable_codex_archives_warn_on_cached_and_local_scans() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let content = concat!(
+            r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}"#,
+            "\n"
+        );
+        let encoded = zstd::encode_all(content.as_bytes(), 0).unwrap();
+        let good_path = sessions.join("good.jsonl.zst");
+        let corrupt_path = sessions.join("copy.jsonl.zst");
+        let plain_copy_path = sessions.join("copy.jsonl");
+        let truncated_path = sessions.join("truncated.jsonl.zst");
+        let capped_path = sessions.join("capped.jsonl.zst");
+        std::fs::write(&good_path, &encoded).unwrap();
+        std::fs::write(&plain_copy_path, content).unwrap();
+        std::fs::write(&corrupt_path, b"not a zstd stream").unwrap();
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        std::fs::write(&truncated_path, truncated).unwrap();
+        std::fs::write(&capped_path, &encoded).unwrap();
+        let limit = sessions::codex::register_archive_limit_override(&capped_path, 32);
+
+        let clients = vec!["codex".to_string()];
+        let home = source_home.path().to_str().unwrap();
+        let scan_cached = || parse_all_messages_with_pricing(home, &clients, None);
+        let assert_warning = |warning: &str| {
+            assert!(warning.contains("skipped 3 unreadable compressed Codex rollout files"));
+            assert!(warning.contains("2 decode failures"));
+            assert!(warning.contains("1 exceeded the 256 MiB decoded-size limit"));
+            assert!(warning.contains("Recorded token totals may omit these files"));
+            assert!(warning.contains("capped.jsonl.zst\" (decoded size limit exceeded"));
+            assert!(warning.contains("copy.jsonl.zst\" (decode failed"));
+            assert!(!warning.contains("truncated.jsonl.zst"));
+            assert_eq!(
+                warning.matches(".jsonl.zst").count(),
+                2,
+                "the aggregate should expose at most two escaped example paths"
+            );
+        };
+
+        let cold = scan_cached();
+        assert_eq!(cold.len(), 2);
+        assert_eq!(
+            cold.iter()
+                .map(|message| message.session_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["copy", "good"]),
+            "the readable plain copy retains its usage while its archive is skipped"
+        );
+        let warnings = take_codex_archive_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_warning(&warnings[0]);
+
+        // Failed parses are not cached. Repeated scans must report them again,
+        // while the TUI keeps only the latest aggregate instead of duplicates.
+        for _ in 0..2 {
+            let warm = scan_cached();
+            assert_eq!(warm.len(), 2);
+        }
+        let warnings = take_codex_archive_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_warning(&warnings[0]);
+
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(direct.counts.get(ClientId::Codex), 2);
+        let warnings = take_codex_archive_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_warning(&warnings[0]);
+
+        std::fs::write(&corrupt_path, &encoded).unwrap();
+        std::fs::write(&truncated_path, &encoded).unwrap();
+        drop(limit);
+        assert_eq!(scan_cached().len(), 4);
+        assert!(
+            take_codex_archive_warnings().is_empty(),
+            "a scan of readable archives must clear the stale warning"
+        );
     }
 
     #[test]
@@ -10918,6 +11444,47 @@ mod tests {
             assert_eq!(parsed.messages[0].input, 100);
             assert_eq!(parsed.messages[0].output, 20);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_counts_claude_advisor_rows_as_part_of_the_reply() {
+        // One assistant reply that consulted an advisor model yields two rows
+        // (the reply and its advisor call) but is still one Claude message.
+        let source_home = tempfile::TempDir::new().unwrap();
+        let project = source_home.path().join(".claude/projects/repro");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("live.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-10-02T20:10:51.000Z","requestId":"req_adv","message":{"id":"msg_adv","model":"claude-opus-5-5","usage":{"input_tokens":4,"output_tokens":779,"iterations":[{"type":"advisor_message","model":"claude-fable-5-1","input_tokens":114995,"output_tokens":2343}]}}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["claude".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.messages.len(), 2, "reply row plus advisor row");
+        assert_eq!(
+            parsed.counts.get(ClientId::Claude),
+            1,
+            "an advisor call is not a second Claude message"
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.message_count)
+                .sum::<i32>(),
+            1
+        );
     }
 
     #[test]

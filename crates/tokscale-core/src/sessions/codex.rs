@@ -20,7 +20,12 @@ use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::Mutex;
 
 /// Agents-tab bucket for a regular interactive Codex thread. Codex stamps each
 /// spawned thread with a random `agent_nickname` (a scientist/philosopher
@@ -372,6 +377,11 @@ pub(crate) struct CodexParseState {
     /// incremental re-parses.
     #[serde(default)]
     pub turn_id_announced_by_task_started: bool,
+    /// Number of native token-count and headless usage events already visited.
+    /// This is persisted so fallback-timestamp rows keep a stable ordinal when
+    /// a live rollout is parsed incrementally from a cached offset.
+    #[serde(default)]
+    pub usage_event_ordinal: u64,
     /// The turns this rollout has recorded usage for so far; see
     /// [`CodexTurnCoverage`]. `#[serde(default)]` keeps it across incremental
     /// re-parses, since a mirror row for an earlier turn still has to yield.
@@ -446,12 +456,99 @@ fn codex_originator_is_openclaw(originator: Option<&str>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("openclaw"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CodexArchiveFailureReason {
+    Decode,
+    DecodedSizeLimit,
+    Open,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexArchiveFailureCause {
+    Decode {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+    DecodedSizeLimit {
+        limit_bytes: u64,
+    },
+    Open {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexArchiveFailure {
+    pub path: PathBuf,
+    pub cause: CodexArchiveFailureCause,
+}
+
+impl CodexArchiveFailure {
+    pub(crate) fn open(path: &Path, error: std::io::Error) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            cause: CodexArchiveFailureCause::Open {
+                kind: error.kind(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn decode(path: &Path, error: std::io::Error) -> Self {
+        Self::decode_parts(path, error.kind(), error.to_string())
+    }
+
+    fn decode_parts(path: &Path, kind: std::io::ErrorKind, message: String) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            cause: CodexArchiveFailureCause::Decode { kind, message },
+        }
+    }
+
+    fn decoded_size_limit(path: &Path, limit_bytes: u64) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            cause: CodexArchiveFailureCause::DecodedSizeLimit { limit_bytes },
+        }
+    }
+
+    pub(crate) fn reason(&self) -> CodexArchiveFailureReason {
+        match &self.cause {
+            CodexArchiveFailureCause::Decode { .. } => CodexArchiveFailureReason::Decode,
+            CodexArchiveFailureCause::DecodedSizeLimit { .. } => {
+                CodexArchiveFailureReason::DecodedSizeLimit
+            }
+            CodexArchiveFailureCause::Open { .. } => CodexArchiveFailureReason::Open,
+        }
+    }
+
+    pub(crate) fn cause_summary(&self) -> String {
+        match &self.cause {
+            CodexArchiveFailureCause::Decode { kind, message } => {
+                format!("decode failed: {message} [{kind:?}]")
+            }
+            CodexArchiveFailureCause::DecodedSizeLimit { limit_bytes } => {
+                format!("decoded size limit exceeded: more than {limit_bytes} bytes")
+            }
+            CodexArchiveFailureCause::Open { kind, message } => {
+                format!("open failed: {message} [{kind:?}]")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedCodexFile {
     pub messages: Vec<UnifiedMessage>,
     pub fallback_timestamp_indices: Vec<usize>,
     pub consumed_offset: u64,
     pub parse_succeeded: bool,
+    /// Set only for an I/O or zstd-boundary failure while reading a compressed
+    /// rollout. Malformed decoded JSON remains a parser failure, not an archive
+    /// read failure.
+    pub archive_failure: Option<CodexArchiveFailure>,
+    reader_error: Option<(std::io::ErrorKind, String)>,
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
@@ -461,6 +558,68 @@ impl ParsedCodexFile {
     pub(crate) fn is_missing_usage(&self) -> bool {
         self.parse_succeeded && self.state.is_missing_usage()
     }
+}
+
+#[cfg(test)]
+static ARCHIVE_LIMIT_OVERRIDES: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
+
+/// Keeps one path-scoped decoded-size limit installed for a test. The exact
+/// path lookup reaches Rayon workers without a process-wide tuning variable.
+#[cfg(test)]
+pub(crate) struct ArchiveLimitOverrideGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ArchiveLimitOverrideGuard {
+    fn drop(&mut self) {
+        let Ok(mut overrides) = ARCHIVE_LIMIT_OVERRIDES.lock() else {
+            return;
+        };
+        if let Some(overrides) = overrides.as_mut() {
+            overrides.remove(&self.path);
+        }
+        if matches!(overrides.as_ref(), Some(overrides) if overrides.is_empty()) {
+            *overrides = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_archive_limit_override(
+    path: &Path,
+    max_bytes: u64,
+) -> ArchiveLimitOverrideGuard {
+    let path = path.to_path_buf();
+    let inserted = {
+        let mut overrides = ARCHIVE_LIMIT_OVERRIDES.lock().unwrap();
+        let overrides = overrides.get_or_insert_with(HashMap::new);
+        if overrides.contains_key(&path) {
+            false
+        } else {
+            overrides.insert(path.clone(), max_bytes);
+            true
+        }
+    };
+    assert!(
+        inserted,
+        "a Codex archive limit override is already registered for this path"
+    );
+    ArchiveLimitOverrideGuard { path }
+}
+
+fn archive_limit_for_path(_path: &Path) -> u64 {
+    #[cfg(test)]
+    if let Some(max_bytes) = ARCHIVE_LIMIT_OVERRIDES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|overrides| overrides.get(_path).copied())
+    {
+        return max_bytes;
+    }
+
+    MAX_ARCHIVE_BYTES
 }
 
 impl CodexParseState {
@@ -479,6 +638,12 @@ impl CodexParseState {
             .unwrap_or("openai");
         self.has_own_synthetic_activity |= super::synthetic::is_synthetic_gateway(model, provider);
         self.has_own_activity = true;
+    }
+
+    fn next_usage_event_ordinal(&mut self) -> u64 {
+        let ordinal = self.usage_event_ordinal;
+        self.usage_event_ordinal = self.usage_event_ordinal.saturating_add(1);
+        ordinal
     }
 }
 
@@ -515,6 +680,19 @@ fn looks_like_explicit_workspace_path(path: &str) -> bool {
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
+#[derive(Debug)]
+struct CodexFallbackDedupIdentity {
+    rollout_id: String,
+    usage_event_ordinal: u64,
+}
+
+#[derive(Debug)]
+struct PendingCodexMessage {
+    message: UnifiedMessage,
+    used_fallback_timestamp: bool,
+    fallback_dedup: Option<CodexFallbackDedupIdentity>,
+}
+
 fn parse_codex_reader<R: BufRead>(
     mut reader: R,
     session_id: &str,
@@ -528,6 +706,7 @@ fn parse_codex_reader<R: BufRead>(
     let mut line = String::with_capacity(4096);
     let mut consumed_offset = start_offset;
     let mut parse_succeeded = true;
+    let mut reader_error = None;
     let mut pending_model_messages = Vec::new();
     let mut unresolved_model_events = false;
 
@@ -536,8 +715,9 @@ fn parse_codex_reader<R: BufRead>(
         let bytes_read = match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(bytes_read) => bytes_read,
-            Err(_) => {
+            Err(error) => {
                 parse_succeeded = false;
+                reader_error = Some((error.kind(), error.to_string()));
                 break;
             }
         };
@@ -596,6 +776,10 @@ fn parse_codex_reader<R: BufRead>(
                     None
                 };
                 let event_model = payload_model.clone().or(info_model.clone());
+                // Count every native token event, including ledger snapshots
+                // that accounting later skips. Its position in the logical
+                // rollout is stable across plain and compressed copies.
+                let usage_event_ordinal = is_token_count.then(|| state.next_usage_event_ordinal());
 
                 // The turn the following token_count rows belong to. Both
                 // `task_started` and `turn_context` start a turn, so each
@@ -1044,7 +1228,7 @@ fn parse_codex_reader<R: BufRead>(
                         message.is_turn_start = true;
                         state.pending_turn_start = false;
                     }
-                    if parsed_timestamp.is_some() || total_usage.is_some() {
+                    let fallback_dedup = if parsed_timestamp.is_some() || total_usage.is_some() {
                         // Fork/subagent children replay the same upstream
                         // token_count history into many sibling files. Those
                         // replays carry identical cumulative totals but a
@@ -1064,7 +1248,32 @@ fn parse_codex_reader<R: BufRead>(
                             dedup_scope_id,
                             total_usage,
                         );
-                    }
+                        None
+                    } else {
+                        // A timestamp-less, last-only row used to have no key,
+                        // so a live rollout and its `.jsonl.zst` copy were both
+                        // counted. The logical rollout, event ordinal, model,
+                        // and emitted usage stay stable across identical copies,
+                        // while the usage fingerprint keeps a rewritten live
+                        // row distinct from an older archive at the same ordinal.
+                        // This only stabilizes identity: after the plain file is
+                        // removed, the archive can still move the row's day to
+                        // its newer mtime because the original mtime is absent.
+                        let identity = CodexFallbackDedupIdentity {
+                            rollout_id: state
+                                .session_id_from_meta
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| session_id.to_string()),
+                            usage_event_ordinal: usage_event_ordinal
+                                .expect("a token_count has an event ordinal"),
+                        };
+                        if let Some(model) = model.as_deref() {
+                            set_codex_fallback_dedup_key(&mut message, model, &identity);
+                        }
+                        Some(identity)
+                    };
                     message.set_workspace(
                         state.session_workspace_key.clone(),
                         state.session_workspace_label.clone(),
@@ -1083,7 +1292,11 @@ fn parse_codex_reader<R: BufRead>(
                             fallback_timestamp_indices.push(messages.len() - 1);
                         }
                     } else {
-                        pending_model_messages.push((message, parsed_timestamp.is_none()));
+                        pending_model_messages.push(PendingCodexMessage {
+                            message,
+                            used_fallback_timestamp: parsed_timestamp.is_none(),
+                            fallback_dedup,
+                        });
                     }
                     handled = true;
                 }
@@ -1157,6 +1370,8 @@ fn parse_codex_reader<R: BufRead>(
         fallback_timestamp_indices,
         consumed_offset,
         parse_succeeded,
+        archive_failure: None,
+        reader_error,
         unresolved_model_events,
         state,
     }
@@ -1373,14 +1588,44 @@ fn set_codex_dedup_key(
     }
 }
 
+fn set_codex_fallback_dedup_key(
+    message: &mut UnifiedMessage,
+    model: &str,
+    identity: &CodexFallbackDedupIdentity,
+) {
+    if message.dedup_key.is_none() {
+        message.dedup_key = Some(format!(
+            "codex:usage-fallback:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            identity.rollout_id.len(),
+            identity.rollout_id,
+            identity.usage_event_ordinal,
+            model.len(),
+            model,
+            message.tokens.input,
+            message.tokens.output,
+            message.tokens.cache_read,
+            message.tokens.cache_write,
+            message.tokens.cache_write_1h,
+            message.tokens.reasoning
+        ));
+    }
+}
+
 fn flush_pending_model_messages(
-    pending_model_messages: &mut Vec<(UnifiedMessage, bool)>,
+    pending_model_messages: &mut Vec<PendingCodexMessage>,
     messages: &mut Vec<UnifiedMessage>,
     fallback_timestamp_indices: &mut Vec<usize>,
     model: &str,
 ) {
-    for (mut message, used_fallback_timestamp) in pending_model_messages.drain(..) {
-        if !used_fallback_timestamp {
+    for pending in pending_model_messages.drain(..) {
+        let PendingCodexMessage {
+            mut message,
+            used_fallback_timestamp,
+            fallback_dedup,
+        } = pending;
+        if let Some(identity) = fallback_dedup.as_ref() {
+            set_codex_fallback_dedup_key(&mut message, model, identity);
+        } else if !used_fallback_timestamp {
             let upstream_session_id = message.session_id.clone();
             set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
@@ -1393,7 +1638,7 @@ fn flush_pending_model_messages(
 }
 
 fn flush_pending_model_messages_as_unknown(
-    pending_model_messages: &mut Vec<(UnifiedMessage, bool)>,
+    pending_model_messages: &mut Vec<PendingCodexMessage>,
     messages: &mut Vec<UnifiedMessage>,
     fallback_timestamp_indices: &mut Vec<usize>,
     unresolved_model_events: &mut bool,
@@ -1451,6 +1696,23 @@ fn forked_child_should_skip_inherited_snapshot(
     false
 }
 
+fn failed_codex_parse(
+    state: CodexParseState,
+    consumed_offset: u64,
+    archive_failure: Option<CodexArchiveFailure>,
+) -> ParsedCodexFile {
+    ParsedCodexFile {
+        messages: Vec::new(),
+        fallback_timestamp_indices: Vec::new(),
+        consumed_offset,
+        parse_succeeded: false,
+        archive_failure,
+        reader_error: None,
+        unresolved_model_events: false,
+        state,
+    }
+}
+
 pub(crate) fn parse_codex_file_incremental(
     path: &Path,
     start_offset: u64,
@@ -1461,60 +1723,42 @@ pub(crate) fn parse_codex_file_incremental(
 
     if is_zst_path(path) {
         if start_offset != 0 {
-            return ParsedCodexFile {
-                messages: Vec::new(),
-                fallback_timestamp_indices: Vec::new(),
-                consumed_offset: start_offset,
-                parse_succeeded: false,
-                unresolved_model_events: false,
-                state,
-            };
+            return failed_codex_parse(state, start_offset, None);
         }
 
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
-                return ParsedCodexFile {
-                    messages: Vec::new(),
-                    fallback_timestamp_indices: Vec::new(),
-                    consumed_offset: 0,
-                    parse_succeeded: false,
-                    unresolved_model_events: false,
-                    state,
-                };
+                return failed_codex_parse(state, 0, Some(CodexArchiveFailure::open(path, error)));
             }
         };
 
         let mut decoder = match zstd::stream::read::Decoder::new(file) {
-            Ok(d) => d,
+            Ok(decoder) => decoder,
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
-                return ParsedCodexFile {
-                    messages: Vec::new(),
-                    fallback_timestamp_indices: Vec::new(),
-                    consumed_offset: 0,
-                    parse_succeeded: false,
-                    unresolved_model_events: false,
+                return failed_codex_parse(
                     state,
-                };
+                    0,
+                    Some(CodexArchiveFailure::decode(path, error)),
+                );
             }
         };
         if let Err(error) = decoder.window_log_max(26) {
-            tracing::warn!(path = %path.display(), %error, "Skipping Codex archive");
-            return ParsedCodexFile {
-                messages: Vec::new(),
-                fallback_timestamp_indices: Vec::new(),
-                consumed_offset: 0,
-                parse_succeeded: false,
-                unresolved_model_events: false,
-                state,
-            };
+            return failed_codex_parse(state, 0, Some(CodexArchiveFailure::decode(path, error)));
         }
 
-        let reader = BufReader::new(decoder.take(MAX_ARCHIVE_BYTES + 1));
+        let archive_limit = archive_limit_for_path(path);
+        let reader = BufReader::new(decoder.take(archive_limit.saturating_add(1)));
         let mut parsed = parse_codex_reader(reader, &session_id, fallback_timestamp, 0, state);
-        if parsed.consumed_offset > MAX_ARCHIVE_BYTES || !parsed.parse_succeeded {
+        parsed.archive_failure = if parsed.consumed_offset > archive_limit {
+            Some(CodexArchiveFailure::decoded_size_limit(path, archive_limit))
+        } else if let Some((kind, message)) = parsed.reader_error.take() {
+            // Corrupt and truncated frames surface while the decoder is read.
+            Some(CodexArchiveFailure::decode_parts(path, kind, message))
+        } else {
+            None
+        };
+        if parsed.archive_failure.is_some() || !parsed.parse_succeeded {
             parsed.messages.clear();
             parsed.fallback_timestamp_indices.clear();
             parsed.parse_succeeded = false;
@@ -1524,27 +1768,11 @@ pub(crate) fn parse_codex_file_incremental(
 
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => {
-            return ParsedCodexFile {
-                messages: Vec::new(),
-                fallback_timestamp_indices: Vec::new(),
-                consumed_offset: start_offset,
-                parse_succeeded: false,
-                unresolved_model_events: false,
-                state,
-            };
-        }
+        Err(_) => return failed_codex_parse(state, start_offset, None),
     };
 
     if file.seek(SeekFrom::Start(start_offset)).is_err() {
-        return ParsedCodexFile {
-            messages: Vec::new(),
-            fallback_timestamp_indices: Vec::new(),
-            consumed_offset: start_offset,
-            parse_succeeded: false,
-            unresolved_model_events: false,
-            state,
-        };
+        return failed_codex_parse(state, start_offset, None);
     }
 
     let reader = BufReader::new(file);
@@ -1649,6 +1877,7 @@ fn parse_codex_headless_line(
     }
 
     let usage = extract_headless_usage(&value)?;
+    let usage_event_ordinal = state.next_usage_event_ordinal();
     state.has_supported_usage |= usage.has_supported_counters;
     let model = usage
         .model
@@ -1671,26 +1900,38 @@ fn parse_codex_headless_line(
         state.session_agent.clone()
     };
 
-    Some((
-        UnifiedMessage::new_with_agent(
-            "codex",
-            model,
-            provider,
-            session_id.to_string(),
-            timestamp,
-            TokenBreakdown {
-                input: usage.input.max(0),
-                output: usage.output.max(0),
-                cache_read: usage.cached.max(0),
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-            0.0,
-            agent,
-        ),
-        usage.timestamp_ms.is_none(),
-    ))
+    let used_fallback_timestamp = usage.timestamp_ms.is_none();
+    let mut message = UnifiedMessage::new_with_agent(
+        "codex",
+        model.clone(),
+        provider,
+        session_id.to_string(),
+        timestamp,
+        TokenBreakdown {
+            input: usage.input.max(0),
+            output: usage.output.max(0),
+            cache_read: usage.cached.max(0),
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+        },
+        0.0,
+        agent,
+    );
+    if used_fallback_timestamp {
+        let identity = CodexFallbackDedupIdentity {
+            rollout_id: state
+                .session_id_from_meta
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| session_id.to_string()),
+            usage_event_ordinal,
+        };
+        set_codex_fallback_dedup_key(&mut message, &model, &identity);
+    }
+
+    Some((message, used_fallback_timestamp))
 }
 
 fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
@@ -4222,6 +4463,180 @@ mod tests {
     }
 
     #[test]
+    fn fallback_usage_dedup_keys_are_copy_stable_and_event_specific() {
+        let dir = TempDir::new().unwrap();
+        let content = concat!(
+            r#"{"type":"session_meta","payload":{"id":"logical-rollout"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2}}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2}}}}"#,
+            "\n",
+            r#"{"type":"metadata","model":"gpt-5"}"#,
+            "\n"
+        );
+        let plain_path = dir.path().join("fallback.jsonl");
+        let zst_path = dir.path().join("fallback.jsonl.zst");
+        std::fs::write(&plain_path, content).unwrap();
+        std::fs::write(&zst_path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
+
+        let plain = parse_codex_file(&plain_path);
+        let compressed = parse_codex_file(&zst_path);
+        let plain_keys = plain
+            .iter()
+            .map(|message| message.dedup_key.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        let compressed_keys = compressed
+            .iter()
+            .map(|message| message.dedup_key.as_deref().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(plain.len(), 2);
+        assert_eq!(compressed_keys, plain_keys);
+        assert_eq!(
+            plain_keys,
+            vec![
+                "codex:usage-fallback:15:logical-rollout:0:5:gpt-5:7:3:3:0:0:2",
+                "codex:usage-fallback:15:logical-rollout:1:5:gpt-5:7:3:3:0:0:2",
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_usage_dedup_key_covers_every_emitted_token_bucket() {
+        let identity = CodexFallbackDedupIdentity {
+            rollout_id: "all-buckets".to_string(),
+            usage_event_ordinal: 0,
+        };
+        let key_for = |tokens: TokenBreakdown| {
+            let mut message =
+                UnifiedMessage::new("codex", "gpt-5", "openai", "all-buckets", 0, tokens, 0.0);
+            set_codex_fallback_dedup_key(&mut message, "gpt-5", &identity);
+            message.dedup_key.unwrap()
+        };
+        let mut keys = std::collections::HashSet::new();
+        keys.insert(key_for(TokenBreakdown::default()));
+        for tokens in [
+            TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
+            TokenBreakdown {
+                output: 1,
+                ..Default::default()
+            },
+            TokenBreakdown {
+                cache_read: 1,
+                ..Default::default()
+            },
+            TokenBreakdown {
+                cache_write: 1,
+                ..Default::default()
+            },
+            TokenBreakdown {
+                cache_write_1h: 1,
+                ..Default::default()
+            },
+            TokenBreakdown {
+                reasoning: 1,
+                ..Default::default()
+            },
+        ] {
+            keys.insert(key_for(tokens));
+        }
+        assert_eq!(
+            keys.len(),
+            7,
+            "every emitted token bucket must affect identity"
+        );
+    }
+
+    #[test]
+    fn fallback_usage_ordinal_survives_incremental_resume() {
+        let first_event = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2}}}}"#,
+            "\n"
+        );
+        let second_event = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":11,"output_tokens":3}}}}"#,
+            "\n"
+        );
+        let mut file = create_test_file(&format!(
+            "{}\n{}\n{first_event}",
+            r#"{"type":"session_meta","payload":{"id":"incremental-rollout"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+        ));
+        let initial = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(initial.messages.len(), 1);
+        assert_eq!(initial.state.usage_event_ordinal, 1);
+        assert_eq!(
+            initial.messages[0].dedup_key.as_deref(),
+            Some("codex:usage-fallback:19:incremental-rollout:0:5:gpt-5:10:2:0:0:0:0")
+        );
+        let initial_key = initial.messages[0].dedup_key.clone().unwrap();
+
+        file.as_file_mut()
+            .write_all(second_event.as_bytes())
+            .unwrap();
+        file.as_file_mut().flush().unwrap();
+        let appended =
+            parse_codex_file_incremental(file.path(), initial.consumed_offset, initial.state);
+
+        assert_eq!(appended.messages.len(), 1);
+        assert_eq!(appended.state.usage_event_ordinal, 2);
+        assert_eq!(
+            appended.messages[0].dedup_key.as_deref(),
+            Some("codex:usage-fallback:19:incremental-rollout:1:5:gpt-5:11:3:0:0:0:0")
+        );
+        let resumed_keys = [initial_key, appended.messages[0].dedup_key.clone().unwrap()];
+        let full_keys = parse_codex_file(file.path())
+            .into_iter()
+            .map(|message| message.dedup_key.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(full_keys, resumed_keys);
+    }
+
+    #[test]
+    fn headless_fallback_usage_identity_is_copy_stable_and_content_sensitive() {
+        let dir = TempDir::new().unwrap();
+        let content = concat!(
+            r#"{"type":"session_meta","payload":{"id":"headless-rollout"}}"#,
+            "\n",
+            r#"{"type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":12,"output_tokens":3}}"#,
+            "\n"
+        );
+        let diverged = concat!(
+            r#"{"type":"session_meta","payload":{"id":"headless-rollout"}}"#,
+            "\n",
+            r#"{"type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":13,"output_tokens":4}}"#,
+            "\n"
+        );
+        let plain_path = dir.path().join("headless.jsonl");
+        let zst_path = dir.path().join("headless.jsonl.zst");
+        std::fs::write(&plain_path, content).unwrap();
+        std::fs::write(&zst_path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
+
+        let plain = parse_codex_file(&plain_path);
+        let compressed = parse_codex_file(&zst_path);
+
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].dedup_key, compressed[0].dedup_key);
+        assert_eq!(
+            plain[0].dedup_key.as_deref(),
+            Some("codex:usage-fallback:16:headless-rollout:0:6:gpt-4o:12:3:0:0:0:0")
+        );
+
+        std::fs::write(&plain_path, diverged).unwrap();
+        let rewritten = parse_codex_file(&plain_path);
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(
+            rewritten[0].dedup_key.as_deref(),
+            Some("codex:usage-fallback:16:headless-rollout:0:6:gpt-4o:13:4:0:0:0:0")
+        );
+        assert_ne!(rewritten[0].dedup_key, compressed[0].dedup_key);
+    }
+
+    #[test]
     fn compressed_archives_preserve_codex_usage_and_session_identity() {
         let dir = TempDir::new().unwrap();
         let content = concat!(
@@ -4241,6 +4656,11 @@ mod tests {
         assert_eq!(expected[0].tokens.output, 10);
         assert_eq!(expected[0].tokens.reasoning, 10);
         assert_eq!(expected[0].tokens.total(), 160);
+        assert_eq!(
+            expected[0].dedup_key.as_deref(),
+            Some("codex:token_count-total:fixture:openai:gpt-5:140:20:30:10"),
+            "the normal timestamped fixture's existing key must not change"
+        );
 
         let zst_path = dir.path().join("fixture.jsonl.zst");
         std::fs::write(&zst_path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
@@ -4249,24 +4669,91 @@ mod tests {
 
         let incremental = parse_codex_file_incremental(&zst_path, 0, CodexParseState::default());
         assert!(incremental.parse_succeeded);
+        assert!(incremental.archive_failure.is_none());
         assert_eq!(incremental.messages, expected);
     }
 
     #[test]
-    fn invalid_or_truncated_compressed_codex_archive_does_not_emit_partial_usage() {
+    fn compressed_archive_open_failure_retains_io_cause() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("rollout.jsonl.zst");
+        let missing_path = dir.path().join("missing.jsonl.zst");
+        let parsed = parse_codex_file_incremental(&missing_path, 0, CodexParseState::default());
+
+        assert!(!parsed.parse_succeeded);
+        assert!(parsed.messages.is_empty());
+        let failure = parsed.archive_failure.expect("missing archive failure");
+        assert_eq!(failure.path, missing_path);
+        match failure.cause {
+            CodexArchiveFailureCause::Open { kind, message } => {
+                assert_eq!(kind, ErrorKind::NotFound);
+                assert!(!message.is_empty(), "the OS error text must be retained");
+            }
+            cause => panic!("expected an open failure, got {cause:?}"),
+        }
+    }
+
+    #[test]
+    fn unreadable_compressed_codex_archives_report_typed_failures_without_partial_usage() {
+        let dir = TempDir::new().unwrap();
         let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
 {"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150},"last_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}}"#;
+
+        let assert_decode_failure = |failure: Option<CodexArchiveFailure>, path: &Path| {
+            let failure = failure.expect("decode failure");
+            assert_eq!(failure.path, path);
+            match failure.cause {
+                CodexArchiveFailureCause::Decode { message, .. } => {
+                    assert!(!message.is_empty(), "the zstd error text must be retained");
+                }
+                cause => panic!("expected a decode failure, got {cause:?}"),
+            }
+        };
+
+        let truncated_path = dir.path().join("truncated.jsonl.zst");
         let mut bytes = zstd::encode_all(&content[..], 0).unwrap();
         bytes.pop();
-        std::fs::write(&path, bytes).unwrap();
-        assert!(parse_codex_file(&path).is_empty());
-        let incremental = parse_codex_file_incremental(&path, 0, CodexParseState::default());
-        assert!(!incremental.parse_succeeded);
-        assert!(incremental.messages.is_empty());
+        std::fs::write(&truncated_path, bytes).unwrap();
+        assert!(parse_codex_file(&truncated_path).is_empty());
+        let truncated =
+            parse_codex_file_incremental(&truncated_path, 0, CodexParseState::default());
+        assert!(!truncated.parse_succeeded);
+        assert!(truncated.messages.is_empty());
+        assert_decode_failure(truncated.archive_failure, &truncated_path);
 
-        std::fs::write(&path, b"not a zstd stream").unwrap();
-        assert!(parse_codex_file(&path).is_empty());
+        let corrupt_path = dir.path().join("corrupt.jsonl.zst");
+        std::fs::write(&corrupt_path, b"not a zstd stream").unwrap();
+        assert!(parse_codex_file(&corrupt_path).is_empty());
+        let corrupt = parse_codex_file_incremental(&corrupt_path, 0, CodexParseState::default());
+        assert!(!corrupt.parse_succeeded);
+        assert!(corrupt.messages.is_empty());
+        assert_decode_failure(corrupt.archive_failure, &corrupt_path);
+
+        let capped_path = dir.path().join("capped.jsonl.zst");
+        std::fs::write(&capped_path, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let _limit = register_archive_limit_override(&capped_path, 32);
+        let capped = parse_codex_file_incremental(&capped_path, 0, CodexParseState::default());
+        assert!(!capped.parse_succeeded);
+        assert!(capped.messages.is_empty());
+        let capped_failure = capped.archive_failure.expect("decoded-size failure");
+        assert_eq!(capped_failure.path, capped_path);
+        assert_eq!(
+            capped_failure.cause,
+            CodexArchiveFailureCause::DecodedSizeLimit { limit_bytes: 32 }
+        );
+
+        let malformed_path = dir.path().join("malformed.jsonl.zst");
+        std::fs::write(
+            &malformed_path,
+            zstd::encode_all(&b"not json\n"[..], 0).unwrap(),
+        )
+        .unwrap();
+        let malformed =
+            parse_codex_file_incremental(&malformed_path, 0, CodexParseState::default());
+        assert!(!malformed.parse_succeeded);
+        assert!(malformed.messages.is_empty());
+        assert!(
+            malformed.archive_failure.is_none(),
+            "decoded malformed JSON is not an archive read failure"
+        );
     }
 }

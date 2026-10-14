@@ -1089,6 +1089,10 @@ pub fn parser_generation() -> u64 {
         acc ^= u64::from(byte);
         acc = acc.wrapping_mul(FNV_PRIME);
     }
+    // Desktop adds live cache balances to Claude's existing transcript lane.
+    // Invalidate derived totals without discarding retained transcript history.
+    acc ^= 2; // Claude Desktop parser generation: preserve full request identities
+    acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
 
@@ -1350,7 +1354,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v12->v13: also retain gateway activity for Synthetic-only scans.
         // v13->v14: support zstd-compressed transcripts (`.jsonl.zst`) in
         // Codex sessions and archives.
-        ClientId::Codex => 14,
+        // v14->v15: assign stable cross-copy dedup keys to usage rows that use
+        // the file-mtime fallback timestamp, and persist their event ordinal.
+        ClientId::Codex => 15,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -4557,10 +4563,11 @@ mod tests {
         // nickname; v9->v10 retains service_tier for Fast mode pricing,
         // v10->v11 resets duration anchors at standalone task_started events.
         // v11->v13 retains source completeness and gateway activity for empty
-        // results, and v13->v14 decodes compressed archives (.jsonl.zst).
+        // results, v13->v14 decodes compressed archives (.jsonl.zst), and
+        // v14->v15 stabilizes fallback-timestamp dedup across rollout copies.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 14);
+        assert_eq!(parser_version(ClientId::Codex), 15);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 

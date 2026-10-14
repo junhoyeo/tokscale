@@ -138,6 +138,8 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
 
+    let undated_position = right_spans.len();
+
     right_spans.push(Span::styled(" | ", Style::default().fg(app.theme.muted)));
 
     // Total cost
@@ -155,6 +157,22 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
             count_label,
             Style::default().fg(app.theme.muted),
         ));
+    }
+
+    if !is_very_narrow && app.data.undated_tokens > 0 {
+        let annotation = Span::styled(
+            format!(
+                " ({} {})",
+                format_tokens(app.data.undated_tokens),
+                tr(lang, MessageKey::FooterUndated)
+            ),
+            Style::default().fg(Color::Yellow),
+        );
+        let required_width =
+            right_spans.iter().map(Span::width).sum::<usize>() + annotation.width();
+        if required_width <= usize::from(chunks[1].width) {
+            right_spans.insert(undated_position, annotation);
+        }
     }
 
     let right_line = Line::from(right_spans);
@@ -522,6 +540,77 @@ mod tests {
         let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
         app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app
+    }
+
+    #[test]
+    fn desktop_undated_tokens_are_visible_in_rendered_footer() {
+        let mut app = make_app_on(Tab::Models);
+        app.terminal_width = 194;
+        app.data.total_tokens = 2000;
+        app.data.undated_tokens = 1000;
+        let backend = ratatui::backend::TestBackend::new(194, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("undated"), "{text}");
+    }
+
+    #[test]
+    fn desktop_undated_annotation_preserves_totals_in_narrow_localized_footers() {
+        for lang in [
+            TuiLanguage::En,
+            TuiLanguage::Ko,
+            TuiLanguage::Ja,
+            TuiLanguage::ZhCn,
+            TuiLanguage::Fr,
+        ] {
+            for width in [40, 59, 60, 79, 100, 194] {
+                let mut app = make_app_on(Tab::Models);
+                app.settings.tui_language = lang;
+                app.terminal_width = width;
+                app.data.total_tokens = 14_700_000_000;
+                app.data.undated_tokens = 8_900_000_000;
+                app.data.total_cost = 9876.54;
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| render_main_row(frame, &mut app, frame.area()))
+                    .unwrap();
+                // Wide characters occupy a second buffer cell; that cell is
+                // not an extra space in the rendered Korean/Japanese/Chinese text.
+                let mut text = String::new();
+                let mut x = 0;
+                while x < width {
+                    let symbol = terminal.backend().buffer()[(x, 0)].symbol();
+                    text.push_str(symbol);
+                    x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+                }
+                assert!(
+                    text.contains(&format_tokens(app.data.total_tokens)),
+                    "{lang:?} {width}: {text}"
+                );
+                assert!(
+                    text.contains(&format_cost(app.data.total_cost)),
+                    "{lang:?} {width}: {text}"
+                );
+                if width < 60 {
+                    assert!(
+                        !text.contains(tr(lang, MessageKey::FooterUndated)),
+                        "{text}"
+                    );
+                } else if width == 194 {
+                    assert!(text.contains(tr(lang, MessageKey::FooterUndated)), "{text}");
+                }
+            }
+        }
     }
 
     #[test]
