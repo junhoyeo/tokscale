@@ -372,6 +372,9 @@ pub struct App {
     pub spinner_frame: usize,
 
     pub background_loading: bool,
+    /// Complete aggregate data is visible while the same owned loader thread
+    /// finishes durable source-message cache persistence.
+    pub source_cache_persisting: bool,
 
     pub needs_reload: bool,
 
@@ -537,6 +540,7 @@ impl App {
             click_areas: Vec::new(),
             spinner_frame: 0,
             background_loading: false,
+            source_cache_persisting: false,
             needs_reload: false,
             dialog_stack,
             dialog_needs_reload,
@@ -959,7 +963,10 @@ impl App {
                 self.last_auto_refresh = Instant::now();
                 if self.current_tab == Tab::Usage {
                     self.refresh_usage();
-                } else if self.background_loading {
+                } else if self.background_loading || self.source_cache_persisting {
+                    // Coalesce repeated refreshes into one load after the owned
+                    // loader finishes persistence; never start a second worker.
+                    self.needs_reload = true;
                     self.set_status("Refresh already in progress");
                 } else {
                     self.needs_reload = true;
@@ -5015,14 +5022,28 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_key_refresh_while_loading_does_not_queue_reload() {
+    fn test_handle_key_refresh_while_loading_queues_one_reload() {
         let mut app = make_app();
         app.background_loading = true;
 
         app.handle_key_event(key(KeyCode::Char('r')));
 
-        assert!(!app.needs_reload);
+        assert!(app.needs_reload);
         assert!(!app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Refresh already in progress")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_while_source_cache_persists_queues_one_reload() {
+        let mut app = make_app();
+        app.source_cache_persisting = true;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(app.needs_reload);
         assert_eq!(
             app.status_message.as_deref(),
             Some("Refresh already in progress")

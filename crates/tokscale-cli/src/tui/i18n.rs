@@ -263,6 +263,7 @@ pub enum MessageKey {
 
     // Footer & Status (additional)
     StatusRefreshingBackground,
+    StatusSavingSourceCache,
     StatusLastUpdated,
     StatusLocal,
     StatusDevice,
@@ -707,6 +708,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::EmptyNoAgentMixed => "No agent breakdown is available for the current sources.\nOnly some sources record agent metadata.\nPress 's' to change sources or 'r' to refresh.",
 
         MessageKey::StatusRefreshingBackground => "Refreshing cached data in background...",
+        MessageKey::StatusSavingSourceCache => "Saving source cache in background...",
         MessageKey::StatusLastUpdated => "Last updated: ",
         MessageKey::StatusLocal => "local",
         MessageKey::StatusDevice => "1 device",
@@ -1126,6 +1128,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "현재 소스에 대한 에이전트 내역을 사용할 수 없습니다.\n일부 소스만 에이전트 메타데이터를 기록합니다.\n's'를 눌러 소스를 변경하거나 'r'을 눌러 새로고침하세요.",
 
         MessageKey::StatusRefreshingBackground => "백그라운드에서 캐시 데이터 새로고침 중...",
+        MessageKey::StatusSavingSourceCache => "백그라운드에서 소스 캐시 저장 중...",
         MessageKey::StatusLastUpdated => "마지막 업데이트: ",
         MessageKey::StatusLocal => "로컬",
         MessageKey::StatusDevice => "1대 기기",
@@ -1552,6 +1555,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "現在のソースのエージェント内訳は利用できません。\n一部のソースのみがエージェントメタデータを記録します。\n's'でソースを変更するか、'r'で更新してください。",
 
         MessageKey::StatusRefreshingBackground => "バックグラウンドでキャッシュデータを更新中...",
+        MessageKey::StatusSavingSourceCache => "バックグラウンドでソースキャッシュを保存中...",
         MessageKey::StatusLastUpdated => "最終更新: ",
         MessageKey::StatusLocal => "ローカル",
         MessageKey::StatusDevice => "1台のデバイス",
@@ -1969,6 +1973,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "当前数据源无可用智能体明细。\n仅部分源记录智能体元数据。\n按 's' 更改数据源或按 'r' 刷新。",
 
         MessageKey::StatusRefreshingBackground => "正在后台刷新缓存数据...",
+        MessageKey::StatusSavingSourceCache => "正在后台保存源缓存...",
         MessageKey::StatusLastUpdated => "最后更新: ",
         MessageKey::StatusLocal => "本地",
         MessageKey::StatusDevice => "1台设备",
@@ -2378,6 +2383,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "Aucune ventilation par agent n'est disponible pour les sources actuelles.\nSeules certaines sources enregistrent des métadonnées d'agent.\nAppuyez sur 's' pour changer de source ou 'r' pour actualiser.",
 
         MessageKey::StatusRefreshingBackground => "Actualisation des données en cache en arrière-plan...",
+        MessageKey::StatusSavingSourceCache => "Enregistrement du cache source en arrière-plan...",
         MessageKey::StatusLastUpdated => "Dernière mise à jour : ",
         MessageKey::StatusLocal => "local",
         MessageKey::StatusDevice => "1 appareil",
@@ -2945,6 +2951,7 @@ mod tests {
             MessageKey::EmptyNoAgentCodex,
             MessageKey::EmptyNoAgentMixed,
             MessageKey::StatusRefreshingBackground,
+            MessageKey::StatusSavingSourceCache,
             MessageKey::StatusLastUpdated,
             MessageKey::StatusLocal,
             MessageKey::StatusDevice,

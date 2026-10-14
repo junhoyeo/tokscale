@@ -537,6 +537,11 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme.muted),
             ));
         }
+    } else if app.source_cache_persisting {
+        spans.push(Span::styled(
+            tr(lang, MessageKey::StatusSavingSourceCache),
+            Style::default().fg(app.theme.muted),
+        ));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             msg.clone(),
@@ -736,6 +741,56 @@ mod tests {
                 &format!("auto_refresh={auto_refresh}, refresh_secs={refresh_secs}"),
             );
         }
+    }
+
+    #[test]
+    fn source_cache_persisting_uses_distinct_non_expiring_text_in_every_language() {
+        const WIDTH: u16 = 120;
+        for lang in TuiLanguage::ALL {
+            let mut app = make_app_on(Tab::Models);
+            app.settings.tui_language = lang;
+            app.status_message = None;
+            app.status_message_time = None;
+            app.source_cache_persisting = true;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(WIDTH, 1)).unwrap();
+            terminal
+                .draw(|frame| render_status_row(frame, &app, frame.area()))
+                .unwrap();
+            let text: String = (0..WIDTH)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect();
+            let persistence_text = tr(lang, MessageKey::StatusSavingSourceCache);
+            // Wide glyphs occupy a continuation cell whose symbol is a space in
+            // TestBackend. Compare without whitespace so the assertion follows
+            // the rendered glyph sequence rather than the backing cell padding.
+            let compact_text: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let compact_persistence: String = persistence_text
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            assert!(
+                compact_text.contains(&compact_persistence),
+                "{lang:?}: {text}"
+            );
+            assert_ne!(
+                persistence_text,
+                tr(lang, MessageKey::StatusRefreshingBackground),
+                "{lang:?} must distinguish post-data persistence from pre-data refresh"
+            );
+            let natural_width =
+                unicode_width::UnicodeWidthStr::width(data_source_label(&app).as_str())
+                    + unicode_width::UnicodeWidthStr::width(" • ")
+                    + unicode_width::UnicodeWidthStr::width(persistence_text);
+            assert!(
+                natural_width <= usize::from(WIDTH),
+                "{lang:?} footer needs {natural_width} cells, budget is {WIDTH}: {persistence_text}"
+            );
+        }
+        assert_eq!(
+            tr(TuiLanguage::En, MessageKey::StatusSavingSourceCache),
+            "Saving source cache in background..."
+        );
     }
 
     #[test]
