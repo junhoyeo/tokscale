@@ -2872,7 +2872,6 @@ struct TrajectoryEnrichmentBudget {
     failure_threshold: u32,
     wasted: Duration,
     consecutive_failures: HashMap<String, u32>,
-    metadata_wasted: Duration,
     metadata_consecutive_failures: HashMap<String, u32>,
 }
 
@@ -2892,7 +2891,6 @@ impl TrajectoryEnrichmentBudget {
             failure_threshold,
             wasted: Duration::ZERO,
             consecutive_failures: HashMap::new(),
-            metadata_wasted: Duration::ZERO,
             metadata_consecutive_failures: HashMap::new(),
         }
     }
@@ -2930,7 +2928,7 @@ impl TrajectoryEnrichmentBudget {
     }
 
     fn metadata_should_attempt(&self, fingerprint: &str) -> bool {
-        if self.metadata_wasted >= self.budget {
+        if self.wasted >= self.budget {
             return false;
         }
         self.metadata_consecutive_failures
@@ -2941,7 +2939,7 @@ impl TrajectoryEnrichmentBudget {
     }
 
     fn record_metadata_failure(&mut self, fingerprint: &str, elapsed: Duration) {
-        self.metadata_wasted = self.metadata_wasted.saturating_add(elapsed);
+        self.wasted = self.wasted.saturating_add(elapsed);
         *self
             .metadata_consecutive_failures
             .entry(fingerprint.to_string())
@@ -3032,10 +3030,6 @@ fn try_fetch_session_artifact(
         let err = anyhow::anyhow!(
             "Antigravity metadata budget exhausted or circuit breaker open for connection {}",
             connection.fingerprint
-        );
-        eprintln!(
-            "Warning: skipping Antigravity metadata for session {}: {err:#}",
-            summary.session_id
         );
         return Err(err);
     }
