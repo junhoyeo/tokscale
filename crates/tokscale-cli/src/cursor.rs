@@ -369,57 +369,60 @@ fn usage_events_watermark_ms(events: &[serde_json::Value]) -> Option<i64> {
 /// Identity of a usage event for incremental merge.
 ///
 /// Billing fields (`chargedCents`, `tokenUsage.totalCents`) are left out so a
-/// boundary event re-fetched on the next sync replaces the stored row instead
+/// recent event re-fetched on the next sync replaces the stored row instead
 /// of being appended beside it. `timestamp` is stored as integer milliseconds
 /// so a string, a number, and an RFC 3339 datetime for the same instant match.
-/// Everything else participates, and object keys are sorted so a cache rewrite
-/// cannot fail to match the dashboard's key order.
+/// Known token counts use the parser's integer coercion so strings and floats
+/// match integers. Everything else participates unchanged, including unknown
+/// nested fields; only object key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
-    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+    // Match CursorTokenUsage's lenient i64 coercion without changing the stored
+    // row. Unknown fields and unrecognized values remain part of the identity.
+    fn token_count(value: &serde_json::Value) -> Option<i64> {
         match value {
-            serde_json::Value::Object(map) => {
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort();
-                let mut sorted = serde_json::Map::new();
-                for key in keys {
-                    if key == "chargedCents" || key == "cursorTokenFee" {
-                        continue;
-                    }
-                    let child = &map[key];
-                    let child = if key == "timestamp" {
-                        match timestamp_ms_from_value(child) {
-                            Some(ms) => serde_json::Value::Number(ms.into()),
-                            None => normalize(child),
-                        }
-                    } else if key == "tokenUsage" {
-                        strip_metered_cents(child)
-                    } else {
-                        normalize(child)
-                    };
-                    sorted.insert(key.clone(), child);
+            serde_json::Value::Number(number) => number
+                .as_i64()
+                .or_else(|| number.as_f64().map(|value| value as i64)),
+            serde_json::Value::String(text) => {
+                let text = text.trim();
+                text.parse::<i64>()
+                    .ok()
+                    .or_else(|| text.parse::<f64>().ok().map(|value| value as i64))
+            }
+            _ => None,
+        }
+    }
+
+    let mut identity = event.clone();
+    if let Some(fields) = identity.as_object_mut() {
+        fields.remove("chargedCents");
+        fields.remove("cursorTokenFee");
+        if let Some(ms) = fields.get("timestamp").and_then(timestamp_ms_from_value) {
+            fields.insert("timestamp".to_string(), serde_json::json!(ms));
+        }
+        if let Some(usage) = fields
+            .get_mut("tokenUsage")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            usage.remove("totalCents");
+            for field in [
+                "inputTokens",
+                "outputTokens",
+                "cacheReadTokens",
+                "cacheWriteTokens",
+            ] {
+                if let Some(count) = usage.get(field).and_then(token_count) {
+                    usage.insert(field.to_string(), serde_json::json!(count));
                 }
-                serde_json::Value::Object(sorted)
             }
-            serde_json::Value::Array(items) => {
-                serde_json::Value::Array(items.iter().map(normalize).collect())
-            }
-            other => other.clone(),
         }
     }
-
-    fn strip_metered_cents(value: &serde_json::Value) -> serde_json::Value {
-        let mut normalized = normalize(value);
-        if let Some(map) = normalized.as_object_mut() {
-            map.remove("totalCents");
-        }
-        normalized
-    }
-
-    serde_json::to_string(&normalize(event)).unwrap_or_default()
+    identity.sort_all_objects();
+    serde_json::to_string(&identity).unwrap_or_default()
 }
 
 /// Union `incoming` (just fetched, newest first) with `existing` (the cache).
-/// Incoming wins on identity so a re-fetched boundary row picks up a billing
+/// Incoming wins on identity so a re-fetched recent row picks up a billing
 /// update, and cached rows the new pages never reached stay in the result.
 fn merge_cursor_usage_events(
     existing: Vec<serde_json::Value>,
@@ -3550,6 +3553,80 @@ mod tests {
         );
         assert!(captured[0].contains("\"page\":1"));
         assert!(captured[1].contains("\"page\":2"));
+    }
+
+    #[test]
+    fn test_regression_cursor_identity_coerces_parser_accepted_token_counts() {
+        let integer = serde_json::json!({
+            "conversationId":"boundary", "timestamp":"7200000", "model":"gpt-5",
+            "chargedCents":1,
+            "tokenUsage":{"inputTokens":10,"outputTokens":20,"cacheReadTokens":30,"cacheWriteTokens":40,"totalCents":1}
+        });
+        let mut floats = integer.clone();
+        floats["tokenUsage"] = serde_json::json!({"inputTokens":10.0,"outputTokens":20.5,"cacheReadTokens":30.0,"cacheWriteTokens":40.75,"totalCents":2});
+        let mut strings = integer.clone();
+        strings["tokenUsage"] = serde_json::json!({"inputTokens":" 10 ","outputTokens":"20.5","cacheReadTokens":"3e1","cacheWriteTokens":"40.75","totalCents":9});
+        strings["chargedCents"] = serde_json::json!(9);
+        let parsed_cache = tempfile::tempdir().unwrap();
+        let parsed_path = parsed_cache.path().join("usage.json");
+        for variant in [&integer, &floats, &strings] {
+            fs::write(
+                &parsed_path,
+                serde_json::json!({"usageEventsDisplay":[variant]}).to_string(),
+            )
+            .unwrap();
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&parsed_path);
+            assert_eq!(messages.len(), 1);
+            let tokens = &messages[0].tokens;
+            assert_eq!(
+                (
+                    tokens.input,
+                    tokens.output,
+                    tokens.cache_read,
+                    tokens.cache_write
+                ),
+                (10, 20, 30, 40)
+            );
+        }
+        let merged =
+            merge_cursor_usage_events(vec![integer.clone(), floats], vec![strings.clone()]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "equivalent token encodings must not duplicate usage"
+        );
+        assert_eq!(
+            merged[0], strings,
+            "the raw incoming row must remain intact"
+        );
+
+        let mut distinct_count = integer.clone();
+        distinct_count["tokenUsage"]["inputTokens"] = serde_json::json!(11);
+        let mut distinct_session = integer.clone();
+        distinct_session["conversationId"] = serde_json::json!("other-session");
+        let mut unknown_a = integer.clone();
+        unknown_a["extra"] = serde_json::json!({"chargedCents":1,"timestamp":"7200000"});
+        let mut unknown_b = unknown_a.clone();
+        unknown_b["extra"]["chargedCents"] = serde_json::json!(2);
+        let mut unknown_token = integer.clone();
+        unknown_token["tokenUsage"]["futureCount"] = serde_json::json!("10");
+        let mut unknown_token_number = unknown_token.clone();
+        unknown_token_number["tokenUsage"]["futureCount"] = serde_json::json!(10);
+        assert_eq!(
+            merge_cursor_usage_events(
+                vec![
+                    integer,
+                    distinct_count,
+                    distinct_session,
+                    unknown_a,
+                    unknown_token
+                ],
+                vec![unknown_b, unknown_token_number],
+            )
+            .len(),
+            7,
+            "distinct same-time rows and unknown fields must survive"
+        );
     }
 
     #[test]
