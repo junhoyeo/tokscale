@@ -1,6 +1,7 @@
 "use client";
 
 import styled from "styled-components";
+import { TOKSCALE_DISCORD_URL, TOKSCALE_X_URL } from "@/lib/community";
 
 export function FooterSection() {
   return (
@@ -13,6 +14,21 @@ export function FooterSection() {
             rel="noopener noreferrer"
           >
             GitHub
+          </FooterLink>
+          <FooterLink
+            href={TOKSCALE_DISCORD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Discord
+          </FooterLink>
+          <FooterLink
+            href={TOKSCALE_X_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Tokscale on X"
+          >
+            X
           </FooterLink>
           <FooterLink
             href="https://github.com/sponsors/junhoyeo"

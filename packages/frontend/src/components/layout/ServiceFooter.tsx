@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import styled from "styled-components";
+import { TOKSCALE_DISCORD_URL, TOKSCALE_X_URL } from "@/lib/community";
 
 export function ServiceFooter() {
   return (
@@ -17,6 +18,17 @@ export function ServiceFooter() {
             rel="noopener noreferrer"
           >
             Source
+          </a>
+          <a href={TOKSCALE_DISCORD_URL} target="_blank" rel="noopener noreferrer">
+            Discord
+          </a>
+          <a
+            href={TOKSCALE_X_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Tokscale on X"
+          >
+            X
           </a>
           <Link href="/privacy">Privacy</Link>
           <Link href="/terms">Terms</Link>
@@ -56,8 +68,10 @@ const Product = styled.span`
 
 const Links = styled.nav`
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  justify-content: flex-end;
+  gap: 8px 16px;
 
   a {
     color: var(--service-text-muted);
