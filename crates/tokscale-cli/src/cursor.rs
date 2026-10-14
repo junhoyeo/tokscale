@@ -377,27 +377,12 @@ fn usage_events_watermark_ms(events: &[serde_json::Value]) -> Option<i64> {
 /// recent event re-fetched on the next sync replaces the stored row instead
 /// of being appended beside it. `timestamp` is stored as integer milliseconds
 /// so a string, a number, and an RFC 3339 datetime for the same instant match.
-/// Known token counts use the parser's integer coercion so strings and floats
-/// match integers. Everything else participates unchanged, including unknown
-/// nested fields; only object key ordering is canonicalized.
+/// Known token counts use the report parser's complete projection: missing or
+/// null buckets default to zero, numbers are coerced leniently, and negatives
+/// clamp to zero. Rejected tokenUsage containers stay distinct from valid rows.
+/// Everything else participates unchanged, including unknown nested fields;
+/// only object key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
-    // Match CursorTokenUsage's lenient i64 coercion without changing the stored
-    // row. Unknown fields and unrecognized values remain part of the identity.
-    fn token_count(value: &serde_json::Value) -> Option<i64> {
-        match value {
-            serde_json::Value::Number(number) => number
-                .as_i64()
-                .or_else(|| number.as_f64().map(|value| value as i64)),
-            serde_json::Value::String(text) => {
-                let text = text.trim();
-                text.parse::<i64>()
-                    .ok()
-                    .or_else(|| text.parse::<f64>().ok().map(|value| value as i64))
-            }
-            _ => None,
-        }
-    }
-
     let mut identity = event.clone();
     if let Some(fields) = identity.as_object_mut() {
         fields.remove("chargedCents");
@@ -405,20 +390,26 @@ fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
         if let Some(ms) = fields.get("timestamp").and_then(timestamp_ms_from_value) {
             fields.insert("timestamp".to_string(), serde_json::json!(ms));
         }
-        if let Some(usage) = fields
-            .get_mut("tokenUsage")
-            .and_then(serde_json::Value::as_object_mut)
+        if let Some(counts) =
+            tokscale_core::sessions::cursor::parse_cursor_token_usage(fields.get("tokenUsage"))
         {
+            // Keep unknown object fields, but use one representation for every
+            // container/known bucket the report parser accepts as equivalent.
+            let usage = fields
+                .entry("tokenUsage")
+                .or_insert(serde_json::Value::Null);
+            if !usage.is_object() {
+                *usage = serde_json::json!({});
+            }
+            let usage = usage.as_object_mut().expect("normalized tokenUsage object");
             usage.remove("totalCents");
-            for field in [
-                "inputTokens",
-                "outputTokens",
-                "cacheReadTokens",
-                "cacheWriteTokens",
+            for (field, count) in [
+                ("inputTokens", counts.input),
+                ("outputTokens", counts.output),
+                ("cacheReadTokens", counts.cache_read),
+                ("cacheWriteTokens", counts.cache_write),
             ] {
-                if let Some(count) = usage.get(field).and_then(token_count) {
-                    usage.insert(field.to_string(), serde_json::json!(count));
-                }
+                usage.insert(field.to_string(), serde_json::json!(count));
             }
         }
     }
@@ -3563,6 +3554,269 @@ mod tests {
         );
         assert!(captured[0].contains("\"page\":1"));
         assert!(captured[1].contains("\"page\":2"));
+    }
+
+    fn cursor_identity_token_fields() -> [&'static str; 4] {
+        [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+        ]
+    }
+
+    fn cursor_identity_count_cases() -> Vec<(&'static str, Option<serde_json::Value>, i64)> {
+        vec![
+            ("omitted", None, 0),
+            ("null", Some(serde_json::Value::Null), 0),
+            ("zero", Some(serde_json::json!(0)), 0),
+            ("negative", Some(serde_json::json!(-7)), 0),
+            ("negative-float", Some(serde_json::json!(-7.75)), 0),
+            ("negative-string", Some(serde_json::json!("-7.75")), 0),
+            ("fraction", Some(serde_json::json!(0.75)), 0),
+            ("integer", Some(serde_json::json!(10)), 10),
+            ("float", Some(serde_json::json!(10.75)), 10),
+            ("string", Some(serde_json::json!(" 10.75 ")), 10),
+            (
+                "malformed-string",
+                Some(serde_json::json!("not-a-number")),
+                0,
+            ),
+            ("boolean", Some(serde_json::json!(true)), 0),
+            ("array", Some(serde_json::json!([99])), 0),
+            ("object", Some(serde_json::json!({"not-a-count":99})), 0),
+            (
+                "max-minus-one",
+                Some(serde_json::json!(i64::MAX - 1)),
+                i64::MAX - 1,
+            ),
+            ("max", Some(serde_json::json!(i64::MAX)), i64::MAX),
+            (
+                "unsigned-overflow",
+                Some(serde_json::json!(u64::MAX)),
+                i64::MAX,
+            ),
+            ("float-overflow", Some(serde_json::json!(1e300)), i64::MAX),
+            (
+                "string-overflow",
+                Some(serde_json::json!("9223372036854775808")),
+                i64::MAX,
+            ),
+            ("infinity", Some(serde_json::json!("inf")), i64::MAX),
+            ("huge-exponent", Some(serde_json::json!("1e1000")), i64::MAX),
+            ("negative-infinity", Some(serde_json::json!("-inf")), 0),
+            ("negative-overflow", Some(serde_json::json!("-1e1000")), 0),
+            ("nan", Some(serde_json::json!("NaN")), 0),
+        ]
+    }
+
+    fn cursor_identity_container_cases(
+    ) -> Vec<(&'static str, Option<serde_json::Value>, Option<[i64; 4]>)> {
+        vec![
+            ("omitted", None, Some([0; 4])),
+            ("null", Some(serde_json::Value::Null), Some([0; 4])),
+            ("empty-map", Some(serde_json::json!({})), Some([0; 4])),
+            ("empty-sequence", Some(serde_json::json!([])), Some([0; 4])),
+            (
+                "short-sequence",
+                Some(serde_json::json!([1])),
+                Some([1, 0, 0, 0]),
+            ),
+            (
+                "full-sequence",
+                Some(serde_json::json!([1, 2, 3, 4, 5])),
+                Some([1, 2, 3, 4]),
+            ),
+            (
+                "null-sequence",
+                Some(serde_json::json!([null, null, null, null, null])),
+                Some([0; 4]),
+            ),
+            (
+                "long-sequence",
+                Some(serde_json::json!([1, 2, 3, 4, 5, 6])),
+                None,
+            ),
+            ("string", Some(serde_json::json!("0")), None),
+            ("number", Some(serde_json::json!(0)), None),
+            ("boolean", Some(serde_json::json!(false)), None),
+        ]
+    }
+
+    fn cursor_identity_fixture(usage: Option<serde_json::Value>) -> serde_json::Value {
+        let mut event = serde_json::json!({"conversationId":"same-request","timestamp":"7200000","model":"gpt-5","chargedCents":9});
+        if let Some(usage) = usage {
+            event["tokenUsage"] = usage;
+        }
+        event
+    }
+
+    fn cursor_identity_canonical_fixture(counts: [i64; 4]) -> serde_json::Value {
+        let usage = cursor_identity_token_fields()
+            .into_iter()
+            .zip(counts)
+            .map(|(key, value)| (key.to_string(), serde_json::json!(value)))
+            .collect::<serde_json::Map<_, _>>();
+        cursor_identity_fixture(Some(serde_json::Value::Object(usage)))
+    }
+
+    fn parser_counts_for_identity_fixture(event: &serde_json::Value) -> Option<[i64; 4]> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(parsed.len() <= 1);
+        parsed.first().map(|row| {
+            [
+                row.tokens.input,
+                row.tokens.output,
+                row.tokens.cache_read,
+                row.tokens.cache_write,
+            ]
+        })
+    }
+
+    #[test]
+    fn test_cursor_parser_count_edge_semantics() {
+        for (index, field) in cursor_identity_token_fields().into_iter().enumerate() {
+            for (name, value, expected) in cursor_identity_count_cases() {
+                let mut event = cursor_identity_canonical_fixture([0; 4]);
+                if let Some(value) = value {
+                    event["tokenUsage"][field] = value;
+                } else {
+                    event["tokenUsage"].as_object_mut().unwrap().remove(field);
+                }
+                let mut counts = [0; 4];
+                counts[index] = expected;
+                assert_eq!(
+                    parser_counts_for_identity_fixture(&event),
+                    Some(counts),
+                    "real parser: {field}/{name}"
+                );
+            }
+        }
+        for (name, value, expected) in cursor_identity_container_cases() {
+            let actual = parser_counts_for_identity_fixture(&cursor_identity_fixture(value));
+            eprintln!("real parser tokenUsage {name}: {actual:?}");
+            assert_eq!(actual, expected, "real parser container: {name}");
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_identities_match_full_parser_semantics() {
+        for (index, field) in cursor_identity_token_fields().into_iter().enumerate() {
+            let mut seen = Vec::new();
+            for (name, value, expected) in cursor_identity_count_cases() {
+                let mut event = cursor_identity_canonical_fixture([0; 4]);
+                if let Some(value) = value {
+                    event["tokenUsage"][field] = value;
+                } else {
+                    event["tokenUsage"].as_object_mut().unwrap().remove(field);
+                }
+                let mut counts = [0; 4];
+                counts[index] = expected;
+                assert_eq!(parser_counts_for_identity_fixture(&event), Some(counts));
+                let canonical = cursor_identity_canonical_fixture(counts);
+                let merged = merge_cursor_usage_events(vec![canonical], vec![event.clone()]);
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "equivalent parser counts must merge: {field}/{name}"
+                );
+                assert_eq!(
+                    merged[0], event,
+                    "keep the raw incoming row: {field}/{name}"
+                );
+                let identity = cursor_usage_event_identity(&event);
+                for (previous_count, previous_identity) in &seen {
+                    assert_eq!(
+                        identity == *previous_identity,
+                        expected == *previous_count,
+                        "only equivalent counts may merge: {field}/{name}"
+                    );
+                }
+                seen.push((expected, identity));
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_container_identities_match_parser_acceptance() {
+        for (name, value, expected) in cursor_identity_container_cases() {
+            let event = cursor_identity_fixture(value);
+            assert_eq!(parser_counts_for_identity_fixture(&event), expected);
+            if let Some(counts) = expected {
+                let merged = merge_cursor_usage_events(
+                    vec![cursor_identity_canonical_fixture(counts)],
+                    vec![event.clone()],
+                );
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "accepted equivalent tokenUsage must merge: {name}"
+                );
+                assert_eq!(merged[0], event, "raw tokenUsage must survive: {name}");
+            } else {
+                assert_eq!(
+                    merge_cursor_usage_events(
+                        vec![cursor_identity_canonical_fixture([0; 4])],
+                        vec![event]
+                    )
+                    .len(),
+                    2,
+                    "rejected tokenUsage must not become valid zeros: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_defaults_preserve_unknown_fields_and_rejected_rows() {
+        let zero = cursor_identity_canonical_fixture([0; 4]);
+        let mut future_null =
+            cursor_identity_fixture(Some(serde_json::json!({"futureCount":null})));
+        let mut future_zero = future_null.clone();
+        future_zero["tokenUsage"]["futureCount"] = serde_json::json!(0);
+        let mut nested_null = cursor_identity_fixture(None);
+        nested_null["metadata"] = serde_json::json!({"inputTokens":null});
+        let mut nested_zero = nested_null.clone();
+        nested_zero["metadata"]["inputTokens"] = serde_json::json!(0);
+        let mut other_session = cursor_identity_fixture(None);
+        other_session["conversationId"] = serde_json::json!("other-request");
+        future_null["chargedCents"] = serde_json::json!(11);
+        let valid = vec![
+            zero,
+            future_null,
+            future_zero,
+            nested_null,
+            nested_zero,
+            other_session,
+        ];
+        for row in &valid {
+            assert_eq!(parser_counts_for_identity_fixture(row), Some([0; 4]));
+        }
+        let rejected: Vec<_> = cursor_identity_container_cases()
+            .into_iter()
+            .filter(|(_, _, counts)| counts.is_none())
+            .map(|(_, value, _)| cursor_identity_fixture(value))
+            .collect();
+        for row in &rejected {
+            assert_eq!(parser_counts_for_identity_fixture(row), None);
+        }
+        let expected = valid.len() + rejected.len();
+        let merged = merge_cursor_usage_events(valid.clone(), rejected.clone());
+        assert_eq!(
+            merged.len(),
+            expected,
+            "unknown fields and rejected shapes must not be erased"
+        );
+        for row in valid.iter().chain(rejected.iter()) {
+            assert!(merged.contains(row), "stored rows must remain raw");
+        }
     }
 
     #[test]

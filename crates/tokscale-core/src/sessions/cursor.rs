@@ -201,6 +201,33 @@ struct CursorTokenUsage {
     total_cents: Option<f64>,
 }
 
+impl CursorTokenUsage {
+    fn token_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            input: self.input_tokens.unwrap_or(0).max(0),
+            output: self.output_tokens.unwrap_or(0).max(0),
+            cache_read: self.cache_read_tokens.unwrap_or(0).max(0),
+            cache_write: self.cache_write_tokens.unwrap_or(0).max(0),
+            cache_write_1h: 0,
+            reasoning: 0,
+        }
+    }
+}
+
+/// Project an optional `tokenUsage` value to the counts used by Cursor reports.
+///
+/// Uses the same deserializer and projection as [`parse_cursor_events_json`],
+/// including zero defaults, lenient numeric coercion and nonnegative clamping.
+/// Missing/null usage is empty; `None` means the container would reject the row.
+/// Borrowing the value avoids cloning unknown fields just to read its counts.
+pub fn parse_cursor_token_usage(value: Option<&serde_json::Value>) -> Option<TokenBreakdown> {
+    let usage = match value {
+        Some(value) => Option::<CursorTokenUsage>::deserialize(value).ok()?,
+        None => None,
+    };
+    Some(usage.unwrap_or_default().token_breakdown())
+}
+
 /// Coerce a JSON number/string into `i64`, tolerating floats and numeric
 /// strings so one unexpected shape doesn't drop an otherwise valid row.
 fn json_value_to_i64(value: &serde_json::Value) -> Option<i64> {
@@ -406,14 +433,7 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
             infer_provider(model),
             session_id,
             timestamp,
-            TokenBreakdown {
-                input: token_usage.input_tokens.unwrap_or(0).max(0),
-                output: token_usage.output_tokens.unwrap_or(0).max(0),
-                cache_read: token_usage.cache_read_tokens.unwrap_or(0).max(0),
-                cache_write: token_usage.cache_write_tokens.unwrap_or(0).max(0),
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
+            token_usage.token_breakdown(),
             cost.unwrap_or(0.0).max(0.0),
         );
         if cost.is_some() {
