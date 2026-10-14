@@ -35,7 +35,124 @@ struct FreeResponse {
 
 /// The `keyring` service name the GitHub CLI stores its token under.
 /// `gh` composes it as `"gh:" + hostname` (cli/cli `keyringServiceName`).
+///
+/// This is the service for the default host only. Everything that looks a
+/// token up goes through [`gh_keyring_service`] with the resolved host, so an
+/// enterprise login (`gh:ghe.example.com`) is found too.
+#[cfg(test)]
 const GH_KEYRING_SERVICE: &str = "gh:github.com";
+
+/// The host `gh` falls back to when neither `GH_HOST` nor `hosts.yml` picks one.
+const DEFAULT_GH_HOST: &str = "github.com";
+
+/// The keyring service `gh` stores the token for `host` under.
+fn gh_keyring_service(host: &str) -> String {
+    format!("gh:{host}")
+}
+
+/// Normalise a host the way a user is likely to type it into `GH_HOST`:
+/// trims whitespace, drops an `https://` / `http://` scheme and a trailing
+/// slash, and lowercases. Returns `None` for anything that is not a bare
+/// `host[:port]`, so a malformed value can never be spliced into a URL.
+fn normalize_gh_host(raw: &str) -> Option<String> {
+    let mut host = raw.trim();
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = host
+            .get(..scheme.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(scheme))
+            .map(|_| &host[scheme.len()..])
+        {
+            host = rest;
+        }
+    }
+    let host = host.trim_end_matches('/');
+    let valid = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    valid.then(|| host.to_ascii_lowercase())
+}
+
+/// Top-level keys of a `gh` `hosts.yml`, i.e. every host `gh` holds a login
+/// for, in file order.
+fn hosts_in_hosts_yml(content: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for line in content.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(key) = trimmed.strip_suffix(':') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(|c| c == '"' || c == '\'');
+        if let Some(host) = normalize_gh_host(key) {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts
+}
+
+/// Pick the host the same way `gh` does: `GH_HOST`, else the only host in
+/// `hosts.yml`, else `github.com`. With several configured hosts and no
+/// `GH_HOST`, `gh` itself defaults to `github.com`, and so do we.
+fn select_gh_host(gh_host_env: Option<&str>, configured: &[String]) -> String {
+    if let Some(host) = gh_host_env.and_then(normalize_gh_host) {
+        return host;
+    }
+    match configured {
+        [only] => only.clone(),
+        _ => DEFAULT_GH_HOST.to_string(),
+    }
+}
+
+fn configured_gh_hosts() -> Vec<String> {
+    for path in hosts_candidates() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let hosts = hosts_in_hosts_yml(&content);
+            if !hosts.is_empty() {
+                return hosts;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// The GitHub host Copilot usage is read for.
+fn current_gh_host() -> String {
+    let env = std::env::var("GH_HOST").ok();
+    select_gh_host(env.as_deref(), &configured_gh_hosts())
+}
+
+/// `github.com` and GHE.com data-residency tenants (`*.ghe.com`) share
+/// github.com's token variables in `gh`; every other host is a GHES appliance.
+fn is_dotcom_style_host(host: &str) -> bool {
+    host == DEFAULT_GH_HOST || host.ends_with(".ghe.com")
+}
+
+/// Environment variables holding a token for `host`, in `gh`'s precedence
+/// (cli/go-gh `auth.TokenForHost`). An enterprise appliance reads only the
+/// enterprise variables, so a github.com `GH_TOKEN` is never sent to it and
+/// vice versa.
+fn token_env_vars(host: &str) -> [&'static str; 2] {
+    if is_dotcom_style_host(host) {
+        ["GH_TOKEN", "GITHUB_TOKEN"]
+    } else {
+        ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+    }
+}
+
+/// The Copilot user endpoint for `host`. The official Copilot language server
+/// derives its API base as `https://api.<host>` for an enterprise URI (not
+/// gh's `/api/v3` REST prefix), and that is `api.github.com` for github.com.
+fn copilot_user_url(host: &str) -> String {
+    format!("https://api.{host}/copilot_internal/user")
+}
 
 /// Windows Credential Manager target names to try for the `gh` token, most
 /// likely first.
@@ -60,8 +177,14 @@ fn gh_wincred_targets(service: &str) -> [String; 2] {
 /// The candidate targets, quoted, for probe and error messages. Quoting
 /// matters: `gh:github.com` is a prefix of `gh:github.com:`, so an unquoted
 /// list reads as one repeated name.
+#[cfg(test)]
 fn gh_wincred_targets_display() -> String {
-    gh_wincred_targets(GH_KEYRING_SERVICE)
+    gh_wincred_targets_display_for(GH_KEYRING_SERVICE)
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn gh_wincred_targets_display_for(service: &str) -> String {
+    gh_wincred_targets(service)
         .iter()
         .map(|target| format!("\"{target}\""))
         .collect::<Vec<String>>()
@@ -115,9 +238,9 @@ fn first_wincred_hit<E: std::fmt::Display>(
 /// with the target it was found at, so callers can report what actually
 /// matched instead of what they hoped would match.
 #[cfg(target_os = "windows")]
-fn read_gh_wincred() -> Result<(String, String)> {
+fn read_gh_wincred(host: &str) -> Result<(String, String)> {
     first_wincred_hit(
-        gh_wincred_targets(GH_KEYRING_SERVICE)
+        gh_wincred_targets(&gh_keyring_service(host))
             .into_iter()
             .map(|target| {
                 let outcome = super::helpers::read_wincred(&target);
@@ -133,19 +256,19 @@ fn read_gh_wincred() -> Result<(String, String)> {
 /// `read_keychain("gh:github.com")` themselves, so a fix to one of them left
 /// the other two — including the one that gates the provider card — still
 /// looking in the wrong place.
-fn read_gh_secret() -> Result<String> {
+fn read_gh_secret(host: &str) -> Result<String> {
     #[cfg(target_os = "windows")]
     {
-        read_gh_wincred().map(|(_target, value)| value)
+        read_gh_wincred(host).map(|(_target, value)| value)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        super::helpers::read_keychain(GH_KEYRING_SERVICE)
+        super::helpers::read_keychain(&gh_keyring_service(host))
     }
 }
 
-fn read_token_from_keychain() -> Result<String> {
-    let raw = read_gh_secret()?;
+fn read_token_from_keychain(host: &str) -> Result<String> {
+    let raw = read_gh_secret(host)?;
     // go-keyring may base64-encode the value
     if let Some(encoded) = raw.strip_prefix("go-keyring-base64:") {
         let decoded = base64_decode(encoded)?;
@@ -155,8 +278,8 @@ fn read_token_from_keychain() -> Result<String> {
     }
 }
 
-fn token_from_env() -> Option<String> {
-    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+fn token_from_env(host: &str) -> Option<String> {
+    for var in token_env_vars(host) {
         if let Some(value) = std::env::var_os(var) {
             let value = value.to_string_lossy().trim().to_string();
             if !value.is_empty() {
@@ -184,7 +307,17 @@ fn hosts_candidates() -> Vec<PathBuf> {
 /// Never includes the token value itself; only presence/absence is reported.
 pub(super) fn credential_probe() -> Vec<String> {
     let mut probes = Vec::new();
-    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+    let host = current_gh_host();
+    probes.push(format!(
+        "GH_HOST={} (host={host}, api={})",
+        if std::env::var_os("GH_HOST").is_some() {
+            "set"
+        } else {
+            "unset"
+        },
+        copilot_user_url(&host)
+    ));
+    for var in token_env_vars(&host) {
         probes.push(format!(
             "{var}={}",
             if std::env::var_os(var).is_some() {
@@ -194,7 +327,7 @@ pub(super) fn credential_probe() -> Vec<String> {
             }
         ));
     }
-    probes.push(wincred_probe());
+    probes.push(wincred_probe_for(&host));
     for path in hosts_candidates() {
         probes.push(format!(
             "hosts={} ({})",
@@ -214,10 +347,15 @@ pub(super) fn credential_probe() -> Vec<String> {
 /// found nothing. That is the whole point: this is the line a #1194 reporter
 /// pastes next to `cmdkey /list`, and it is useless if it prints a name the
 /// code never looked up.
+#[cfg_attr(not(test), allow(dead_code))]
 fn wincred_probe() -> String {
+    wincred_probe_for(&current_gh_host())
+}
+
+fn wincred_probe_for(host: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        match read_gh_wincred() {
+        match read_gh_wincred(host) {
             Ok((target, cred)) => {
                 let (prefix, blob_len) = match cred.strip_prefix("go-keyring-base64:") {
                     Some(encoded) => ("go-keyring-base64", encoded.len()),
@@ -236,7 +374,7 @@ fn wincred_probe() -> String {
     {
         format!(
             "wincred=not-applicable on non-windows (would try: {})",
-            gh_wincred_targets_display()
+            gh_wincred_targets_display_for(&gh_keyring_service(host))
         )
     }
 }
@@ -357,55 +495,63 @@ fn gh_config_dir() -> std::path::PathBuf {
     home.join(".config").join("gh")
 }
 
-fn parse_token_from_hosts() -> Result<String> {
-    for path in hosts_candidates() {
-        if !path.exists() {
+/// The `oauth_token` stored under `host:` in a `hosts.yml`, if any.
+fn token_for_host_in_hosts_yml(content: &str, host: &str) -> Option<String> {
+    let mut in_host = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let top_level = !line.starts_with(' ') && !line.starts_with('\t');
+        if top_level && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            // A non-indented line starts a new section.
+            in_host = trimmed
+                .strip_suffix(':')
+                .map(|key| key.trim().trim_matches(|c| c == '"' || c == '\''))
+                .and_then(normalize_gh_host)
+                .is_some_and(|key| key == host);
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        // Parse YAML-like: look for "oauth_token: <token>" under "github.com:"
-        let mut in_github = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed == "github.com:" {
-                in_github = true;
-                continue;
-            }
-            // A non-indented, non-empty, non-comment line starts a new section
-            if in_github
-                && !line.starts_with(' ')
-                && !line.starts_with('\t')
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-            {
-                in_github = false;
-            }
-            if in_github && trimmed.starts_with("oauth_token:") {
-                let token = trimmed.trim_start_matches("oauth_token:").trim();
+        if in_host {
+            if let Some(token) = trimmed.strip_prefix("oauth_token:") {
+                let token = token.trim().trim_matches(|c| c == '"' || c == '\'');
                 if !token.is_empty() {
-                    return Ok(token.to_string());
+                    return Some(token.to_string());
                 }
             }
         }
     }
-    anyhow::bail!("No oauth_token found in hosts.yml")
+    None
 }
 
-fn read_token_from_hosts() -> Result<String> {
-    parse_token_from_hosts()
+fn parse_token_from_hosts(host: &str) -> Result<String> {
+    for path in hosts_candidates() {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(token) = token_for_host_in_hosts_yml(&content, host) {
+            return Ok(token);
+        }
+    }
+    anyhow::bail!("No oauth_token for {host} found in hosts.yml")
 }
 
-fn read_credentials() -> Result<String> {
-    if let Some(token) = token_from_env() {
+/// The token for `host`, from (in order) the host's environment variables,
+/// the platform keyring entry `gh:<host>`, and the `<host>:` section of
+/// `hosts.yml`. Every source is keyed by the same host the request goes to,
+/// so a credential is only ever sent to the host it was issued for.
+fn read_credentials(host: &str) -> Result<String> {
+    if let Some(token) = token_from_env(host) {
         return Ok(token);
     }
-    read_token_from_keychain()
-        .or_else(|_| read_token_from_hosts())
+    read_token_from_keychain(host)
+        .or_else(|_| parse_token_from_hosts(host))
         .map_err(|_| {
             anyhow::anyhow!(
-                "No GitHub Copilot credentials found. Run 'gh auth login' to authenticate."
+                "No GitHub Copilot credentials found for {host}. Run 'gh auth login{}' to authenticate.",
+                if host == DEFAULT_GH_HOST {
+                    String::new()
+                } else {
+                    format!(" --hostname {host}")
+                }
             )
         })
 }
@@ -466,9 +612,9 @@ fn pretty_category(key: &str) -> String {
     }
 }
 
-async fn fetch_api(client: &reqwest::Client, token: &str) -> Result<serde_json::Value> {
+async fn fetch_api(client: &reqwest::Client, host: &str, token: &str) -> Result<serde_json::Value> {
     let resp = client
-        .get("https://api.github.com/copilot_internal/user")
+        .get(copilot_user_url(host))
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/json")
         .header("Editor-Version", "vscode/1.96.2")
@@ -489,29 +635,34 @@ async fn fetch_api(client: &reqwest::Client, token: &str) -> Result<serde_json::
 }
 
 pub fn has_credentials() -> bool {
-    if token_from_env().is_some() {
+    let host = current_gh_host();
+    if token_from_env(&host).is_some() {
         return true;
     }
-    if read_gh_secret().is_ok() {
+    if read_gh_secret(&host).is_ok() {
         return true;
     }
-    parse_token_from_hosts().is_ok()
+    parse_token_from_hosts(&host).is_ok()
 }
 
 pub fn fetch() -> Result<UsageOutput> {
-    let token = read_credentials()?;
+    let host = current_gh_host();
+    let token = read_credentials(&host)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let client = tokscale_core::http::client();
-        let resp = fetch_api(&client, &token).await.map_err(|e| {
+        let resp = fetch_api(&client, &host, &token).await.map_err(|e| {
             if e.to_string().contains("NEEDS_AUTH") {
-                anyhow::anyhow!(
-                    "GitHub token found but not authorized for Copilot. \
-                     Run 'gh auth login' or check your GH_TOKEN/GITHUB_TOKEN."
-                )
+                {
+                    let [primary, secondary] = token_env_vars(&host);
+                    anyhow::anyhow!(
+                        "GitHub token for {host} found but not authorized for Copilot. \
+                         Run 'gh auth login' or check your {primary}/{secondary}."
+                    )
+                }
             } else {
                 e
             }
@@ -936,5 +1087,139 @@ mod tests {
             probes.iter().any(|p| p.starts_with("apps.json=")),
             "missing apps.json probe: {probes:?}"
         );
+    }
+
+    #[test]
+    fn host_selection_follows_gh_precedence() {
+        let none: Vec<String> = Vec::new();
+        let one = vec!["ghe.example.com".to_string()];
+        let many = vec!["github.com".to_string(), "ghe.example.com".to_string()];
+        assert_eq!(select_gh_host(None, &none), "github.com");
+        assert_eq!(select_gh_host(None, &one), "ghe.example.com");
+        assert_eq!(select_gh_host(None, &many), "github.com");
+        assert_eq!(
+            select_gh_host(Some("https://GHE.Corp.example/"), &many),
+            "ghe.corp.example"
+        );
+        // An unusable GH_HOST is ignored rather than spliced into a URL.
+        assert_eq!(
+            select_gh_host(Some("evil.com/x?y"), &one),
+            "ghe.example.com"
+        );
+        assert_eq!(select_gh_host(Some("   "), &none), "github.com");
+    }
+
+    #[test]
+    fn hosts_yml_lists_every_top_level_host() {
+        let yml = "# comment\ngithub.com:\n    user: a\n    oauth_token: gho_dotcom\nghe.example.com:\n    users:\n        b:\n            oauth_token: gho_ghe\n    oauth_token: gho_ghe\n    git_protocol: https\n";
+        assert_eq!(
+            hosts_in_hosts_yml(yml),
+            vec!["github.com".to_string(), "ghe.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn hosts_yml_token_is_read_from_the_requested_host_only() {
+        let yml = "github.com:\n    oauth_token: gho_dotcom\nghe.example.com:\n    oauth_token: gho_ghe\n";
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "github.com").as_deref(),
+            Some("gho_dotcom")
+        );
+        assert_eq!(
+            token_for_host_in_hosts_yml(yml, "ghe.example.com").as_deref(),
+            Some("gho_ghe")
+        );
+        assert_eq!(token_for_host_in_hosts_yml(yml, "other.example"), None);
+        // The case #1260 reports: an enterprise-only file used to bail.
+        let enterprise_only = "ghe.example.com:\n    user: b\n    oauth_token: gho_ghe\n";
+        assert_eq!(hosts_in_hosts_yml(enterprise_only), vec!["ghe.example.com"]);
+        assert_eq!(
+            token_for_host_in_hosts_yml(enterprise_only, "github.com"),
+            None
+        );
+        assert_eq!(
+            token_for_host_in_hosts_yml(enterprise_only, "ghe.example.com").as_deref(),
+            Some("gho_ghe")
+        );
+    }
+
+    #[test]
+    fn keyring_service_and_endpoint_follow_the_host() {
+        assert_eq!(gh_keyring_service("github.com"), GH_KEYRING_SERVICE);
+        assert_eq!(gh_keyring_service("ghe.example.com"), "gh:ghe.example.com");
+        assert_eq!(
+            copilot_user_url("github.com"),
+            "https://api.github.com/copilot_internal/user"
+        );
+        assert_eq!(
+            copilot_user_url("ghe.example.com:8443"),
+            "https://api.ghe.example.com:8443/copilot_internal/user"
+        );
+        assert_eq!(
+            gh_wincred_targets(&gh_keyring_service("ghe.example.com"))[0],
+            "gh:ghe.example.com:"
+        );
+    }
+
+    #[test]
+    fn token_env_vars_never_cross_hosts() {
+        assert_eq!(token_env_vars("github.com"), ["GH_TOKEN", "GITHUB_TOKEN"]);
+        assert_eq!(token_env_vars("acme.ghe.com"), ["GH_TOKEN", "GITHUB_TOKEN"]);
+        assert_eq!(
+            token_env_vars("ghe.example.com"),
+            ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn github_token_is_not_sent_to_an_enterprise_host() {
+        let keys = [
+            "GH_HOST",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ];
+        let mut guard = EnvGuard::capture(&keys);
+        for key in keys {
+            guard.remove(key);
+        }
+        guard.set("GH_TOKEN", "gho_dotcom");
+        assert_eq!(token_from_env("ghe.example.com"), None);
+        assert_eq!(token_from_env("github.com").as_deref(), Some("gho_dotcom"));
+        guard.set("GH_ENTERPRISE_TOKEN", "gho_ghe");
+        assert_eq!(
+            token_from_env("ghe.example.com").as_deref(),
+            Some("gho_ghe")
+        );
+        assert_eq!(token_from_env("github.com").as_deref(), Some("gho_dotcom"));
+    }
+
+    #[test]
+    #[serial]
+    fn current_host_reads_gh_host_and_an_enterprise_only_hosts_yml() {
+        let temp = TempDir::new().unwrap();
+        let mut guard = EnvGuard::capture(&["GH_HOST", "GH_CONFIG_DIR"]);
+        guard.remove("GH_HOST");
+        guard.set("GH_CONFIG_DIR", temp.path());
+        assert_eq!(current_gh_host(), "github.com");
+        std::fs::write(
+            temp.path().join("hosts.yml"),
+            "ghe.example.com:\n    oauth_token: gho_ghe\n",
+        )
+        .unwrap();
+        assert_eq!(current_gh_host(), "ghe.example.com");
+        assert_eq!(
+            parse_token_from_hosts("ghe.example.com").unwrap(),
+            "gho_ghe"
+        );
+        assert!(parse_token_from_hosts("github.com").is_err());
+        guard.set("GH_HOST", "other.example");
+        assert_eq!(current_gh_host(), "other.example");
+        let probe = credential_probe().join("\n");
+        assert!(probe.contains("host=other.example"), "got: {probe}");
+        assert!(probe.contains("GH_ENTERPRISE_TOKEN="), "got: {probe}");
+        assert!(!probe.contains("gho_ghe"), "probe leaked a token: {probe}");
     }
 }
