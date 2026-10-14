@@ -2585,9 +2585,19 @@ pub(crate) struct SourceMessageCache {
 // A shard can be as large as `MAX_CACHE_SHARD_BYTES`, and one transaction
 // temporarily holds decoded entries plus a serialized envelope. Keep at most
 // two such transactions in flight: this preserves the cache's bounded-memory
-// design while still overlapping the durability barriers that dominate cold
+// design while still overlapping the F_FULLFSYNC barriers that dominate cold
 // saves on Apple filesystems.
+//
+// Windows stays serial. Each transaction executes both `FlushFileBuffers` and
+// a write-through `MoveFileExW`. In the #1446 Windows CI comparison, enabling
+// overlap coincided with the integration suite taking more than twice as long
+// and unrelated child-process smoke tests moving from about 10s to 50s. It did
+// not reveal a sharing or atomicity failure -- all shard round-trip/concurrency
+// tests passed -- so retaining the established serial I/O is the safe default.
+#[cfg(not(windows))]
 const MAX_PARALLEL_SHARD_SAVE_LANES: usize = 2;
+#[cfg(windows)]
+const MAX_PARALLEL_SHARD_SAVE_LANES: usize = 1;
 
 fn run_shard_save_batch<T, R, F>(items: Vec<T>, persist: F) -> Vec<R>
 where
@@ -7782,6 +7792,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_shard_save_batch_overlaps_work_with_a_bounded_lane_count() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7835,6 +7846,26 @@ mod tests {
             max_active.load(Ordering::SeqCst),
             MAX_PARALLEL_SHARD_SAVE_LANES
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shard_save_batch_stays_serial() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        assert_eq!(MAX_PARALLEL_SHARD_SAVE_LANES, 1);
+        let active = AtomicUsize::new(0);
+        let max_active = AtomicUsize::new(0);
+        let work: Vec<u8> = (0..8).collect();
+        let results = run_shard_save_batch(work.clone(), |item| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(current, Ordering::SeqCst);
+            active.fetch_sub(1, Ordering::SeqCst);
+            item
+        });
+
+        assert_eq!(results, work);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
     #[test]
