@@ -289,6 +289,10 @@ tokscale models --json > report.json   # 保存到文件
 
 交互式 TUI 模式提供：
 
+在会话视图中，可查看每个会话的元数据、活动、Token 明细和成本：
+
+![TUI 会话详情](.github/assets/tui-sessions.png)
+
 - **10 个视图**：概览（图表 + 热门模型）、Usage（订阅配额）、模型、每日、每时、每月、会话、项目（按工作区汇总）、统计（贡献图）、代理。在项目视图中，Codex Desktop 的普通聊天目录（`Documents/Codex/YYYY-MM-DD/<chat>`）会被合并为 **Codex Chat**，并保留其会话数、token 和成本；包含 Git 仓库的目录保持独立。按分钟视图（Minutely）默认隐藏，可在 `settings.json` 中通过 `minutelyTabEnabled` 启用 —— 参见[配置](#配置)
 - **键盘导航**：
   - `←/→/Tab/BackTab`：切换视图

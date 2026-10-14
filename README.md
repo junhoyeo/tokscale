@@ -290,6 +290,10 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
+Inspect session metadata, activity, token breakdowns, and cost from the Sessions view:
+
+![TUI Session Details](.github/assets/tui-sessions.png)
+
 - **10 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Monthly, Sessions, Projects (per-workspace rollups), Stats (contribution graph), Agents. In Projects, Codex Desktop's ordinary chat directories (`Documents/Codex/YYYY-MM-DD/<chat>`) are combined into **Codex Chat**, preserving their session count, tokens, and cost; directories containing a Git repository remain separate. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views

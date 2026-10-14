@@ -288,6 +288,10 @@ tokscale models --json > report.json   # 파일로 저장
 
 인터랙티브 TUI 모드는 다음을 제공합니다:
 
+세션 뷰에서 세션별 메타데이터, 활동, 토큰 내역, 비용을 확인할 수 있습니다:
+
+![TUI 세션 상세](.github/assets/tui-sessions.png)
+
 - **10개 뷰**: 개요 (차트 + 상위 모델), Usage (구독 할당량), 모델, 일별, 시간별, 월별, 세션, 프로젝트 (워크스페이스별 집계), 통계 (기여 그래프), 에이전트. 프로젝트 뷰에서는 Codex Desktop의 일반 채팅 디렉터리(`Documents/Codex/YYYY-MM-DD/<chat>`)가 세션 수·토큰·비용을 보존한 채 **Codex Chat**으로 통합되며, Git 저장소를 포함한 디렉터리는 별도로 유지됩니다. 분 단위 뷰(Minutely)는 기본적으로 숨겨져 있으며 `settings.json`의 `minutelyTabEnabled`로 활성화할 수 있습니다 — [설정](#설정) 참조
 - **키보드 내비게이션**:
   - `←/→/Tab/BackTab`: 뷰 전환
