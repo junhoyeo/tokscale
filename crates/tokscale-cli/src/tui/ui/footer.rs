@@ -217,7 +217,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
     let hint_style = app.theme.hint_key_style();
     let count_style = app.theme.count_style();
 
-    let spans = if is_very_narrow {
+    let compact_spans = || {
         let mut spans = vec![
             Span::styled("↑↓", Style::default().fg(app.theme.muted)),
             Span::styled("·", Style::default().fg(app.theme.muted)),
@@ -272,6 +272,10 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled("b", hint_style));
         }
         spans
+    };
+
+    let spans = if is_very_narrow {
+        compact_spans()
     } else {
         let lang = app.settings.tui_language;
         let mut spans = vec![
@@ -381,7 +385,11 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             tr(lang, MessageKey::HelpQuit),
             Style::default().fg(app.theme.muted),
         ));
-        spans
+        if spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
+            spans
+        } else {
+            compact_spans()
+        }
     };
 
     let line = Line::from(spans);
@@ -540,6 +548,128 @@ mod tests {
         let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
         app.settings.tui_language = crate::tui::i18n::TuiLanguage::En;
         app
+    }
+
+    fn rendered_help_text(app: &mut App, terminal_width: u16, backend_width: u16) -> String {
+        app.terminal_width = terminal_width;
+        let backend = ratatui::backend::TestBackend::new(backend_width, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, frame.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        let mut x = 1;
+        while x < backend_width - 1 {
+            let symbol = buffer[(x, 2)].symbol();
+            text.push_str(symbol);
+            x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+        }
+        text.trim_end().to_string()
+    }
+
+    fn assert_help_row_fits(app: &mut App, context: &str) {
+        let full = rendered_help_text(app, 1026, 1026);
+        let compact = rendered_help_text(app, 59, 1026);
+        let quit_hint = tr(app.settings.tui_language, MessageKey::HelpQuit);
+        assert!(full.ends_with(quit_hint), "{context}: {full}");
+        assert!(compact.contains(quit_hint), "{context}: {compact}");
+        let full_width = unicode_width::UnicodeWidthStr::width(full.as_str());
+
+        for terminal_width in 60..=200 {
+            let actual = rendered_help_text(app, terminal_width, terminal_width);
+            let available_width = usize::from(terminal_width - 2);
+            let expected = if full_width <= available_width {
+                &full
+            } else {
+                &compact
+            };
+            assert_eq!(
+                actual, *expected,
+                "{context}, terminal_width={terminal_width}, full_width={full_width}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_row_falls_back_without_clipping_hints() {
+        use std::time::Duration;
+
+        use tokscale_core::{GroupBy, WorktreeRollup};
+
+        use crate::tui::themes::{Theme, ThemeName};
+
+        for &tab in Tab::all() {
+            let active_states: &[bool] =
+                if matches!(tab, Tab::Models | Tab::Daily | Tab::Monthly | Tab::Sessions) {
+                    &[false, true]
+                } else {
+                    &[false]
+                };
+
+            for &active in active_states {
+                for lang in TuiLanguage::ALL {
+                    let mut app = make_app_on(tab);
+                    app.settings.tui_language = lang;
+                    app.theme = Theme::from_name_for_current_terminal(ThemeName::Gruvbox);
+                    app.auto_refresh = true;
+                    app.auto_refresh_interval = Duration::from_secs(30);
+                    *app.group_by.borrow_mut() = GroupBy::ClientProviderModel;
+                    app.selected_model_trend = active.then(|| "model".to_string());
+                    app.selected_daily_detail_date =
+                        active.then(|| chrono::NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+                    app.selected_monthly_detail_month = active.then(|| "2026-10".to_string());
+                    app.roll_up_subagents = active;
+
+                    assert_help_row_fits(
+                        &mut app,
+                        &format!("tab={tab:?}, active={active}, lang={lang:?}"),
+                    );
+                }
+            }
+        }
+
+        for &theme in ThemeName::all() {
+            let mut app = make_app_on(Tab::Overview);
+            app.theme = Theme::from_name_for_current_terminal(theme);
+            app.auto_refresh = true;
+            app.auto_refresh_interval = Duration::from_secs(30);
+            *app.group_by.borrow_mut() = GroupBy::ClientProviderModel;
+            assert_help_row_fits(&mut app, &format!("theme={}", theme.as_str()));
+        }
+
+        let group_variants = [
+            (GroupBy::Model, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::ClientModel, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::ClientProviderModel, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::WorkspaceModel, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::WorkspaceModel, WorktreeRollup::Separate),
+            (GroupBy::Session, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::ClientSession, WorktreeRollup::MergeIntoRepo),
+        ];
+        for (group_by, worktree_rollup) in group_variants {
+            let mut app = make_app_on(Tab::Sessions);
+            app.theme = Theme::from_name_for_current_terminal(ThemeName::GruvboxMaterial);
+            app.auto_refresh = true;
+            app.auto_refresh_interval = Duration::from_secs(300);
+            *app.group_by.borrow_mut() = group_by.clone();
+            app.worktree_rollup = worktree_rollup;
+            assert_help_row_fits(
+                &mut app,
+                &format!("group_by={group_by}, worktree_rollup={worktree_rollup:?}"),
+            );
+        }
+
+        for (auto_refresh, refresh_secs) in [(false, 0), (true, 1), (true, 30), (true, 3600)] {
+            let mut app = make_app_on(Tab::Overview);
+            app.auto_refresh = auto_refresh;
+            app.auto_refresh_interval = Duration::from_secs(refresh_secs);
+            assert_help_row_fits(
+                &mut app,
+                &format!("auto_refresh={auto_refresh}, refresh_secs={refresh_secs}"),
+            );
+        }
     }
 
     #[test]
