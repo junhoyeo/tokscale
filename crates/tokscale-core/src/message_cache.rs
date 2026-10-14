@@ -2,6 +2,7 @@ use crate::clients::ClientId;
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -2581,6 +2582,40 @@ pub(crate) struct SourceMessageCache {
     persistent: bool,
 }
 
+// A shard can be as large as `MAX_CACHE_SHARD_BYTES`, and one transaction
+// temporarily holds decoded entries plus a serialized envelope. Keep at most
+// two such transactions in flight: this preserves the cache's bounded-memory
+// design while still overlapping the durability barriers that dominate cold
+// saves on Apple filesystems.
+const MAX_PARALLEL_SHARD_SAVE_LANES: usize = 2;
+
+fn run_shard_save_batch<T, R, F>(items: Vec<T>, persist: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync + Send,
+{
+    let lane_count = items.len().min(MAX_PARALLEL_SHARD_SAVE_LANES);
+    if lane_count == 0 {
+        return Vec::new();
+    }
+
+    let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
+    for (index, item) in items.into_iter().enumerate() {
+        lanes[index % lane_count].push((index, item));
+    }
+
+    let mut indexed_results: Vec<(usize, R)> = lanes
+        .into_par_iter()
+        .flat_map_iter(|lane| lane.into_iter().map(|(index, item)| (index, persist(item))))
+        .collect();
+    indexed_results.sort_unstable_by_key(|(index, _)| *index);
+    indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect()
+}
+
 impl SourceMessageCache {
     /// Opens the persistent cache without reading any shard.
     ///
@@ -2963,76 +2998,99 @@ impl SourceMessageCache {
         affected_shards.extend(dirty_by_shard.keys().cloned());
         affected_shards.extend(deleted_by_shard.keys().cloned());
 
-        let mut successful_shards = HashSet::new();
+        // Prepare namespace directories before entering the parallel batch. Each
+        // worker then owns one distinct final path while the cross-process lock
+        // remains held for the complete read/merge/replace transaction.
+        let mut prepared_namespaces = HashSet::new();
+        let mut unavailable_namespaces = HashSet::new();
+        let mut shard_jobs = Vec::with_capacity(affected_shards.len());
         for shard_key in affected_shards {
             let Some(identity) = CacheIdentity::current_for_namespace(&shard_key.namespace) else {
                 continue;
             };
-            let parser_dir = shard_root.join(identity.namespace);
-            if let Err(error) = ensure_cache_dir(&parser_dir) {
-                warn_cache_failure_once(
-                    "source message cache parser directory is unavailable",
-                    &parser_dir,
-                    &error,
-                );
+            if unavailable_namespaces.contains(identity.namespace) {
                 continue;
             }
+            if prepared_namespaces.insert(identity.namespace) {
+                let parser_dir = shard_root.join(identity.namespace);
+                if let Err(error) = ensure_cache_dir(&parser_dir) {
+                    warn_cache_failure_once(
+                        "source message cache parser directory is unavailable",
+                        &parser_dir,
+                        &error,
+                    );
+                    unavailable_namespaces.insert(identity.namespace);
+                    continue;
+                }
+            }
             let final_path = shard_path(&shard_root, &shard_key);
+            shard_jobs.push((shard_key, identity, final_path));
+        }
 
-            let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
-                match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
-                    ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
-                        entries
-                            .into_iter()
-                            .filter(|entry| entry.identity_is_current())
-                            .map(|entry| (CacheKey::from_entry(&entry), entry))
-                            .filter(|(key, _)| key.shard() == shard_key)
-                            .collect()
-                    }
-                    ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
-                    ShardReadStatus::Invalid(error) => {
-                        warn_cache_failure_once(
-                            "source message cache shard is invalid",
-                            &final_path,
-                            &error,
-                        );
-                        HashMap::new()
-                    }
-                };
-
-            if let Some(deleted) = deleted_by_shard.get(&shard_key) {
-                for (key, reason) in deleted {
-                    let should_remove = match reason {
-                        DeletionReason::Missing => !key.path.to_path_buf().exists(),
-                        DeletionReason::Invalidated(expected) => merged_entries
-                            .get(key)
-                            .is_some_and(|entry| entry.fingerprint == *expected),
-                    };
-                    if should_remove {
-                        merged_entries.remove(key);
-                    }
-                }
-            }
-            if let Some(dirty) = dirty_by_shard.get(&shard_key) {
-                for key in dirty {
-                    if let Some(entry) = state.entries.get(key) {
-                        let mut entry = entry.clone();
-                        // Another process holding the lock before us may have
-                        // stored history for this same path that our in-memory
-                        // entry never saw. Union it in rather than replacing
-                        // wholesale — see `absorb_retained_history`.
-                        if let Some(stored) = merged_entries.remove(key) {
-                            entry.absorb_retained_history(&stored);
+        let entries_by_key = &state.entries;
+        let shard_results =
+            run_shard_save_batch(shard_jobs, |(shard_key, identity, final_path)| {
+                let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
+                    match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
+                        ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
+                            entries
+                                .into_iter()
+                                .filter(|entry| entry.identity_is_current())
+                                .map(|entry| (CacheKey::from_entry(&entry), entry))
+                                .filter(|(key, _)| key.shard() == shard_key)
+                                .collect()
                         }
-                        entry.remove_claude_synthetic_placeholders();
-                        merged_entries.insert(key.clone(), entry);
+                        ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
+                        ShardReadStatus::Invalid(error) => {
+                            warn_cache_failure_once(
+                                "source message cache shard is invalid",
+                                &final_path,
+                                &error,
+                            );
+                            HashMap::new()
+                        }
+                    };
+
+                if let Some(deleted) = deleted_by_shard.get(&shard_key) {
+                    for (key, reason) in deleted {
+                        let should_remove = match reason {
+                            DeletionReason::Missing => !key.path.to_path_buf().exists(),
+                            DeletionReason::Invalidated(expected) => merged_entries
+                                .get(key)
+                                .is_some_and(|entry| entry.fingerprint == *expected),
+                        };
+                        if should_remove {
+                            merged_entries.remove(key);
+                        }
                     }
                 }
-            }
+                if let Some(dirty) = dirty_by_shard.get(&shard_key) {
+                    for key in dirty {
+                        if let Some(entry) = entries_by_key.get(key) {
+                            let mut entry = entry.clone();
+                            // Another process holding the lock before us may have
+                            // stored history for this same path that our in-memory
+                            // entry never saw. Union it in rather than replacing
+                            // wholesale — see `absorb_retained_history`.
+                            if let Some(stored) = merged_entries.remove(key) {
+                                entry.absorb_retained_history(&stored);
+                            }
+                            entry.remove_claude_synthetic_placeholders();
+                            merged_entries.insert(key.clone(), entry);
+                        }
+                    }
+                }
 
-            let mut entries: Vec<CachedSourceEntry> = merged_entries.into_values().collect();
-            entries.sort_by_key(|left| left.path.to_path_buf());
-            match write_shard_with_limit(&final_path, identity, &entries, max_shard_bytes) {
+                let mut entries: Vec<CachedSourceEntry> = merged_entries.into_values().collect();
+                entries.sort_by_key(|left| left.path.to_path_buf());
+                let result =
+                    write_shard_with_limit(&final_path, identity, &entries, max_shard_bytes);
+                (shard_key, final_path, result)
+            });
+
+        let mut successful_shards = HashSet::new();
+        for (shard_key, final_path, result) in shard_results {
+            match result {
                 Ok(()) => {
                     successful_shards.insert(shard_key);
                 }
@@ -7725,6 +7783,61 @@ mod tests {
     }
 
     #[test]
+    fn test_shard_save_batch_overlaps_work_with_a_bounded_lane_count() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc, Condvar};
+        use std::time::Duration;
+
+        // A larger enclosing registry must not raise the cache's own in-flight
+        // budget. The gate keeps the first jobs resident long enough to measure
+        // actual overlap without relying on a sleep.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let coordinator_gate = Arc::clone(&gate);
+        let coordinator = std::thread::spawn(move || {
+            let first = started_rx.recv_timeout(Duration::from_secs(5));
+            let second = started_rx.recv_timeout(Duration::from_secs(5));
+            let (open, ready) = &*coordinator_gate;
+            *open.lock().unwrap() = true;
+            ready.notify_all();
+            assert!(first.is_ok(), "the first shard never started");
+            assert!(second.is_ok(), "the shard batch ran serially");
+        });
+
+        let work: Vec<u8> = (0..8).collect();
+        let results = pool.install(|| {
+            run_shard_save_batch(work.clone(), |item| {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(current, Ordering::SeqCst);
+                let _ = started_tx.send(item);
+                let (open, ready) = &*gate;
+                let mut open = open.lock().unwrap();
+                while !*open {
+                    open = ready.wait(open).unwrap();
+                }
+                drop(open);
+                active.fetch_sub(1, Ordering::SeqCst);
+                item
+            })
+        });
+        coordinator.join().unwrap();
+        assert_eq!(
+            results, work,
+            "parallel completion must preserve input order"
+        );
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            MAX_PARALLEL_SHARD_SAVE_LANES
+        );
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_source_message_cache_round_trips_across_distinct_shards() {
         let temp_home = TempDir::new().unwrap();
@@ -7747,6 +7860,46 @@ mod tests {
         assert_eq!(loaded.entry_count(), 2);
         assert!(loaded.get(identity, &path_one).is_some());
         assert!(loaded.get(identity, &path_two).is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parallel_save_clears_only_successful_shards() {
+        const TEST_SHARD_LIMIT: u64 = 8 * 1024;
+
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (small_path, oversized_path) = write_sources_in_distinct_shards(&source_dir, identity);
+
+        let small_key = CacheKey::new(identity, &small_path);
+        let oversized_key = CacheKey::new(identity, &oversized_path);
+        let small = test_entry(identity, &small_path, "small");
+        let mut oversized = test_entry(identity, &oversized_path, "oversized");
+        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize);
+
+        let mut cache = SourceMessageCache::default();
+        cache.insert(small);
+        cache.insert(oversized);
+        cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
+
+        assert!(cache_shard_path(identity, &small_path).is_file());
+        assert!(!cache_shard_path(identity, &oversized_path).is_file());
+        {
+            let state = cache.state();
+            assert!(!state.dirty_keys.contains(&small_key));
+            assert!(state.dirty_keys.contains(&oversized_key));
+        }
+
+        cache.insert(test_entry(identity, &oversized_path, "retried"));
+        cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
+        assert!(!cache.is_dirty());
+        assert!(matches!(
+            read_shard(&cache_shard_path(identity, &oversized_path), identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].messages[0].session_id == "retried"
+        ));
     }
 
     #[test]
