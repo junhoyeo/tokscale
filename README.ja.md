@@ -920,7 +920,7 @@ tokscale codex status --name personal --json
 
 ### 設定
 
-Tokscaleは設定ディレクトリの`settings.json`に設定を保存します。既定の場所は`~/.config/tokscale/settings.json`です。Linuxで`XDG_CONFIG_HOME`が設定されている場合は`$XDG_CONFIG_HOME/tokscale/settings.json`、Windowsでは`%APPDATA%\tokscale\settings.json`です。`TOKSCALE_CONFIG_DIR`を設定すると、すべてのプラットフォームでそのディレクトリが使われます：
+Tokscaleは設定ディレクトリの`settings.json`に設定を保存します。既定の場所は`~/.config/tokscale/settings.json`です。Linuxで`XDG_CONFIG_HOME`が設定されている場合は`$XDG_CONFIG_HOME/tokscale/settings.json`、Windowsでは`%APPDATA%\tokscale\settings.json`です。`TOKSCALE_CONFIG_DIR`を設定すると、すべてのプラットフォームでそのディレクトリが使われます。設定ディレクトリをまったく解決できない場合は、現在の作業ディレクトリの`./.tokscale/settings.json`にフォールバックします：
 
 ```json
 {

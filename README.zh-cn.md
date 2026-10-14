@@ -919,7 +919,7 @@ tokscale codex status --name personal --json
 
 ### 配置
 
-Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置为 `~/.config/tokscale/settings.json`；在 Linux 上若设置了 `XDG_CONFIG_HOME`，则为 `$XDG_CONFIG_HOME/tokscale/settings.json`；在 Windows 上为 `%APPDATA%\tokscale\settings.json`。设置 `TOKSCALE_CONFIG_DIR` 后，所有平台都改用该目录：
+Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置为 `~/.config/tokscale/settings.json`；在 Linux 上若设置了 `XDG_CONFIG_HOME`，则为 `$XDG_CONFIG_HOME/tokscale/settings.json`；在 Windows 上为 `%APPDATA%\tokscale\settings.json`。设置 `TOKSCALE_CONFIG_DIR` 后，所有平台都改用该目录；若无法解析任何配置目录，则回退到当前工作目录下的 `./.tokscale/settings.json`：
 
 ```json
 {

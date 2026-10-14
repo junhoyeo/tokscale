@@ -917,7 +917,7 @@ tokscale codex status --name personal --json
 
 ### 설정
 
-Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다. 기본 위치는 `~/.config/tokscale/settings.json`입니다. Linux에서 `XDG_CONFIG_HOME`이 설정되어 있으면 `$XDG_CONFIG_HOME/tokscale/settings.json`이고, Windows에서는 `%APPDATA%\tokscale\settings.json`입니다. `TOKSCALE_CONFIG_DIR`을 설정하면 모든 플랫폼에서 그 디렉터리를 대신 씁니다:
+Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다. 기본 위치는 `~/.config/tokscale/settings.json`입니다. Linux에서 `XDG_CONFIG_HOME`이 설정되어 있으면 `$XDG_CONFIG_HOME/tokscale/settings.json`이고, Windows에서는 `%APPDATA%\tokscale\settings.json`입니다. `TOKSCALE_CONFIG_DIR`을 설정하면 모든 플랫폼에서 그 디렉터리를 대신 씁니다. 설정 디렉터리를 전혀 찾을 수 없으면 현재 작업 디렉터리의 `./.tokscale/settings.json`을 씁니다:
 
 ```json
 {

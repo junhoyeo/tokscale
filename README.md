@@ -928,7 +928,7 @@ If those native Codex sources produce no successful usage result, Tokscale reads
 
 ### Configuration
 
-Tokscale stores settings in `settings.json` in its config directory. By default that is `~/.config/tokscale/settings.json`. On Linux it is `$XDG_CONFIG_HOME/tokscale/settings.json` when `XDG_CONFIG_HOME` is set, and on Windows it is `%APPDATA%\tokscale\settings.json`. `TOKSCALE_CONFIG_DIR` overrides the directory on every platform:
+Tokscale stores settings in `settings.json` in its config directory. By default that is `~/.config/tokscale/settings.json`. On Linux it is `$XDG_CONFIG_HOME/tokscale/settings.json` when `XDG_CONFIG_HOME` is set, and on Windows it is `%APPDATA%\tokscale\settings.json`. `TOKSCALE_CONFIG_DIR` overrides the directory on every platform. If no config directory can be resolved at all, Tokscale falls back to `./.tokscale/settings.json` in the current working directory:
 
 ```json
 {
