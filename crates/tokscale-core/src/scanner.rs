@@ -3080,7 +3080,7 @@ fn prefer_amp_cache_over_legacy(files: &mut Vec<PathBuf>, cache_root: &Path) {
         };
         // Prefer the server projection only when it is at least as fresh. A
         // local thread written after the last sync may contain newer messages.
-        amp_cache_is_at_least_as_fresh(amp_file_mtime(cache), amp_file_mtime(path))
+        !amp_cache_is_at_least_as_fresh(amp_file_mtime(cache), amp_file_mtime(path))
     });
 }
 
@@ -3782,8 +3782,8 @@ mod tests {
         fs::create_dir_all(&legacy_dir).unwrap();
         // Same thread in both roots, one only in the cache, one only legacy.
         for (dir, name) in [
-            (&cache_dir, "T-shared.json"),
             (&legacy_dir, "T-shared.json"),
+            (&cache_dir, "T-shared.json"),
             (&cache_dir, "T-cache-only.json"),
             (&legacy_dir, "T-legacy-only.json"),
         ] {
