@@ -292,7 +292,13 @@ fn sync_antigravity_cache_impl(
     let _lock = SyncLockGuard::acquire(&cache_dir)?;
 
     let manifest = load_antigravity_manifest()?;
-    let summaries = list_trajectory_summaries(connections)?;
+    let mut metadata_failed: Option<anyhow::Error> = None;
+    let (summaries, list_errors) = list_trajectory_summaries_with_errors(connections);
+    if let Some(err) = list_errors.into_iter().next() {
+        if metadata_failed.is_none() {
+            metadata_failed = Some(err);
+        }
+    }
     let filesystem_candidates = scan_filesystem_session_candidates()?;
     let export_candidates = merge_export_candidates(&manifest, &summaries, &filesystem_candidates);
     let mut next_manifest = AntigravityManifest {
@@ -313,7 +319,6 @@ fn sync_antigravity_cache_impl(
     // under the exclusive cache lock acquired above.
     let mut enrichment = TrajectoryEnrichmentBudget::new();
     let mut synced_sessions: usize = 0;
-    let mut metadata_failed: Option<anyhow::Error> = None;
 
     for candidate in &export_candidates {
         if let Some(summary) = find_summary_for_candidate(&summaries, &candidate.session_id) {
@@ -1172,7 +1177,26 @@ fn bool_label(value: bool) -> &'static str {
     }
 }
 
+fn antigravity_discovery_disabled() -> bool {
+    for key in [
+        "TOKSCALE_DISABLE_ANTIGRAVITY_DISCOVERY",
+        "TOKSCALE_ANTIGRAVITY_DISABLE_DISCOVERY",
+        "TOKSCALE_NO_ANTIGRAVITY_DISCOVERY",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
+    if antigravity_discovery_disabled() {
+        return Ok(Vec::new());
+    }
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
@@ -1943,10 +1967,11 @@ fn run_command_output(program: &str, args: &[&str]) -> Result<std::process::Outp
     Ok(output)
 }
 
-pub fn list_trajectory_summaries(
+pub fn list_trajectory_summaries_with_errors(
     connections: &[AntigravityConnection],
-) -> Result<Vec<TrajectorySummary>> {
+) -> (Vec<TrajectorySummary>, Vec<anyhow::Error>) {
     let mut merged: HashMap<String, TrajectorySummary> = HashMap::new();
+    let mut errors = Vec::new();
 
     for connection in connections {
         let response = match rpc_request(
@@ -1960,6 +1985,7 @@ pub fn list_trajectory_summaries(
                     "Warning: failed to list Antigravity trajectories for {}: {err:#}",
                     connection.fingerprint
                 );
+                errors.push(err);
                 continue;
             }
         };
@@ -1983,6 +2009,16 @@ pub fn list_trajectory_summaries(
             })
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
+    (values, errors)
+}
+
+pub fn list_trajectory_summaries(
+    connections: &[AntigravityConnection],
+) -> Result<Vec<TrajectorySummary>> {
+    let (values, errors) = list_trajectory_summaries_with_errors(connections);
+    if let Some(err) = errors.into_iter().next() {
+        return Err(err);
+    }
     Ok(values)
 }
 
