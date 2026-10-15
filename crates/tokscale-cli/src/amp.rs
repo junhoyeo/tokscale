@@ -418,6 +418,23 @@ pub fn auto_sync() -> Option<String> {
     Some(format!("  {prefix}: {error}"))
 }
 
+fn manual_sync_completion(result: &SyncAmpResult) -> Result<()> {
+    if !result.synced {
+        anyhow::bail!(
+            "Amp sync failed: {}",
+            result.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    if result.failed != 0 || result.remaining != 0 {
+        anyhow::bail!(
+            "Amp sync completed incompletely: {} failed, {} remaining",
+            result.failed,
+            result.remaining
+        );
+    }
+    Ok(())
+}
+
 pub fn run_amp_sync(json: bool, timeout_secs: Option<u64>) -> Result<()> {
     let timeout = timeout_secs
         .map(Duration::from_secs)
@@ -438,13 +455,7 @@ pub fn run_amp_sync(json: bool, timeout_secs: Option<u64>) -> Result<()> {
             eprintln!("{}", format!("  Amp sync warning: {error}").yellow());
         }
     }
-    if !result.synced {
-        anyhow::bail!(
-            "Amp sync failed: {}",
-            result.error.as_deref().unwrap_or("unknown error")
-        );
-    }
-    Ok(())
+    manual_sync_completion(&result)
 }
 
 #[cfg(test)]
@@ -670,5 +681,26 @@ mod tests {
         assert!(!is_valid_thread_id("T-../../etc/passwd"));
         assert!(!is_valid_thread_id("T-"));
         assert!(!is_valid_thread_id("thread-1"));
+    }
+
+    #[test]
+    fn manual_sync_rejects_partial_export_results() {
+        let result = SyncAmpResult {
+            synced: true,
+            failed: 1,
+            ..SyncAmpResult::default()
+        };
+        assert!(manual_sync_completion(&result).is_err());
+        let result = SyncAmpResult {
+            synced: true,
+            remaining: 1,
+            ..SyncAmpResult::default()
+        };
+        assert!(manual_sync_completion(&result).is_err());
+        assert!(manual_sync_completion(&SyncAmpResult {
+            synced: true,
+            ..SyncAmpResult::default()
+        })
+        .is_ok());
     }
 }
