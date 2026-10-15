@@ -1564,6 +1564,22 @@ describe("amp parser high-water", () => {
     expect(plan.nextState?.aggregate.tokens).toBe(100);
   });
 
+  it("freezes an aggregate-covering v2 snapshot when Amp cache coverage is incomplete", () => {
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const partialDays = foldParserClientSnapshot([contribution("2026-04-09", 150)], "amp");
+    const plan = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.amp,
+      fullHistory: false,
+      existingLegacyDays: oldDays,
+      incomingDays: partialDays,
+    });
+
+    expect(plan.mode).toBe("freeze");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays).toBeUndefined();
+  });
+
   it("accepts v1 before transition and freezes it after a v2 baseline", () => {
     const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
     const v1 = planParserHighWaterSubmission({

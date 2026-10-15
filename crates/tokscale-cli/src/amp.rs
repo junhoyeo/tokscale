@@ -40,6 +40,9 @@ struct AmpSyncIndex {
     version: u32,
     #[serde(default)]
     last_attempt_at: Option<String>,
+    /// True only when the latest successful listing was fully exported.
+    #[serde(default)]
+    complete: bool,
     /// Thread id -> `updated` value reported by `amp threads list` when the
     /// thread was last exported.
     #[serde(default)]
@@ -64,7 +67,22 @@ pub struct SyncAmpResult {
     pub failed: usize,
     /// Threads not attempted because the sync timeout elapsed.
     pub remaining: usize,
+    /// The cached snapshot covers every thread from a successful listing.
+    pub complete: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct AutoSyncAmpResult {
+    pub warning: Option<String>,
+    pub cache_complete: bool,
+    pub has_cached_threads: bool,
+}
+
+impl AutoSyncAmpResult {
+    pub fn allows_full_history(&self) -> bool {
+        self.cache_complete || !self.has_cached_threads
+    }
 }
 
 pub fn get_amp_cache_dir() -> PathBuf {
@@ -235,10 +253,7 @@ where
 
 const AMP_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-fn lock_sync_transaction(
-    file: std::fs::File,
-    deadline: Instant,
-) -> std::io::Result<std::fs::File> {
+fn lock_sync_transaction(file: std::fs::File, deadline: Instant) -> std::io::Result<std::fs::File> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
@@ -287,6 +302,7 @@ where
         }
     };
     let mut index = load_index(cache_dir);
+    index.complete = false;
     if index.version != INDEX_VERSION {
         // Cached exports use an older projection. Clearing the map keeps
         // them pending until each is re-exported, even across a failed
@@ -380,6 +396,8 @@ where
     result.exported = exported.len();
     result.failed = failures.len();
     result.remaining = timed_out.into_inner();
+    result.complete = result.failed == 0 && result.remaining == 0;
+    index.complete = result.complete;
     index.threads.extend(exported);
 
     let mut problems = Vec::new();
@@ -447,22 +465,37 @@ fn has_cached_threads(cache_dir: &Path) -> bool {
 /// wrapped). Skipped when the Amp CLI is missing or the last attempt is
 /// recent. Returns a warning when the sync failed or was incomplete; callers
 /// then read the existing cache.
-pub fn auto_sync() -> Option<String> {
+pub fn auto_sync_status() -> AutoSyncAmpResult {
     let cache_dir = get_amp_cache_dir();
+    let persisted_complete = load_index(&cache_dir).complete;
     if find_amp_binary().is_none() || !auto_sync_is_due(&cache_dir) {
-        return None;
+        return AutoSyncAmpResult {
+            warning: None,
+            cache_complete: persisted_complete,
+            has_cached_threads: has_cached_threads(&cache_dir),
+        };
     }
     let had_cache = has_cached_threads(&cache_dir);
     let result = sync_amp_cache(AMP_AUTO_SYNC_TIMEOUT);
-    let error = result.error?;
-    let prefix = if result.synced {
-        "Amp sync warning"
-    } else if had_cache {
-        "Amp sync failed; using cached data"
-    } else {
-        "Amp sync failed"
-    };
-    Some(format!("  {prefix}: {error}"))
+    let warning = result.error.as_ref().map(|error| {
+        let prefix = if result.synced {
+            "Amp sync warning"
+        } else if had_cache {
+            "Amp sync failed; using cached data"
+        } else {
+            "Amp sync failed"
+        };
+        format!("  {prefix}: {error}")
+    });
+    AutoSyncAmpResult {
+        warning,
+        cache_complete: result.complete,
+        has_cached_threads: has_cached_threads(&cache_dir),
+    }
+}
+
+pub fn auto_sync() -> Option<String> {
+    auto_sync_status().warning
 }
 
 fn manual_sync_completion(result: &SyncAmpResult) -> Result<()> {
@@ -626,6 +659,8 @@ mod tests {
         fake.failing = vec!["T-bad"];
         let result = sync(cache, &fake);
         assert!(result.synced);
+        assert!(!result.complete);
+        assert!(!load_index(cache).complete);
         assert_eq!((result.exported, result.failed), (2, 1));
         assert!(result.error.as_deref().unwrap().contains("T-bad"));
         assert!(threads_dir(cache).join("T-a.json").is_file());
@@ -638,7 +673,9 @@ mod tests {
             summary("T-bad", "1"),
             summary("T-c", "1"),
         ]);
-        sync(cache, &retry);
+        let result = sync(cache, &retry);
+        assert!(result.complete);
+        assert!(load_index(cache).complete);
         assert_eq!(retry.exported(), vec!["T-bad"]);
     }
 
@@ -734,6 +771,22 @@ mod tests {
     }
 
     #[test]
+    fn empty_amp_cache_does_not_block_other_clients_full_history() {
+        assert!(AutoSyncAmpResult::default().allows_full_history());
+        assert!(!AutoSyncAmpResult {
+            has_cached_threads: true,
+            ..AutoSyncAmpResult::default()
+        }
+        .allows_full_history());
+        assert!(AutoSyncAmpResult {
+            cache_complete: true,
+            has_cached_threads: true,
+            ..AutoSyncAmpResult::default()
+        }
+        .allows_full_history());
+    }
+
+    #[test]
     fn manual_sync_rejects_partial_export_results() {
         let result = SyncAmpResult {
             synced: true,
@@ -779,8 +832,8 @@ mod tests {
             .open(&path)
             .unwrap();
 
-        let error = lock_sync_transaction(second, Instant::now() + Duration::from_millis(20))
-            .unwrap_err();
+        let error =
+            lock_sync_transaction(second, Instant::now() + Duration::from_millis(20)).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("deadline"));
     }
