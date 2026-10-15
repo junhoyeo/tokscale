@@ -6534,7 +6534,17 @@ fn run_submit_command(
                         .yellow()
                     );
                 } else if let Some(err) = sync_result.error {
-                    if has_antigravity_cache {
+                    if sync_result.fresh > 0 || sync_result.preserved > 0 {
+                        let warning = format!(
+                            "  Antigravity sync partially completed ({} fresh, {} preserved, {} failed); using cached data: {}",
+                            sync_result.fresh, sync_result.preserved, sync_result.failed, err
+                        );
+                        if has_antigravity_cache {
+                            println!("{}", warning.yellow());
+                        } else {
+                            println!("{}", format!("{}", warning).yellow());
+                        }
+                    } else if has_antigravity_cache {
                         println!(
                             "{}",
                             format!("  Antigravity sync failed; using cached data: {}", err)
