@@ -344,62 +344,57 @@ fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -
 ///
 /// Accepted rows use the report parser's projection of every immutable known
 /// field: trimmed model/session ids (one missing-id fallback), integer timestamp
-/// and defaulted/coerced/clamped token counts. Mutable billing fields are omitted
-/// so a re-fetched correction replaces its cached row. Unknown fields remain
-/// unchanged, including tokenUsage siblings and nested metadata. Rejected rows
-/// retain their raw identity; only object key ordering is canonicalized.
+/// and defaulted/coerced/clamped token counts. Mutable billing and unknown fields
+/// are omitted so a re-fetched correction replaces its cached row; the multiset
+/// merge separately preserves repeated events with the same projection. Rejected
+/// rows retain their raw identity; only object key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
-    let mut identity = event.clone();
-    if let Some(parsed) = tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
+    let mut identity = if let Some(parsed) =
+        tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
     {
-        // Positional rows have no top-level extensions. Preserve the raw fifth
-        // field (tokenUsage), whose object may still carry unknown siblings.
-        if !identity.is_object() {
-            identity = serde_json::json!({"tokenUsage": event.get(4)});
-        }
-        let fields = identity
-            .as_object_mut()
-            .expect("normalized usage event object");
-        fields.remove("chargedCents");
-        fields.remove("cursorTokenFee");
-        fields.insert(
-            "conversationId".to_string(),
-            serde_json::json!(parsed.conversation_id),
-        );
-        fields.insert("model".to_string(), serde_json::json!(parsed.model));
-        fields.insert("timestamp".to_string(), serde_json::json!(parsed.timestamp));
-        let usage = fields
-            .entry("tokenUsage")
-            .or_insert(serde_json::Value::Null);
-        if !usage.is_object() {
-            *usage = serde_json::json!({});
-        }
-        let usage = usage.as_object_mut().expect("normalized tokenUsage object");
-        usage.remove("totalCents");
-        for (field, count) in [
-            ("inputTokens", parsed.tokens.input),
-            ("outputTokens", parsed.tokens.output),
-            ("cacheReadTokens", parsed.tokens.cache_read),
-            ("cacheWriteTokens", parsed.tokens.cache_write),
-        ] {
-            usage.insert(field.to_string(), serde_json::json!(count));
-        }
-    }
+        // Restrict accepted rows to the report parser's immutable projection.
+        // Cursor exposes no stable event id, so multiplicity is tracked by the
+        // merge rather than by unknown fields that billing corrections may change.
+        serde_json::json!({
+            "conversationId": parsed.conversation_id,
+            "model": parsed.model,
+            "timestamp": parsed.timestamp,
+            "tokenUsage": {
+                "inputTokens": parsed.tokens.input,
+                "outputTokens": parsed.tokens.output,
+                "cacheReadTokens": parsed.tokens.cache_read,
+                "cacheWriteTokens": parsed.tokens.cache_write,
+            },
+        })
+    } else {
+        // Rejected rows cannot be projected safely. Keep their complete raw
+        // identity so unrelated malformed data is never discarded.
+        event.clone()
+    };
     identity.sort_all_objects();
     serde_json::to_string(&identity).unwrap_or_default()
 }
 
-/// Union `incoming` (just fetched, newest first) with `existing` (the cache).
-/// Incoming wins on identity so a re-fetched recent row picks up a billing
-/// update, and cached rows the new pages never reached stay in the result.
+/// Reconcile `incoming` (just fetched, newest first) with `existing` (the cache).
+/// Incoming is authoritative for every identity present in the completed overlap,
+/// so all cached occurrences of those identities are replaced. Every incoming
+/// occurrence is retained because Cursor has no stable event id and distinct
+/// billable events may have identical parser fields. Cached identities the new
+/// pages never reached stay in the result.
 fn merge_cursor_usage_events(
     existing: Vec<serde_json::Value>,
     incoming: Vec<serde_json::Value>,
 ) -> Vec<serde_json::Value> {
-    let mut seen = HashSet::with_capacity(existing.len().saturating_add(incoming.len()));
-    let mut merged = Vec::with_capacity(existing.len().saturating_add(incoming.len()));
-    for event in incoming.into_iter().chain(existing) {
-        if seen.insert(cursor_usage_event_identity(&event)) {
+    let capacity = existing.len().saturating_add(incoming.len());
+    let mut incoming_identities = HashSet::with_capacity(incoming.len());
+    let mut merged = Vec::with_capacity(capacity);
+    for event in incoming {
+        incoming_identities.insert(cursor_usage_event_identity(&event));
+        merged.push(event);
+    }
+
+    for event in existing {
+        if !incoming_identities.contains(&cursor_usage_event_identity(&event)) {
             merged.push(event);
         }
     }
@@ -4468,7 +4463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_identity_contract_preserves_unknown_fields_and_rejected_rows() {
+    fn test_cursor_merge_preserves_unknown_fields_and_rejected_rows() {
         let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
         let mut unknown = vec![base.clone()];
         for (nested, key, value) in [
@@ -4571,7 +4566,7 @@ mod tests {
         assert_eq!(
             merged.len(),
             expected,
-            "unknown fields and rejected representations remain distinct"
+            "unknown fields, rejected representations, and raw multiplicity must survive"
         );
         for row in all {
             assert!(merged.contains(&row), "raw row retained: {row}");
@@ -4611,8 +4606,11 @@ mod tests {
                 (10, 20, 30, 40)
             );
         }
-        let merged =
-            merge_cursor_usage_events(vec![integer.clone(), floats], vec![strings.clone()]);
+        assert_eq!(
+            cursor_usage_event_identity(&integer),
+            cursor_usage_event_identity(&floats)
+        );
+        let merged = merge_cursor_usage_events(vec![integer.clone()], vec![strings.clone()]);
         assert_eq!(
             merged.len(),
             1,
@@ -4647,8 +4645,8 @@ mod tests {
                 vec![unknown_b, unknown_token_number],
             )
             .len(),
-            7,
-            "distinct same-time rows and unknown fields must survive"
+            4,
+            "the complete overlap must replace cached variants and keep incoming multiplicity"
         );
     }
 
@@ -4731,6 +4729,39 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_cursor_usage_events_preserves_identical_event_multiplicity() {
+        let stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("duplicate", "200")).unwrap();
+        let mut corrected = stored.clone();
+        corrected["chargedCents"] = serde_json::json!(9);
+
+        let merged = merge_cursor_usage_events(
+            vec![stored.clone(), stored.clone()],
+            vec![corrected.clone(), corrected.clone()],
+        );
+        assert_eq!(merged, vec![corrected.clone(), corrected.clone()]);
+
+        let corrected_snapshot =
+            merge_cursor_usage_events(vec![stored.clone(), stored], vec![corrected.clone()]);
+        assert_eq!(corrected_snapshot, vec![corrected]);
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_ignores_mutable_unknown_billing_fields() {
+        let mut stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("corrected", "200")).unwrap();
+        stored["isChargeable"] = serde_json::json!(false);
+        stored["usageBasedCosts"] = serde_json::json!({"totalCents": 1});
+        let mut corrected = stored.clone();
+        corrected["chargedCents"] = serde_json::json!(9);
+        corrected["isChargeable"] = serde_json::json!(true);
+        corrected["usageBasedCosts"] = serde_json::json!({"totalCents": 9});
+
+        let merged = merge_cursor_usage_events(vec![stored], vec![corrected.clone()]);
+        assert_eq!(merged, vec![corrected]);
+    }
+
+    #[test]
     fn test_merge_cursor_usage_events_collapses_equivalent_timestamps() {
         let string_ts =
             serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
@@ -4748,7 +4779,7 @@ mod tests {
             cursor_usage_event_identity(&string_ts),
             cursor_usage_event_identity(&rfc3339)
         );
-        let merged = merge_cursor_usage_events(vec![string_ts, number_ts], vec![rfc3339]);
+        let merged = merge_cursor_usage_events(vec![number_ts], vec![rfc3339]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0]["chargedCents"], serde_json::json!(4));
 
