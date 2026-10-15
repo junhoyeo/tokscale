@@ -1154,7 +1154,7 @@ fn codex_archive_failure_warning(
         ));
     }
     if size_limit_failures > 0 {
-        let limit_mib = sessions::utils::MAX_ARCHIVE_BYTES / (1024 * 1024);
+        let limit_mib = sessions::codex::MAX_CODEX_ARCHIVE_BYTES / (1024 * 1024);
         categories.push(format!(
             "{size_limit_failures} exceeded the {limit_mib} MiB decoded-size limit"
         ));
@@ -8320,7 +8320,7 @@ mod tests {
         let assert_warning = |warning: &str| {
             assert!(warning.contains("skipped 3 unreadable compressed Codex rollout files"));
             assert!(warning.contains("2 decode failures"));
-            assert!(warning.contains("1 exceeded the 256 MiB decoded-size limit"));
+            assert!(warning.contains("1 exceeded the 1024 MiB decoded-size limit"));
             assert!(warning.contains("Recorded token totals may omit these files"));
             assert!(warning.contains("capped.jsonl.zst\" (decoded size limit exceeded"));
             assert!(warning.contains("copy.jsonl.zst\" (decode failed"));

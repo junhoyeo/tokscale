@@ -1017,6 +1017,37 @@ fn sandbox_config_dir(tmp: &Path) -> std::path::PathBuf {
     tmp.join(".config").join("tokscale")
 }
 
+/// Keep submit fixtures from enumerating real desktop processes. `submit` now
+/// refreshes Antigravity before scanning; HOME alone cannot contain `ps` or
+/// PowerShell discovery. The child executes only this fixture-owned shim, which
+/// reports no candidate processes on every supported platform.
+fn discovery_shim_path(tmp: &Path) -> std::ffi::OsString {
+    let bin = tmp.join(".tokscale-test-bin");
+    fs::create_dir_all(&bin).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ps = bin.join("ps");
+        fs::write(&ps, "#!/bin/sh\nprintf 'PID PPID COMMAND\\n'\n").unwrap();
+        fs::set_permissions(&ps, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(windows)]
+    {
+        // `Command::new("powershell")` resolves this through PATHEXT before
+        // the host PowerShell. Its JSON is the empty process collection expected
+        // by `parse_windows_process_candidates`.
+        fs::write(bin.join("powershell.cmd"), "@echo []\r\n").unwrap();
+    }
+
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
+
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
@@ -1024,6 +1055,7 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
+        .env("PATH", discovery_shim_path(tmp))
         // `pricing` intentionally bypasses TOKSCALE_PRICING_CACHE_ONLY; the
         // loopback proxies below are the offline guarantee for every command.
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
@@ -3480,6 +3512,7 @@ fn test_submit_tip_recommends_only_the_client_filter() {
         .stdout(predicate::str::contains(
             "Tip: narrow the scan with `--client <id>` for a faster submit.",
         ))
+        .stdout(predicate::str::contains("Syncing Antigravity usage data...").not())
         .stdout(predicate::str::is_match(r"Tip:.*--since").unwrap().not());
 }
 
@@ -7237,20 +7270,27 @@ fn test_codex_compressed_session_reports_usage() {
     )
     .unwrap();
 
-    let output = cmd_with_home(tmp.path())
-        .args(["--client", "codex", "--json", "--no-spinner"])
-        .output()
-        .unwrap();
+    // Check a cold archive scan, an uncompressed duplicate, and the warm cache.
+    for scan in 0..3 {
+        if scan == 1 {
+            fs::write(sessions.join("fixture.jsonl"), content).unwrap();
+        }
+        let output = cmd_with_home(tmp.path())
+            .args(["--client", "codex", "--json", "--no-spinner"])
+            .output()
+            .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
-    assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
+        assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
+        assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
+        assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+        assert_eq!(json["entries"][0]["reasoning"].as_i64().unwrap(), 10);
+    }
 }

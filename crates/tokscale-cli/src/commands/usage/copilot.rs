@@ -81,8 +81,9 @@ fn normalize_gh_host(raw: &str) -> Option<String> {
     if !is_dns_hostname(name) {
         return None;
     }
+    let name = normalize_gh_hostname(name);
     let Some(port) = port else {
-        return Some(name.to_string());
+        return Some(name);
     };
     // Digits only, so a second `:` (or a sign, or whitespace) is rejected
     // here rather than by `parse`.
@@ -94,6 +95,25 @@ fn normalize_gh_host(raw: &str) -> Option<String> {
         443 => Some(name.to_string()),
         port => Some(format!("{name}:{port}")),
     }
+}
+
+/// Match go-gh's hostname aliases before looking up a token or keyring
+/// service. GitHub API and upload subdomains share the github.com account;
+/// tenancy routes reduce to their tenant label; and GitHub's local test host
+/// shares the dotcom token variables.
+fn normalize_gh_hostname(name: &str) -> String {
+    if name.ends_with(".github.com") {
+        return DEFAULT_GH_HOST.to_string();
+    }
+    if name.ends_with(".github.localhost") {
+        return "github.localhost".to_string();
+    }
+    if let Some(before) = name.strip_suffix(".ghe.com") {
+        if let Some(tenant) = before.rsplit('.').next() {
+            return format!("{tenant}.ghe.com");
+        }
+    }
+    name.to_string()
 }
 
 /// An ASCII DNS hostname: 1-253 characters of dot-separated labels, each
@@ -236,7 +256,7 @@ fn current_gh_host() -> String {
 /// credential than the host the request is sent to.
 fn is_dotcom_style_host(host: &str) -> bool {
     let name = gh_host_name(host);
-    name == DEFAULT_GH_HOST || name.ends_with(".ghe.com")
+    name == DEFAULT_GH_HOST || name == "github.localhost" || name.ends_with(".ghe.com")
 }
 
 /// Environment variables holding a token for `host`, in `gh`'s precedence
@@ -1336,6 +1356,23 @@ mod tests {
         for (raw, want) in cases {
             assert_eq!(normalize_gh_host(raw).as_deref(), want, "input {raw:?}");
         }
+    }
+
+    #[test]
+    fn gh_host_aliases_match_gh_credential_normalization() {
+        let cases = [
+            ("api.github.com", "github.com"),
+            ("uploads.github.com", "github.com"),
+            ("api.github.localhost", "github.localhost"),
+            ("api.tenant.ghe.com", "tenant.ghe.com"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(normalize_gh_host(raw).as_deref(), Some(expected), "{raw}");
+        }
+        assert_eq!(
+            token_env_vars("github.localhost"),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
     }
 
     #[test]

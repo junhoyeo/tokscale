@@ -1397,14 +1397,13 @@ fn parser_version(client: ClientId) -> u32 {
         // Codex sessions and archives.
         // v14->v15: assign stable cross-copy dedup keys to usage rows that use
         // the file-mtime fallback timestamp, and persist their event ordinal.
-        // v15->v16: a `token_usage_record` that no token_count confirms (a
-        // context compaction request, or a response whose turn ended before
-        // its token_count) is now counted from the record, and the parse state
-        // carries the pending and settled records beside v15's event ordinal.
-        // A finished rollout never changes, so a v15 entry would keep serving
-        // the totals without those responses. OpenClaw's codex-home rollouts
-        // share this identity.
-        ClientId::Codex => 16,
+        // v15->v16: count token_usage_record rows that no token_count confirms,
+        // including context compaction requests, and retain the pending/settled
+        // record state needed to do so.
+        // v16->v17: safely skip oversized JSONL records while retaining later
+        // usage in large compressed rollouts. v16 cache entries predate this
+        // bounded parser behavior and must be reparsed.
+        ClientId::Codex => 17,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -4734,10 +4733,11 @@ mod tests {
         // v11->v13 retains source completeness and gateway activity for empty
         // results, v13->v14 decodes compressed archives (.jsonl.zst),
         // v14->v15 stabilizes fallback-timestamp dedup across rollout copies,
-        // and v15->v16 counts usage records no token_count confirms.
+        // v15->v16 counts usage records no token_count confirms, and v16->v17
+        // skips oversized records while preserving later usage.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 16);
+        assert_eq!(parser_version(ClientId::Codex), 17);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -5260,7 +5260,7 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 16);
+        assert_eq!(cached.parser_version, 17);
         assert_eq!(cached.messages, parsed);
     }
 

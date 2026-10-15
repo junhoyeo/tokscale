@@ -6492,6 +6492,77 @@ fn run_submit_command(
             }
         }
     }
+
+    let include_antigravity = clients
+        .as_ref()
+        .is_none_or(|s| s.iter().any(|src| src == "antigravity"));
+    let has_antigravity_cache = antigravity::has_antigravity_cache();
+    if include_antigravity {
+        match antigravity::detect_antigravity_connections() {
+            Ok(active_connections) if !active_connections.is_empty() => {
+                println!("{}", "  Syncing Antigravity usage data...".bright_black());
+                let sync_result = antigravity::sync_antigravity_cache_with_connections(
+                    &active_connections,
+                    false,
+                );
+                if sync_result.synced {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity: {} session{} synced from {} active connection{}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.connections,
+                            if sync_result.connections == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                        .bright_black()
+                    );
+                } else if sync_result.partial {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity sync was partial: {} session{} refreshed, {} retained from cache, {} failed: {}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.retained_sessions,
+                            sync_result.failed_sessions,
+                            sync_result.error.as_deref().unwrap_or("unknown sync error")
+                        )
+                        .yellow()
+                    );
+                } else if let Some(err) = sync_result.error {
+                    if has_antigravity_cache {
+                        println!(
+                            "{}",
+                            format!("  Antigravity sync failed; using cached data: {}", err)
+                                .yellow()
+                        );
+                    } else {
+                        println!("{}", format!("  Antigravity sync failed: {}", err).yellow());
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                if has_antigravity_cache {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed; using cached data: {}", err)
+                            .yellow()
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed: {}", err).yellow()
+                    );
+                }
+            }
+        }
+    }
     if explicit_cursor_filter || explicit_warp_filter || explicit_hindsight_filter {
         let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
         emit_cursor_setup_warnings(&cursor_setup_warnings);
