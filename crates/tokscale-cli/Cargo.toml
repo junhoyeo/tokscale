@@ -44,6 +44,7 @@ dirs = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
 fs2 = { workspace = true }
+tempfile = "3.0"
 # Only the codecs `wrapped` actually touches: it saves PNG and decodes the
 # PNG/JPEG/WebP logo and avatar assets it downloads. `image`'s default
 # feature set additionally links AVIF, BMP, DDS, EXR, Farbfeld, GIF, HDR,
@@ -135,7 +136,6 @@ signal-hook = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
-tempfile = "3.0"
 serial_test = "3.0"
 # DSH transcript fixtures are zstd frames; the CLI tests write them directly.
 zstd = { workspace = true }

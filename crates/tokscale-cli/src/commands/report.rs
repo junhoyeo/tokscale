@@ -1046,21 +1046,9 @@ fn run_minimax_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_js
 /// `tokscale report` can never block forever.
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
-/// `timeout` for it to finish.
-///
-/// Mirrors the pure-std spawn + reader-thread + `try_wait()` deadline + kill
-/// approach used by `run_capture_command` in `main.rs` (no extra dependency).
-/// Both stdout and stderr are drained on dedicated threads so a chatty backend
-/// cannot deadlock on a full pipe buffer while we poll for exit.
-///
-/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
-/// returned, which callers treat as a recoverable "skip this backend" signal.
 const MAX_CAPTURED_SUBPROCESS_BYTES: usize = 16 * 1024 * 1024;
 
-fn drain_subprocess_pipe(
-    mut pipe: impl std::io::Read + Send + 'static,
-) -> std::io::Result<Vec<u8>> {
+fn drain_subprocess_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
@@ -1078,15 +1066,28 @@ fn drain_subprocess_pipe(
     }
 }
 
+/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
+/// `timeout` for it to finish.
+///
+/// Output is redirected to owned temporary files instead of blocking pipe
+/// readers. A descendant may inherit the write handles, but it cannot keep a
+/// reader thread alive or delay capture after the direct child exits.
+///
+/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
+/// returned, which callers treat as a recoverable "skip this backend" signal.
 pub(crate) fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
     stdin_bytes: Option<&[u8]>,
 ) -> std::io::Result<Output> {
-    use std::thread;
+    use std::io::Seek;
     use std::time::Instant;
 
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let deadline = Instant::now() + timeout;
+    let mut stdout_file = tempfile::NamedTempFile::new()?;
+    let mut stderr_file = tempfile::NamedTempFile::new()?;
+    cmd.stdout(Stdio::from(stdout_file.reopen()?))
+        .stderr(Stdio::from(stderr_file.reopen()?));
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -1096,23 +1097,6 @@ pub(crate) fn run_command_with_timeout(
             stdin.write_all(bytes)?;
         }
     }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
-    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let _ = stdout_tx.send(drain_subprocess_pipe(stdout));
-    });
-    thread::spawn(move || {
-        let _ = stderr_tx.send(drain_subprocess_pipe(stderr));
-    });
-    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -1125,22 +1109,13 @@ pub(crate) fn run_command_with_timeout(
                 "subprocess timed out",
             ));
         }
-        thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(25));
     };
-    let receive = |rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
-        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|error| match error {
-                std::sync::mpsc::RecvTimeoutError::Timeout => std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "subprocess exited but a descendant kept an output pipe open",
-                ),
-                std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                    std::io::Error::other("subprocess output reader stopped")
-                }
-            })?
-    };
-    let stdout = receive(stdout_rx)?;
-    let stderr = receive(stderr_rx)?;
+
+    stdout_file.rewind()?;
+    stderr_file.rewind()?;
+    let stdout = drain_subprocess_pipe(stdout_file.as_file_mut())?;
+    let stderr = drain_subprocess_pipe(stderr_file.as_file_mut())?;
     Ok(Output {
         status,
         stdout,
@@ -2480,6 +2455,17 @@ mod tests {
         let bytes = vec![0_u8; MAX_CAPTURED_SUBPROCESS_BYTES + 1];
         let error = drain_subprocess_pipe(std::io::Cursor::new(bytes)).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_capture_does_not_wait_for_descendant_owned_output_handles() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "(sleep 2) & printf done"]);
+
+        let output = run_command_with_timeout(command, Duration::from_millis(200), None).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done");
     }
 
     #[test]
