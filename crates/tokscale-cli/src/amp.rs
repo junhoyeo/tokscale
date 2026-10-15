@@ -451,7 +451,7 @@ fn auto_sync_is_due(index: &AmpSyncIndex) -> bool {
     let Some(last_attempt) = index.last_attempt_at.as_ref() else {
         return true;
     };
-    let Ok(last_attempt) = chrono::DateTime::parse_from_rfc3339(&last_attempt) else {
+    let Ok(last_attempt) = chrono::DateTime::parse_from_rfc3339(last_attempt) else {
         return true;
     };
     let age = chrono::Utc::now().signed_duration_since(last_attempt);
