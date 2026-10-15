@@ -1069,12 +1069,19 @@ async fn drain_subprocess_pipe(
     }
 }
 
+async fn terminate_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
 async fn run_command_async(
     mut cmd: Command,
     stdin_bytes: Option<Vec<u8>>,
+    timeout: Duration,
 ) -> std::io::Result<Output> {
     use tokio::io::AsyncWriteExt;
 
+    let deadline = tokio::time::Instant::now() + timeout;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
@@ -1084,7 +1091,16 @@ async fn run_command_async(
     let mut child = cmd.spawn()?;
     if let Some(bytes) = stdin_bytes {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&bytes).await?;
+            match tokio::time::timeout_at(deadline, stdin.write_all(&bytes)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    terminate_and_reap(&mut child).await;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "subprocess stdin write timed out",
+                    ));
+                }
+            }
         }
     }
     let stdout = child
@@ -1095,16 +1111,60 @@ async fn run_command_async(
         .stderr
         .take()
         .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
-    let (status, stdout, stderr) = tokio::try_join!(
-        child.wait(),
-        drain_subprocess_pipe(stdout),
-        drain_subprocess_pipe(stderr)
-    )?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    let mut stdout_drain = Box::pin(drain_subprocess_pipe(stdout));
+    let mut stderr_drain = Box::pin(drain_subprocess_pipe(stderr));
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+
+    loop {
+        tokio::select! {
+            result = child.wait(), if status.is_none() => {
+                match result {
+                    Ok(value) => status = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            result = &mut stdout_drain, if stdout.is_none() => {
+                match result {
+                    Ok(value) => stdout = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            result = &mut stderr_drain, if stderr.is_none() => {
+                match result {
+                    Ok(value) => stderr = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                if status.is_none() {
+                    terminate_and_reap(&mut child).await;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "subprocess or output drain timed out",
+                ));
+            }
+        }
+
+        if let (Some(status), Some(stdout), Some(stderr)) = (&status, &stdout, &stderr) {
+            return Ok(Output {
+                status: *status,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            });
+        }
+    }
 }
 
 /// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
@@ -1128,16 +1188,7 @@ pub(crate) fn run_command_with_timeout(
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                runtime.block_on(async {
-                    tokio::time::timeout(timeout, run_command_async(cmd, stdin_bytes))
-                        .await
-                        .map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "subprocess or output drain timed out",
-                            )
-                        })?
-                })
+                runtime.block_on(run_command_async(cmd, stdin_bytes, timeout))
             })
             .join()
             .map_err(|_| std::io::Error::other("subprocess runtime thread panicked"))?
@@ -2482,6 +2533,30 @@ mod tests {
             .block_on(drain_subprocess_pipe(&bytes[..]))
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_and_reaps_the_direct_child() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let pid_path = temp.path().join("pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!("echo $$ > {}; exec sleep 30", pid_path.display()),
+        ]);
+
+        let error =
+            run_command_with_timeout(command, Duration::from_millis(200), None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "timed-out direct child {pid} still exists");
     }
 
     #[cfg(unix)]
