@@ -2,7 +2,6 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use colored::Colorize;
 use std::collections::HashMap;
-use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use unicode_normalization::UnicodeNormalization;
 
@@ -1048,11 +1047,15 @@ const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MAX_CAPTURED_SUBPROCESS_BYTES: usize = 16 * 1024 * 1024;
 
-fn drain_subprocess_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+async fn drain_subprocess_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
     let mut output = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
-        let read = pipe.read(&mut chunk)?;
+        let read = pipe.read(&mut chunk).await?;
         if read == 0 {
             return Ok(output);
         }
@@ -1066,60 +1069,78 @@ fn drain_subprocess_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8
     }
 }
 
-/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
-/// `timeout` for it to finish.
-///
-/// Output is redirected to owned temporary files instead of blocking pipe
-/// readers. A descendant may inherit the write handles, but it cannot keep a
-/// reader thread alive or delay capture after the direct child exits.
-///
-/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
-/// returned, which callers treat as a recoverable "skip this backend" signal.
-pub(crate) fn run_command_with_timeout(
+async fn run_command_async(
     mut cmd: Command,
-    timeout: Duration,
-    stdin_bytes: Option<&[u8]>,
+    stdin_bytes: Option<Vec<u8>>,
 ) -> std::io::Result<Output> {
-    use std::io::Seek;
-    use std::time::Instant;
+    use tokio::io::AsyncWriteExt;
 
-    let deadline = Instant::now() + timeout;
-    let mut stdout_file = tempfile::NamedTempFile::new()?;
-    let mut stderr_file = tempfile::NamedTempFile::new()?;
-    cmd.stdout(Stdio::from(stdout_file.reopen()?))
-        .stderr(Stdio::from(stderr_file.reopen()?));
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
     }
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
     if let Some(bytes) = stdin_bytes {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(bytes)?;
+            stdin.write_all(&bytes).await?;
         }
     }
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "subprocess timed out",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-
-    stdout_file.rewind()?;
-    stderr_file.rewind()?;
-    let stdout = drain_subprocess_pipe(stdout_file.as_file_mut())?;
-    let stderr = drain_subprocess_pipe(stderr_file.as_file_mut())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
+    let (status, stdout, stderr) = tokio::try_join!(
+        child.wait(),
+        drain_subprocess_pipe(stdout),
+        drain_subprocess_pipe(stderr)
+    )?;
     Ok(Output {
         status,
         stdout,
         stderr,
+    })
+}
+
+/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
+/// `timeout` for the direct child and both bounded output drains to finish.
+///
+/// The async drains are owned by the invocation. Timing out drops and closes
+/// them before the dedicated runtime thread returns, so a descendant retaining
+/// a pipe cannot leak a blocked reader across repeated commands.
+///
+/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
+/// returned, which callers treat as a recoverable "skip this backend" signal.
+pub(crate) fn run_command_with_timeout(
+    cmd: Command,
+    timeout: Duration,
+    stdin_bytes: Option<&[u8]>,
+) -> std::io::Result<Output> {
+    let stdin_bytes = stdin_bytes.map(<[u8]>::to_vec);
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(async {
+                    tokio::time::timeout(timeout, run_command_async(cmd, stdin_bytes))
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "subprocess or output drain timed out",
+                            )
+                        })?
+                })
+            })
+            .join()
+            .map_err(|_| std::io::Error::other("subprocess runtime thread panicked"))?
     })
 }
 
@@ -2453,19 +2474,25 @@ mod tests {
     #[test]
     fn bounded_subprocess_drain_rejects_oversized_output() {
         let bytes = vec![0_u8; MAX_CAPTURED_SUBPROCESS_BYTES + 1];
-        let error = drain_subprocess_pipe(std::io::Cursor::new(bytes)).unwrap_err();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(drain_subprocess_pipe(&bytes[..]))
+            .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[cfg(unix)]
     #[test]
-    fn command_capture_does_not_wait_for_descendant_owned_output_handles() {
+    fn command_capture_cancels_descendant_owned_output_drains() {
         let mut command = Command::new("sh");
         command.args(["-c", "(sleep 2) & printf done"]);
 
-        let output = run_command_with_timeout(command, Duration::from_millis(200), None).unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"done");
+        let error =
+            run_command_with_timeout(command, Duration::from_millis(200), None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]
