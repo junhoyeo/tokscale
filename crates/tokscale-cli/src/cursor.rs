@@ -974,16 +974,16 @@ fn prepare_cursor_cache_layout(cache_dir: &Path, store: &CursorCredentialsStore)
     ));
     if named.exists() {
         if active.exists() {
-            archive_cache_file_in_dir(cache_dir, &active, "active-copy")?;
+            // The verified canonical cache remains usable if the refresh fails.
             archive_cache_file_in_dir(cache_dir, &named, "named-copy")?;
-            preserved += 2;
+            preserved += 1;
         } else {
             fs::rename(named, active)?;
         }
     }
     if preserved > 0 {
         eprintln!(
-            "Cursor: preserved {preserved} cache file(s) in {}; refetching accounts independently",
+            "Cursor: preserved {preserved} cache file(s) in {}",
             cache_dir.join("archive").display()
         );
     }
@@ -6530,6 +6530,49 @@ mod tests {
         assert!(
             !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
             "unexpected legacy files must trigger preservation even with a fresh marker"
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_verified_active_cache_survives_duplicate_cleanup_and_failed_fetch() -> Result<()> {
+        let home = TempDir::new()?;
+        let mut store = collision_fixture_store(home.path())?;
+        let id = store.active_account_id.clone();
+        store.accounts.retain(|key, _| key == &id);
+        save_credentials_store_in_home(home.path(), &store)?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        let active = owned_cursor_cache(
+            &String::from_utf8(json_page(1, &[&json_event("canonical-history", "7200000")]))?,
+            &id,
+        )?;
+        let duplicate = owned_cursor_cache(
+            &String::from_utf8(json_page(1, &[&json_event("duplicate-history", "1")]))?,
+            &id,
+        )?;
+        let named = dir.join(format!("usage.{}.json", cursor_account_cache_stem(&id)));
+        fs::write(dir.join("usage.json"), &active)?;
+        fs::write(&named, &duplicate)?;
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert_eq!(
+                    fetch.existing_cache.as_deref(),
+                    Some(active.as_str()),
+                    "a verified canonical cache must remain available to the fetcher"
+                );
+                std::future::ready(Err(anyhow::anyhow!("network unavailable")))
+            }),
+        );
+        assert!(!result.synced);
+        assert!(result.error.unwrap().contains("network unavailable"));
+        assert_eq!(fs::read_to_string(dir.join("usage.json"))?, active);
+        assert!(!named.exists());
+        assert_eq!(
+            preserved_cursor_files(&dir)?,
+            vec![(
+                named.file_name().unwrap().to_string_lossy().to_string(),
+                duplicate.into_bytes()
+            )]
         );
         Ok(())
     }
