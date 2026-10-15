@@ -1620,7 +1620,11 @@ fn write_jcode_session(base: &Path) {
 fn write_cursor_usage_cache(base: &Path) {
     let cache_dir = base.join(".config/tokscale/cursor-cache");
     fs::create_dir_all(&cache_dir).unwrap();
-    fs::write(cache_dir.join("usage.json"), r#"{"usageEventsDisplay":[]}"#).unwrap();
+    fs::write(
+        cache_dir.join("usage.json"),
+        r#"{"_tokscale":{"version":1,"accountId":"active-account"},"usageEventsDisplay":[]}"#,
+    )
+    .unwrap();
 }
 
 fn write_cursor_credentials(base: &Path) {
@@ -3365,6 +3369,36 @@ fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
         !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
         "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
     );
+}
+
+#[test]
+fn test_graph_preserves_unowned_cursor_cache_when_refetch_fails() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_credentials(tmp.path());
+    let cache_dir = tmp.path().join(".config/tokscale/cursor-cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let legacy = r#"{"usageEventsDisplay":[]}"#;
+    fs::write(cache_dir.join("usage.json"), legacy).unwrap();
+    let output = cmd_with_home(tmp.path())
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .args(["graph", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("preserved 1 cache file(s)"), "{stderr}");
+    assert!(stderr.contains("Cursor sync failed"), "{stderr}");
+    assert!(!cache_dir.join("usage.json").exists());
+    let archives: Vec<_> = fs::read_dir(cache_dir.join("archive")).unwrap().collect();
+    assert_eq!(archives.len(), 1);
+    let original = archives[0].as_ref().unwrap().path().join("usage.json");
+    assert_eq!(fs::read_to_string(original).unwrap(), legacy);
 }
 
 #[test]

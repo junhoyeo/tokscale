@@ -231,14 +231,6 @@ pub struct SyncCursorResult {
     pub error: Option<String>,
 }
 
-pub fn get_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(cursor_credentials_path(&home_dir()?))
-}
-
-pub fn get_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(cursor_cache_dir(&home_dir()?))
-}
-
 fn migrate_cache_dir_from_old_path_in_home(home_dir: &Path) {
     let old_dir = old_cursor_cache_dir(home_dir);
     let new_dir = cursor_cache_dir(home_dir);
@@ -769,14 +761,19 @@ pub fn read_local_cursor_session_token() -> Result<String> {
 /// Save credentials while preserving an existing account label / created_at when
 /// the caller does not supply a new label (used by local desktop refresh).
 fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
+    upsert_credentials_in_home(&home_dir()?, token, label)
+}
+
+fn upsert_credentials_in_home(home: &Path, token: &str, label: Option<&str>) -> Result<String> {
     let account_id = derive_account_id(token);
     let user_id = extract_user_id_from_session_token(token);
 
-    let mut store = load_credentials_store().unwrap_or_else(|| CursorCredentialsStore {
-        version: 1,
-        active_account_id: account_id.clone(),
-        accounts: HashMap::new(),
-    });
+    let mut store =
+        load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
+            version: 1,
+            active_account_id: account_id.clone(),
+            accounts: HashMap::new(),
+        });
 
     if let Some(lbl) = label {
         let needle = lbl.trim().to_lowercase();
@@ -820,11 +817,13 @@ fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
     // reconciliation would treat the previous account's `usage.json` as the new
     // active account's and could drop the new account's only cache.
     let old_active_id = store.active_account_id.clone();
-    let reconciled = if old_active_id != account_id {
-        reconcile_cache_files(&old_active_id, &account_id)
-    } else {
-        Ok(())
-    };
+    let reconciled = prepare_cursor_cache_layout(&cursor_cache_dir(home), &store).and_then(|()| {
+        if old_active_id != account_id {
+            reconcile_cache_files_in_dir(&cursor_cache_dir(home), &old_active_id, &account_id)
+        } else {
+            Ok(())
+        }
+    });
 
     // A freshly read desktop token is worth keeping even when the cache files
     // could not be moved, so the accounts are saved either way. Only point
@@ -833,7 +832,7 @@ fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
     if reconciled.is_ok() {
         store.active_account_id = account_id.clone();
     }
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
     reconciled?;
     Ok(account_id)
 }
@@ -884,6 +883,111 @@ fn sanitize_account_id_for_filename(account_id: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+/// Hash the exact ID, including case and whitespace. Sanitized names cannot
+/// distinguish accounts and are retained only for human-readable archive labels.
+fn cursor_account_cache_stem(account_id: &str) -> String {
+    format!("account-{:x}", Sha256::digest(account_id.as_bytes()))
+}
+
+#[derive(Deserialize)]
+struct CursorCacheOwnership {
+    #[serde(rename = "_tokscale")]
+    metadata: Option<CursorCacheOwner>,
+}
+
+#[derive(Deserialize)]
+struct CursorCacheOwner {
+    version: u32,
+    #[serde(rename = "accountId")]
+    account_id: String,
+}
+
+fn cursor_cache_owner(contents: &str) -> Option<String> {
+    // Deserialize only metadata; do not allocate every usage event just to
+    // check ownership of a potentially large history.
+    let value: CursorCacheOwnership = serde_json::from_str(contents).ok()?;
+    let metadata = value.metadata?;
+    if metadata.version != 1 {
+        return None;
+    }
+    Some(metadata.account_id)
+}
+
+fn owned_cursor_cache(contents: &str, account_id: &str) -> Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(contents)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Cursor usage cache must be a JSON object"))?;
+    object.insert(
+        "_tokscale".to_string(),
+        serde_json::json!({"version": 1, "accountId": account_id}),
+    );
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// Unmarked legacy files have no provable owner. Preserve them outside the
+/// scanner's live paths before any incremental fetch or account lifecycle move.
+/// A failed backup aborts the operation; no account may borrow that watermark.
+fn prepare_cursor_cache_layout(cache_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    let mut preserved = 0;
+    for entry in fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_cursor_usage_cache_filename(name) {
+            continue;
+        }
+        let path = entry.path();
+        if !entry.file_type()?.is_file() {
+            anyhow::bail!("Cursor cache is not a regular file: {}", path.display());
+        }
+        let owner = fs::read_to_string(&path)
+            .ok()
+            .and_then(|contents| cursor_cache_owner(&contents));
+        let verified = owner.as_deref().is_some_and(|id| {
+            store.accounts.contains_key(id)
+                && ((name == "usage.json" && id == store.active_account_id)
+                    || name == format!("usage.{}.json", cursor_account_cache_stem(id)))
+        });
+        if !verified {
+            archive_cache_file_in_dir(cache_dir, &path, "unverified").with_context(|| {
+                format!(
+                    "Failed to preserve unverified Cursor cache {}",
+                    path.display()
+                )
+            })?;
+            preserved += 1;
+        }
+    }
+
+    // An interrupted switch may leave the active account under its stable name.
+    // Only a verified file may be promoted; duplicate copies are backed up.
+    let active = cache_dir.join("usage.json");
+    let named = cache_dir.join(format!(
+        "usage.{}.json",
+        cursor_account_cache_stem(&store.active_account_id)
+    ));
+    if named.exists() {
+        if active.exists() {
+            archive_cache_file_in_dir(cache_dir, &active, "active-copy")?;
+            archive_cache_file_in_dir(cache_dir, &named, "named-copy")?;
+            preserved += 2;
+        } else {
+            fs::rename(named, active)?;
+        }
+    }
+    if preserved > 0 {
+        eprintln!(
+            "Cursor: preserved {preserved} cache file(s) in {}; refetching accounts independently",
+            cache_dir.join("archive").display()
+        );
+    }
+    Ok(())
 }
 
 pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
@@ -941,10 +1045,6 @@ fn load_credentials_store_from_home(home_dir: &Path) -> Option<CursorCredentials
     }
 
     None
-}
-
-pub fn save_credentials_store(store: &CursorCredentialsStore) -> Result<()> {
-    save_credentials_store_in_home(&home_dir()?, store)
 }
 
 fn save_credentials_store_in_home(home_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
@@ -1037,36 +1137,48 @@ pub fn save_credentials(token: &str, label: Option<&str>) -> Result<String> {
 }
 
 pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
+    remove_account_in_home(&home_dir()?, name_or_id, purge_cache)
+}
+
+fn remove_account_in_home(home: &Path, name_or_id: &str, purge_cache: bool) -> Result<()> {
+    let mut store = load_credentials_store_from_home(home)
+        .ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
 
     let resolved = resolve_account_id(&store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Account not found: {}", name_or_id))?;
 
     let was_active = resolved == store.active_account_id;
 
-    let cache_dir = get_cursor_cache_dir()?;
+    let cache_dir = cursor_cache_dir(home);
+    prepare_cursor_cache_layout(&cache_dir, &store)?;
     if cache_dir.exists() {
         for ext in CURSOR_CACHE_EXTENSIONS {
             let per_account = cache_dir.join(format!(
                 "usage.{}.{ext}",
-                sanitize_account_id_for_filename(&resolved)
+                cursor_account_cache_stem(&resolved)
             ));
             if per_account.exists() {
                 if purge_cache {
-                    let _ = fs::remove_file(&per_account);
+                    fs::remove_file(&per_account)?;
                 } else {
-                    let _ = archive_cache_file(&per_account, &format!("usage.{}", resolved));
+                    archive_cache_file_in_dir(
+                        &cache_dir,
+                        &per_account,
+                        &format!("usage.{}", resolved),
+                    )?;
                 }
             }
             if was_active {
                 let active_file = cache_dir.join(format!("usage.{ext}"));
                 if active_file.exists() {
                     if purge_cache {
-                        let _ = fs::remove_file(&active_file);
+                        fs::remove_file(&active_file)?;
                     } else {
-                        let _ =
-                            archive_cache_file(&active_file, &format!("usage.active.{}", resolved));
+                        archive_cache_file_in_dir(
+                            &cache_dir,
+                            &active_file,
+                            &format!("usage.active.{}", resolved),
+                        )?;
                     }
                 }
             }
@@ -1076,7 +1188,7 @@ pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
     store.accounts.remove(&resolved);
 
     if store.accounts.is_empty() {
-        let path = get_cursor_credentials_path()?;
+        let path = cursor_credentials_path(home);
         if path.exists() {
             fs::remove_file(path)?;
         }
@@ -1088,40 +1200,52 @@ pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
             for ext in CURSOR_CACHE_EXTENSIONS {
                 let new_account_file = cache_dir.join(format!(
                     "usage.{}.{ext}",
-                    sanitize_account_id_for_filename(&first_id)
+                    cursor_account_cache_stem(&first_id)
                 ));
                 let active_file = cache_dir.join(format!("usage.{ext}"));
                 if new_account_file.exists() {
-                    let _ = fs::rename(&new_account_file, &active_file);
+                    fs::rename(&new_account_file, &active_file)?;
                 }
             }
             store.active_account_id = first_id;
         }
     }
 
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
     Ok(())
 }
 
 pub fn remove_all_accounts(purge_cache: bool) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
+    remove_all_accounts_in_home(&home_dir()?, purge_cache)
+}
+
+fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
+    let cache_dir = cursor_cache_dir(home);
+    let store = load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
+        version: 1,
+        active_account_id: String::new(),
+        accounts: HashMap::new(),
+    });
+    prepare_cursor_cache_layout(&cache_dir, &store)?;
     if cache_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&cache_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("usage") && (name.ends_with(".json") || name.ends_with(".csv"))
-                {
-                    if purge_cache {
-                        let _ = fs::remove_file(entry.path());
-                    } else {
-                        let _ = archive_cache_file(&entry.path(), &format!("usage.all.{}", name));
-                    }
+        for entry in fs::read_dir(&cache_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_cursor_usage_cache_filename(&name) {
+                if purge_cache {
+                    fs::remove_file(entry.path())?;
+                } else {
+                    archive_cache_file_in_dir(
+                        &cache_dir,
+                        &entry.path(),
+                        &format!("usage.all.{name}"),
+                    )?;
                 }
             }
         }
     }
 
-    let path = get_cursor_credentials_path()?;
+    let path = cursor_credentials_path(home);
     if path.exists() {
         fs::remove_file(path)?;
     }
@@ -1129,12 +1253,17 @@ pub fn remove_all_accounts(purge_cache: bool) -> Result<()> {
 }
 
 pub fn set_active_account(name_or_id: &str) -> Result<()> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
+    set_active_account_in_home(&home_dir()?, name_or_id)
+}
+
+fn set_active_account_in_home(home: &Path, name_or_id: &str) -> Result<()> {
+    let mut store = load_credentials_store_from_home(home)
+        .ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
 
     let resolved = resolve_account_id(&store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Account not found: {}", name_or_id))?;
 
+    prepare_cursor_cache_layout(&cursor_cache_dir(home), &store)?;
     let old_active_id = store.active_account_id.clone();
 
     if resolved != old_active_id {
@@ -1142,18 +1271,13 @@ pub fn set_active_account(name_or_id: &str) -> Result<()> {
         // `usage.*` would then belong to a different account than
         // `active_account_id` claims, and the next sync would file one account's
         // usage under the other.
-        reconcile_cache_files(&old_active_id, &resolved)?;
+        reconcile_cache_files_in_dir(&cursor_cache_dir(home), &old_active_id, &resolved)?;
     }
 
     store.active_account_id = resolved;
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
 
     Ok(())
-}
-
-fn reconcile_cache_files(old_account_id: &str, new_account_id: &str) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
-    reconcile_cache_files_in_dir(&cache_dir, old_account_id, new_account_id)
 }
 
 /// Moves `usage.<ext>` back under `old_account_id` and promotes
@@ -1176,22 +1300,6 @@ fn reconcile_cache_files_in_dir(
         return Ok(());
     }
 
-    let old_stem = sanitize_account_id_for_filename(old_account_id);
-    let new_stem = sanitize_account_id_for_filename(new_account_id);
-    if old_account_id != new_account_id
-        && old_stem == new_stem
-        && CURSOR_CACHE_EXTENSIONS.iter().any(|ext| {
-            cache_dir.join(format!("usage.{ext}")).exists()
-                || cache_dir.join(format!("usage.{old_stem}.{ext}")).exists()
-        })
-    {
-        anyhow::bail!(
-            "Cursor cache filenames collide for {} and {}; keeping existing cache files",
-            old_account_id,
-            new_account_id
-        );
-    }
-
     let mut failures: Vec<String> = Vec::new();
 
     // Move both the current JSON cache and any legacy CSV cache so a switch
@@ -1200,16 +1308,24 @@ fn reconcile_cache_files_in_dir(
         let active_file = cache_dir.join(format!("usage.{ext}"));
         let old_account_file = cache_dir.join(format!(
             "usage.{}.{ext}",
-            sanitize_account_id_for_filename(old_account_id)
+            cursor_account_cache_stem(old_account_id)
         ));
         let new_account_file = cache_dir.join(format!(
             "usage.{}.{ext}",
-            sanitize_account_id_for_filename(new_account_id)
+            cursor_account_cache_stem(new_account_id)
         ));
 
         if active_file.exists() {
             if old_account_file.exists() {
-                let _ = archive_cache_file_in_dir(cache_dir, &old_account_file, old_account_id);
+                if let Err(error) =
+                    archive_cache_file_in_dir(cache_dir, &old_account_file, old_account_id)
+                {
+                    failures.push(format!(
+                        "could not preserve {} before moving usage.{ext}: {error}",
+                        old_account_file.display()
+                    ));
+                    continue;
+                }
             }
             if let Err(err) = fs::rename(&active_file, &old_account_file) {
                 failures.push(format!(
@@ -1225,7 +1341,15 @@ fn reconcile_cache_files_in_dir(
 
         if new_account_file.exists() {
             if active_file.exists() {
-                let _ = archive_cache_file_in_dir(cache_dir, &active_file, "usage.active");
+                if let Err(error) =
+                    archive_cache_file_in_dir(cache_dir, &active_file, "usage.active")
+                {
+                    failures.push(format!(
+                        "could not preserve {} before moving usage.{ext}: {error}",
+                        active_file.display()
+                    ));
+                    continue;
+                }
             }
             if let Err(err) = fs::rename(&new_account_file, &active_file) {
                 failures.push(format!(
@@ -1316,7 +1440,7 @@ fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
                     } else {
                         cache_dir.join(format!(
                             "usage.{}.json",
-                            sanitize_account_id_for_filename(account_id)
+                            cursor_account_cache_stem(account_id)
                         ))
                     }
                 })
@@ -1357,6 +1481,32 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
     if !cursor_usage_cache_file_is_fresh(&active_path, max_age) {
         return false;
     }
+    let store = load_credentials_store_from_home(home_dir);
+    let expected_paths = expected_cursor_usage_cache_paths_in(home_dir);
+    if let Some(store) = &store {
+        // Legacy aliases or interrupted-switch duplicates must be preserved
+        // before reporting, even when all expected files and the marker are fresh.
+        let Ok(entries) = fs::read_dir(&cache_dir) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_cursor_usage_cache_filename)
+                && !expected_paths.contains(&entry.path())
+            {
+                return false;
+            }
+        }
+        let owner = fs::read_to_string(&active_path)
+            .ok()
+            .and_then(|contents| cursor_cache_owner(&contents));
+        if owner.as_deref() != Some(&store.active_account_id) {
+            return false;
+        }
+    }
 
     // For secondaries, a fresh sync-attempt marker is sufficient. This avoids
     // forcing a sync on every invocation when a secondary account is
@@ -1365,10 +1515,30 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
     let marker_fresh =
         cursor_usage_cache_file_is_fresh(&cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), max_age);
 
-    expected_cursor_usage_cache_paths_in(home_dir)
+    expected_paths
         .iter()
         .filter(|p| *p != &active_path)
-        .all(|p| cursor_usage_cache_file_is_fresh(p, max_age) || marker_fresh)
+        .all(|path| {
+            // A recent attempt may excuse a missing or stale secondary, but
+            // never a live file whose ownership is unknown or disagrees.
+            if path.exists() {
+                let owner = fs::read_to_string(path)
+                    .ok()
+                    .and_then(|contents| cursor_cache_owner(&contents));
+                let verified = owner.as_deref().is_some_and(|id| {
+                    store
+                        .as_ref()
+                        .is_some_and(|store| store.accounts.contains_key(id))
+                        && *path
+                            == cache_dir
+                                .join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+                });
+                if !verified {
+                    return false;
+                }
+            }
+            cursor_usage_cache_file_is_fresh(path, max_age) || marker_fresh
+        })
 }
 
 /// True when the active cursor usage cache (`usage.json`) was refreshed within
@@ -1919,9 +2089,16 @@ where
         let _ = fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700));
     }
 
+    if let Err(error) = prepare_cursor_cache_layout(&cache_dir, &store) {
+        return SyncCursorResult {
+            synced: false,
+            rows: 0,
+            error: Some(cursor_sync_error_text(&error)),
+        };
+    }
+
     let mut total_rows = 0;
     let mut success_count = 0;
-    let mut refreshed_secondary_paths = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
 
     for (account_id, credentials) in &store.accounts {
@@ -1931,7 +2108,7 @@ where
         } else {
             cache_dir.join(format!(
                 "usage.{}.json",
-                sanitize_account_id_for_filename(account_id)
+                cursor_account_cache_stem(account_id)
             ))
         };
         let existing_cache = fs::read_to_string(&file_path).ok();
@@ -1943,6 +2120,13 @@ where
         .await
         {
             Ok(json_text) => {
+                let json_text = match owned_cursor_cache(&json_text, account_id) {
+                    Ok(contents) => contents,
+                    Err(error) => {
+                        errors.push(format!("{account_id}: invalid usage response: {error}"));
+                        continue;
+                    }
+                };
                 let event_count = count_cursor_json_events(&json_text);
                 let legacy_csv = file_path.with_extension("csv");
 
@@ -1963,9 +2147,6 @@ where
                 } else {
                     total_rows += event_count;
                     success_count += 1;
-                    if !is_active {
-                        refreshed_secondary_paths.insert(file_path.clone());
-                    }
                     // Archive (don't delete) the legacy CSV counterpart now that
                     // JSON is authoritative: pre-migration history survives and
                     // the scanner never parses both and double-counts this account.
@@ -1981,34 +2162,6 @@ where
             Err(e) => {
                 errors.push(format!("{account_id}: {}", cursor_sync_error_text(&e)));
             }
-        }
-    }
-
-    // Reconcile the active account's leftover per-account duplicate. The active
-    // account is cached as `usage.json`; a `usage.<active_id>.json` copy left
-    // over from when it was a secondary is only safe to drop once `usage.json`
-    // actually exists on disk — whether this run just wrote it or a prior run
-    // did. Gating on that existence keeps the duplicate when a failed first-time
-    // fetch leaves no `usage.json` (it is then the only data we have), while a
-    // failed fetch that still has a good `usage.json` clears the duplicate so the
-    // scanner never reads both JSON caches and double-counts the active account.
-    // The JSON dup is a stale copy (removed); the legacy CSV dup is archived so
-    // pre-migration history survives. A secondary successfully refreshed in this
-    // run may share the active account's sanitized path. Keep its just-written
-    // JSON instead of deleting a successful sync result as an active duplicate.
-    if cache_dir.join("usage.json").exists() {
-        let active_sanitized = sanitize_account_id_for_filename(&store.active_account_id);
-        let dup_json = cache_dir.join(format!("usage.{active_sanitized}.json"));
-        if dup_json.exists() && !refreshed_secondary_paths.contains(&dup_json) {
-            let _ = fs::remove_file(&dup_json);
-        }
-        let dup_csv = cache_dir.join(format!("usage.{active_sanitized}.csv"));
-        if dup_csv.exists() {
-            let label = dup_csv
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("usage");
-            let _ = archive_cache_file_in_dir(&cache_dir, &dup_csv, label);
         }
     }
 
@@ -2189,13 +2342,8 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     .await
 }
 
-fn archive_cache_file(file_path: &std::path::Path, label: &str) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
-    archive_cache_file_in_dir(&cache_dir, file_path, label)
-}
-
-/// Moves `file_path` into `<cache_dir>/archive/` under a timestamped, sanitized
-/// name so a legacy cache is preserved rather than deleted during migration.
+/// Moves `file_path` into a newly created private directory under archive/.
+/// Keep its original filename and bytes, and never overwrite an earlier backup.
 ///
 /// Kept `cache_dir`-relative (rather than resolving the real cache dir itself)
 /// so callers inside a synced-home flow archive into the same directory they are
@@ -2216,13 +2364,20 @@ fn archive_cache_file_in_dir(
     }
 
     let safe_label = sanitize_account_id_for_filename(label);
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-    let ext = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("csv");
-    let dest = archive_dir.join(format!("{}-{}.{}", safe_label, ts, ext));
-    fs::rename(file_path, dest)?;
+    // Keep the parent short for Windows path limits; the original filename
+    // remains intact, and create_dir reserves a destination that cannot exist.
+    let short_label = &safe_label[..safe_label.len().min(12)];
+    let destination_dir = archive_dir.join(format!("{short_label}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&destination_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&destination_dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let name = file_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Cursor cache has no filename"))?;
+    fs::rename(file_path, destination_dir.join(name))?;
     Ok(())
 }
 
@@ -4863,14 +5018,23 @@ mod tests {
 
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
         assert!(!cursor_usage_cache_is_fresh_in(
             temp_dir.path(),
             Duration::from_secs(300)
         ));
 
-        fs::write(cache_dir.join("usage.team-account.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account")
+            )),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         assert!(cursor_usage_cache_is_fresh_in(
             temp_dir.path(),
             Duration::from_secs(300)
@@ -4880,7 +5044,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_expected_cache_paths_dedupes_sanitized_account_collisions() {
+    fn test_cursor_expected_cache_paths_keep_sanitized_account_collisions_separate() {
         let temp_dir = TempDir::new().unwrap();
         let mut accounts = HashMap::new();
         accounts.insert(
@@ -4925,10 +5089,18 @@ mod tests {
 
         let paths = expected_cursor_usage_cache_paths_in(temp_dir.path());
         let cache_dir = cursor_cache_dir(temp_dir.path());
-        let expected = vec![
+        let mut expected = vec![
             cache_dir.join("usage.json"),
-            cache_dir.join("usage.team-account-a.json"),
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account-a")
+            )),
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team@account-a")
+            )),
         ];
+        expected.sort_unstable();
         assert_eq!(paths, expected);
     }
 
@@ -5004,9 +5176,10 @@ mod tests {
             1
         );
         assert_eq!(
-            count_cursor_json_events(&fs::read_to_string(
-                cache_dir.join("usage.team-account.json")
-            )?),
+            count_cursor_json_events(&fs::read_to_string(cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account")
+            )))?),
             2
         );
         // The active account is never duplicated as a per-account file.
@@ -5016,6 +5189,8 @@ mod tests {
         assert!(!cache_dir.join("usage.csv").exists());
         assert!(!cache_dir.join("usage.team-account.csv").exists());
         let archived: Vec<_> = fs::read_dir(cache_dir.join("archive"))?
+            .filter_map(|entry| entry.ok())
+            .flat_map(|entry| fs::read_dir(entry.path()).unwrap())
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "csv"))
             .collect();
@@ -5062,6 +5237,7 @@ mod tests {
             fs::create_dir_all(&cache_dir)?;
             let active_json =
                 String::from_utf8(json_page(1, &[&json_event("active-history", "7200000")]))?;
+            let active_json = owned_cursor_cache(&active_json, active_id)?;
             fs::write(cache_dir.join("usage.json"), &active_json)?;
             let secondary_json =
                 String::from_utf8(json_page(1, &[&json_event("secondary-history", "7200000")]))?;
@@ -5091,10 +5267,13 @@ mod tests {
                 fs::read(cursor_credentials_path(temp.path()))?,
                 credentials_before
             );
-            let secondary_path = cache_dir.join("usage.team-account-a.json");
+            let secondary_path = cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem(secondary_id)
+            ));
             assert_eq!(
                 fs::read_to_string(&secondary_path).ok().as_deref(),
-                Some(secondary_json.as_str()),
+                Some(owned_cursor_cache(&secondary_json, secondary_id)?.as_str()),
                 "cleanup must retain the freshly written secondary; active_fails={active_fails}"
             );
             let rows = tokscale_core::sessions::cursor::parse_cursor_file(&secondary_path);
@@ -5134,11 +5313,17 @@ mod tests {
             let path = if id == "active" {
                 cache_dir.join("usage.json")
             } else {
-                cache_dir.join("usage.secondary.json")
+                cache_dir.join(format!(
+                    "usage.{}.json",
+                    cursor_account_cache_stem("secondary")
+                ))
             };
             fs::write(
                 path,
-                format!(r#"{{"usageEventsDisplay":[{latest},{previous},{old}]}}"#),
+                owned_cursor_cache(
+                    &format!(r#"{{"usageEventsDisplay":[{latest},{previous},{old}]}}"#),
+                    id,
+                )?,
             )?;
             let mut update: serde_json::Value = serde_json::from_str(&previous)?;
             update["chargedCents"] = serde_json::json!(9);
@@ -5186,7 +5371,10 @@ mod tests {
             let path = if id == "active" {
                 cache_dir.join("usage.json")
             } else {
-                cache_dir.join("usage.secondary.json")
+                cache_dir.join(format!(
+                    "usage.{}.json",
+                    cursor_account_cache_stem("secondary")
+                ))
             };
             let stored = cached_usage_events(Some(&fs::read_to_string(path)?));
             assert_eq!(stored.len(), 3, "unreturned cached history must survive");
@@ -5239,8 +5427,11 @@ mod tests {
         // must not overwrite it with nothing.
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        let seeded = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
-        fs::write(cache_dir.join("usage.json"), seeded)?;
+        let seeded = owned_cursor_cache(
+            r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#,
+            "active-account",
+        )?;
+        fs::write(cache_dir.join("usage.json"), &seeded)?;
 
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
@@ -5289,9 +5480,12 @@ mod tests {
         // would double-count the active account.
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        let good = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
-        fs::write(cache_dir.join("usage.json"), good)?;
-        fs::write(cache_dir.join("usage.active-account.json"), good)?;
+        let good = owned_cursor_cache(
+            r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#,
+            "active-account",
+        )?;
+        fs::write(cache_dir.join("usage.json"), &good)?;
+        fs::write(cache_dir.join("usage.active-account.json"), &good)?;
 
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
@@ -5532,11 +5726,20 @@ mod tests {
         fs::create_dir_all(&cache_dir)?;
 
         // Fresh active cache.
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
         // Stale secondary cache.
-        let secondary = cache_dir.join("usage.team-account.json");
-        fs::write(&secondary, "Date,Model\n")?;
+        let secondary = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
+        fs::write(
+            &secondary,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         if !backdate_file(&secondary, 3600) {
             return Ok(()); // platform can't set mtime — skip
         }
@@ -5562,10 +5765,19 @@ mod tests {
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
 
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
-        let secondary = cache_dir.join("usage.team-account.json");
-        fs::write(&secondary, "Date,Model\n")?;
+        let secondary = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
+        fs::write(
+            &secondary,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         if !backdate_file(&secondary, 3600) {
             return Ok(());
         }
@@ -5598,7 +5810,13 @@ mod tests {
         }
 
         // Fresh secondary and fresh marker.
-        fs::write(cache_dir.join("usage.team-account.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account")
+            )),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
 
         assert!(
@@ -5647,8 +5865,8 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
-        let new_stem = sanitize_account_id_for_filename(new_id);
+        let old_stem = cursor_account_cache_stem(old_id);
+        let new_stem = cursor_account_cache_stem(new_id);
 
         for ext in CURSOR_CACHE_EXTENSIONS {
             fs::write(cache_dir.join(format!("usage.{ext}")), format!("old-{ext}"))?;
@@ -5691,7 +5909,7 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
+        let old_stem = cursor_account_cache_stem(old_id);
 
         // A regular file named `archive` makes `archive_cache_file_in_dir` fail,
         // so the blocking entries below are not archived out of the way first.
@@ -5737,8 +5955,8 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
-        let new_stem = sanitize_account_id_for_filename(new_id);
+        let old_stem = cursor_account_cache_stem(old_id);
+        let new_stem = cursor_account_cache_stem(new_id);
 
         fs::write(cache_dir.join("archive"), b"not a directory")?;
         fs::write(cache_dir.join("usage.json"), b"old-account-data")?;
@@ -5767,44 +5985,55 @@ mod tests {
     }
 
     #[test]
-    fn test_reconcile_collision_guard_preserves_all_formats() -> Result<()> {
-        for extensions in [vec!["json"], vec!["csv"], vec!["json", "csv"]] {
-            let temp = TempDir::new()?;
-            for ext in &extensions {
-                fs::write(
-                    temp.path().join(format!("usage.{ext}")),
-                    format!("old-active-{ext}"),
-                )?;
-                fs::write(
-                    temp.path().join(format!("usage.team-account-a.{ext}")),
-                    format!("incoming-history-{ext}"),
-                )?;
-            }
-            let error =
-                reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")
-                    .expect_err("one path cannot represent both accounts during a switch");
-            assert!(error.to_string().contains("filenames collide"));
-            assert!(
-                !temp.path().join("archive").exists(),
-                "preflight must precede archival"
-            );
-            for ext in &extensions {
-                assert_eq!(
-                    fs::read_to_string(temp.path().join(format!("usage.{ext}")))?,
-                    format!("old-active-{ext}")
-                );
-                assert_eq!(
-                    fs::read_to_string(temp.path().join(format!("usage.team-account-a.{ext}")))?,
-                    format!("incoming-history-{ext}")
-                );
-            }
-            assert_eq!(fs::read_dir(temp.path())?.count(), extensions.len() * 2);
+    fn test_layout_preserves_unverified_json_and_csv_before_switch() -> Result<()> {
+        let temp = TempDir::new()?;
+        setup_two_account_store(temp.path())?;
+        let store = load_credentials_store_from_home(temp.path()).unwrap();
+        let dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&dir)?;
+        let files = [
+            "usage.json",
+            "usage.csv",
+            "usage.team-account.json",
+            "usage.team-account.csv",
+        ];
+        for name in files {
+            fs::write(dir.join(name), format!("unverified-{name}"))?;
         }
+        prepare_cursor_cache_layout(&dir, &store)?;
+        for name in files {
+            assert!(!dir.join(name).exists());
+        }
+        let mut saved = Vec::new();
+        for entry in fs::read_dir(dir.join("archive"))? {
+            for file in fs::read_dir(entry?.path())? {
+                let path = file?.path();
+                saved.push((
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    fs::read_to_string(path)?,
+                ));
+            }
+        }
+        assert_eq!(saved.len(), files.len());
+        for name in files {
+            assert!(saved.contains(&(name.to_string(), format!("unverified-{name}"))));
+        }
+        set_active_account_in_home(temp.path(), "team/account")?;
+        assert_eq!(
+            load_credentials_store_from_home(temp.path())
+                .unwrap()
+                .active_account_id,
+            "team/account"
+        );
+        assert!(
+            !dir.join("usage.json").exists(),
+            "unknown history must not be assigned to the selected account"
+        );
         Ok(())
     }
 
     #[test]
-    fn test_reconcile_collision_guard_allows_switch_without_relevant_history() -> Result<()> {
+    fn test_reconcile_colliding_ids_without_relevant_history() -> Result<()> {
         let temp = TempDir::new()?;
         let missing = temp.path().join("missing");
         reconcile_cache_files_in_dir(&missing, "team/account-a", "team@account-a")?;
@@ -5820,6 +6049,488 @@ mod tests {
             "unrelated history"
         );
         assert_eq!(fs::read_dir(temp.path())?.count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn test_colliding_expected_paths_keep_every_distinct_account() -> Result<()> {
+        let prefix = "x".repeat(80);
+        let cases = [
+            (
+                "punctuation",
+                "team/account-a".to_string(),
+                "team@account-a".to_string(),
+            ),
+            ("case", "Team_A".to_string(), "team_a".to_string()),
+            ("whitespace", " team-a ".to_string(), "team-a".to_string()),
+            ("truncation", format!("{prefix}-a"), format!("{prefix}-b")),
+            ("empty fallback", "/".to_string(), "@".to_string()),
+        ];
+        let mut failures = Vec::new();
+        for (kind, first, second) in cases {
+            let temp = TempDir::new()?;
+            let accounts = ["unrelated-active".to_string(), first, second]
+                .into_iter()
+                .map(|id| {
+                    let credentials = CursorCredentials {
+                        session_token: format!("fixture-{id}"),
+                        user_id: Some(id.clone()),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        expires_at: None,
+                        label: None,
+                    };
+                    (id, credentials)
+                })
+                .collect();
+            save_credentials_store_in_home(
+                temp.path(),
+                &CursorCredentialsStore {
+                    version: 1,
+                    active_account_id: "unrelated-active".to_string(),
+                    accounts,
+                },
+            )?;
+            let paths = expected_cursor_usage_cache_paths_in(temp.path());
+            if paths.len() != 3 {
+                failures.push(format!("{kind}: {paths:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "freshness checks must retain an independent path for every account: {}",
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_colliding_secondary_accounts_never_share_fetch_history_or_saved_rows() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        let mut endpoints = HashMap::new();
+        let mut captured = Vec::new();
+        for (id, token) in [
+            ("active", "active"),
+            ("team/account-a", "team-a"),
+            ("team@account-a", "team-b"),
+        ] {
+            accounts.insert(
+                id.to_string(),
+                CursorCredentials {
+                    session_token: token.to_string(),
+                    user_id: Some(id.to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    label: None,
+                },
+            );
+            let body = json_page(
+                2,
+                &[
+                    &json_event(&format!("{token}-new"), "7200000"),
+                    &json_event(&format!("{token}-old"), "1"),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            endpoints.insert(token.to_string(), url);
+            captured.push((token, requests));
+        }
+        save_credentials_store_in_home(
+            temp.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active".to_string(),
+                accounts,
+            },
+        )?;
+        let inputs = std::sync::Mutex::new(HashMap::new());
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp.path(),
+            |fetch| {
+                inputs
+                    .lock()
+                    .unwrap()
+                    .insert(fetch.session_token.clone(), fetch.existing_cache.clone());
+                let url = endpoints[&fetch.session_token].clone();
+                async move {
+                    fetch_cursor_usage_events_json_merging(
+                        &url,
+                        &fetch.session_token,
+                        Some(Duration::from_secs(2)),
+                        true,
+                        CURSOR_MAX_JSON_BYTES,
+                        2,
+                        fetch.existing_cache.as_deref(),
+                    )
+                    .await
+                }
+            },
+        ));
+        let inputs = inputs.into_inner().unwrap();
+        eprintln!("actual fetch inputs: {}", serde_json::to_string(&inputs)?);
+        let mut saved = Vec::new();
+        for entry in fs::read_dir(cursor_cache_dir(temp.path()))? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let rows = cached_usage_events(Some(&fs::read_to_string(&path)?));
+                eprintln!(
+                    "saved {}: {}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    serde_json::to_string(&rows)?
+                );
+                saved.push(rows);
+            }
+        }
+        for (token, requests) in &captured {
+            eprintln!("actual HTTP for {token}: {:?}", requests.lock().unwrap());
+        }
+        assert!(result.synced, "{result:?}");
+        assert!(
+            inputs.values().all(Option::is_none),
+            "cold accounts must never receive another account's just-written cache"
+        );
+        assert_eq!(saved.len(), 3, "each account must retain its own cache");
+        for (token, requests) in captured {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                !requests[0].contains("\"startDate\""),
+                "cold {token} must request full history"
+            );
+            let rows = saved
+                .iter()
+                .find(|rows| {
+                    rows.iter()
+                        .any(|row| row["conversationId"] == format!("{token}-new"))
+                })
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                2,
+                "only {token}'s new and old history belongs in this file"
+            );
+            assert!(rows
+                .iter()
+                .all(|row| row["conversationId"].as_str().unwrap().starts_with(token)));
+        }
+        Ok(())
+    }
+    fn collision_fixture_store(home: &Path) -> Result<CursorCredentialsStore> {
+        let ids = ["team/account-a", "team@account-a", "TEAM_ACCOUNT_A"];
+        let store = CursorCredentialsStore {
+            version: 1,
+            active_account_id: ids[0].to_string(),
+            accounts: ids
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        CursorCredentials {
+                            session_token: format!("{id}::fixture"),
+                            user_id: Some(id.to_string()),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            expires_at: None,
+                            label: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        save_credentials_store_in_home(home, &store)?;
+        Ok(store)
+    }
+
+    fn preserved_cursor_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut files = Vec::new();
+        if !dir.join("archive").exists() {
+            return Ok(files);
+        }
+        for entry in fs::read_dir(dir.join("archive"))? {
+            for file in fs::read_dir(entry?.path())? {
+                let path = file?.path();
+                files.push((
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    fs::read(path)?,
+                ));
+            }
+        }
+        Ok(files)
+    }
+
+    #[test]
+    fn test_legacy_collision_recovery_refetches_without_assigning_ownership() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        let old = String::from_utf8(json_page(1, &[&json_event("unknown-owner", "9999999")]))?;
+        let legacy = [
+            "usage.json",
+            "usage.team-account-a.json",
+            "usage.team-account-a.csv",
+        ];
+        for name in legacy {
+            fs::write(dir.join(name), old.as_bytes())?;
+        }
+        // Even a new-looking filename is unsafe when the ownership disagrees.
+        let wrong = format!("usage.{}.json", cursor_account_cache_stem("team@account-a"));
+        let wrong_contents = owned_cursor_cache(&old, "team/account-a")?;
+        fs::write(dir.join(&wrong), &wrong_contents)?;
+        let failed = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert!(fetch.existing_cache.is_none());
+                std::future::ready(Err(anyhow::anyhow!("network unavailable")))
+            }),
+        );
+        assert!(!failed.synced);
+        assert!(failed.error.unwrap().contains("network unavailable"));
+        assert!(!dir.join("usage.json").exists());
+        assert_eq!(preserved_cursor_files(&dir)?.len(), 4);
+        // A retry still fetches from the beginning and leaves every backup intact.
+        let seen = std::sync::Mutex::new(Vec::new());
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert!(
+                    fetch.existing_cache.is_none(),
+                    "legacy or foreign history must never seed a watermark"
+                );
+                let id = extract_user_id_from_session_token(&fetch.session_token).unwrap();
+                seen.lock().unwrap().push(id.clone());
+                std::future::ready(
+                    String::from_utf8(json_page(1, &[&json_event(&id, "1")])).map_err(Into::into),
+                )
+            }),
+        );
+        assert!(result.synced, "{result:?}");
+        assert_eq!(result.rows, 3);
+        assert_eq!(result.error, None);
+        assert_eq!(seen.lock().unwrap().len(), store.accounts.len());
+        let saved = preserved_cursor_files(&dir)?;
+        assert_eq!(saved.len(), 4);
+        for name in legacy {
+            assert!(saved.contains(&(name.to_string(), old.as_bytes().to_vec())));
+        }
+        assert!(saved.contains(&(wrong, wrong_contents.into_bytes())));
+        let discovered =
+            tokscale_core::scanner::scan_directory(dir.to_str().unwrap(), "usage*.json|usage*.csv");
+        assert_eq!(
+            discovered.len(),
+            3,
+            "preserved history must stay outside the live report scan"
+        );
+        for id in store.accounts.keys() {
+            let path = if *id == store.active_account_id {
+                dir.join("usage.json")
+            } else {
+                dir.join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+            };
+            let text = fs::read_to_string(&path)?;
+            assert_eq!(cursor_cache_owner(&text).as_deref(), Some(id.as_str()));
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, *id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_owned_colliding_accounts_survive_switch_refresh_remove_and_logout() -> Result<()> {
+        for purge in [false, true] {
+            let home = TempDir::new()?;
+            let store = collision_fixture_store(home.path())?;
+            let dir = cursor_cache_dir(home.path());
+            fs::create_dir_all(&dir)?;
+            for id in store.accounts.keys() {
+                let path = if *id == store.active_account_id {
+                    dir.join("usage.json")
+                } else {
+                    dir.join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+                };
+                let json = String::from_utf8(json_page(1, &[&json_event(id, "1")]))?;
+                fs::write(path, owned_cursor_cache(&json, id)?)?;
+            }
+            let first = "team/account-a";
+            let second = "team@account-a";
+            let third = "TEAM_ACCOUNT_A";
+            let third_path = dir.join(format!("usage.{}.json", cursor_account_cache_stem(third)));
+            let third_before = fs::read(&third_path)?;
+            set_active_account_in_home(home.path(), second)?;
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(dir.join("usage.json"))?).as_deref(),
+                Some(second)
+            );
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(
+                    dir.join(format!("usage.{}.json", cursor_account_cache_stem(first)))
+                )?)
+                .as_deref(),
+                Some(first)
+            );
+            assert_eq!(fs::read(&third_path)?, third_before);
+            assert_eq!(
+                upsert_credentials_in_home(home.path(), &format!("{first}::fresh-token"), None)?,
+                first
+            );
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(dir.join("usage.json"))?).as_deref(),
+                Some(first)
+            );
+            remove_account_in_home(home.path(), second, purge)?;
+            assert_eq!(fs::read(&third_path)?, third_before);
+            assert!(!dir
+                .join(format!("usage.{}.json", cursor_account_cache_stem(second)))
+                .exists());
+            remove_account_in_home(home.path(), first, purge)?;
+            assert_eq!(
+                load_credentials_store_from_home(home.path())
+                    .unwrap()
+                    .active_account_id,
+                third
+            );
+            assert_eq!(fs::read(dir.join("usage.json"))?, third_before);
+            // An unknown legacy alias remains recoverable even when purging known accounts.
+            fs::write(
+                dir.join("usage.team-account-a.csv"),
+                b"unknown legacy owner",
+            )?;
+            remove_all_accounts_in_home(home.path(), purge)?;
+            assert!(!cursor_credentials_path(home.path()).exists());
+            assert!(!dir.join("usage.json").exists());
+            assert!(preserved_cursor_files(&dir)?.contains(&(
+                "usage.team-account-a.csv".to_string(),
+                b"unknown legacy owner".to_vec()
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_failed_legacy_preservation_blocks_fetch_switch_and_removal() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), b"unverified history")?;
+        fs::write(dir.join("archive"), b"blocks archival")?;
+        let credentials = fs::read(cursor_credentials_path(home.path()))?;
+        assert!(set_active_account_in_home(home.path(), "team@account-a").is_err());
+        assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
+        assert!(remove_account_in_home(home.path(), &store.active_account_id, true).is_err());
+        assert!(remove_all_accounts_in_home(home.path(), true).is_err());
+        assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
+        let fetched = std::sync::atomic::AtomicBool::new(false);
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |_| {
+                fetched.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Err(anyhow::anyhow!("fetch must not start")))
+            }),
+        );
+        assert!(!fetched.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!result.synced);
+        assert!(result.error.unwrap().contains("preserve unverified"));
+        assert!(
+            upsert_credentials_in_home(home.path(), "team@account-a::refreshed", None).is_err()
+        );
+        let after = load_credentials_store_from_home(home.path()).unwrap();
+        assert_eq!(after.active_account_id, store.active_account_id);
+        assert_eq!(
+            after.accounts["team@account-a"].session_token,
+            "team@account-a::refreshed"
+        );
+        assert_eq!(fs::read(dir.join("usage.json"))?, b"unverified history");
+        Ok(())
+    }
+
+    #[test]
+    fn test_repeated_legacy_backups_keep_each_original_copy() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        for contents in [b"first copy", b"other copy"] {
+            fs::write(dir.join("usage.json"), contents)?;
+            prepare_cursor_cache_layout(&dir, &store)?;
+        }
+        let files = preserved_cursor_files(&dir)?;
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&("usage.json".to_string(), b"first copy".to_vec())));
+        assert!(files.contains(&("usage.json".to_string(), b"other copy".to_vec())));
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_requires_owned_active_cache_after_upgrade() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), r#"{"usageEventsDisplay":[]}"#)?;
+        fs::write(dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+        assert!(!cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        fs::write(
+            dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &store.active_account_id)?,
+        )?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        Ok(())
+    }
+    #[test]
+    fn test_freshness_keeps_colliding_secondaries_independent_and_verified() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &store.active_account_id)?,
+        )?;
+        let a = "team@account-a";
+        let b = "TEAM_ACCOUNT_A";
+        let path_a = dir.join(format!("usage.{}.json", cursor_account_cache_stem(a)));
+        let path_b = dir.join(format!("usage.{}.json", cursor_account_cache_stem(b)));
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, a)?,
+        )?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "one fresh secondary cannot stand in for another"
+        );
+        fs::write(
+            &path_b,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, b)?,
+        )?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, b)?,
+        )?;
+        fs::write(dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "a fresh attempt cannot bless foreign ownership"
+        );
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, a)?,
+        )?;
+        fs::write(
+            dir.join("usage.team-account-a.csv"),
+            "unverified legacy alias",
+        )?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "unexpected legacy files must trigger preservation even with a fresh marker"
+        );
         Ok(())
     }
 }

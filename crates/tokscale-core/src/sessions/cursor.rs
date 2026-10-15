@@ -2,7 +2,9 @@
 //!
 //! Parses usage files cached locally at ~/.config/tokscale/cursor-cache/.
 //! The active account's cache is `usage.json` (or legacy `usage.csv`);
-//! additional accounts use `usage.<account>.json` (or legacy `usage.<account>.csv`).
+//! additional accounts use `usage.account-<sha256>.json` with exact-owner metadata.
+//! Unmarked legacy JSON/CSV caches remain readable until the CLI preserves them
+//! in archive/ and independently refetches the saved accounts.
 //!
 //! JSON (preferred) comes from the dashboard `get-filtered-usage-events`
 //! endpoint. Each event carries a real `conversationId`, so sessions are keyed
