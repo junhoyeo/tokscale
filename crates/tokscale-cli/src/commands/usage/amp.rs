@@ -6,7 +6,7 @@
 //! `secrets.json` is sent to the same balance endpoint the CLI uses. Both
 //! paths return the same human-readable balance text, parsed below.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,11 +51,21 @@ fn api_key_from_env() -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-fn read_api_key() -> Option<String> {
-    api_key_from_env().or_else(|| {
-        let content = std::fs::read_to_string(secrets_path()?).ok()?;
-        serde_json::from_str::<Secrets>(&content).ok()?.api_key
-    })
+fn read_api_key() -> Result<Option<String>> {
+    if let Some(key) = api_key_from_env() {
+        return Ok(Some(key));
+    }
+    let Some(path) = secrets_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(serde_json::from_str::<Secrets>(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?
+        .api_key)
 }
 
 /// Parse a dollar amount like "$4.50" or "$1,200.00" from text starting at the given prefix.
@@ -275,9 +285,7 @@ fn usage_output_from_text(display_text: &str) -> Result<UsageOutput> {
 }
 
 pub fn has_credentials() -> bool {
-    crate::amp::find_amp_binary().is_some()
-        || api_key_from_env().is_some()
-        || secrets_path().is_some_and(|path| path.exists())
+    api_key_from_env().is_some() || secrets_path().is_some_and(|path| path.exists())
 }
 
 fn fetch_via_cli() -> Option<Result<UsageOutput>> {
@@ -331,7 +339,7 @@ pub fn fetch() -> Result<UsageOutput> {
         Some(Err(error)) => Some(error),
         None => None,
     };
-    match (read_api_key(), cli_error) {
+    match (read_api_key()?, cli_error) {
         (Some(api_key), None) => fetch_via_api(&api_key),
         (Some(api_key), Some(cli_error)) => fetch_via_api(&api_key).map_err(|api_error| {
             anyhow::anyhow!("{api_error} (amp usage also failed: {cli_error:#})")
