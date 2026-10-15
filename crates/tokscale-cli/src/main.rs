@@ -6525,26 +6525,17 @@ fn run_submit_command(
                     println!(
                         "{}",
                         format!(
-                            "  Antigravity sync was partial: {} session{} refreshed, {} retained from cache: {}",
+                            "  Antigravity sync was partial: {} session{} refreshed, {} retained from cache, {} failed: {}",
                             sync_result.sessions,
                             if sync_result.sessions == 1 { "" } else { "s" },
                             sync_result.retained_sessions,
+                            sync_result.failed_sessions,
                             sync_result.error.as_deref().unwrap_or("unknown sync error")
                         )
                         .yellow()
                     );
                 } else if let Some(err) = sync_result.error {
-                    if sync_result.fresh > 0 || sync_result.preserved > 0 {
-                        let warning = format!(
-                            "  Antigravity sync partially completed ({} fresh, {} preserved, {} failed); using cached data: {}",
-                            sync_result.fresh, sync_result.preserved, sync_result.failed, err
-                        );
-                        if has_antigravity_cache {
-                            println!("{}", warning.yellow());
-                        } else {
-                            println!("{}", format!("{}", warning).yellow());
-                        }
-                    } else if has_antigravity_cache {
+                    if has_antigravity_cache {
                         println!(
                             "{}",
                             format!("  Antigravity sync failed; using cached data: {}", err)

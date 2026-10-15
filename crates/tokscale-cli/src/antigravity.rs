@@ -250,6 +250,8 @@ pub struct SyncAntigravityResult {
     pub sessions: usize,
     /// Older artifacts retained after a recoverable failure.
     pub retained_sessions: usize,
+    /// Sessions or connection lists that could not be refreshed in this run.
+    pub failed_sessions: usize,
     pub connections: usize,
     pub error: Option<String>,
 }
@@ -258,6 +260,7 @@ pub struct SyncAntigravityResult {
 struct SyncCacheOutcome {
     synced_sessions: usize,
     retained_sessions: usize,
+    failed_sessions: usize,
     partial_error: Option<anyhow::Error>,
 }
 
@@ -285,6 +288,7 @@ pub fn sync_antigravity_cache_with_connections(
             partial: false,
             sessions: 0,
             retained_sessions: 0,
+            failed_sessions: 0,
             connections: 0,
             error: None,
         };
@@ -297,6 +301,7 @@ pub fn sync_antigravity_cache_with_connections(
                 partial,
                 sessions: outcome.synced_sessions,
                 retained_sessions: outcome.retained_sessions,
+                failed_sessions: outcome.failed_sessions,
                 connections: connections.len(),
                 error: outcome.partial_error.map(|err| err.to_string()),
             }
@@ -306,6 +311,7 @@ pub fn sync_antigravity_cache_with_connections(
             partial: false,
             sessions: 0,
             retained_sessions: 0,
+            failed_sessions: 0,
             connections: connections.len(),
             error: Some(err.to_string()),
         },
@@ -321,6 +327,7 @@ pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
                 partial: false,
                 sessions: 0,
                 retained_sessions: 0,
+                failed_sessions: 0,
                 connections: 0,
                 error: Some(err.to_string()),
             };
@@ -356,6 +363,7 @@ fn sync_antigravity_cache_impl_with_deadline(
     let mut outcome = SyncCacheOutcome::default();
     let (summaries, list_errors) =
         list_trajectory_summaries_with_errors(connections, deadline.as_ref());
+    outcome.failed_sessions += list_errors.len();
     if let Some(err) = list_errors.into_iter().next() {
         outcome.partial_error = Some(err);
     }
@@ -418,6 +426,7 @@ fn sync_antigravity_cache_impl_with_deadline(
                     continue;
                 }
                 Err(err) => {
+                    outcome.failed_sessions += 1;
                     if outcome.partial_error.is_none() {
                         outcome.partial_error = Some(err);
                     }
@@ -457,6 +466,7 @@ fn sync_antigravity_cache_impl_with_deadline(
             }
             Ok(None) => {}
             Err(err) => {
+                outcome.failed_sessions += 1;
                 if outcome.partial_error.is_none() {
                     outcome.partial_error = Some(err);
                 }
@@ -6002,6 +6012,7 @@ mod tests {
         );
         assert!(outcome.partial_error.is_some());
         assert_eq!(outcome.synced_sessions, 0);
+        assert_eq!(outcome.failed_sessions, 1);
         assert!(seen
             .lock()
             .unwrap()
