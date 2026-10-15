@@ -1176,6 +1176,22 @@ fn reconcile_cache_files_in_dir(
         return Ok(());
     }
 
+    let old_stem = sanitize_account_id_for_filename(old_account_id);
+    let new_stem = sanitize_account_id_for_filename(new_account_id);
+    if old_account_id != new_account_id
+        && old_stem == new_stem
+        && CURSOR_CACHE_EXTENSIONS.iter().any(|ext| {
+            cache_dir.join(format!("usage.{ext}")).exists()
+                || cache_dir.join(format!("usage.{old_stem}.{ext}")).exists()
+        })
+    {
+        anyhow::bail!(
+            "Cursor cache filenames collide for {} and {}; keeping existing cache files",
+            old_account_id,
+            new_account_id
+        );
+    }
+
     let mut failures: Vec<String> = Vec::new();
 
     // Move both the current JSON cache and any legacy CSV cache so a switch
@@ -5747,6 +5763,63 @@ mod tests {
             b"new-account-data",
             "the incoming cache must stay under its own account id"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconcile_collision_guard_preserves_all_formats() -> Result<()> {
+        for extensions in [vec!["json"], vec!["csv"], vec!["json", "csv"]] {
+            let temp = TempDir::new()?;
+            for ext in &extensions {
+                fs::write(
+                    temp.path().join(format!("usage.{ext}")),
+                    format!("old-active-{ext}"),
+                )?;
+                fs::write(
+                    temp.path().join(format!("usage.team-account-a.{ext}")),
+                    format!("incoming-history-{ext}"),
+                )?;
+            }
+            let error =
+                reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")
+                    .expect_err("one path cannot represent both accounts during a switch");
+            assert!(error.to_string().contains("filenames collide"));
+            assert!(
+                !temp.path().join("archive").exists(),
+                "preflight must precede archival"
+            );
+            for ext in &extensions {
+                assert_eq!(
+                    fs::read_to_string(temp.path().join(format!("usage.{ext}")))?,
+                    format!("old-active-{ext}")
+                );
+                assert_eq!(
+                    fs::read_to_string(temp.path().join(format!("usage.team-account-a.{ext}")))?,
+                    format!("incoming-history-{ext}")
+                );
+            }
+            assert_eq!(fs::read_dir(temp.path())?.count(), extensions.len() * 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconcile_collision_guard_allows_switch_without_relevant_history() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.path().join("missing");
+        reconcile_cache_files_in_dir(&missing, "team/account-a", "team@account-a")?;
+        assert!(!missing.exists());
+        reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")?;
+        fs::write(
+            temp.path().join("usage.unrelated.json"),
+            "unrelated history",
+        )?;
+        reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")?;
+        assert_eq!(
+            fs::read_to_string(temp.path().join("usage.unrelated.json"))?,
+            "unrelated history"
+        );
+        assert_eq!(fs::read_dir(temp.path())?.count(), 1);
         Ok(())
     }
 }
