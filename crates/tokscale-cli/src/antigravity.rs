@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -31,6 +32,25 @@ const TRAJECTORY_ENRICHMENT_BUDGET: Duration = Duration::from_secs(60);
 /// Consecutive enrichment failures on one connection before that connection is
 /// written off for the rest of the sync. See [`TrajectoryEnrichmentBudget`].
 const TRAJECTORY_ENRICHMENT_FAILURE_THRESHOLD: u32 = 2;
+
+thread_local! {
+    static RPC_DEADLINE: RefCell<Option<Instant>> = RefCell::new(None);
+}
+
+pub fn set_rpc_deadline(deadline: Option<Instant>) {
+    RPC_DEADLINE.with(|cell| {
+        *cell.borrow_mut() = deadline;
+    });
+}
+
+fn rpc_timeout(default: Duration) -> Duration {
+    RPC_DEADLINE.with(|cell| {
+        cell
+            .borrow()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()).min(default))
+            .unwrap_or(default)
+    })
+}
 
 #[cfg(not(target_os = "windows"))]
 static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -216,6 +236,9 @@ struct SessionCandidate {
 pub struct SyncAntigravityResult {
     pub synced: bool,
     pub sessions: usize,
+    pub fresh: usize,
+    pub preserved: usize,
+    pub failed: usize,
     pub connections: usize,
     pub error: Option<String>,
 }
@@ -234,7 +257,7 @@ pub fn has_antigravity_cache() -> bool {
     }
 }
 
-pub fn sync_antigravity_cache_with_connections(
+pub fn sync_antigravity_cache_impl(
     connections: &[AntigravityConnection],
     explicit: bool,
 ) -> SyncAntigravityResult {
@@ -242,24 +265,49 @@ pub fn sync_antigravity_cache_with_connections(
         return SyncAntigravityResult {
             synced: false,
             sessions: 0,
+            fresh: 0,
+            preserved: 0,
+            failed: 0,
             connections: 0,
             error: None,
         };
     }
-    match sync_antigravity_cache_impl(connections, explicit) {
-        Ok(count) => SyncAntigravityResult {
-            synced: true,
-            sessions: count,
+
+    if explicit {
+        set_rpc_deadline(None);
+    } else {
+        set_rpc_deadline(Some(Instant::now() + Duration::from_secs(60)));
+    }
+
+    let inner_result = sync_antigravity_cache_inner(connections, explicit);
+    set_rpc_deadline(None);
+    match inner_result {
+        Ok((fresh, preserved, failed, error)) => SyncAntigravityResult {
+            synced: error.is_none(),
+            sessions: fresh,
+            fresh,
+            preserved,
+            failed,
             connections: connections.len(),
-            error: None,
+            error: error.map(|err| err.to_string()),
         },
         Err(err) => SyncAntigravityResult {
             synced: false,
             sessions: 0,
+            fresh: 0,
+            preserved: 0,
+            failed: 0,
             connections: connections.len(),
             error: Some(err.to_string()),
         },
     }
+}
+
+pub fn sync_antigravity_cache_with_connections(
+    connections: &[AntigravityConnection],
+    explicit: bool,
+) -> SyncAntigravityResult {
+    sync_antigravity_cache_impl(connections, explicit)
 }
 
 pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
@@ -269,6 +317,9 @@ pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
             return SyncAntigravityResult {
                 synced: false,
                 sessions: 0,
+                fresh: 0,
+                preserved: 0,
+                failed: 0,
                 connections: 0,
                 error: Some(err.to_string()),
             };
@@ -277,10 +328,10 @@ pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
     sync_antigravity_cache_with_connections(&connections, explicit)
 }
 
-fn sync_antigravity_cache_impl(
+fn sync_antigravity_cache_inner(
     connections: &[AntigravityConnection],
     explicit: bool,
-) -> Result<usize> {
+) -> Result<(usize, usize, usize, Option<anyhow::Error>)> {
     use colored::Colorize;
 
     let cache_dir = get_antigravity_cache_dir()?;
@@ -293,10 +344,15 @@ fn sync_antigravity_cache_impl(
 
     let manifest = load_antigravity_manifest()?;
     let mut metadata_failed: Option<anyhow::Error> = None;
+    let mut preserved_sessions: usize = 0;
+    let mut failed_sessions: usize = 0;
     let (summaries, list_errors) = list_trajectory_summaries_with_errors(connections);
-    if let Some(err) = list_errors.into_iter().next() {
-        if metadata_failed.is_none() {
-            metadata_failed = Some(err);
+    if !list_errors.is_empty() {
+        failed_sessions += list_errors.len();
+        if let Some(err) = list_errors.into_iter().next() {
+            if metadata_failed.is_none() {
+                metadata_failed = Some(err);
+            }
         }
     }
     let filesystem_candidates = scan_filesystem_session_candidates()?;
@@ -319,8 +375,38 @@ fn sync_antigravity_cache_impl(
     // under the exclusive cache lock acquired above.
     let mut enrichment = TrajectoryEnrichmentBudget::new();
     let mut synced_sessions: usize = 0;
+    let mut preserved_sessions: usize = 0;
 
-    for candidate in &export_candidates {
+    let sync_deadline = if explicit {
+        None
+    } else {
+        Some(Instant::now() + Duration::from_secs(60))
+    };
+    let total_candidates = export_candidates.len();
+
+    for (candidate_index, candidate) in export_candidates.iter().enumerate() {
+        if let Some(deadline) = sync_deadline {
+            if Instant::now() >= deadline {
+                for session in &manifest.sessions {
+                    if !next_manifest
+                        .sessions
+                        .iter()
+                        .any(|entry| entry.session_id == session.session_id)
+                    {
+                        next_manifest.sessions.push(session.clone());
+                        preserved_sessions += 1;
+                    }
+                }
+                let remaining = total_candidates.saturating_sub(candidate_index);
+                failed_sessions += remaining;
+                if metadata_failed.is_none() {
+                    metadata_failed = Some(anyhow::anyhow!(
+                        "Antigravity implicit sync exceeded its 60-second budget"
+                    ));
+                }
+                break;
+            }
+        }
         if let Some(summary) = find_summary_for_candidate(&summaries, &candidate.session_id) {
             match fetch_session_artifact(summary, connections, &mut enrichment) {
                 Ok(Some(artifact)) => {
@@ -345,6 +431,7 @@ fn sync_antigravity_cache_impl(
                         .find(|entry| entry.session_id == candidate.session_id)
                     {
                         next_manifest.sessions.push(previous.clone());
+                        preserved_sessions += 1;
                         continue;
                     } else if let Some(preserved) = cached_manifest_session_entry(
                         &candidate.session_id,
@@ -352,11 +439,13 @@ fn sync_antigravity_cache_impl(
                         &summary.connection_fingerprint,
                     ) {
                         next_manifest.sessions.push(preserved);
+                        preserved_sessions += 1;
                         continue;
                     }
                     continue;
                 }
                 Err(err) => {
+                    failed_sessions += 1;
                     if metadata_failed.is_none() {
                         metadata_failed = Some(err);
                     }
@@ -366,6 +455,7 @@ fn sync_antigravity_cache_impl(
                         .find(|entry| entry.session_id == candidate.session_id)
                     {
                         next_manifest.sessions.push(previous.clone());
+                        preserved_sessions += 1;
                         continue;
                     } else if let Some(preserved) = cached_manifest_session_entry(
                         &candidate.session_id,
@@ -373,6 +463,7 @@ fn sync_antigravity_cache_impl(
                         &summary.connection_fingerprint,
                     ) {
                         next_manifest.sessions.push(preserved);
+                        preserved_sessions += 1;
                         continue;
                     }
                     continue;
@@ -393,6 +484,7 @@ fn sync_antigravity_cache_impl(
             }
             Ok(None) => {}
             Err(err) => {
+                failed_sessions += 1;
                 if metadata_failed.is_none() {
                     metadata_failed = Some(err);
                 }
@@ -405,6 +497,7 @@ fn sync_antigravity_cache_impl(
             .find(|entry| entry.session_id == candidate.session_id)
         {
             next_manifest.sessions.push(previous.clone());
+                        preserved_sessions += 1;
         } else if let Some(preserved) = cached_manifest_session_entry(
             &candidate.session_id,
             candidate.last_modified_ms,
@@ -414,6 +507,7 @@ fn sync_antigravity_cache_impl(
                 .unwrap_or_default(),
         ) {
             next_manifest.sessions.push(preserved);
+                        preserved_sessions += 1;
         }
     }
 
@@ -465,11 +559,18 @@ fn sync_antigravity_cache_impl(
         println!();
     }
 
+    set_rpc_deadline(None);
+
     if let Some(err) = metadata_failed {
-        return Err(err);
+        return Ok((
+            synced_sessions,
+            preserved_sessions,
+            failed_sessions,
+            Some(err),
+        ));
     }
 
-    Ok(synced_sessions)
+    Ok((synced_sessions, preserved_sessions, failed_sessions, None))
 }
 
 pub fn run_antigravity_sync() -> Result<()> {
@@ -2586,7 +2687,7 @@ fn antigravity_https_client() -> &'static reqwest::Client {
             .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
-            .timeout(Duration::from_secs(10))
+            .timeout(rpc_timeout(Duration::from_secs(10)))
             .build()
             .expect("failed to create Antigravity HTTPS RPC client")
     })
@@ -2640,8 +2741,8 @@ fn rpc_request_plain_http(
         )
     })?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(rpc_timeout(Duration::from_secs(10))))?;
+    stream.set_write_timeout(Some(rpc_timeout(Duration::from_secs(5))))?;
 
     let body_text = serde_json::to_string(body)?;
     let request = format!(
@@ -5875,6 +5976,38 @@ mod tests {
         assert_eq!(result.sessions, 0);
         assert_eq!(result.connections, 0);
         assert!(result.error.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn implicit_antigravity_sync_returns_within_budget_on_metadata_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::redirect_to(temp_dir.path());
+
+        let listing = serde_json::json!({
+            "cascadeTrajectories": [{
+                "cascadeId": "session-implicit-1"
+            }]
+        })
+        .to_string();
+        let (port, _seen) = serve_rpc_methods(move |method| match method {
+            "GetAllCascadeTrajectories" => Some(listing.clone()),
+            _ => None,
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+
+        let started = Instant::now();
+        let result = sync_antigravity_cache_with_connections(&[connection], false);
+        let elapsed = started.elapsed();
+
+        assert!(!result.synced);
+        assert!(result.error.is_some());
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "implicit sync did not return within budget: {:?}",
+            elapsed
+        );
     }
 
     #[test]
