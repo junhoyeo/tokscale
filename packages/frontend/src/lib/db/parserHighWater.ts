@@ -705,8 +705,8 @@ export function scanScopeCoversFullHistory(
   scope: { fullHistory: boolean; fullHistoryClients?: readonly string[] } | undefined,
   clients: readonly string[],
 ): boolean {
-  if (scope?.fullHistory !== true) return false;
-  if (scope.fullHistoryClients == null) return true;
+  if (scope == null) return false;
+  if (scope.fullHistoryClients == null) return scope.fullHistory;
   const complete = new Set(scope.fullHistoryClients);
   return clients.every((client) => complete.has(client));
 }

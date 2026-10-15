@@ -5164,9 +5164,11 @@ fn submit_scan_scope(
     } else {
         Vec::new()
     };
+    let every_client_complete = full_history_clients.len() == clients.len();
     Some(TsScanScope {
         parser_versions,
-        full_history,
+        // Fail closed for receivers predating `fullHistoryClients`.
+        full_history: full_history && every_client_complete,
         full_history_clients,
     })
 }
@@ -9614,7 +9616,7 @@ mod tests {
             incomplete.parser_versions.get("amp"),
             Some(&AMP_SUBMISSION_PARSER_VERSION)
         );
-        assert!(incomplete.full_history);
+        assert!(!incomplete.full_history);
         assert!(!incomplete.full_history_clients.contains(&"amp".to_string()));
         assert!(incomplete
             .full_history_clients

@@ -1532,7 +1532,8 @@ describe("droid parser high-water", () => {
 describe("per-client full-history scope", () => {
   it("freezes only clients omitted from a new completeness declaration", () => {
     const scope = {
-      fullHistory: true,
+      // Legacy receivers fail closed for an incomplete client.
+      fullHistory: false,
       fullHistoryClients: ["copilot", "droid"],
     };
     expect(scanScopeCoversFullHistory(scope, ["amp"])).toBe(false);
