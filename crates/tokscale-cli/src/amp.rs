@@ -8,10 +8,12 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -238,6 +240,28 @@ where
     F: Fn(&[&str], Duration) -> Result<Vec<u8>> + Sync,
 {
     let deadline = Instant::now() + timeout;
+    let mut result = SyncAmpResult::default();
+    if let Err(error) = ensure_private_dir(cache_dir) {
+        result.error = Some(format!("failed to create Amp cache directory: {error}"));
+        return result;
+    }
+    // Atomic replacement protects individual files, not the index/thread
+    // read-modify-write transaction. Keep this OS lock for the full sync.
+    let lock_path = cache_dir.join("sync.lock");
+    let _lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .and_then(|file| file.lock_exclusive().map(|_| file))
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            result.error = Some(format!("failed to lock Amp sync transaction: {error}"));
+            return result;
+        }
+    };
     let mut index = load_index(cache_dir);
     if index.version != INDEX_VERSION {
         // Cached exports use an older projection. Clearing the map keeps
@@ -248,7 +272,6 @@ where
     }
     index.last_attempt_at = Some(chrono::Utc::now().to_rfc3339());
 
-    let mut result = SyncAmpResult::default();
     let finish = |index: &AmpSyncIndex, mut result: SyncAmpResult| {
         if let Err(error) =
             ensure_private_dir(cache_dir).and_then(|_| write_index(cache_dir, index))
@@ -702,5 +725,26 @@ mod tests {
             ..SyncAmpResult::default()
         })
         .is_ok());
+    }
+
+    #[test]
+    fn sync_transaction_lock_blocks_a_second_writer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        ensure_private_dir(temp.path()).unwrap();
+        let path = temp.path().join("sync.lock");
+        let first = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        first.lock_exclusive().unwrap();
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(second.try_lock_exclusive().is_err());
     }
 }
