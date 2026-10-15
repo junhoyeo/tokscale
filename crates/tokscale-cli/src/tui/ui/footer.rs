@@ -243,6 +243,8 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(SEPARATOR, Style::default().fg(app.theme.muted)),
             Span::styled("[s]", count_style),
             Span::styled(SEPARATOR, Style::default().fg(app.theme.muted)),
+            Span::styled("[k]", count_style),
+            Span::styled(SEPARATOR, Style::default().fg(app.theme.muted)),
             Span::styled("[g]", count_style),
             Span::styled(SEPARATOR, Style::default().fg(app.theme.muted)),
             Span::styled("[p]", Style::default().fg(Color::Magenta)),
@@ -646,6 +648,7 @@ mod tests {
         let quit_hint = tr(app.settings.tui_language, MessageKey::HelpQuit);
         assert!(full.ends_with(quit_hint), "{context}: {full}");
         assert!(compact.contains(quit_hint), "{context}: {compact}");
+        assert!(compact.contains("[k]"), "{context}: {compact}");
         let full_width = unicode_width::UnicodeWidthStr::width(full.as_str());
 
         for terminal_width in 60..=200 {
