@@ -3633,7 +3633,7 @@ mod tests {
     fn test_watermark_clock_skew_boundaries() {
         let now = 7_200_000;
         let max_timestamp = now + CURSOR_USAGE_CLOCK_SKEW_MS;
-        assert!(CURSOR_USAGE_CLOCK_SKEW_MS < CURSOR_USAGE_CORRECTION_WINDOW_MS);
+        const { assert!(CURSOR_USAGE_CLOCK_SKEW_MS < CURSOR_USAGE_CORRECTION_WINDOW_MS) };
         for (timestamp, expected) in [
             (1, Some(1)),
             (now, Some(now)),
@@ -3645,7 +3645,7 @@ mod tests {
             let event: serde_json::Value =
                 serde_json::from_str(&json_event("valid", &timestamp.to_string())).unwrap();
             assert_eq!(
-                usage_events_watermark_ms(&[event.clone()], max_timestamp),
+                usage_events_watermark_ms(std::slice::from_ref(&event), max_timestamp),
                 expected
             );
             let (fresh, crossed) =
@@ -3884,8 +3884,9 @@ mod tests {
         ]
     }
 
-    fn cursor_identity_container_cases(
-    ) -> Vec<(&'static str, Option<serde_json::Value>, Option<[i64; 4]>)> {
+    type CursorIdentityContainerCase = (&'static str, Option<serde_json::Value>, Option<[i64; 4]>);
+
+    fn cursor_identity_container_cases() -> Vec<CursorIdentityContainerCase> {
         vec![
             ("omitted", None, Some([0; 4])),
             ("null", Some(serde_json::Value::Null), Some([0; 4])),
