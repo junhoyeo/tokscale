@@ -4991,6 +4991,10 @@ struct TsTimeMetrics {
 
 const SUBMISSION_PARSER_VERSION: u32 = 1;
 const COPILOT_SUBMISSION_PARSER_VERSION: u32 = 2;
+// Amp v2 moves existing exported messages from synthesized creation-time dates
+// to the server-provided usage timestamp. The receiver replaces the complete
+// Amp daily layout at this generation, preserving lifetime totals.
+const AMP_SUBMISSION_PARSER_VERSION: u32 = 2;
 // The receiver admits the MiMo CLI/desktop split atomically only when both
 // selected surfaces declare this generation and cover the credited history.
 // This is a submission contract, independent of the on-disk parser cache version.
@@ -5149,6 +5153,7 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
         .map(|client| {
             let version = match client.as_str() {
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
+                "amp" => AMP_SUBMISSION_PARSER_VERSION,
                 "micode" | "micode-desktop" => MICODE_SUBMISSION_PARSER_VERSION,
                 _ => SUBMISSION_PARSER_VERSION,
             };
@@ -9497,17 +9502,25 @@ mod tests {
 
     #[test]
     fn submit_scan_scope_separates_parser_identity_from_full_history() {
-        let clients = vec!["codex".to_string(), "copilot".to_string()];
+        let clients = vec![
+            "codex".to_string(),
+            "copilot".to_string(),
+            "amp".to_string(),
+        ];
         let full = submit_scan_scope(Some(&clients), true).expect("full scope");
         let partial = submit_scan_scope(Some(&clients), false).expect("partial scope");
 
         assert!(full.full_history);
         assert!(!partial.full_history);
         assert_eq!(full.parser_versions, partial.parser_versions);
-        assert_eq!(full.parser_versions.len(), 2);
+        assert_eq!(full.parser_versions.len(), 3);
         assert_eq!(
             full.parser_versions.get("copilot"),
             Some(&COPILOT_SUBMISSION_PARSER_VERSION)
+        );
+        assert_eq!(
+            full.parser_versions.get("amp"),
+            Some(&AMP_SUBMISSION_PARSER_VERSION)
         );
         assert!(!full.parser_versions.contains_key("claude"));
     }

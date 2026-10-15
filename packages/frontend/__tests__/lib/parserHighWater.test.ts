@@ -1528,6 +1528,43 @@ describe("droid parser high-water", () => {
   });
 });
 
+describe("amp parser high-water", () => {
+  function contribution(date: string, tokens: number) {
+    return {
+      date,
+      clients: [{
+        client: "amp",
+        modelId: "claude-sonnet-4-0",
+        tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        cost: 0,
+        messages: 1,
+      }],
+    };
+  }
+
+  it("replaces a full re-attributed snapshot without changing lifetime tokens", () => {
+    // v1 dated this message on the thread-created day; v2 uses its server
+    // usage timestamp. A normal per-day guard would retain 100 on Apr 4 and
+    // add another 100 on Apr 9.
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const newDays = foldParserClientSnapshot([contribution("2026-04-09", 100)], "amp");
+    const plan = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.amp,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: newDays,
+    });
+
+    expect(SUPPORTED_VERSIONED_PARSERS.amp).toBe(2);
+    expect(plan.mode).toBe("replace");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays?.["2026-04-04"]).toBeUndefined();
+    expect(plan.layoutDays?.["2026-04-09"]?.tokens).toBe(100);
+    expect(plan.nextState?.aggregate.tokens).toBe(100);
+  });
+});
+
 describe("unverified retention floor", () => {
   function floored(
     state: ParserClientHighWaterState,

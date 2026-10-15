@@ -31,6 +31,11 @@ import { createSafeRecord, ownValue } from "../safeRecord";
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
   droid: 1,
+  // v2 moves exported Amp messages from the synthesized thread-created day to
+  // their server-provided usage timestamp. This is a pure re-attribution, so
+  // the receiver must replace the daily layout instead of applying its normal
+  // non-decreasing per-day merge guard.
+  amp: 2,
   // Membership and accepted generations for the atomic Antigravity family
   // transition; the submit route deliberately skips independent client plans.
   "antigravity-cli": 1,
@@ -49,7 +54,7 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
  * snapshot cannot replace anything and the bounded-growth plan applies, which
  * keeps every stored row.
  */
-const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
+const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid", "amp"]);
 
 const TOKEN_FIELDS = [
   "input",
