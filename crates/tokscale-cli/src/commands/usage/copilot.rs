@@ -117,98 +117,63 @@ fn gh_host_name(host: &str) -> &str {
     host.split_once(':').map_or(host, |(name, _port)| name)
 }
 
-/// One `key: value` line of a block-style YAML mapping, which is how `gh`
-/// writes `hosts.yml`. `value` is empty when the key opens a nested mapping.
-#[derive(Debug, PartialEq)]
-struct YamlEntry {
-    indent: usize,
-    key: String,
-    value: String,
+/// The only host-level fields this command needs from `gh`'s `hosts.yml`.
+///
+/// Unknown fields (such as `user`, `users`, and `git_protocol`) intentionally
+/// deserialize without affecting credential selection. In particular, a token
+/// nested under `users` is not the active host token.
+#[derive(Debug, Default, Deserialize)]
+struct GhHostConfig {
+    oauth_token: Option<String>,
+    api_host: Option<String>,
 }
 
-/// Read a quoted YAML scalar at the start of `text` (which begins with its
-/// quote) and return it with whatever follows the closing quote.
-fn split_quoted_yaml_scalar(text: &str) -> Option<(String, &str)> {
-    let quote = text.chars().next()?;
-    let mut out = String::new();
-    let mut chars = text.char_indices().skip(1).peekable();
-    while let Some((i, c)) = chars.next() {
-        match (quote, c) {
-            ('\'', '\'') => {
-                // `''` is an escaped quote inside a single-quoted scalar.
-                if chars.peek().is_some_and(|&(_, next)| next == '\'') {
-                    chars.next();
-                    out.push('\'');
-                } else {
-                    return Some((out, &text[i + 1..]));
-                }
-            }
-            ('"', '"') => return Some((out, &text[i + 1..])),
-            ('"', '\\') => out.push(chars.next()?.1),
-            (_, c) => out.push(c),
-        }
-    }
-    None
+/// Parse `gh`'s actual top-level YAML mapping. This deliberately does not
+/// approximate YAML with line matching: quoted scalars, comments, aliases, and
+/// escapes are part of the file format and all can affect a credential value.
+fn parse_hosts_yml(content: &str) -> Option<yaml_serde::Mapping> {
+    yaml_serde::from_str(content).ok()
 }
 
-/// Parse one line of a block mapping. Blank lines, comment lines, document
-/// markers and lines that are not `key: value` (sequence items, flow
-/// collections, continuation lines) yield `None`.
-fn parse_yaml_entry(line: &str) -> Option<YamlEntry> {
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    let rest = line.trim_start_matches([' ', '\t']);
-    let indent = line.len() - rest.len();
-    if rest.is_empty() || rest.starts_with('#') || rest == "---" || rest == "..." {
-        return None;
-    }
-    let (key, after_key) = if rest.starts_with(['"', '\'']) {
-        let (key, after) = split_quoted_yaml_scalar(rest)?;
-        (
-            key,
-            after.trim_start_matches([' ', '\t']).strip_prefix(':')?,
-        )
-    } else {
-        // A plain key ends at the first `:` followed by whitespace or the end
-        // of the line, so `ghe.example.com:8443:` keeps its port.
-        let bytes = rest.as_bytes();
-        let colon = (0..bytes.len()).find(|&i| {
-            bytes[i] == b':' && bytes.get(i + 1).is_none_or(|b| matches!(b, b' ' | b'\t'))
-        })?;
-        (rest[..colon].trim_end().to_string(), &rest[colon + 1..])
-    };
-    if !after_key.is_empty() && !after_key.starts_with([' ', '\t']) {
-        return None;
-    }
-    let value_text = after_key.trim_start_matches([' ', '\t']);
-    let value = if value_text.starts_with(['"', '\'']) {
-        split_quoted_yaml_scalar(value_text)?.0
-    } else {
-        // In a plain scalar a comment starts at a `#` that begins the value
-        // or follows whitespace; `gho_a#b` keeps its `#`.
-        let end = value_text
-            .char_indices()
-            .find(|&(i, c)| c == '#' && (i == 0 || value_text[..i].ends_with([' ', '\t'])))
-            .map_or(value_text.len(), |(i, _)| i);
-        value_text[..end].trim_end().to_string()
-    };
-    Some(YamlEntry { indent, key, value })
-}
-
-/// Top-level keys of a `gh` `hosts.yml`, i.e. every host `gh` holds a login
-/// for, in file order.
+/// Top-level host keys of a `gh` `hosts.yml`, in its file order.
 fn hosts_in_hosts_yml(content: &str) -> Vec<String> {
-    let mut hosts = Vec::new();
-    for entry in content.lines().filter_map(parse_yaml_entry) {
-        if entry.indent != 0 {
-            continue;
-        }
-        if let Some(host) = normalize_gh_host(&entry.key) {
-            if !hosts.contains(&host) {
-                hosts.push(host);
-            }
-        }
-    }
+    let Some(hosts) = parse_hosts_yml(content) else {
+        return Vec::new();
+    };
     hosts
+        .keys()
+        .filter_map(yaml_serde::Value::as_str)
+        .filter_map(normalize_gh_host)
+        .collect()
+}
+
+/// Read one requested host's typed configuration record from `hosts.yml`.
+fn host_config_for_host_in_hosts_yml(content: &str, host: &str) -> Option<GhHostConfig> {
+    let hosts = parse_hosts_yml(content)?;
+    hosts.into_iter().find_map(|(key, value)| {
+        let key = key.as_str()?;
+        (normalize_gh_host(key).as_deref() == Some(host))
+            .then(|| yaml_serde::from_value(value).ok())
+            .flatten()
+    })
+}
+
+/// The active `oauth_token` stored directly under `host:` in a `hosts.yml`.
+fn token_for_host_in_hosts_yml(content: &str, host: &str) -> Option<String> {
+    host_config_for_host_in_hosts_yml(content, host)?
+        .oauth_token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// The configured API transport for a logical `gh` host, if it is a valid
+/// hostname. `gh` credentials remain keyed by the logical host, not this API
+/// transport hostname.
+fn api_host_for_host_in_hosts_yml(content: &str, host: &str) -> Option<String> {
+    host_config_for_host_in_hosts_yml(content, host)?
+        .api_host
+        .as_deref()
+        .and_then(normalize_gh_host)
 }
 
 /// Pick the host the same way `gh` does: `GH_HOST`, else the only host in
@@ -234,6 +199,28 @@ fn configured_gh_hosts() -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+/// The configured API transport for `host`, if its `hosts.yml` record has one.
+fn configured_api_host(host: &str) -> Option<String> {
+    for path in hosts_candidates() {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(api_host) = api_host_for_host_in_hosts_yml(&content, host) {
+            return Some(api_host);
+        }
+    }
+    None
+}
+
+/// The Copilot API hostname for one logical `gh` host. An explicit `api_host`
+/// is the transport configured by `gh`; otherwise Copilot's documented
+/// enterprise convention is the `api.` subdomain of the logical host.
+fn copilot_api_host(host: &str, configured_api_host: Option<&str>) -> String {
+    configured_api_host
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("api.{host}"))
 }
 
 /// The GitHub host Copilot usage is read for.
@@ -264,11 +251,9 @@ fn token_env_vars(host: &str) -> [&'static str; 2] {
     }
 }
 
-/// The Copilot user endpoint for `host`. The official Copilot language server
-/// derives its API base as `https://api.<host>` for an enterprise URI (not
-/// gh's `/api/v3` REST prefix), and that is `api.github.com` for github.com.
-fn copilot_user_url(host: &str) -> String {
-    format!("https://api.{host}/copilot_internal/user")
+/// The Copilot user endpoint for the resolved API transport hostname.
+fn copilot_user_url(api_host: &str) -> String {
+    format!("https://{api_host}/copilot_internal/user")
 }
 
 /// Windows Credential Manager target names to try for the `gh` token, most
@@ -425,6 +410,8 @@ fn hosts_candidates() -> Vec<PathBuf> {
 pub(super) fn credential_probe() -> Vec<String> {
     let mut probes = Vec::new();
     let host = current_gh_host();
+    let configured_api_host = configured_api_host(&host);
+    let api_host = copilot_api_host(&host, configured_api_host.as_deref());
     probes.push(format!(
         "GH_HOST={} (host={host}, api={})",
         if std::env::var_os("GH_HOST").is_some() {
@@ -432,7 +419,7 @@ pub(super) fn credential_probe() -> Vec<String> {
         } else {
             "unset"
         },
-        copilot_user_url(&host)
+        copilot_user_url(&api_host)
     ));
     for var in token_env_vars(&host) {
         probes.push(format!(
@@ -612,31 +599,6 @@ fn gh_config_dir() -> std::path::PathBuf {
     home.join(".config").join("gh")
 }
 
-/// The active `oauth_token` stored under `host:` in a `hosts.yml`, if any.
-///
-/// Only a direct child of the host's mapping counts. `gh` also keeps a token
-/// per account under `users:`, and one of those is not necessarily the
-/// account `gh` is logged in as.
-fn token_for_host_in_hosts_yml(content: &str, host: &str) -> Option<String> {
-    let mut in_host = false;
-    let mut child_indent = None;
-    for entry in content.lines().filter_map(parse_yaml_entry) {
-        if entry.indent == 0 {
-            in_host = normalize_gh_host(&entry.key).is_some_and(|key| key == host);
-            child_indent = None;
-            continue;
-        }
-        if !in_host {
-            continue;
-        }
-        let indent = *child_indent.get_or_insert(entry.indent);
-        if entry.indent == indent && entry.key == "oauth_token" && !entry.value.is_empty() {
-            return Some(entry.value);
-        }
-    }
-    None
-}
-
 fn parse_token_from_hosts(host: &str) -> Result<String> {
     for path in hosts_candidates() {
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -649,10 +611,10 @@ fn parse_token_from_hosts(host: &str) -> Result<String> {
     anyhow::bail!("No oauth_token for {host} found in hosts.yml")
 }
 
-/// The token for `host`, from (in order) the host's environment variables,
-/// the platform keyring entry `gh:<host>`, and the `<host>:` section of
-/// `hosts.yml`. Every source is keyed by the same host the request goes to,
-/// so a credential is only ever sent to the host it was issued for.
+/// The token for logical `host`, from (in order) the host's environment
+/// variables, the platform keyring entry `gh:<host>`, and the `<host>:`
+/// section of `hosts.yml`. `api_host` can deliberately select a different API
+/// transport; it never changes the logical host used for credential lookup.
 fn read_credentials(host: &str) -> Result<String> {
     if let Some(token) = token_from_env(host) {
         return Ok(token);
@@ -727,9 +689,13 @@ fn pretty_category(key: &str) -> String {
     }
 }
 
-async fn fetch_api(client: &reqwest::Client, host: &str, token: &str) -> Result<serde_json::Value> {
+async fn fetch_api(
+    client: &reqwest::Client,
+    api_host: &str,
+    token: &str,
+) -> Result<serde_json::Value> {
     let resp = client
-        .get(copilot_user_url(host))
+        .get(copilot_user_url(api_host))
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/json")
         .header("Editor-Version", "vscode/1.96.2")
@@ -763,13 +729,15 @@ pub fn has_credentials() -> bool {
 pub fn fetch() -> Result<UsageOutput> {
     let host = current_gh_host();
     let token = read_credentials(&host)?;
+    let configured_api_host = configured_api_host(&host);
+    let api_host = copilot_api_host(&host, configured_api_host.as_deref());
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let client = tokscale_core::http::client();
-        let resp = fetch_api(&client, &host, &token).await.map_err(|e| {
+        let resp = fetch_api(&client, &api_host, &token).await.map_err(|e| {
             if e.to_string().contains("NEEDS_AUTH") {
                 {
                     let [primary, secondary] = token_env_vars(&host);
@@ -1259,15 +1227,15 @@ mod tests {
     }
 
     #[test]
-    fn keyring_service_and_endpoint_follow_the_host() {
+    fn keyring_service_and_default_endpoint_follow_the_logical_host() {
         assert_eq!(gh_keyring_service("github.com"), GH_KEYRING_SERVICE);
         assert_eq!(gh_keyring_service("ghe.example.com"), "gh:ghe.example.com");
         assert_eq!(
-            copilot_user_url("github.com"),
+            copilot_user_url(&copilot_api_host("github.com", None)),
             "https://api.github.com/copilot_internal/user"
         );
         assert_eq!(
-            copilot_user_url("ghe.example.com:8443"),
+            copilot_user_url(&copilot_api_host("ghe.example.com:8443", None)),
             "https://api.ghe.example.com:8443/copilot_internal/user"
         );
         assert_eq!(
@@ -1321,13 +1289,19 @@ mod tests {
         assert_eq!(current_gh_host(), "github.com");
         std::fs::write(
             temp.path().join("hosts.yml"),
-            "ghe.example.com:\n    oauth_token: gho_ghe\n",
+            "ghe.example.com:\n    oauth_token: gho_ghe\n    api_host: copilot-api.example.net:8443\n",
         )
         .unwrap();
         assert_eq!(current_gh_host(), "ghe.example.com");
         assert_eq!(
             parse_token_from_hosts("ghe.example.com").unwrap(),
             "gho_ghe"
+        );
+        let api_host = configured_api_host("ghe.example.com").unwrap();
+        assert_eq!(api_host, "copilot-api.example.net:8443");
+        assert_eq!(
+            copilot_user_url(&copilot_api_host("ghe.example.com", Some(&api_host))),
+            "https://copilot-api.example.net:8443/copilot_internal/user"
         );
         assert!(parse_token_from_hosts("github.com").is_err());
         guard.set("GH_HOST", "other.example");
@@ -1365,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_audience_matches_the_host_the_request_reaches() {
+    fn default_api_endpoint_matches_the_credential_host() {
         for raw in [
             "github.com",
             "github.com:443",
@@ -1377,7 +1351,8 @@ mod tests {
             let host = normalize_gh_host(raw).unwrap();
             // Parse the URL the way `fetch_api` sends it, and check the host
             // it reaches is the one the credential was chosen for.
-            let url = reqwest::Url::parse(&copilot_user_url(&host)).unwrap();
+            let api_host = copilot_api_host(&host, None);
+            let url = reqwest::Url::parse(&copilot_user_url(&api_host)).unwrap();
             let reached = url.host_str().unwrap().strip_prefix("api.").unwrap();
             assert_eq!(reached, gh_host_name(&host), "input {raw:?}");
             let dotcom = reached == "github.com" || reached.ends_with(".ghe.com");
@@ -1450,26 +1425,25 @@ mod tests {
     }
 
     #[test]
-    fn yaml_entry_parsing() {
-        let entry = |indent, key: &str, value: &str| {
-            Some(YamlEntry {
-                indent,
-                key: key.to_string(),
-                value: value.to_string(),
-            })
-        };
-        assert_eq!(parse_yaml_entry("a: b"), entry(0, "a", "b"));
-        assert_eq!(parse_yaml_entry("  a:"), entry(2, "a", ""));
-        assert_eq!(parse_yaml_entry("a: b#c"), entry(0, "a", "b#c"));
-        assert_eq!(parse_yaml_entry("a: b #c"), entry(0, "a", "b"));
-        assert_eq!(parse_yaml_entry("a: # c"), entry(0, "a", ""));
+    fn hosts_yml_resolves_yaml_aliases() {
+        let yml = "ghe.example.com:\n    oauth_token: &active gho_ghe\nother.example.com:\n    oauth_token: *active\n";
         assert_eq!(
-            parse_yaml_entry("'it''s': \"x\\\"y\""),
-            entry(0, "it's", "x\"y")
+            token_for_host_in_hosts_yml(yml, "other.example.com").as_deref(),
+            Some("gho_ghe")
         );
-        assert_eq!(parse_yaml_entry("# a: b"), None);
-        assert_eq!(parse_yaml_entry("---"), None);
-        assert_eq!(parse_yaml_entry("- a"), None);
-        assert_eq!(parse_yaml_entry("\"unterminated: x"), None);
+    }
+
+    #[test]
+    fn hosts_yml_routes_the_api_request_without_rekeying_credentials() {
+        let yml = "ghe.example.com:\n    oauth_token: gho_ghe\n    api_host: https://copilot-api.example.net:8443/\n";
+        let logical_host = "ghe.example.com";
+        let api_host = api_host_for_host_in_hosts_yml(yml, logical_host).unwrap();
+
+        assert_eq!(api_host, "copilot-api.example.net:8443");
+        assert_eq!(gh_keyring_service(logical_host), "gh:ghe.example.com");
+        assert_eq!(
+            copilot_user_url(&copilot_api_host(logical_host, Some(&api_host))),
+            "https://copilot-api.example.net:8443/copilot_internal/user"
+        );
     }
 }

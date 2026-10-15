@@ -37,6 +37,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 # Patch TUI preferences without reserializing unrelated JSON values or numbers.
 serde_json = { workspace = true, features = ["raw_value"] }
+yaml_serde = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
