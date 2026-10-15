@@ -35,7 +35,16 @@ pub struct ReportOptions {
     pub full: bool,
 }
 
+fn should_auto_sync_amp_for_report(home_dir: &Option<String>, client: &Option<String>) -> bool {
+    home_dir.is_none() && client.as_deref().is_none_or(|client| client == "amp")
+}
+
 pub fn run_report(opts: ReportOptions) -> Result<()> {
+    if should_auto_sync_amp_for_report(&opts.home_dir, &opts.client) {
+        if let Some(warning) = crate::amp::auto_sync() {
+            eprintln!("{warning}");
+        }
+    }
     let wiki_path = WikiDb::default_path();
     let db =
         WikiDb::open(&wiki_path).map_err(|e| anyhow::anyhow!("Failed to open wiki DB: {}", e))?;
@@ -2471,5 +2480,19 @@ mod tests {
         let bytes = vec![0_u8; MAX_CAPTURED_SUBPROCESS_BYTES + 1];
         let error = drain_subprocess_pipe(std::io::Cursor::new(bytes)).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn report_amp_auto_sync_respects_client_filter_and_home_isolation() {
+        assert!(should_auto_sync_amp_for_report(&None, &None));
+        assert!(should_auto_sync_amp_for_report(&None, &Some("amp".into())));
+        assert!(!should_auto_sync_amp_for_report(
+            &None,
+            &Some("codex".into())
+        ));
+        assert!(!should_auto_sync_amp_for_report(
+            &Some("/tmp/profile".into()),
+            &Some("amp".into())
+        ));
     }
 }
