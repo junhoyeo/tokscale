@@ -448,6 +448,9 @@ fn manual_sync_completion(result: &SyncAmpResult) -> Result<()> {
             result.error.as_deref().unwrap_or("unknown error")
         );
     }
+    if let Some(error) = &result.error {
+        anyhow::bail!("Amp sync completed with errors: {error}");
+    }
     if result.failed != 0 || result.remaining != 0 {
         anyhow::bail!(
             "Amp sync completed incompletely: {} failed, {} remaining",
@@ -717,6 +720,12 @@ mod tests {
         let result = SyncAmpResult {
             synced: true,
             remaining: 1,
+            ..SyncAmpResult::default()
+        };
+        assert!(manual_sync_completion(&result).is_err());
+        let result = SyncAmpResult {
+            synced: true,
+            error: Some("index write failed".to_string()),
             ..SyncAmpResult::default()
         };
         assert!(manual_sync_completion(&result).is_err());
