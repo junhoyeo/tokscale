@@ -1563,6 +1563,35 @@ describe("amp parser high-water", () => {
     expect(plan.layoutDays?.["2026-04-09"]?.tokens).toBe(100);
     expect(plan.nextState?.aggregate.tokens).toBe(100);
   });
+
+  it("accepts v1 before transition and freezes it after a v2 baseline", () => {
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const v1 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: oldDays,
+    });
+    expect(v1.mode).toBe("status-quo");
+
+    const v2 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 2,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: foldParserClientSnapshot([contribution("2026-04-09", 100)], "amp"),
+    });
+    const staleV1 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: {},
+      incomingDays: oldDays,
+      state: v2.nextState,
+    });
+    expect(staleV1.mode).toBe("freeze");
+  });
 });
 
 describe("unverified retention floor", () => {
