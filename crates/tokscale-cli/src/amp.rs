@@ -233,6 +233,30 @@ where
     }
 }
 
+const AMP_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn lock_sync_transaction(
+    file: std::fs::File,
+    deadline: Instant,
+) -> std::io::Result<std::fs::File> {
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error) if crate::commands::autosubmit::is_lock_contention(&error) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Amp sync transaction lock deadline elapsed",
+                    ));
+                }
+                std::thread::sleep(remaining.min(AMP_LOCK_POLL_INTERVAL));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Sync core with an injectable `amp` runner. `run(args, timeout)` returns
 /// the command's stdout or an error.
 fn sync_amp_cache_with<F>(cache_dir: &Path, timeout: Duration, run: F) -> SyncAmpResult
@@ -254,7 +278,7 @@ where
         .create(true)
         .truncate(false)
         .open(&lock_path)
-        .and_then(|file| file.lock_exclusive().map(|_| file))
+        .and_then(|file| lock_sync_transaction(file, deadline))
     {
         Ok(lock) => lock,
         Err(error) => {
@@ -737,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_transaction_lock_blocks_a_second_writer() {
+    fn sync_transaction_lock_stops_at_the_command_deadline() {
         let temp = tempfile::TempDir::new().unwrap();
         ensure_private_dir(temp.path()).unwrap();
         let path = temp.path().join("sync.lock");
@@ -754,6 +778,10 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        assert!(second.try_lock_exclusive().is_err());
+
+        let error = lock_sync_transaction(second, Instant::now() + Duration::from_millis(20))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("deadline"));
     }
 }
