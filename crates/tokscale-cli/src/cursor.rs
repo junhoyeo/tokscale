@@ -1216,20 +1216,28 @@ pub fn remove_all_accounts(purge_cache: bool) -> Result<()> {
 
 fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
     let cache_dir = cursor_cache_dir(home);
-    let store = load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
-        version: 1,
-        active_account_id: String::new(),
-        accounts: HashMap::new(),
-    });
-    prepare_cursor_cache_layout(&cache_dir, &store)?;
-    if cache_dir.exists() {
-        for entry in fs::read_dir(&cache_dir)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if is_cursor_usage_cache_filename(&name) {
-                if purge_cache {
-                    fs::remove_file(entry.path())?;
-                } else {
+    if purge_cache {
+        // `--all --purge-cache` is an explicit deletion request. Remove both
+        // application-owned cache locations, including legacy files and earlier
+        // archives whose ownership can no longer be proved.
+        for dir in [cache_dir.clone(), old_cursor_cache_dir(home)] {
+            if dir.exists() {
+                fs::remove_dir_all(dir)?;
+            }
+        }
+    } else {
+        let store =
+            load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
+                version: 1,
+                active_account_id: String::new(),
+                accounts: HashMap::new(),
+            });
+        prepare_cursor_cache_layout(&cache_dir, &store)?;
+        if cache_dir.exists() {
+            for entry in fs::read_dir(&cache_dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_cursor_usage_cache_filename(&name) {
                     archive_cache_file_in_dir(
                         &cache_dir,
                         &entry.path(),
@@ -1240,9 +1248,13 @@ fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
         }
     }
 
-    let path = cursor_credentials_path(home);
-    if path.exists() {
-        fs::remove_file(path)?;
+    for path in [
+        cursor_credentials_path(home),
+        old_cursor_credentials_path(home),
+    ] {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
@@ -2471,13 +2483,18 @@ pub fn run_cursor_logout(name: Option<String>, all: bool, purge_cache: bool) -> 
 
     if all {
         let accounts = list_accounts();
-        if accounts.is_empty() {
+        if accounts.is_empty() && !purge_cache {
             println!("\n  {}\n", "No saved Cursor accounts.".yellow());
             return Ok(());
         }
 
         remove_all_accounts(purge_cache)?;
-        println!("\n  {}\n", "Logged out from all Cursor accounts.".green());
+        let message = if accounts.is_empty() {
+            "Purged all Cursor cache data."
+        } else {
+            "Logged out from all Cursor accounts."
+        };
+        println!("\n  {}\n", message.green());
         return Ok(());
     }
 
@@ -6427,11 +6444,43 @@ mod tests {
             remove_all_accounts_in_home(home.path(), purge)?;
             assert!(!cursor_credentials_path(home.path()).exists());
             assert!(!dir.join("usage.json").exists());
-            assert!(preserved_cursor_files(&dir)?.contains(&(
+            let legacy_preserved = preserved_cursor_files(&dir)?.contains(&(
                 "usage.team-account-a.csv".to_string(),
-                b"unknown legacy owner".to_vec()
-            )));
+                b"unknown legacy owner".to_vec(),
+            ));
+            assert_eq!(legacy_preserved, !purge);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_all_purge_deletes_unverified_caches_without_archiving() -> Result<()> {
+        let home = TempDir::new()?;
+        collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), b"unverified json history")?;
+        fs::write(dir.join("usage.legacy.csv"), b"unverified csv history")?;
+        let old_archive = dir.join("archive/old-backup");
+        fs::create_dir_all(&old_archive)?;
+        fs::write(old_archive.join("usage.json"), b"earlier archived history")?;
+        let legacy_dir = old_cursor_cache_dir(home.path());
+        fs::create_dir_all(&legacy_dir)?;
+        fs::write(legacy_dir.join("usage.json"), b"legacy-location history")?;
+        fs::create_dir_all(old_cursor_credentials_path(home.path()).parent().unwrap())?;
+        fs::write(
+            old_cursor_credentials_path(home.path()),
+            b"legacy credentials",
+        )?;
+
+        remove_all_accounts_in_home(home.path(), true)?;
+
+        assert!(!cursor_credentials_path(home.path()).exists());
+        assert!(!old_cursor_credentials_path(home.path()).exists());
+        assert!(
+            !dir.exists() && !legacy_dir.exists(),
+            "purge-all must remove live, archived, and legacy-location usage"
+        );
         Ok(())
     }
 
@@ -6447,7 +6496,7 @@ mod tests {
         assert!(set_active_account_in_home(home.path(), "team@account-a").is_err());
         assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
         assert!(remove_account_in_home(home.path(), &store.active_account_id, true).is_err());
-        assert!(remove_all_accounts_in_home(home.path(), true).is_err());
+        assert!(remove_all_accounts_in_home(home.path(), false).is_err());
         assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
         let fetched = std::sync::atomic::AtomicBool::new(false);
         let result = tokio::runtime::Runtime::new()?.block_on(

@@ -3404,6 +3404,31 @@ fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
 }
 
 #[test]
+fn test_cursor_logout_all_purge_removes_cache_without_credentials() {
+    let tmp = create_empty_fixture_dir();
+    let current = tmp.path().join(".config/tokscale/cursor-cache");
+    let legacy = tmp.path().join(".tokscale/cursor-cache");
+    fs::create_dir_all(current.join("archive/old")).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(current.join("archive/old/usage.json"), b"archived usage").unwrap();
+    fs::write(legacy.join("usage.csv"), b"legacy usage").unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["cursor", "logout", "--all", "--purge-cache"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!current.exists());
+    assert!(!legacy.exists());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Purged all Cursor cache data"));
+}
+
+#[test]
 fn test_graph_preserves_unowned_cursor_cache_when_refetch_fails() {
     let tmp = create_empty_fixture_dir();
     write_cursor_credentials(tmp.path());
