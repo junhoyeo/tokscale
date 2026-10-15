@@ -10,9 +10,11 @@ mod paths;
 mod process_liveness;
 mod trae;
 mod tui;
+mod ui_glyphs;
 mod warp;
 
 use crate::tui::client_ui;
+use crate::ui_glyphs::{AMBIENT_STABLE_SCANNER_ACTIVE, AMBIENT_STABLE_SCANNER_INACTIVE};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -484,15 +486,15 @@ enum CursorSubcommand {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
-    #[command(about = "Sync Cursor API usage into cursor-cache/usage*.csv")]
+    #[command(about = "Sync Cursor API usage into cursor-cache/usage*.json")]
     Sync {
         #[arg(long, help = "Output as JSON")]
         json: bool,
         #[arg(
             long,
             value_name = "SECONDS",
-            value_parser = clap::value_parser!(u64).range(1..),
-            help = "Overall sync timeout in seconds (overrides default dynamic budget)"
+            value_parser = clap::value_parser!(u64).range(1..=cursor::CURSOR_MAX_SYNC_TIMEOUT_SECS),
+            help = "Overall sync timeout in seconds, 1-86400 (overrides cursor.syncTimeoutSeconds in settings.json and the default dynamic budget)"
         )]
         timeout: Option<u64>,
     },
@@ -2109,9 +2111,16 @@ impl LightSpinner {
 
             if distance < Self::TRAIL_LENGTH {
                 let color = Self::TRAIL_COLORS[distance.min(Self::TRAIL_COLORS.len() - 1)];
-                out.push_str(&format!("\x1b[38;5;{}m■\x1b[0m", color));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    color, AMBIENT_STABLE_SCANNER_ACTIVE
+                ));
             } else {
-                out.push_str(&format!("\x1b[38;5;{}m⬝\x1b[0m", Self::INACTIVE_COLOR));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    Self::INACTIVE_COLOR,
+                    AMBIENT_STABLE_SCANNER_INACTIVE
+                ));
             }
         }
 
@@ -2316,7 +2325,7 @@ fn run_models_report(
     hide_zero: bool,
 ) -> Result<()> {
     use tokio::runtime::Runtime;
-    use tokscale_core::{get_model_report, GroupBy};
+    use tokscale_core::{get_model_report_v2, GroupBy};
 
     let mut context = LocalReportContext::new(
         home_dir,
@@ -2327,11 +2336,17 @@ fn run_models_report(
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
-            get_model_report(context.report_options_with_rollup(group_by.clone(), worktree_rollup))
-                .await
+            get_model_report_v2(
+                context.report_options_with_rollup(group_by.clone(), worktree_rollup),
+            )
+            .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut report = report;
+    let tokscale_core::ModelReportV2 {
+        mut report,
+        undated_tokens,
+        claude_desktop_cache,
+    } = report;
     if hide_zero {
         // Display-only filter: totals were computed in core over the full
         // entry set and intentionally still include the hidden rows.
@@ -2373,6 +2388,8 @@ fn run_models_report(
         })
         .unwrap_or_default();
 
+    let desktop_cache = claude_desktop_cache;
+
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -2409,6 +2426,9 @@ fn run_models_report(
             total_messages: i32,
             total_cost: f64,
             processing_time_ms: u32,
+            undated_tokens: ModelTokenBreakdownJson,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            claude_desktop_cache: Option<tokscale_core::claude_desktop::Coverage>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2461,6 +2481,8 @@ fn run_models_report(
             total_messages: report.total_messages,
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
+            undated_tokens: undated_tokens.into(),
+            claude_desktop_cache: desktop_cache,
             warnings: context.cursor_setup_warnings,
             diagnostics,
         };
@@ -2468,6 +2490,18 @@ fn run_models_report(
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
         emit_client_diagnostics(&diagnostics);
+
+        if undated_tokens.total() > 0 {
+            eprintln!("  Claude Desktop: {} tokens included in all-time totals have no known usage date. They are excluded from dated reports and submissions.", undated_tokens.total());
+        }
+        if let Some(coverage) = desktop_cache {
+            if coverage.decode_errors > 0 {
+                eprintln!(
+                    "  Claude Desktop: {} cache read/decode errors; cached totals are incomplete.",
+                    coverage.decode_errors
+                );
+            }
+        }
 
         emit_cursor_setup_warnings(&context.cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -4834,6 +4868,30 @@ fn format_number(n: i32) -> String {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ModelTokenBreakdownJson {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+    reasoning: i64,
+}
+
+impl From<tokscale_core::TokenBreakdown> for ModelTokenBreakdownJson {
+    fn from(tokens: tokscale_core::TokenBreakdown) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            cache_write_1h: tokens.cache_write_1h,
+            reasoning: tokens.reasoning,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TsTokenBreakdown {
     input: i64,
     output: i64,
@@ -6869,6 +6927,13 @@ fn resolve_light_cache_filter_set(
     }
 }
 
+fn light_cache_group_by(_report_group_by: &tokscale_core::GroupBy) -> tokscale_core::GroupBy {
+    // The light report may use a caller-selected grouping, but this file is the
+    // startup cache for the TUI, whose initial grouping key is always `model`.
+    // Writing the report grouping makes the next TUI launch miss its cache.
+    crate::tui::TUI_DEFAULT_GROUP_BY
+}
+
 fn write_light_cache(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
@@ -6904,8 +6969,9 @@ fn write_light_cache(
     // pattern in `run_warm_tui_cache` below.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    if let Ok(data) = loader.load(&scan_clients, group_by, include_synthetic) {
-        save_cached_data(&data, &enabled_set, group_by, &report_scope);
+    let cache_group_by = light_cache_group_by(group_by);
+    if let Ok(data) = loader.load(&scan_clients, &cache_group_by, include_synthetic) {
+        save_cached_data(&data, &enabled_set, &cache_group_by, &report_scope);
     }
 }
 
@@ -7458,6 +7524,26 @@ mod tests {
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown,
     };
+
+    #[test]
+    fn model_token_breakdown_json_preserves_all_buckets_in_camel_case() {
+        let tokens = TokenBreakdown {
+            input: 11,
+            output: 22,
+            cache_read: 33,
+            cache_write: 44,
+            cache_write_1h: 15,
+            reasoning: 66,
+        };
+        let json = serde_json::to_value(ModelTokenBreakdownJson::from(tokens)).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "input":11, "output":22, "cacheRead":33, "cacheWrite":44,
+                "cacheWrite1h":15, "reasoning":66,
+            })
+        );
+    }
 
     /// The overwhelming majority of the pricing sheet is at or above a cent
     /// per 1M tokens, and that output must not move.
@@ -8988,22 +9074,22 @@ mod tests {
     #[test]
     fn test_light_spinner_frame_0() {
         let frame = LightSpinner::frame(0);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]
     fn test_light_spinner_frame_1() {
         let frame = LightSpinner::frame(1);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]
     fn test_light_spinner_frame_2() {
         let frame = LightSpinner::frame(2);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
+        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
     }
 
     #[test]
@@ -9677,6 +9763,17 @@ mod tests {
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "300"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "0"]).is_err());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "86400"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "86401"]).is_err());
+        // A 19-digit value used to parse and then panic on `Instant` overflow.
+        assert!(Cli::try_parse_from([
+            "tokscale",
+            "cursor",
+            "sync",
+            "--timeout",
+            "18446744073709551615"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -9830,6 +9927,86 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("runtime unavailable")));
+    }
+
+    #[test]
+    fn light_cache_uses_the_tui_grouping_key() {
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::default()),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::WorkspaceModel),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn light_cache_writer_round_trips_through_the_tui_key() {
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..).rev() {
+                    unsafe {
+                        match previous {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let values = vec![
+            ("HOME", home.path().as_os_str().to_owned()),
+            ("TOKSCALE_CONFIG_DIR", config.path().as_os_str().to_owned()),
+            (
+                "CLAUDE_CONFIG_DIR",
+                home.path().join(".claude").into_os_string(),
+            ),
+            ("CODEX_HOME", home.path().join(".codex").into_os_string()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", "1".into()),
+            ("TOKSCALE_EXTRA_DIRS", "".into()),
+            ("TOKSCALE_HEADLESS_DIR", "".into()),
+        ];
+        let _restore = EnvRestore(
+            values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        for (key, value) in values {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let clients = Some(vec!["claude".to_string(), "codex".to_string()]);
+        write_light_cache(
+            &None,
+            &clients,
+            &None,
+            &None,
+            &None,
+            &tokscale_core::GroupBy::default(),
+        );
+
+        let enabled = resolve_light_cache_filter_set(&clients);
+        let result = tui::load_cache(
+            &enabled,
+            &tui::TUI_DEFAULT_GROUP_BY,
+            &tui::CacheReportScope::default(),
+        );
+        assert!(matches!(result, tui::CacheResult::Fresh(_)));
+        assert!(matches!(
+            tui::load_cache(
+                &enabled,
+                &tokscale_core::GroupBy::default(),
+                &tui::CacheReportScope::default(),
+            ),
+            tui::CacheResult::Miss
+        ));
     }
 
     #[test]

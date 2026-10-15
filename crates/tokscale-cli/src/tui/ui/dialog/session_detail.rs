@@ -177,12 +177,14 @@ impl SessionDetailDialog {
             inner_width,
         ));
 
+        let turn_count = if self.session.turn_count > 0 {
+            format_tokens_with_commas(self.session.turn_count as u64)
+        } else {
+            "\u{2014}".to_string()
+        };
         lines.push(kv_line(
             tr(self.lang, MessageKey::ColTurn),
-            Span::styled(
-                format_tokens_with_commas(self.session.turn_count as u64),
-                Style::default().fg(theme.foreground),
-            ),
+            Span::styled(turn_count, Style::default().fg(theme.foreground)),
             theme,
         ));
 
@@ -677,6 +679,31 @@ mod tests {
         let (w_small, h_small) = dialog.desired_size(Rect::new(0, 0, 50, 15));
         assert_eq!(w_small, 46);
         assert_eq!(h_small, 13);
+    }
+
+    #[test]
+    fn test_session_detail_dialog_zero_turns_match_session_list() {
+        let mut session = test_session();
+        session.turn_count = 0;
+        let dialog = SessionDetailDialog::new(session, TuiLanguage::En);
+        let lines = dialog.build_lines(&test_theme(), 76);
+        let turn_line = lines
+            .iter()
+            .find(|line| {
+                line.spans.iter().any(|span| {
+                    span.content
+                        .contains(tr(TuiLanguage::En, MessageKey::ColTurn))
+                })
+            })
+            .expect("turn row");
+        let rendered = turn_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.ends_with('—'), "{rendered:?}");
+        assert!(!rendered.ends_with('0'), "{rendered:?}");
     }
 
     #[test]

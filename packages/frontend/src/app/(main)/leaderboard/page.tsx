@@ -17,6 +17,7 @@ import { leaderboardUrl } from "@/lib/seo/urls";
 import LeaderboardClient from "./LeaderboardClient";
 import GroupsBrowser from "./GroupsBrowser";
 import ViewSelector, { type LeaderboardView } from "./ViewSelector";
+import { TOKSCALE_X_HANDLE } from "@/lib/community";
 
 function isMissingDatabaseUrl(error: unknown): boolean {
   return error instanceof Error && error.message === "DATABASE_URL environment variable is not set";
@@ -89,6 +90,7 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     },
     twitter: {
       card: "summary_large_image",
+      site: TOKSCALE_X_HANDLE,
       title,
       description,
     },

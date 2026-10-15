@@ -15,11 +15,13 @@ use std::time::{Duration, Instant, SystemTime};
 /// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Environment variable overriding the explicit sync timeout budget in milliseconds.
-pub const CURSOR_SYNC_TIMEOUT_MS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_MS";
-
-/// Environment variable overriding the explicit sync timeout budget in seconds.
-pub const CURSOR_SYNC_TIMEOUT_SECS_ENV: &str = "TOKSCALE_CURSOR_SYNC_TIMEOUT_SECS";
+/// Largest explicit sync budget a user can configure, through
+/// `tokscale cursor sync --timeout` or `cursor.syncTimeoutSeconds` in
+/// settings.json. Twenty-four hours is far beyond any real history walk.
+/// Keeping a bound also keeps the `Instant` deadline arithmetic in range: an
+/// unbounded 19-digit `--timeout` used to panic with "overflow when adding
+/// duration to instant".
+pub const CURSOR_MAX_SYNC_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
 /// Per-request timeout for the usage-CSV download during an explicit
 /// `tokscale cursor sync`. Large accounts export CSVs that take well over the
@@ -125,10 +127,36 @@ const USAGE_SUMMARY_ENDPOINT: &str = "https://cursor.com/api/usage-summary";
 /// `totalUsageEventsCount` events (or a page comes back short/empty).
 const CURSOR_JSON_PAGE_SIZE: usize = 500;
 
-/// Hard ceiling on pages walked in one fetch, so a server that keeps returning
-/// full pages (or a mis-reported total) can't spin forever. At the page size
-/// above this admits up to a quarter-million events.
+/// Page ceiling for one fetch at the requested page size, so a server that
+/// keeps returning full pages (or a mis-reported total) can't spin forever.
+/// At the page size above this admits up to a quarter-million events.
 const CURSOR_MAX_JSON_PAGES: usize = 500;
+
+/// The event budget behind [`CURSOR_MAX_JSON_PAGES`]. When Cursor clamps the
+/// requested page size (it has been seen returning 100 rows for a 500-row
+/// request), a fixed page ceiling would quietly shrink this budget fivefold and
+/// fail every history above ~50,000 events, so the page ceiling is derived from
+/// the page size the server actually honours instead.
+const CURSOR_MAX_JSON_EVENTS: usize = CURSOR_JSON_PAGE_SIZE * CURSOR_MAX_JSON_PAGES;
+
+/// Smallest page yield the derived ceiling is sized for, which bounds the
+/// walk at `CURSOR_MAX_JSON_EVENTS / 50` = 5,000 pages however hard a server
+/// clamps. The byte cap and the time budget still bound the walk as well.
+const CURSOR_MIN_PAGE_YIELD_FOR_LIMIT: usize = 50;
+
+/// How many pages one fetch may walk, given the largest page the server has
+/// returned so far. Pages are full except the last, so the largest page seen
+/// is the page size the server honours. The result never drops below
+/// [`CURSOR_MAX_JSON_PAGES`].
+fn cursor_page_limit(largest_page_yield: usize) -> usize {
+    if largest_page_yield == 0 {
+        return CURSOR_MAX_JSON_PAGES;
+    }
+    let honoured = largest_page_yield.max(CURSOR_MIN_PAGE_YIELD_FOR_LIMIT);
+    CURSOR_MAX_JSON_EVENTS
+        .div_ceil(honoured)
+        .max(CURSOR_MAX_JSON_PAGES)
+}
 
 /// Cumulative ceiling on the usage-events JSON downloaded in one fetch, enforced
 /// *while* each page is read rather than after it has all arrived, and counted
@@ -1236,10 +1264,14 @@ async fn fetch_cursor_usage_events_json_from(
     let start_time = Instant::now();
     let initial_budget = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
     let mut overall_budget = initial_budget;
-    let mut fetch_deadline = start_time + overall_budget;
+    let mut fetch_deadline = deadline_after(start_time, overall_budget);
 
     let mut completed = false;
-    for page in 1..=CURSOR_MAX_JSON_PAGES {
+    let mut page_limit = CURSOR_MAX_JSON_PAGES;
+    let mut largest_page_yield = 0usize;
+    let mut page = 0usize;
+    while page < page_limit {
+        page += 1;
         let remaining_budget = fetch_deadline.saturating_duration_since(Instant::now());
         if remaining_budget.is_zero() {
             let budget_secs = overall_budget.as_secs();
@@ -1370,6 +1402,8 @@ async fn fetch_cursor_usage_events_json_from(
         };
         let received = page_events.len();
         all_events.extend(page_events);
+        largest_page_yield = largest_page_yield.max(received);
+        page_limit = cursor_page_limit(largest_page_yield);
 
         // When running an explicit sync with the default budget (no custom
         // override specified via flag or environment variable), dynamically
@@ -1383,7 +1417,7 @@ async fn fetch_cursor_usage_events_json_from(
                 let effective_page = if received > 0 { received } else { page_size };
                 let expanded = compute_dynamic_cursor_budget(total, effective_page, initial_budget);
                 if expanded > overall_budget {
-                    fetch_deadline = start_time + expanded;
+                    fetch_deadline = deadline_after(start_time, expanded);
                     overall_budget = expanded;
                 }
             }
@@ -1419,7 +1453,8 @@ async fn fetch_cursor_usage_events_json_from(
     // was collected; caching it would masquerade as a full sync, so fail instead.
     if !completed {
         anyhow::bail!(
-            "Cursor usage events exceeded the {CURSOR_MAX_JSON_PAGES}-page fetch limit before the full history was collected; refusing to cache a partial history"
+            "Cursor usage events exceeded the {page_limit}-page fetch limit ({} events collected) before the full history was collected; refusing to cache a partial history",
+            all_events.len()
         );
     }
 
@@ -1661,44 +1696,114 @@ where
     }
 }
 
-fn configured_explicit_sync_timeout(explicit_timeout: Option<Duration>) -> (Duration, bool) {
-    if let Some(timeout) = explicit_timeout {
-        if !timeout.is_zero() {
-            return (timeout, true);
-        }
+fn max_sync_timeout() -> Duration {
+    Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)
+}
+
+fn is_valid_sync_timeout_secs(secs: u64) -> bool {
+    (1..=CURSOR_MAX_SYNC_TIMEOUT_SECS).contains(&secs)
+}
+
+/// The explicit sync budget and whether the user chose it.
+///
+/// Precedence: the `--timeout` flag, then `cursor.syncTimeoutSeconds` from
+/// settings.json, then the default budget, which the walk scales with the
+/// advertised event count. A user-chosen budget is used as-is, without
+/// scaling. Out-of-range settings are dropped by the caller (with a warning)
+/// before they get here, and a flag value is clamped as a last line of
+/// defence even though clap already rejects anything above the maximum.
+fn configured_explicit_sync_timeout(
+    explicit_timeout: Option<Duration>,
+    configured_secs: Option<u64>,
+) -> (Duration, bool) {
+    if let Some(timeout) = explicit_timeout.filter(|timeout| !timeout.is_zero()) {
+        return (timeout.min(max_sync_timeout()), true);
     }
 
-    if let Ok(val) = std::env::var(CURSOR_SYNC_TIMEOUT_MS_ENV) {
-        if let Ok(ms) = val.trim().parse::<u64>() {
-            if ms > 0 {
-                return (Duration::from_millis(ms), true);
-            }
-        }
-    }
-
-    if let Ok(val) = std::env::var(CURSOR_SYNC_TIMEOUT_SECS_ENV) {
-        if let Ok(secs) = val.trim().parse::<u64>() {
-            if secs > 0 {
-                return (Duration::from_secs(secs), true);
-            }
-        }
+    if let Some(secs) = configured_secs.filter(|secs| is_valid_sync_timeout_secs(*secs)) {
+        return (Duration::from_secs(secs), true);
     }
 
     (CURSOR_EXPLICIT_SYNC_TIMEOUT, false)
 }
 
 /// Timeout override for the usage download: explicit syncs get the longer
-/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`] (or user-configured override); implicit syncs keep the client default.
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`] (or the user's flag/setting); implicit
+/// syncs keep the client default.
 fn sync_timeout_override(
     explicit: bool,
     explicit_timeout: Option<Duration>,
+    configured_secs: Option<u64>,
 ) -> (Option<Duration>, bool) {
     if explicit {
-        let (duration, is_custom) = configured_explicit_sync_timeout(explicit_timeout);
+        let (duration, is_custom) =
+            configured_explicit_sync_timeout(explicit_timeout, configured_secs);
         (Some(duration), is_custom)
     } else {
         (None, false)
     }
+}
+
+/// A `cursor.syncTimeoutSeconds` value the sync can use: a whole number of
+/// seconds in `1..=CURSOR_MAX_SYNC_TIMEOUT_SECS`, written as `600` or `600.0`.
+/// Strings, fractions, negative and out-of-range numbers are not.
+fn usable_sync_timeout_setting(raw: &serde_json::Value) -> Option<u64> {
+    let secs = raw.as_u64().or_else(|| {
+        raw.as_f64()
+            .filter(|secs| {
+                secs.fract() == 0.0 && (0.0..=CURSOR_MAX_SYNC_TIMEOUT_SECS as f64).contains(secs)
+            })
+            .map(|secs| secs as u64)
+    })?;
+    is_valid_sync_timeout_secs(secs).then_some(secs)
+}
+
+/// `cursor.syncTimeoutSeconds` from settings.json, if it is set and usable.
+///
+/// Only an explicit `tokscale cursor sync` reads this (never the TUI), so an
+/// unusable value is reported on stderr - which leaves `--json` stdout
+/// intact - and the default budget is used instead. The file keeps the value
+/// as written.
+fn configured_sync_timeout_secs() -> Option<u64> {
+    let raw = crate::tui::settings::Settings::load()
+        .cursor
+        .sync_timeout_seconds?;
+    let secs = usable_sync_timeout_setting(&raw);
+    if secs.is_none() {
+        eprintln!(
+            "Warning: ignoring cursor.syncTimeoutSeconds = {raw} in settings.json \
+             (expected a whole number of seconds, 1-{CURSOR_MAX_SYNC_TIMEOUT_SECS}); \
+             using the default sync budget."
+        );
+    }
+    secs
+}
+
+/// The persisted budget to consult for this sync, if any. Only an explicit
+/// sync without `--timeout` reads the setting: the flag wins outright, and
+/// reading the setting anyway could warn about a value this run never uses.
+fn setting_budget_for(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+    load_setting: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    let flag_given = explicit_timeout.is_some_and(|timeout| !timeout.is_zero());
+    if explicit && !flag_given {
+        load_setting()
+    } else {
+        None
+    }
+}
+
+/// `start + budget` without the panic `Instant + Duration` raises on
+/// overflow. Budgets are bounded by [`CURSOR_MAX_SYNC_TIMEOUT_SECS`], so the
+/// fallback never triggers in practice; it keeps any future caller from
+/// reintroducing the overflow panic.
+fn deadline_after(start: Instant, budget: Duration) -> Instant {
+    start
+        .checked_add(budget)
+        .or_else(|| start.checked_add(max_sync_timeout()))
+        .unwrap_or(start)
 }
 
 pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
@@ -1713,7 +1818,9 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
     let _ = ensure_credentials_from_local_cursor();
 
-    let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout);
+    let configured_secs =
+        setting_budget_for(explicit, explicit_timeout, configured_sync_timeout_secs);
+    let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout, configured_secs);
     sync_cursor_cache_with_fetcher(move |session_token| async move {
         fetch_cursor_usage_events_json_from(
             USAGE_EVENTS_JSON_ENDPOINT,
@@ -2065,14 +2172,6 @@ mod tests {
             }
             Self { name, original }
         }
-
-        fn remove(name: &'static str) -> Self {
-            let original = std::env::var_os(name);
-            unsafe {
-                std::env::remove_var(name);
-            }
-            Self { name, original }
-        }
     }
 
     impl Drop for EnvVarGuard {
@@ -2286,47 +2385,153 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_sync_timeout_override_only_for_explicit_sync() {
-        let _g1 = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_MS_ENV);
-        let _g2 = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_SECS_ENV);
         assert_eq!(
-            sync_timeout_override(true, None),
+            sync_timeout_override(true, None, None),
             (Some(Duration::from_secs(120)), false)
         );
         assert_eq!(
-            sync_timeout_override(true, Some(Duration::from_secs(300))),
+            sync_timeout_override(true, Some(Duration::from_secs(300)), None),
             (Some(Duration::from_secs(300)), true)
         );
-        assert_eq!(sync_timeout_override(false, None), (None, false));
+        assert_eq!(sync_timeout_override(false, None, None), (None, false));
         assert_eq!(
-            sync_timeout_override(false, Some(Duration::from_secs(300))),
+            sync_timeout_override(false, Some(Duration::from_secs(300)), Some(600)),
             (None, false)
         );
     }
 
     #[test]
-    #[serial]
-    fn test_sync_timeout_override_honors_env_vars() {
-        {
-            let _g_clean = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_SECS_ENV);
-            let _g_ms = EnvVarGuard::set(CURSOR_SYNC_TIMEOUT_MS_ENV, "180000");
-            assert_eq!(
-                sync_timeout_override(true, None),
-                (Some(Duration::from_millis(180000)), true)
-            );
-            assert_eq!(sync_timeout_override(false, None), (None, false));
-        }
+    fn test_sync_timeout_override_prefers_flag_then_setting_then_default() {
+        // The flag wins over the persisted setting for one run.
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(300)), Some(600)),
+            (Some(Duration::from_secs(300)), true)
+        );
+        // Without a flag, `cursor.syncTimeoutSeconds` is the whole budget.
+        assert_eq!(
+            sync_timeout_override(true, None, Some(600)),
+            (Some(Duration::from_secs(600)), true)
+        );
+        assert_eq!(
+            sync_timeout_override(true, None, Some(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+        // Neither: the default budget, which the walk may scale.
+        assert_eq!(
+            sync_timeout_override(true, None, None),
+            (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false)
+        );
+    }
 
-        {
-            let _g_clean = EnvVarGuard::remove(CURSOR_SYNC_TIMEOUT_MS_ENV);
-            let _g_secs = EnvVarGuard::set(CURSOR_SYNC_TIMEOUT_SECS_ENV, "240");
+    #[test]
+    fn test_sync_timeout_override_ignores_out_of_range_settings() {
+        for secs in [0, CURSOR_MAX_SYNC_TIMEOUT_SECS + 1, u64::MAX] {
             assert_eq!(
-                sync_timeout_override(true, None),
-                (Some(Duration::from_secs(240)), true)
+                sync_timeout_override(true, None, Some(secs)),
+                (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false),
+                "cursor.syncTimeoutSeconds = {secs} must fall back to the default budget"
             );
-            assert_eq!(sync_timeout_override(false, None), (None, false));
         }
+    }
+
+    #[test]
+    fn test_sync_timeout_setting_must_be_whole_seconds_in_range() {
+        use serde_json::json;
+        assert_eq!(usable_sync_timeout_setting(&json!(600)), Some(600));
+        assert_eq!(usable_sync_timeout_setting(&json!(1)), Some(1));
+        assert_eq!(
+            usable_sync_timeout_setting(&json!(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+            Some(CURSOR_MAX_SYNC_TIMEOUT_SECS)
+        );
+        // `600.0` is a whole number too.
+        assert_eq!(usable_sync_timeout_setting(&json!(600.0)), Some(600));
+        assert_eq!(usable_sync_timeout_setting(&json!(86400.0)), Some(86_400));
+        for unusable in [
+            json!(0),
+            json!(0.0),
+            json!(CURSOR_MAX_SYNC_TIMEOUT_SECS + 1),
+            json!(86401.0),
+            json!(-5),
+            json!(-5.0),
+            json!(1.5),
+            json!(600.5),
+            json!(1e300),
+            json!("600"),
+            json!(true),
+            json!([600]),
+            json!({ "seconds": 600 }),
+        ] {
+            assert_eq!(usable_sync_timeout_setting(&unusable), None, "{unusable}");
+        }
+    }
+
+    #[test]
+    fn test_the_timeout_setting_is_read_only_without_the_flag() {
+        let unreachable = || -> Option<u64> { panic!("the setting must not be read") };
+        // `--timeout` wins outright, so the settings file is never consulted.
+        assert_eq!(
+            setting_budget_for(true, Some(Duration::from_secs(300)), unreachable),
+            None
+        );
+        // Implicit (pre-report) syncs never use the explicit budget.
+        assert_eq!(setting_budget_for(false, None, unreachable), None);
+        // An explicit sync without the flag reads it.
+        assert_eq!(setting_budget_for(true, None, || Some(600)), Some(600));
+        // A zero duration is not a flag value (clap rejects 0).
+        assert_eq!(
+            setting_budget_for(true, Some(Duration::ZERO), || Some(600)),
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn test_explicit_timeout_is_clamped_to_the_maximum() {
+        // clap rejects these, but the budget must stay bounded for any caller.
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(u64::MAX)), None),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::MAX), None),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_timeout_override_ignores_retired_env_vars() {
+        // The budget is a persisted setting (`cursor.syncTimeoutSeconds`), not
+        // an environment variable; these names must not change it.
+        let _g_ms = EnvVarGuard::set("TOKSCALE_CURSOR_SYNC_TIMEOUT_MS", "180000");
+        let _g_secs = EnvVarGuard::set("TOKSCALE_CURSOR_SYNC_TIMEOUT_SECS", "240");
+        assert_eq!(
+            sync_timeout_override(true, None, None),
+            (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false)
+        );
+    }
+
+    #[test]
+    fn test_deadline_after_never_panics_on_huge_budgets() {
+        let start = Instant::now();
+        assert_eq!(
+            deadline_after(start, Duration::from_secs(5)),
+            start + Duration::from_secs(5)
+        );
+        // `start + Duration::MAX` panics; the helper must not.
+        let saturated = deadline_after(start, Duration::MAX);
+        assert!(saturated >= start);
+        let from_u64_max = deadline_after(start, Duration::from_secs(u64::MAX));
+        assert!(from_u64_max >= start);
     }
 
     #[test]
@@ -2490,7 +2695,7 @@ mod tests {
             .block_on(fetch_cursor_usage_events_json_from(
                 &url,
                 "session-token",
-                sync_timeout_override(true, None).0,
+                sync_timeout_override(true, None, None).0,
                 false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
@@ -2558,6 +2763,27 @@ mod tests {
         assert!(captured[0].contains("\"page\":1"));
         assert!(captured[1].contains("\"page\":2"));
         assert!(captured[2].contains("\"page\":3"));
+    }
+
+    #[test]
+    fn test_cursor_page_limit_follows_the_page_size_the_server_honours() {
+        // Nothing observed yet, or the requested size honoured: today's ceiling.
+        assert_eq!(cursor_page_limit(0), CURSOR_MAX_JSON_PAGES);
+        assert_eq!(
+            cursor_page_limit(CURSOR_JSON_PAGE_SIZE),
+            CURSOR_MAX_JSON_PAGES
+        );
+        // Cursor clamping 500 -> 100 keeps the same 250,000-event budget.
+        assert_eq!(cursor_page_limit(100), 2_500);
+        assert_eq!(cursor_page_limit(100) * 100, CURSOR_MAX_JSON_EVENTS);
+        // Harder clamps are bounded by the minimum-yield floor.
+        assert_eq!(cursor_page_limit(1), 5_000);
+        assert_eq!(cursor_page_limit(49), 5_000);
+        // Oversized pages never lower the ceiling below today's.
+        assert_eq!(cursor_page_limit(1_000), CURSOR_MAX_JSON_PAGES);
+        assert_eq!(cursor_page_limit(usize::MAX), CURSOR_MAX_JSON_PAGES);
+        // A 60,000-event history clamped to 100 per page now fits.
+        assert!(cursor_page_limit(100) >= 600);
     }
 
     #[test]
