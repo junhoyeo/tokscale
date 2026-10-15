@@ -4994,6 +4994,7 @@ const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
 struct TsScanScope {
     parser_versions: std::collections::BTreeMap<String, u32>,
     full_history: bool,
+    full_history_clients: Vec<String>,
 }
 
 /// Submission-level provenance (#888): history recovered from an aggregate
@@ -5154,10 +5155,19 @@ fn submit_scan_scope(
             (client.clone(), version)
         })
         .collect();
-    let amp_is_complete = !clients.iter().any(|client| client == "amp") || amp_full_history_safe;
+    let full_history_clients = if full_history {
+        clients
+            .iter()
+            .filter(|client| client.as_str() != "amp" || amp_full_history_safe)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     Some(TsScanScope {
         parser_versions,
-        full_history: full_history && amp_is_complete,
+        full_history,
+        full_history_clients,
     })
 }
 
@@ -9604,8 +9614,13 @@ mod tests {
             incomplete.parser_versions.get("amp"),
             Some(&AMP_SUBMISSION_PARSER_VERSION)
         );
-        assert!(!incomplete.full_history);
+        assert!(incomplete.full_history);
+        assert!(!incomplete.full_history_clients.contains(&"amp".to_string()));
+        assert!(incomplete
+            .full_history_clients
+            .contains(&"codex".to_string()));
         assert!(complete.full_history);
+        assert!(complete.full_history_clients.contains(&"amp".to_string()));
     }
 
     #[test]

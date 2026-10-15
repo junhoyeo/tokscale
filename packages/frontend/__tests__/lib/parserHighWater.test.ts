@@ -3,6 +3,7 @@ import {
   addClientBreakdownIncrement,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
+  scanScopeCoversFullHistory,
   SUPPORTED_VERSIONED_PARSERS,
   type ParserClientHighWaterState,
   type ParserHighWaterPlan,
@@ -1525,6 +1526,23 @@ describe("droid parser high-water", () => {
 
     expect(plan.mode).toBe("freeze");
     expect(plan.increments).toEqual({});
+  });
+});
+
+describe("per-client full-history scope", () => {
+  it("freezes only clients omitted from a new completeness declaration", () => {
+    const scope = {
+      fullHistory: true,
+      fullHistoryClients: ["copilot", "droid"],
+    };
+    expect(scanScopeCoversFullHistory(scope, ["amp"])).toBe(false);
+    expect(scanScopeCoversFullHistory(scope, ["copilot"])).toBe(true);
+    expect(scanScopeCoversFullHistory(scope, ["copilot", "droid"])).toBe(true);
+  });
+
+  it("keeps the legacy global full-history meaning when the field is absent", () => {
+    expect(scanScopeCoversFullHistory({ fullHistory: true }, ["amp"])).toBe(true);
+    expect(scanScopeCoversFullHistory({ fullHistory: false }, ["amp"])).toBe(false);
   });
 });
 

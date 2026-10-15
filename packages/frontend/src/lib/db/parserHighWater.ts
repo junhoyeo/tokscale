@@ -701,6 +701,16 @@ function validState(
  * drops the cells of days the snapshot no longer dates. A snapshot that does
  * not cover it falls back to the bounded-growth plan and keeps every row.
  */
+export function scanScopeCoversFullHistory(
+  scope: { fullHistory: boolean; fullHistoryClients?: readonly string[] } | undefined,
+  clients: readonly string[],
+): boolean {
+  if (scope?.fullHistory !== true) return false;
+  if (scope.fullHistoryClients == null) return true;
+  const complete = new Set(scope.fullHistoryClients);
+  return clients.every((client) => complete.has(client));
+}
+
 export function planParserHighWaterSubmission(args: {
   client: string;
   incomingVersion?: number;
