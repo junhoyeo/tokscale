@@ -826,7 +826,7 @@ pub fn parse_claude_file_with_cache_and_home(
 // Top-level usage already sums the main-model iterations, excluding advisors.
 // Keep each advisor's position in the original array so repeated snapshots and
 // forked transcripts identify the same call, including same-model advisors.
-fn claude_advisor_messages(
+pub(crate) fn claude_advisor_messages(
     usage: &AnthropicUsage,
     parent: &UnifiedMessage,
 ) -> Vec<(UnifiedMessage, AnthropicUsage)> {

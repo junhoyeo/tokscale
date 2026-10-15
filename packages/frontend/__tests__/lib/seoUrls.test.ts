@@ -34,6 +34,12 @@ describe("root metadata", () => {
     ]));
     expect(metadata.twitter?.images).toContain("https://runtime.example/og-image.png");
   });
+
+  it("attributes X cards to the Tokscale account", () => {
+    expect(getRootMetadata("https://runtime.example").twitter).toMatchObject({
+      site: "@Tokscale",
+    });
+  });
 });
 
 describe("getPublicOrigin", () => {

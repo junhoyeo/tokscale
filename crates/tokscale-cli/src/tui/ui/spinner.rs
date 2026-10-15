@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::themes::Theme;
+use crate::ui_glyphs::{AMBIENT_STABLE_SCANNER_ACTIVE, AMBIENT_STABLE_SCANNER_INACTIVE};
 
 const WIDTH: usize = 8;
 const HOLD_START: usize = 30;
@@ -66,14 +67,14 @@ pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
             usize::MAX
         };
 
-        let (ch, color) = if distance < TRAIL_LENGTH {
-            ('■', TRAIL_COLORS[distance])
+        let (symbol, color) = if distance < TRAIL_LENGTH {
+            (AMBIENT_STABLE_SCANNER_ACTIVE, TRAIL_COLORS[distance])
         } else {
-            ('⬝', INACTIVE_COLOR)
+            (AMBIENT_STABLE_SCANNER_INACTIVE, INACTIVE_COLOR)
         };
 
         spans.push(Span::styled(
-            ch.to_string(),
+            symbol,
             Style::default().fg(theme.color(color)),
         ));
     }
@@ -90,5 +91,42 @@ pub fn get_phase_message(phase: &str, lang: crate::tui::i18n::TuiLanguage) -> &'
         "finalizing-report" => tr(lang, MessageKey::PhaseFinalizingReport),
         "complete" => tr(lang, MessageKey::PhaseComplete),
         _ => tr(lang, MessageKey::PhaseLoadingData),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
+    use unicode_width::UnicodeWidthStr;
+
+    use super::*;
+    use crate::tui::themes::{Theme, ThemeName};
+
+    #[test]
+    fn scanner_widget_has_the_same_width_in_cjk_locales() {
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let backend = TestBackend::new(WIDTH as u16, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(Line::from(get_scanner_spans(3, &theme))),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(
+            UnicodeWidthStr::width(rendered.as_str()),
+            UnicodeWidthStr::width_cjk(rendered.as_str()),
+            "scanner width changed in a CJK locale: {rendered:?}"
+        );
     }
 }

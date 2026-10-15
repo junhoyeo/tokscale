@@ -16,6 +16,7 @@
 > | [<img alt="GitHub Follow" src="https://img.shields.io/github/followers/junhoyeo?style=flat-square&logo=github&labelColor=black&color=24292f" width="156px" />](https://github.com/junhoyeo) | 在 GitHub 上关注 [@junhoyeo](https://github.com/junhoyeo) 获取更多项目。涉及 AI、基础设施等各个领域。 |
 > | :-----| :----- |
 > [<img alt="Discord link" src="https://img.shields.io/discord/1480206352755458110?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square" width="156px" />](https://discord.gg/h6DUGWdBbm) | 加入我们的 [Discord](https://discord.gg/h6DUGWdBbm) — 与全球顶尖的开发者一起交流。 |
+> [<img alt="X follow" src="https://img.shields.io/badge/follow-%40Tokscale-000000?style=flat-square&logo=x&logoColor=white&labelColor=black" width="156px" />](https://x.com/Tokscale) | 在 X 上关注 [@Tokscale](https://x.com/Tokscale)，获取版本发布和最新动态。 |
 > [<img alt="Sponsor Tokscale" src="https://img.shields.io/badge/sponsor-Tokscale-EA4AAA?style=flat-square&logo=githubsponsors&logoColor=white&labelColor=black" width="156px" />](https://github.com/sponsors/junhoyeo) | 通过 [GitHub Sponsors](https://github.com/sponsors/junhoyeo) 支持 Tokscale 的持续开发。 |
 
 <div align="center">
@@ -44,6 +45,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -59,20 +64,20 @@
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+，包含 `opencode-stable.db` 等所有渠道) 或 `~/.local/share/opencode/storage/message/` |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` 和 `~/.claude/transcripts/` |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) |
-| <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
+| <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` 和 `~/.codex/archived_sessions/`（`*.jsonl`，以及 zstd 压缩的 `*.jsonl.zst` 和其他归档副本；同一 rollout 的多个副本只计一次） |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 和 `~/.prime/agent/session-artifacts/`（RLM 子会话） |
-| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | 通过 Codex 追踪 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
+| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | 通过 Codex 追踪 — `~/.codex/sessions/` 和 `~/.codex/archived_sessions/` 中的 rollout (`model_provider: sakana`) |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/session-store.db`（CLI 用量事件；无需 OTEL）、`~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`)、`~/.copilot/data.db` |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 和 `$HERMES_HOME/profiles/*/state.db`（回退：`~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（回退：`~/.gemini/tmp/*/chats/*.json`） |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 导出缓存于 `~/.config/tokscale/cursor-cache/usage*.csv`（桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 用量缓存于 `~/.config/tokscale/cursor-cache/usage*.json`（仍会读取旧版 `usage*.csv` 缓存；桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/`（+ `manicode-dev`、`manicode-staging`；可通过 `CODEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | 与 Codebuff 共用 `~/.config/manicode/`（同一运行时）；令牌消耗从转录估算（无本地用量；可通过 `FREEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` |
 | <img width="48px" src="https://omp.sh/favicon-180x180.png" alt="Oh My Pi" /> | [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
-| <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |
+| <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖）和 `~/.omo/agent/sessions/`（OmO Native，omo-ai 5.1.0+），以及各项目 `.omo/senpi-task/children/` 下的任务子会话；其他 OmO 位置可通过 `scanner.extraScanPaths.senpi` 添加 |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（可通过 `KIMCHI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（可通过 `REASONIX_STATE_HOME` 或 `REASONIX_HOME` 覆盖） |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/`（可通过 `KIMI_CODE_HOME` 覆盖）kimi-work：桌面端 app-data 根目录（自动发现） |
@@ -609,15 +614,15 @@ tokscale autosubmit disable
 
 ### Cursor IDE 命令
 
-Cursor IDE 通过 Cursor 的网页用量导出 API 获取数据，并缓存在 `~/.config/tokscale/cursor-cache/usage*.csv`。Tokscale **不会**解析 `~/.cursor` 下的 Cursor Agent CLI 本地会话，也不会把桌面端 SQLite 当作用量账本。
+Cursor IDE 通过 Cursor 的网页用量 API 获取数据，并缓存在 `~/.config/tokscale/cursor-cache/usage*.json`。Tokscale **不会**解析 `~/.cursor` 下的 Cursor Agent CLI 本地会话，也不会把桌面端 SQLite 当作用量账本。
 
-若本机已安装并登录 Cursor 桌面端，`tokscale cursor login` 会优先从 Cursor 的 `state.vscdb` 读取 `cursorAuth/accessToken` 并自动构造会话 cookie；`tokscale cursor sync` 在可用时也会刷新该 token。用量数据仍只来自 Cursor 的 usage-export API。
+若本机已安装并登录 Cursor 桌面端，`tokscale cursor login` 会优先从 Cursor 的 `state.vscdb` 读取 `cursorAuth/accessToken` 并自动构造会话 cookie；`tokscale cursor sync` 在可用时也会刷新该 token。用量数据仍只来自 Cursor 的用量 API。
 
 设置（桌面端自动登录）：
 
 1. 登录 Cursor 桌面端。
 2. 运行 `tokscale cursor login --name work`（有本地桌面会话时会自动检测）。
-3. 运行 `tokscale cursor sync --json`，填充 `~/.config/tokscale/cursor-cache/usage.csv`。
+3. 运行 `tokscale cursor sync --json`，填充 `~/.config/tokscale/cursor-cache/usage.json`。
 4. 运行 `tokscale --client cursor` 或任意报告命令。
 
 回退（手动粘贴浏览器 cookie）：桌面端不可用时：
@@ -642,7 +647,10 @@ tokscale cursor accounts
 # 手动刷新缓存的 Cursor 使用量
 tokscale cursor sync --json
 
-# 切换活动账户（同步到 cursor-cache/usage.csv 的账户）
+# 为较慢或数据量很大的账户提供更多时间（总预算，单位为秒）
+tokscale cursor sync --timeout 600
+
+# 切换活动账户（同步到 cursor-cache/usage.json 的账户）
 tokscale cursor switch work
 
 # 登出指定账户（保留历史，但不再参与合并统计）
@@ -658,11 +666,21 @@ tokscale cursor logout --all
 tokscale cursor logout --all --purge-cache
 ```
 
-**凭据存储**：Cursor 账户保存到 `~/.config/tokscale/cursor-credentials.json`。使用量数据缓存在 `~/.config/tokscale/cursor-cache/`（活动账户使用 `usage.csv`，其他账户使用 `usage.<account>.csv`）。
+**凭据存储**：Cursor 账户保存到 `~/.config/tokscale/cursor-credentials.json`。使用量数据缓存在 `~/.config/tokscale/cursor-cache/`（活动账户使用 `usage.json`，其他账户使用 `usage.<account>.json`）。
 
-默认情况下，tokscale 会 **合并统计所有已保存 Cursor 账户的使用量**（`cursor-cache/usage*.csv`）。为保持兼容性，活动账户会同步到 `cursor-cache/usage.csv`。
+默认情况下，tokscale 会 **合并统计所有已保存 Cursor 账户的使用量**（`cursor-cache/usage*.json`）。对于尚无 JSON 缓存的账户，仍会读取旧版 Tokscale 生成的旧格式 CSV 缓存（`usage.csv`、`usage.<account>.csv`）；该账户下次同步成功后，会写入 JSON 缓存，并将 CSV 移动到 `cursor-cache/archive/`。
 
 登出时，tokscale 会将缓存的历史记录移动到 `cursor-cache/archive/`（因此不会参与合并统计）。如需彻底删除缓存，请使用 `--purge-cache`。
+
+`tokscale cursor sync` 会逐页下载每个已保存账户的使用量历史，并为每个账户设定一个总时间预算。默认预算从 120 秒开始，并根据 Cursor 报告的该账户使用量事件数延长，最多 1800 秒（30 分钟）。如需使用固定预算，可在单次运行时传入 `--timeout <SECONDS>`，或在 `settings.json`（默认位于 `~/.config/tokscale/settings.json`；Windows、`XDG_CONFIG_HOME` 与 `TOKSCALE_CONFIG_DIR` 见[配置](#配置)）中保存 `cursor.syncTimeoutSeconds`。两者均接受 1-86400 之间的整数秒；如果设置中是其他值，不带 `--timeout` 运行的 `tokscale cursor sync` 会显示警告并使用默认预算。命令行选项优先于设置，设置优先于默认预算。
+
+```json
+{
+  "cursor": {
+    "syncTimeoutSeconds": 600
+  }
+}
+```
 
 > ⚠️ **安全警告**：像对待密码一样对待您的会话令牌。切勿公开分享或提交到版本控制。该令牌授予对您 Cursor 账户的完全访问权限。
 
@@ -906,7 +924,7 @@ tokscale codex status --name personal --json
 
 ### 配置
 
-Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
+Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置为 `~/.config/tokscale/settings.json`；在 Linux 上若设置了 `XDG_CONFIG_HOME`，则为 `$XDG_CONFIG_HOME/tokscale/settings.json`；在 Windows 上为 `%APPDATA%\tokscale\settings.json`。设置 `TOKSCALE_CONFIG_DIR` 后，所有平台都改用该目录；若无法解析任何配置目录，则回退到当前工作目录下的 `./.tokscale/settings.json`：
 
 ```json
 {
@@ -942,6 +960,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `usage.disabledProviders` | string[] | `[]` | 在凭据发现或网络访问之前跳过的订阅 usage 提供商。有效 ID（不区分大小写，忽略首尾空白）：`claude`、`codex`、`zai`、`amp`、`antigravity`、`copilot`、`grok`、`kimi`、`minimax`、`minimax-token-plan`、`warp`、`sakana`、`opencode-go`。未知 ID 会被忽略。被禁用的提供商也会从缓存的 TUI 卡片和诊断中隐藏。更改在下次 `tokscale usage` 运行或 TUI 启动/刷新时生效。 |
 | `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
+| `cursor.syncTimeoutSeconds` | number | 未设置 | `tokscale cursor sync` 下载每个账户使用量时的总时间预算（秒，1-86400）。未设置时从 120 秒开始，并根据 Cursor 报告的使用量事件数延长，最多 1800 秒。`tokscale cursor sync --timeout <SECONDS>` 会按次运行覆盖该设置。参见 [Cursor IDE 命令](#cursor-ide-命令)。 |
 | `scanner.extraScanPaths` | object | `{}` | 针对 Tokscale 默认 home 根位置之外的会话，为各客户端额外指定的扫描根目录 |
 | `scanner.bucketTimezone` | string | 自动检测 | 此设备将使用量按天分桶时所用时区的 IANA 名称（例如 `"Asia/Seoul"`）。首次运行时会自动记录。请优先使用 `tokscale config set timezone <zone>`，而非手动编辑。 |
 
@@ -969,7 +988,7 @@ $ tokscale config set timezone auto
 
 现有安装在首次建立固定值之前不会受到影响。记录的时区等于该设备当前机器时区，因此首次固定操作不会重新分桶现有历史记录。
 
-使用 `scanner.extraScanPaths` 配置持久化的额外根目录，例如项目级的 `.codex` 目录或导入的 Gemini/OpenClaw 历史。Tokscale 会自动发现 `$HERMES_HOME/profiles/*/state.db` 下的 Hermes 配置文件数据库（未设置 `HERMES_HOME` 时为 `~/.hermes/profiles/*/state.db`）。仅对非标准的 Hermes 配置文件位置使用 `scanner.extraScanPaths.hermes`；Hermes 条目既可以指向包含 `state.db` 的配置文件目录，也可以直接指向 `state.db` 文件。Tokscale 在每次运行时都会将这些路径与默认扫描根目录合并，并按规范路径去重重叠的根目录。
+使用 `scanner.extraScanPaths` 配置持久化的额外根目录，例如项目级的 `.codex` 目录或导入的 Gemini/OpenClaw 历史。Tokscale 会自动发现 `$HERMES_HOME/profiles/*/state.db` 下的 Hermes 配置文件数据库（未设置 `HERMES_HOME` 时为 `~/.hermes/profiles/*/state.db`）。仅对非标准的 Hermes 配置文件位置使用 `scanner.extraScanPaths.hermes`；Hermes 条目既可以指向包含 `state.db` 的配置文件目录，也可以直接指向 `state.db` 文件。位于 `~/.omo/agent` 之外的 OmO Native agent 目录，请添加到 `scanner.extraScanPaths.senpi`；条目可以指向 agent 目录或其 `sessions/` 目录（参见 [Senpi (OmO Native)](#senpi-omo-native)）。Tokscale 在每次运行时都会将这些路径与默认扫描根目录合并，并按规范路径去重重叠的根目录。
 
 使用 `defaultClients` 固定一个个人默认值 —— 例如，如果您只使用 OpenCode 和 Claude，就将其设为 `["opencode", "claude"]`，那么 `tokscale`（不带任何选项）会自动将每个报告的范围限定为它们。在命令行传入 `--client` 可针对单次运行进行覆盖。
 
@@ -1482,7 +1501,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | 可通过 `HERMES_HOME` 环境变量配置（[源码](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | 可通过 `GEMINI_CLI_HOME` 环境变量配置 |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | 与 OpenCode 一样使用 `xdg-basedir` |
-| Cursor | API 同步 | API 同步 | 通过 API 获取并缓存为 `usage*.csv`；桌面端自动登录仅读取 `state.vscdb` 认证；不解析本地 `~/.cursor` 会话数据 |
+| Cursor | API 同步 | API 同步 | 通过 API 获取并缓存为 `usage*.json`（仍会读取旧版 `usage*.csv` 缓存）；桌面端自动登录仅读取 `state.vscdb` 认证；不解析本地 `~/.cursor` 会话数据 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 所有平台使用相同路径 |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 所有平台使用相同路径 |
 | Oh My Pi | `~/.omp/` | `%USERPROFILE%\.omp\` | 所有平台使用相同路径（[Oh My Pi](https://github.com/can1357/oh-my-pi)） |
@@ -1686,12 +1705,14 @@ Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claud
 
 ### Codex CLI
 
-位置：`~/.codex/sessions/*.jsonl`
+位置：`~/.codex/sessions/` 和 `~/.codex/archived_sessions/`（`*.jsonl` rollout、zstd 压缩的 `*.jsonl.zst` 副本，以及在 `.jsonl` 文件名后追加后缀的其他归档副本）
 
 带 `token_count` 事件的事件驱动格式：
 ```json
 {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 567}}}}
 ```
+
+同一 rollout 的多个副本只计一次，因此同时存在于两个目录中、或同时有普通文件和压缩文件的会话，其使用量不会被重复计算。
 
 ### Copilot CLI
 
@@ -1742,7 +1763,7 @@ Tokscale 将 `chat` span 作为 Token 统计的真实来源，并在第一阶段
 
 ### Cursor IDE
 
-位置：`~/.config/tokscale/cursor-cache/usage*.csv`（通过 Cursor API 同步）
+位置：`~/.config/tokscale/cursor-cache/usage*.json`（通过 Cursor API 同步；同一账户没有 JSON 缓存时，仍会读取旧版 `usage*.csv` 缓存）
 
 Cursor 数据使用会话令牌从 Cursor API 获取并本地缓存。认证可从 Cursor 桌面端 `state.vscdb`（仅 `cursorAuth/accessToken`）导入，或粘贴浏览器 cookie。Tokscale 读取 API 缓存文件生成报告；不会解析本地 `~/.cursor` 会话数据或桌面端用量表。设置说明请参阅 [Cursor IDE 命令](#cursor-ide-命令)。
 
@@ -1820,6 +1841,24 @@ Hermes 将会话级使用量存储在 SQLite `sessions` 表中。Tokscale 导入
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+```
+
+### Senpi (OmO Native)
+
+位置：`~/.senpi/agent/sessions/<encoded-cwd>/*.jsonl` 和 `~/.omo/agent/sessions/<encoded-cwd>/*.jsonl`（OmO Native，omo-ai 5.1.0+），以及各项目 `.omo/senpi-task/children/` 下的任务子会话
+
+Senpi 使用与 Pi 相同的 JSONL 会话格式。OmO 将任务子会话保存在各个项目内部，因此 Tokscale 会从两个会话目录树的会话头中读取 `cwd`，并对每个存在 `<project>/.omo/senpi-task/children/` 的项目扫描该目录。如果 OmO 的 `task.state_dir` 被设置为绝对路径（位于项目的 `.omo/omo.jsonc` 或 `.omo/omo.json`，或 `~/.omo/` 下的同名文件），Tokscale 会改为扫描 `<state_dir>/children/`。
+
+如果 OmO 的 agent 目录位于其他位置，请将其添加到 `settings.json`（默认位于 `~/.config/tokscale/settings.json`；Windows、`XDG_CONFIG_HOME` 与 `TOKSCALE_CONFIG_DIR` 见[配置](#配置)）的 `scanner.extraScanPaths.senpi` 中。条目可以指向 agent 目录或其 `sessions/` 目录。Tokscale 会扫描其中的会话，并以同样的方式找到这些会话所记录项目的任务子会话：
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "senpi": ["/Users/me/custom/omo/agent"]
+    }
+  }
+}
 ```
 
 ### Prime Agent

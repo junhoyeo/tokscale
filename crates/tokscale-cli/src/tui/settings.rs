@@ -207,6 +207,25 @@ pub struct UsageSettings {
     pub disabled_providers: Vec<String>,
 }
 
+/// Cursor integration preferences (`"cursor": { ... }` in settings.json).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorSettings {
+    /// Overall wall-clock budget, in seconds, for an explicit
+    /// `tokscale cursor sync`. Unset keeps the default budget, which scales
+    /// with the event count Cursor reports. `--timeout` overrides it for one
+    /// run.
+    ///
+    /// Held as the raw JSON value, exactly as written. The sync uses it only
+    /// when it is a whole number in
+    /// `1..=crate::cursor::CURSOR_MAX_SYNC_TIMEOUT_SECS` and warns about
+    /// anything else (a string, a float, a negative or out-of-range number),
+    /// and keeping the raw value means a later settings save never erases a
+    /// hand edit the user still has to fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_timeout_seconds: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutosubmitSettings {
@@ -347,6 +366,24 @@ pub struct Settings {
     /// Preferred UI language for the TUI interface.
     #[serde(default, deserialize_with = "deserialize_tui_language_lossy")]
     pub tui_language: TuiLanguage,
+    /// Cursor integration preferences, e.g. the explicit sync budget.
+    #[serde(default, deserialize_with = "deserialize_cursor_settings_lossy")]
+    pub cursor: CursorSettings,
+}
+
+/// Lossy deserializer for the `cursor` section. Settings without a `cursor`
+/// key ignored a hand-edited `"cursor": "oops"`; failing the whole file on it
+/// now would read every other preference (scan paths, aliases, autosubmit) as
+/// its default on every run. A value that is not a `cursor` object reads as
+/// the default section instead.
+fn deserialize_cursor_settings_lossy<'de, D>(deserializer: D) -> Result<CursorSettings, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer).ok().flatten();
+    Ok(value
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
 }
 
 /// Lossy deserializer for `tuiLanguage`: unrecognized language codes, hand-edited
@@ -432,6 +469,7 @@ impl Default for Settings {
             model_aliases: tokscale_core::ModelAliasMap::default(),
             tui_light_mode: false,
             tui_language: TuiLanguage::En,
+            cursor: CursorSettings::default(),
         }
     }
 }
@@ -1291,6 +1329,89 @@ mod tests {
         let serialized = serde_json::to_string(&light).unwrap();
         let parsed: LightSettings = serde_json::from_str(&serialized).unwrap();
         assert!(parsed.write_cache);
+    }
+
+    #[test]
+    fn cursor_sync_timeout_setting_parses_and_defaults_to_unset() {
+        let parsed: Settings = serde_json::from_str(r#"{ "colorPalette": "blue" }"#).unwrap();
+        assert_eq!(parsed.cursor, CursorSettings::default());
+        assert_eq!(parsed.cursor.sync_timeout_seconds, None);
+
+        let parsed: Settings =
+            serde_json::from_str(r#"{ "cursor": { "syncTimeoutSeconds": 600 } }"#).unwrap();
+        assert_eq!(
+            parsed.cursor.sync_timeout_seconds,
+            Some(serde_json::json!(600))
+        );
+
+        // `null` is the same as leaving the key out.
+        let parsed: Settings =
+            serde_json::from_str(r#"{ "cursor": { "syncTimeoutSeconds": null } }"#).unwrap();
+        assert_eq!(parsed.cursor.sync_timeout_seconds, None);
+    }
+
+    #[test]
+    fn cursor_sync_timeout_setting_keeps_unusable_values_as_written() {
+        // The sync warns about these and uses its default budget, but the
+        // settings file keeps them, so no later save erases a hand edit.
+        for raw in [r#""600""#, "-5", "1.5", "true", "[]", "999999", "0"] {
+            let json = format!(
+                r#"{{ "colorPalette": "purple", "cursor": {{ "syncTimeoutSeconds": {raw} }} }}"#
+            );
+            let parsed: Settings = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("{raw} must not fail settings: {error}"));
+            let expected: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                parsed.cursor.sync_timeout_seconds,
+                Some(expected.clone()),
+                "{raw}"
+            );
+            assert_eq!(parsed.color_palette, "purple", "{raw}");
+
+            let saved = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(saved["cursor"]["syncTimeoutSeconds"], expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn non_object_cursor_section_keeps_every_other_preference() {
+        for raw in [r#""oops""#, "5", "[]", "true", "null"] {
+            let json = format!(
+                r#"{{ "colorPalette": "purple", "scanner": {{ "bucketTimezone": "Asia/Seoul" }}, "cursor": {raw} }}"#
+            );
+            let parsed: Settings = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("cursor = {raw} must not fail settings: {error}"));
+            assert_eq!(parsed.cursor, CursorSettings::default(), "{raw}");
+            assert_eq!(parsed.color_palette, "purple", "{raw}");
+            assert_eq!(
+                parsed.scanner.bucket_timezone.as_deref(),
+                Some("Asia/Seoul"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_sync_timeout_setting_serializes_only_when_set() {
+        let unset = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(unset["cursor"], serde_json::json!({}));
+
+        let settings = Settings {
+            cursor: CursorSettings {
+                sync_timeout_seconds: Some(serde_json::json!(900)),
+            },
+            ..Settings::default()
+        };
+        let set = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            set["cursor"],
+            serde_json::json!({ "syncTimeoutSeconds": 900 })
+        );
+        let round_trip: Settings = serde_json::from_value(set).unwrap();
+        assert_eq!(
+            round_trip.cursor.sync_timeout_seconds,
+            Some(serde_json::json!(900))
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
 use crate::tui::themes::Theme;
+use crate::ui_glyphs::{AMBIENT_STABLE_SCROLL_DOWN, AMBIENT_STABLE_SCROLL_UP};
 
 pub fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000_000 {
@@ -104,8 +105,8 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
 /// reintroduces a default symbol.
 pub fn ambient_stable_scrollbar() -> Scrollbar<'static> {
     Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some("\u{25B4}")) // ▴
-        .end_symbol(Some("\u{25BE}")) // ▾
+        .begin_symbol(Some(AMBIENT_STABLE_SCROLL_UP))
+        .end_symbol(Some(AMBIENT_STABLE_SCROLL_DOWN))
         .track_symbol(Some("|"))
         .thumb_symbol("\u{25AE}") // ▮
 }

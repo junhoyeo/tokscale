@@ -1,6 +1,8 @@
 "use client";
 
-import styled from "styled-components";
+import Link from "next/link";
+import styled, { css } from "styled-components";
+import { TOKSCALE_DISCORD_URL, TOKSCALE_X_URL } from "@/lib/community";
 
 export function FooterSection() {
   return (
@@ -15,6 +17,21 @@ export function FooterSection() {
             GitHub
           </FooterLink>
           <FooterLink
+            href={TOKSCALE_DISCORD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Discord
+          </FooterLink>
+          <FooterLink
+            href={TOKSCALE_X_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Tokscale on X"
+          >
+            X
+          </FooterLink>
+          <FooterLink
             href="https://github.com/sponsors/junhoyeo"
             target="_blank"
             rel="noopener noreferrer"
@@ -22,6 +39,12 @@ export function FooterSection() {
             Sponsor Tokscale
           </FooterLink>
         </FooterNav>
+        {/* Ad networks check that the site root links its privacy policy. */}
+        <FooterLegalNav aria-label="Legal">
+          <FooterPageLink href="/privacy">Privacy</FooterPageLink>
+          <FooterPageLink href="/terms">Terms</FooterPageLink>
+          <FooterPageLink href="/contact">Contact</FooterPageLink>
+        </FooterLegalNav>
         <FooterCopyright>© 2026 STROKE</FooterCopyright>
       </FooterInner>
     </LandingFooter>
@@ -62,7 +85,7 @@ const FooterNav = styled.nav`
   }
 `;
 
-const FooterLink = styled.a`
+const footerLinkStyles = css`
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -84,6 +107,21 @@ const FooterLink = styled.a`
 
   @media (max-width: 480px) {
     min-height: 48px;
+  }
+`;
+
+const FooterLink = styled.a`
+  ${footerLinkStyles}
+`;
+
+const FooterPageLink = styled(Link)`
+  ${footerLinkStyles}
+`;
+
+const FooterLegalNav = styled(FooterNav)`
+  @media (max-width: 480px) {
+    flex-direction: row;
+    gap: 16px;
   }
 `;
 
