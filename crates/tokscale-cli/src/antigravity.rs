@@ -32,6 +32,33 @@ const TRAJECTORY_ENRICHMENT_BUDGET: Duration = Duration::from_secs(60);
 /// written off for the rest of the sync. See [`TrajectoryEnrichmentBudget`].
 const TRAJECTORY_ENRICHMENT_FAILURE_THRESHOLD: u32 = 2;
 
+/// Routine submit must not wait on a sick local language server once per
+/// retained session. This deadline applies to list, metadata and trajectory
+/// RPCs together; explicit `antigravity sync` remains manually controlled.
+const IMPLICIT_SYNC_DEADLINE: Duration = Duration::from_secs(60);
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+struct SyncDeadline {
+    expires_at: Instant,
+}
+
+impl SyncDeadline {
+    fn new(budget: Duration) -> Self {
+        Self {
+            expires_at: Instant::now() + budget,
+        }
+    }
+
+    fn remaining_timeout(&self) -> Result<Duration> {
+        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Antigravity implicit sync deadline expired")
+        }
+        Ok(remaining.min(DEFAULT_RPC_TIMEOUT))
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -214,10 +241,24 @@ struct SessionCandidate {
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncAntigravityResult {
+    /// All discovered work completed without a recoverable RPC failure.
     pub synced: bool,
+    /// Some fresh artifacts were persisted, but another RPC failed. The scanner
+    /// can safely use the fresh and retained artifacts, but submit must warn.
+    pub partial: bool,
+    /// Artifacts fetched from a live language server in this run.
     pub sessions: usize,
+    /// Older artifacts retained after a recoverable failure.
+    pub retained_sessions: usize,
     pub connections: usize,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SyncCacheOutcome {
+    synced_sessions: usize,
+    retained_sessions: usize,
+    partial_error: Option<anyhow::Error>,
 }
 
 pub fn has_antigravity_cache() -> bool {
@@ -241,21 +282,30 @@ pub fn sync_antigravity_cache_with_connections(
     if !explicit && connections.is_empty() {
         return SyncAntigravityResult {
             synced: false,
+            partial: false,
             sessions: 0,
+            retained_sessions: 0,
             connections: 0,
             error: None,
         };
     }
     match sync_antigravity_cache_impl(connections, explicit) {
-        Ok(count) => SyncAntigravityResult {
-            synced: true,
-            sessions: count,
-            connections: connections.len(),
-            error: None,
-        },
+        Ok(outcome) => {
+            let partial = outcome.partial_error.is_some();
+            SyncAntigravityResult {
+                synced: !partial,
+                partial,
+                sessions: outcome.synced_sessions,
+                retained_sessions: outcome.retained_sessions,
+                connections: connections.len(),
+                error: outcome.partial_error.map(|err| err.to_string()),
+            }
+        }
         Err(err) => SyncAntigravityResult {
             synced: false,
+            partial: false,
             sessions: 0,
+            retained_sessions: 0,
             connections: connections.len(),
             error: Some(err.to_string()),
         },
@@ -268,7 +318,9 @@ pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
         Err(err) => {
             return SyncAntigravityResult {
                 synced: false,
+                partial: false,
                 sessions: 0,
+                retained_sessions: 0,
                 connections: 0,
                 error: Some(err.to_string()),
             };
@@ -280,7 +332,16 @@ pub fn sync_antigravity_cache(explicit: bool) -> SyncAntigravityResult {
 fn sync_antigravity_cache_impl(
     connections: &[AntigravityConnection],
     explicit: bool,
-) -> Result<usize> {
+) -> Result<SyncCacheOutcome> {
+    let deadline = (!explicit).then(|| SyncDeadline::new(IMPLICIT_SYNC_DEADLINE));
+    sync_antigravity_cache_impl_with_deadline(connections, explicit, deadline)
+}
+
+fn sync_antigravity_cache_impl_with_deadline(
+    connections: &[AntigravityConnection],
+    explicit: bool,
+    deadline: Option<SyncDeadline>,
+) -> Result<SyncCacheOutcome> {
     use colored::Colorize;
 
     let cache_dir = get_antigravity_cache_dir()?;
@@ -292,12 +353,11 @@ fn sync_antigravity_cache_impl(
     let _lock = SyncLockGuard::acquire(&cache_dir)?;
 
     let manifest = load_antigravity_manifest()?;
-    let mut metadata_failed: Option<anyhow::Error> = None;
-    let (summaries, list_errors) = list_trajectory_summaries_with_errors(connections);
+    let mut outcome = SyncCacheOutcome::default();
+    let (summaries, list_errors) =
+        list_trajectory_summaries_with_errors(connections, deadline.as_ref());
     if let Some(err) = list_errors.into_iter().next() {
-        if metadata_failed.is_none() {
-            metadata_failed = Some(err);
-        }
+        outcome.partial_error = Some(err);
     }
     let filesystem_candidates = scan_filesystem_session_candidates()?;
     let export_candidates = merge_export_candidates(&manifest, &summaries, &filesystem_candidates);
@@ -318,11 +378,10 @@ fn sync_antigravity_cache_impl(
     // One budget for the whole sync: the enrichment RPCs it bounds all run
     // under the exclusive cache lock acquired above.
     let mut enrichment = TrajectoryEnrichmentBudget::new();
-    let mut synced_sessions: usize = 0;
 
     for candidate in &export_candidates {
         if let Some(summary) = find_summary_for_candidate(&summaries, &candidate.session_id) {
-            match fetch_session_artifact(summary, connections, &mut enrichment) {
+            match fetch_session_artifact(summary, connections, &mut enrichment, deadline.as_ref()) {
                 Ok(Some(artifact)) => {
                     let path = write_session_artifact(&summary.session_id, &artifact.contents)?;
                     let relative_path = to_relative_artifact_path(&path)?;
@@ -335,7 +394,7 @@ fn sync_antigravity_cache_impl(
                         connection_fingerprint: summary.connection_fingerprint.clone(),
                         artifact_hash: artifact.artifact_hash,
                     });
-                    synced_sessions += 1;
+                    outcome.synced_sessions += 1;
                     continue;
                 }
                 Ok(None) => {
@@ -345,6 +404,7 @@ fn sync_antigravity_cache_impl(
                         .find(|entry| entry.session_id == candidate.session_id)
                     {
                         next_manifest.sessions.push(previous.clone());
+                        outcome.retained_sessions += 1;
                         continue;
                     } else if let Some(preserved) = cached_manifest_session_entry(
                         &candidate.session_id,
@@ -352,13 +412,14 @@ fn sync_antigravity_cache_impl(
                         &summary.connection_fingerprint,
                     ) {
                         next_manifest.sessions.push(preserved);
+                        outcome.retained_sessions += 1;
                         continue;
                     }
                     continue;
                 }
                 Err(err) => {
-                    if metadata_failed.is_none() {
-                        metadata_failed = Some(err);
+                    if outcome.partial_error.is_none() {
+                        outcome.partial_error = Some(err);
                     }
                     if let Some(previous) = manifest
                         .sessions
@@ -366,6 +427,7 @@ fn sync_antigravity_cache_impl(
                         .find(|entry| entry.session_id == candidate.session_id)
                     {
                         next_manifest.sessions.push(previous.clone());
+                        outcome.retained_sessions += 1;
                         continue;
                     } else if let Some(preserved) = cached_manifest_session_entry(
                         &candidate.session_id,
@@ -373,6 +435,7 @@ fn sync_antigravity_cache_impl(
                         &summary.connection_fingerprint,
                     ) {
                         next_manifest.sessions.push(preserved);
+                        outcome.retained_sessions += 1;
                         continue;
                     }
                     continue;
@@ -385,16 +448,17 @@ fn sync_antigravity_cache_impl(
             connections,
             candidate,
             &mut enrichment,
+            deadline.as_ref(),
         ) {
             Ok(Some(entry)) => {
                 next_manifest.sessions.push(entry);
-                synced_sessions += 1;
+                outcome.synced_sessions += 1;
                 continue;
             }
             Ok(None) => {}
             Err(err) => {
-                if metadata_failed.is_none() {
-                    metadata_failed = Some(err);
+                if outcome.partial_error.is_none() {
+                    outcome.partial_error = Some(err);
                 }
             }
         }
@@ -405,6 +469,7 @@ fn sync_antigravity_cache_impl(
             .find(|entry| entry.session_id == candidate.session_id)
         {
             next_manifest.sessions.push(previous.clone());
+            outcome.retained_sessions += 1;
         } else if let Some(preserved) = cached_manifest_session_entry(
             &candidate.session_id,
             candidate.last_modified_ms,
@@ -414,6 +479,7 @@ fn sync_antigravity_cache_impl(
                 .unwrap_or_default(),
         ) {
             next_manifest.sessions.push(preserved);
+            outcome.retained_sessions += 1;
         }
     }
 
@@ -428,7 +494,7 @@ fn sync_antigravity_cache_impl(
 
     let count = next_manifest.sessions.len();
 
-    if explicit && metadata_failed.is_none() {
+    if explicit && outcome.partial_error.is_none() {
         println!("\n  {}", "Antigravity sync".cyan());
         println!(
             "  {}",
@@ -465,11 +531,7 @@ fn sync_antigravity_cache_impl(
         println!();
     }
 
-    if let Some(err) = metadata_failed {
-        return Err(err);
-    }
-
-    Ok(synced_sessions)
+    Ok(outcome)
 }
 
 pub fn run_antigravity_sync() -> Result<()> {
@@ -1177,26 +1239,7 @@ fn bool_label(value: bool) -> &'static str {
     }
 }
 
-fn antigravity_discovery_disabled() -> bool {
-    for key in [
-        "TOKSCALE_DISABLE_ANTIGRAVITY_DISCOVERY",
-        "TOKSCALE_ANTIGRAVITY_DISABLE_DISCOVERY",
-        "TOKSCALE_NO_ANTIGRAVITY_DISCOVERY",
-    ] {
-        if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
-    if antigravity_discovery_disabled() {
-        return Ok(Vec::new());
-    }
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
@@ -1643,7 +1686,8 @@ fn probe_https_heartbeat(port: u16, csrf_token: &str) -> bool {
         fingerprint: format!("port:{port}"),
     };
     let body = serde_json::json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
-    let Ok(response) = https_rpc_request(&connection, "Heartbeat", &body) else {
+    let Ok(response) = https_rpc_request(&connection, "Heartbeat", &body, DEFAULT_RPC_TIMEOUT)
+    else {
         return false;
     };
     if !heartbeat_value_looks_well_formed(&response) {
@@ -1754,7 +1798,13 @@ fn https_identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Op
         csrf_token: csrf_token.to_string(),
         fingerprint: format!("port:{port}"),
     };
-    let response = https_rpc_request(&connection, method, &serde_json::json!({})).ok()?;
+    let response = https_rpc_request(
+        &connection,
+        method,
+        &serde_json::json!({}),
+        DEFAULT_RPC_TIMEOUT,
+    )
+    .ok()?;
     serde_json::to_string(&response).ok()
 }
 
@@ -1967,17 +2017,19 @@ fn run_command_output(program: &str, args: &[&str]) -> Result<std::process::Outp
     Ok(output)
 }
 
-pub fn list_trajectory_summaries_with_errors(
+fn list_trajectory_summaries_with_errors(
     connections: &[AntigravityConnection],
+    deadline: Option<&SyncDeadline>,
 ) -> (Vec<TrajectorySummary>, Vec<anyhow::Error>) {
     let mut merged: HashMap<String, TrajectorySummary> = HashMap::new();
     let mut errors = Vec::new();
 
     for connection in connections {
-        let response = match rpc_request(
+        let response = match rpc_request_with_deadline(
             connection,
             "GetAllCascadeTrajectories",
             &serde_json::json!({}),
+            deadline,
         ) {
             Ok(response) => response,
             Err(err) => {
@@ -2010,16 +2062,6 @@ pub fn list_trajectory_summaries_with_errors(
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
     (values, errors)
-}
-
-pub fn list_trajectory_summaries(
-    connections: &[AntigravityConnection],
-) -> Result<Vec<TrajectorySummary>> {
-    let (values, errors) = list_trajectory_summaries_with_errors(connections);
-    if let Some(err) = errors.into_iter().next() {
-        return Err(err);
-    }
-    Ok(values)
 }
 
 fn merge_summary(merged: &mut HashMap<String, TrajectorySummary>, summary: TrajectorySummary) {
@@ -2194,6 +2236,7 @@ fn fetch_historical_session_artifact(
     connections: &[AntigravityConnection],
     candidate: &SessionCandidate,
     budget: &mut TrajectoryEnrichmentBudget,
+    deadline: Option<&SyncDeadline>,
 ) -> Result<Option<ManifestSessionEntry>> {
     let fallback_summary = TrajectorySummary {
         session_id: session_id.to_string(),
@@ -2205,7 +2248,9 @@ fn fetch_historical_session_artifact(
             .unwrap_or_default(),
     };
 
-    if let Some(artifact) = fetch_session_artifact(&fallback_summary, connections, budget)? {
+    if let Some(artifact) =
+        fetch_session_artifact(&fallback_summary, connections, budget, deadline)?
+    {
         let path = write_session_artifact(session_id, &artifact.contents)?;
         return Ok(Some(ManifestSessionEntry {
             session_id: session_id.to_string(),
@@ -2220,17 +2265,35 @@ fn fetch_historical_session_artifact(
     Ok(None)
 }
 
+#[cfg(test)]
 fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    rpc_request_with_deadline(connection, method, body, None)
+}
+
+fn rpc_request_with_deadline(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+    deadline: Option<&SyncDeadline>,
+) -> Result<Value> {
     // A port already known to speak TLS will never answer plaintext, so the
-    // plaintext leg here is pure latency — see [`RpcTransport`]. Deliberately
-    // no plaintext retry on failure: a listener does not change protocol
-    // mid-run, and retrying would reintroduce exactly the cost being removed.
+    // plaintext leg here is pure latency — see [`RpcTransport`].
     if cached_rpc_transport(connection.port) == Some(RpcTransport::Https) {
-        return https_rpc_request(connection, method, body)
-            .with_context(|| format!("HTTPS RPC failed for Antigravity RPC {method}"));
+        return https_rpc_request(
+            connection,
+            method,
+            body,
+            rpc_timeout_for_deadline(deadline)?,
+        )
+        .with_context(|| format!("HTTPS RPC failed for Antigravity RPC {method}"));
     }
 
-    match rpc_request_plain_http(connection, method, body) {
+    match rpc_request_plain_http(
+        connection,
+        method,
+        body,
+        rpc_timeout_for_deadline(deadline)?,
+    ) {
         Ok(value) => {
             remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
             Ok(value)
@@ -2240,7 +2303,13 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
                 remember_rpc_transport(connection.port, RpcTransport::PlainHttp);
                 return Err(http_err);
             }
-            let value = https_rpc_request(connection, method, body).with_context(|| {
+            let value = https_rpc_request(
+                connection,
+                method,
+                body,
+                rpc_timeout_for_deadline(deadline)?,
+            )
+            .with_context(|| {
                 format!(
                     "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
                 )
@@ -2248,6 +2317,13 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
             remember_rpc_transport(connection.port, RpcTransport::Https);
             Ok(value)
         }
+    }
+}
+
+fn rpc_timeout_for_deadline(deadline: Option<&SyncDeadline>) -> Result<Duration> {
+    match deadline {
+        Some(deadline) => deadline.remaining_timeout(),
+        None => Ok(DEFAULT_RPC_TIMEOUT),
     }
 }
 
@@ -2270,6 +2346,11 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
 /// `.no_proxy()`.
 #[cfg(any(target_os = "windows", test))]
 fn windows_curl_rpc_args(url: &str) -> Vec<&str> {
+    windows_curl_rpc_args_with_timeout(url, "10")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_curl_rpc_args_with_timeout<'a>(url: &'a str, max_time: &'a str) -> Vec<&'a str> {
     vec![
         // Must stay first, see above.
         "-q",
@@ -2279,7 +2360,7 @@ fn windows_curl_rpc_args(url: &str) -> Vec<&str> {
         "-sS",
         "--http1.1",
         "--max-time",
-        "10",
+        max_time,
         "-X",
         "POST",
         url,
@@ -2333,6 +2414,7 @@ fn https_rpc_request(
     connection: &AntigravityConnection,
     method: &str,
     body: &Value,
+    timeout: Duration,
 ) -> Result<Value> {
     // On Windows, the reqwest (rustls) request to the local DesktopAgent
     // stalls until the timeout, while the in-box curl.exe (SChannel) completes
@@ -2383,8 +2465,9 @@ fn https_rpc_request(
         // progress meter but keeps errors), so this is already generous.
         const MAX_CURL_STDERR_BYTES: usize = 64 * 1024;
 
+        let max_time = format!("{:.3}", timeout.as_secs_f64().max(0.001));
         let mut child = std::process::Command::new(&system32_curl)
-            .args(windows_curl_rpc_args(&url))
+            .args(windows_curl_rpc_args_with_timeout(&url, &max_time))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -2514,7 +2597,7 @@ fn https_rpc_request(
                 scope
                     .spawn(|| {
                         antigravity_https_runtime()
-                            .block_on(https_rpc_once(connection, method, body))
+                            .block_on(https_rpc_once(connection, method, body, timeout))
                     })
                     .join()
             });
@@ -2535,6 +2618,7 @@ async fn https_rpc_once(
     connection: &AntigravityConnection,
     method: &str,
     body: &Value,
+    timeout: Duration,
 ) -> Result<Value> {
     let url = format!(
         "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
@@ -2546,6 +2630,7 @@ async fn https_rpc_once(
         .header("Connect-Protocol-Version", "1")
         .header("X-Codeium-Csrf-Token", &connection.csrf_token)
         .json(body)
+        .timeout(timeout)
         .send()
         .await?;
     let status = response.status();
@@ -2586,7 +2671,7 @@ fn antigravity_https_client() -> &'static reqwest::Client {
             .http1_only()
             .danger_accept_invalid_certs(true)
             .no_proxy()
-            .timeout(Duration::from_secs(10))
+            .timeout(DEFAULT_RPC_TIMEOUT)
             .build()
             .expect("failed to create Antigravity HTTPS RPC client")
     })
@@ -2632,16 +2717,18 @@ fn rpc_request_plain_http(
     connection: &AntigravityConnection,
     method: &str,
     body: &Value,
+    timeout: Duration,
 ) -> Result<Value> {
-    let mut stream = TcpStream::connect(("127.0.0.1", connection.port)).with_context(|| {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], connection.port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout).with_context(|| {
         format!(
             "Failed to connect to Antigravity RPC on port {}",
             connection.port
         )
     })?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout.min(Duration::from_secs(5))))?;
 
     let body_text = serde_json::to_string(body)?;
     let request = format!(
@@ -2838,6 +2925,7 @@ fn fetch_session_artifact(
     summary: &TrajectorySummary,
     connections: &[AntigravityConnection],
     budget: &mut TrajectoryEnrichmentBudget,
+    deadline: Option<&SyncDeadline>,
 ) -> Result<Option<SessionArtifact>> {
     let preferred = connections
         .iter()
@@ -2855,7 +2943,7 @@ fn fetch_session_artifact(
 
     let mut last_error: Option<anyhow::Error> = None;
     for connection in ordered {
-        match try_fetch_session_artifact(summary, connection, budget) {
+        match try_fetch_session_artifact(summary, connection, budget, deadline) {
             Ok(Some(artifact)) => return Ok(Some(artifact)),
             Ok(None) => {}
             Err(err) => last_error = Some(err),
@@ -3018,6 +3106,7 @@ fn fetch_usage_timestamps(
     summary: &TrajectorySummary,
     connection: &AntigravityConnection,
     budget: &mut TrajectoryEnrichmentBudget,
+    deadline: Option<&SyncDeadline>,
 ) -> Result<HashMap<String, i64>> {
     if !budget.should_attempt(&connection.fingerprint) {
         let err = anyhow::anyhow!(
@@ -3032,10 +3121,11 @@ fn fetch_usage_timestamps(
     }
 
     let started = Instant::now();
-    match rpc_request(
+    match rpc_request_with_deadline(
         connection,
         "GetCascadeTrajectory",
         &serde_json::json!({ "cascadeId": summary.session_id }),
+        deadline,
     ) {
         Ok(trajectory) => {
             budget.record_success(&connection.fingerprint);
@@ -3061,6 +3151,7 @@ fn try_fetch_session_artifact(
     summary: &TrajectorySummary,
     connection: &AntigravityConnection,
     budget: &mut TrajectoryEnrichmentBudget,
+    deadline: Option<&SyncDeadline>,
 ) -> Result<Option<SessionArtifact>> {
     if !budget.metadata_should_attempt(&connection.fingerprint) {
         let err = anyhow::anyhow!(
@@ -3071,10 +3162,11 @@ fn try_fetch_session_artifact(
     }
 
     let metadata_started = Instant::now();
-    let response = match rpc_request(
+    let response = match rpc_request_with_deadline(
         connection,
         "GetCascadeTrajectoryGeneratorMetadata",
         &serde_json::json!({ "cascadeId": summary.session_id }),
+        deadline,
     ) {
         Ok(value) => {
             budget.record_metadata_success(&connection.fingerprint);
@@ -3100,7 +3192,7 @@ fn try_fetch_session_artifact(
     }
 
     let usage_timestamps = if session_metadata_needs_trajectory_timestamps(&metadata) {
-        match fetch_usage_timestamps(summary, connection, budget) {
+        match fetch_usage_timestamps(summary, connection, budget, deadline) {
             Ok(timestamps) => timestamps,
             Err(err) => {
                 let cached = cached_usage_timestamps(&summary.session_id);
@@ -4551,7 +4643,14 @@ mod tests {
         };
 
         let error = rt
-            .block_on(async { https_rpc_request(&connection, "GetUsage", &serde_json::json!({})) })
+            .block_on(async {
+                https_rpc_request(
+                    &connection,
+                    "GetUsage",
+                    &serde_json::json!({}),
+                    DEFAULT_RPC_TIMEOUT,
+                )
+            })
             .unwrap_err();
 
         // Asserting only the absence of "runtime" would also be satisfied by
@@ -4685,7 +4784,7 @@ mod tests {
                 step_count: Some(1),
                 connection_fingerprint: connection.fingerprint.clone(),
             };
-            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
                 .expect("a failed enrichment must never fail the sync")
                 .expect("the session must still be written from its metadata");
             assert!(
@@ -4749,7 +4848,7 @@ mod tests {
                 step_count: Some(1),
                 connection_fingerprint: connection.fingerprint.clone(),
             };
-            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
                 .unwrap()
                 .expect("the session must be written");
             let usage: Value = artifact
@@ -5092,7 +5191,7 @@ mod tests {
             connection_fingerprint: connection.fingerprint.clone(),
         };
 
-        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
             .unwrap()
             .expect("enrichment failure must still regenerate the artifact");
         let usage: Vec<Value> = artifact
@@ -5191,7 +5290,7 @@ mod tests {
         };
 
         for round in 1..=2 {
-            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+            let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
                 .unwrap()
                 .unwrap_or_else(|| {
                     panic!("round {round}: a grown session must still produce an artifact")
@@ -5313,7 +5412,7 @@ mod tests {
 
         // Round 1: enrichment succeeds and the usage is timestamped through
         // its messageId. `sync` writes that artifact back.
-        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
             .unwrap()
             .expect("round 1 must produce an artifact");
         let usage = usage_rows(&artifact);
@@ -5325,7 +5424,7 @@ mod tests {
         // Round 2: the trajectory has grown past the cap, so enrichment
         // fails; the timestamp recovered last time must survive.
         trajectory_over_cap.store(true, Ordering::SeqCst);
-        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget)
+        let artifact = try_fetch_session_artifact(&summary, &connection, &mut budget, None)
             .unwrap()
             .expect("round 2 must still regenerate the artifact");
         let usage = usage_rows(&artifact);
@@ -5862,6 +5961,52 @@ mod tests {
             4096,
             "the remainder is still consumed; bytes left in the pipe are what block the child"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn implicit_sync_deadline_bounds_stalled_metadata_and_reports_partial_cache() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::redirect_to(temp_dir.path());
+        let summaries = serde_json::json!({
+            "cascadeTrajectories": [{
+                "cascadeId": "stalled-session",
+                "lastModifiedTime": 1,
+                "stepCount": 1
+            }]
+        })
+        .to_string();
+        let (port, seen) = serve_rpc_methods(move |method| match method {
+            "GetAllCascadeTrajectories" => Some(summaries.clone()),
+            "GetCascadeTrajectoryGeneratorMetadata" => {
+                // The client-side deadline must win; the test server deliberately
+                // keeps this request open longer than the supplied sync deadline.
+                thread::sleep(Duration::from_secs(2));
+                None
+            }
+            _ => None,
+        });
+        remember_rpc_transport(port, RpcTransport::PlainHttp);
+        let connection = enrichment_test_connection(port);
+        let started = Instant::now();
+        let outcome = sync_antigravity_cache_impl_with_deadline(
+            &[connection],
+            false,
+            Some(SyncDeadline::new(Duration::from_millis(100))),
+        )
+        .expect("a recoverable RPC timeout must preserve and persist the cache");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the implicit deadline must bound plaintext and HTTPS fallback work"
+        );
+        assert!(outcome.partial_error.is_some());
+        assert_eq!(outcome.synced_sessions, 0);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "GetAllCascadeTrajectories"));
     }
 
     #[test]
