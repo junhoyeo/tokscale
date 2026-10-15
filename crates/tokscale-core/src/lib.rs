@@ -135,12 +135,9 @@ pub(crate) fn normalize_syntactic(model_id: &str) -> String {
     if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {
         name = base_model.to_string();
     }
-    if name.len() > 9 {
-        let potential_date = &name[name.len() - 8..];
-        if potential_date.chars().all(|c| c.is_ascii_digit())
-            && name.as_bytes()[name.len() - 9] == b'-'
-        {
-            name = name[..name.len() - 9].to_string();
+    if let Some((base_model, potential_date)) = name.rsplit_once('-') {
+        if potential_date.len() == 8 && potential_date.chars().all(|c| c.is_ascii_digit()) {
+            name = base_model.to_string();
         }
     }
 
@@ -9138,6 +9135,15 @@ mod tests {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
             "claude-opus-4-5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_model_for_grouping_handles_non_ascii_names() {
+        assert_eq!(normalize_model_for_grouping("按需模型"), "按需模型");
+        assert_eq!(
+            normalize_model_for_grouping("按需模型-20241022"),
+            "按需模型"
         );
     }
 
