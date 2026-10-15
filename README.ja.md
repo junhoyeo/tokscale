@@ -16,6 +16,7 @@
 > | [<img alt="GitHub Follow" src="https://img.shields.io/github/followers/junhoyeo?style=flat-square&logo=github&labelColor=black&color=24292f" width="156px" />](https://github.com/junhoyeo) | GitHubで[@junhoyeo](https://github.com/junhoyeo)をフォローして、他のプロジェクトもチェックしてください。AI、インフラ、その他様々な分野で開発しています。 |
 > | :-----| :----- |
 > [<img alt="Discord link" src="https://img.shields.io/discord/1480206352755458110?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square" width="156px" />](https://discord.gg/h6DUGWdBbm) | [Discord](https://discord.gg/h6DUGWdBbm)に参加しよう — 世界最高のバイバーたちと一緒に。 |
+> [<img alt="X follow" src="https://img.shields.io/badge/follow-%40Tokscale-000000?style=flat-square&logo=x&logoColor=white&labelColor=black" width="156px" />](https://x.com/Tokscale) | Xで[@Tokscale](https://x.com/Tokscale)をフォローして、リリース情報やアップデートを受け取りましょう。 |
 > [<img alt="Sponsor Tokscale" src="https://img.shields.io/badge/sponsor-Tokscale-EA4AAA?style=flat-square&logo=githubsponsors&logoColor=white&labelColor=black" width="156px" />](https://github.com/sponsors/junhoyeo) | [GitHub Sponsors](https://github.com/sponsors/junhoyeo)を通じて、Tokscaleの継続的な開発をご支援ください。 |
 
 <div align="center">
@@ -43,6 +44,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -65,7 +70,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` および `$HERMES_HOME/profiles/*/state.db`（フォールバック: `~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（フォールバック: `~/.gemini/tmp/*/chats/*.json`） |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API の使用量を `~/.config/tokscale/cursor-cache/usage*.json` にキャッシュ（旧形式の `usage*.csv` キャッシュも引き続き読み込み；デスクトップ自動ログインまたは Cookie 貼り付け；`~/.cursor` ではない） |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`、`manicode-staging`; `CODEBUFF_DATA_DIR` でオーバーライド可能) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff と同じ `~/.config/manicode/` を共有（同一ランタイム）；トークン使用量はトランスクリプトから推定（ローカル使用量なし；`FREEBUFF_DATA_DIR` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -1495,7 +1500,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 使用イベントは `session-store.db` から取得（OTEL 不要）。`COPILOT_OTEL_FILE_EXPORTER_PATH` と Desktop `data.db` も自動取り込み |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME`環境変数で設定可能（[ソース](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | `GEMINI_CLI_HOME`環境変数で設定可能 |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCodeと同様に`xdg-basedir`を使用 |
+| Amp | `~/.config/tokscale/amp-cache/`（+ レガシー `~/.local/share/amp/`） | `%APPDATA%\tokscale\amp-cache\`（+ レガシー `%USERPROFILE%\.local\share\amp\`） | `tokscale amp sync` で同期。レガシーパスは OpenCode と同様に `xdg-basedir` を使用 |
 | Cursor | API同期 | API同期 | Cursor API から取得したデータを `usage*.json` としてキャッシュ（旧形式の `usage*.csv` キャッシュも引き続き読み込み）；デスクトップ自動ログインは `state.vscdb` の認証のみ；ローカルの `~/.cursor` セッションデータは解析しない |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | すべてのプラットフォームで同じパス |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | すべてのプラットフォームで同じパス |

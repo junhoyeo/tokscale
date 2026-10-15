@@ -783,7 +783,53 @@ fn parse_all_messages_with_pricing(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceCachePolicy {
     Persistent,
+    PersistentDeferred,
     InMemory,
+}
+
+/// An owned persistent source-cache write that has not run yet.
+///
+/// This is an internal integration surface for the TUI. Calling [`Self::persist`]
+/// performs the same synchronous, locked, atomic shard transactions as the
+/// normal local parse APIs. Dropping it abandons only the pending write.
+#[doc(hidden)]
+#[must_use = "source cache persistence is pending"]
+pub struct PendingSourceCacheSave {
+    source_cache: message_cache::SourceMessageCache,
+}
+
+impl PendingSourceCacheSave {
+    fn new(source_cache: message_cache::SourceMessageCache) -> Self {
+        Self { source_cache }
+    }
+
+    pub fn persist(mut self) {
+        persist_source_cache(&mut self.source_cache);
+    }
+}
+
+fn persist_source_cache(source_cache: &mut message_cache::SourceMessageCache) {
+    source_cache.save_if_dirty();
+}
+
+fn apply_source_cache_policy(
+    policy: SourceCachePolicy,
+    mut source_cache: message_cache::SourceMessageCache,
+    persist: impl FnOnce(&mut message_cache::SourceMessageCache),
+) -> Option<PendingSourceCacheSave> {
+    match policy {
+        SourceCachePolicy::Persistent => {
+            persist(&mut source_cache);
+            None
+        }
+        SourceCachePolicy::PersistentDeferred => Some(PendingSourceCacheSave::new(source_cache)),
+        SourceCachePolicy::InMemory => None,
+    }
+}
+
+struct StreamingParseOutcome {
+    coverage: Option<claude_desktop::Coverage>,
+    pending_save: Option<PendingSourceCacheSave>,
 }
 
 fn parse_all_messages_with_pricing_with_env_strategy(
@@ -1011,13 +1057,45 @@ fn parse_all_messages_with_coverage(
     cache_policy: SourceCachePolicy,
 ) -> (Vec<UnifiedMessage>, Option<claude_desktop::Coverage>) {
     let mut messages: Vec<UnifiedMessage> = Vec::new();
-    let coverage = parse_all_messages_streaming(
+    let outcome = parse_all_messages_streaming(
         home_dir,
         clients,
         pricing,
         use_env_roots,
         scanner_settings,
         cache_policy,
+        &mut messages,
+    );
+    // This established collection boundary never exposes deferred ownership.
+    // Persist defensively if a future internal caller supplies that policy.
+    if let Some(pending_save) = outcome.pending_save {
+        pending_save.persist();
+    }
+    let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
+    recovery::apply(
+        &mut messages,
+        home_dir,
+        clients,
+        timezone.is_pinned().then_some(&timezone),
+    );
+    (messages, outcome.coverage)
+}
+
+fn parse_all_messages_deferred(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+) -> (Vec<UnifiedMessage>, PendingSourceCacheSave) {
+    let mut messages = Vec::new();
+    let outcome = parse_all_messages_streaming(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        SourceCachePolicy::PersistentDeferred,
         &mut messages,
     );
     let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
@@ -1027,7 +1105,10 @@ fn parse_all_messages_with_coverage(
         clients,
         timezone.is_pinned().then_some(&timezone),
     );
-    (messages, coverage)
+    let pending_save = outcome
+        .pending_save
+        .expect("deferred source-cache policy must return its owned save");
+    (messages, pending_save)
 }
 
 fn codex_missing_usage_warning(missing_files: usize, inspected_files: usize) -> Option<String> {
@@ -1073,7 +1154,7 @@ fn codex_archive_failure_warning(
         ));
     }
     if size_limit_failures > 0 {
-        let limit_mib = sessions::utils::MAX_ARCHIVE_BYTES / (1024 * 1024);
+        let limit_mib = sessions::codex::MAX_CODEX_ARCHIVE_BYTES / (1024 * 1024);
         categories.push(format!(
             "{size_limit_failures} exceeded the {limit_mib} MiB decoded-size limit"
         ));
@@ -1130,7 +1211,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     scanner_settings: &scanner::ScannerSettings,
     cache_policy: SourceCachePolicy,
     sink: &mut S,
-) -> Option<claude_desktop::Coverage> {
+) -> StreamingParseOutcome {
     let mut desktop_coverage = None;
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -2212,7 +2293,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // pruned as that namespace loads. A scan therefore pays for the clients it
     // actually reads instead of for every client the machine has ever cached.
     let mut source_cache = match cache_policy {
-        SourceCachePolicy::Persistent => message_cache::SourceMessageCache::load(),
+        SourceCachePolicy::Persistent | SourceCachePolicy::PersistentDeferred => {
+            message_cache::SourceMessageCache::load()
+        }
         SourceCachePolicy::InMemory => message_cache::SourceMessageCache::default(),
     };
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
@@ -3799,15 +3882,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         codex_archive_failures,
     );
 
-    if cache_policy == SourceCachePolicy::Persistent {
-        source_cache.save_if_dirty();
-    }
+    let pending_save = apply_source_cache_policy(cache_policy, source_cache, persist_source_cache);
 
     // retain/normalize/rebucket used to run here as three whole-set passes.
     // They now run per message inside `flush_lane`, which is also where the
-    // messages are released.
+    // messages are released. The deferred policy deliberately hands these
+    // complete messages to its caller before the owned cache write can begin.
     flush_lane(&mut all_messages, &flush_context, sink);
-    desktop_coverage
+    StreamingParseOutcome {
+        coverage: desktop_coverage,
+        pending_save,
+    }
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
@@ -5610,6 +5695,23 @@ fn parse_local_unified_messages_resolved(
     );
     Ok(filter_unified_messages(messages, &options))
 }
+
+fn parse_local_unified_messages_deferred_resolved(
+    options: LocalParseOptions,
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+) -> Result<(Vec<UnifiedMessage>, PendingSourceCacheSave), String> {
+    let (messages, pending_save) = parse_all_messages_deferred(
+        home_dir,
+        clients,
+        pricing,
+        options.use_env_roots,
+        &options.scanner_settings,
+    );
+    Ok((filter_unified_messages(messages, &options), pending_save))
+}
+
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
     let start = Instant::now();
 
@@ -6966,6 +7068,20 @@ pub async fn parse_local_unified_messages(
     )
 }
 
+/// Parse and filter local messages while deferring only the durable source-cache write.
+///
+/// This is an internal integration surface for the TUI. The returned messages
+/// are complete and ready to aggregate. The caller must invoke
+/// [`PendingSourceCacheSave::persist`] synchronously on its owned loader thread.
+#[doc(hidden)]
+pub async fn parse_local_unified_messages_deferred(
+    options: LocalParseOptions,
+) -> Result<(Vec<UnifiedMessage>, PendingSourceCacheSave), String> {
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    let pricing = load_pricing_for_local_parse().await;
+    parse_local_unified_messages_deferred_resolved(options, &home_dir, &clients, pricing.as_deref())
+}
+
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
         client: msg.client.clone(),
@@ -7132,7 +7248,8 @@ mod tests {
         merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
         normalize_model_for_grouping, opencode_json_superseded_by_sqlite,
         parse_all_messages_with_pricing_with_cache_policy,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
+        parse_local_unified_messages, parse_local_unified_messages_deferred, parsed_to_unified,
         paths, prepare_submission_pricing, pricing, retain_for_requested_clients, scanner,
         select_local_parse_pricing, sessions, unified_to_parsed, validate_priced_messages,
         ClientId, GraphPricingRequirement, GraphSink, GroupBy, LocalParseOptions, MessageSink,
@@ -7149,6 +7266,179 @@ mod tests {
     use serial_test::serial;
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    fn blocking_source_cache_persist_observer() -> (
+        message_cache::TestSourceCachePersistObserver,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let observer = std::sync::Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        });
+        (observer, entered_rx, release_tx)
+    }
+
+    fn write_deferred_claude_fixture(home: &Path) -> PathBuf {
+        let dir = home.join(".claude/projects/deferred-boundary");
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("conversation.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_in","message":{"id":"msg_in","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2024-12-02T10:00:00.000Z","requestId":"req_out","message":{"id":"msg_out","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":60}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        transcript
+    }
+
+    fn deferred_claude_options(home: &Path) -> LocalParseOptions {
+        LocalParseOptions {
+            home_dir: Some(home.to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["claude".to_string()]),
+            since: Some("2024-12-01".to_string()),
+            until: Some("2024-12-01".to_string()),
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                bucket_timezone: Some("UTC".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn claude_source_shards() -> Vec<PathBuf> {
+        let dir = paths::get_cache_dir()
+            .join("source-message-cache-v2")
+            .join(ClientId::Claude.as_str());
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("bin"))
+            .collect()
+    }
+
+    fn assert_filtered_deferred_fixture(messages: &[UnifiedMessage]) {
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("msg_in:req_in"));
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+    }
+
+    #[test]
+    #[serial]
+    fn deferred_local_parse_returns_filtered_data_before_source_cache_persistence() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut cache_env = redirect_cache_home(cache_home.path());
+        cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+        let transcript = write_deferred_claude_fixture(source_home.path());
+        let options = deferred_claude_options(source_home.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (observer, persist_entered_rx, release_persist_tx) =
+            blocking_source_cache_persist_observer();
+
+        let (messages, pending_save) = runtime
+            .block_on(parse_local_unified_messages_deferred(options))
+            .unwrap();
+        assert_filtered_deferred_fixture(&messages);
+        assert!(claude_source_shards().is_empty());
+
+        let (persist_returned_tx, persist_returned_rx) = std::sync::mpsc::channel();
+        let persist_thread = std::thread::spawn(move || {
+            let _observer = message_cache::install_test_source_cache_persist_observer(observer);
+            pending_save.persist();
+            persist_returned_tx.send(()).unwrap();
+        });
+
+        persist_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(
+            persist_returned_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(claude_source_shards().is_empty());
+        release_persist_tx.send(()).unwrap();
+        persist_returned_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        persist_thread.join().unwrap();
+
+        assert_eq!(claude_source_shards().len(), 1);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(
+                message_cache::CacheIdentity::for_client(ClientId::Claude),
+                &transcript,
+            )
+            .is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn synchronous_local_parse_does_not_return_before_source_cache_persistence() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut cache_env = redirect_cache_home(cache_home.path());
+        cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+        let transcript = write_deferred_claude_fixture(source_home.path());
+        let options = deferred_claude_options(source_home.path());
+        let (observer, persist_entered_rx, release_persist_tx) =
+            blocking_source_cache_persist_observer();
+        let (parse_returned_tx, parse_returned_rx) = std::sync::mpsc::channel();
+
+        let parse_thread = std::thread::spawn(move || {
+            let _observer = message_cache::install_test_source_cache_persist_observer(observer);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(parse_local_unified_messages(options));
+            parse_returned_tx.send(result).unwrap();
+        });
+
+        persist_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(
+            parse_returned_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(claude_source_shards().is_empty());
+        release_persist_tx.send(()).unwrap();
+        let messages = parse_returned_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        parse_thread.join().unwrap();
+
+        assert_filtered_deferred_fixture(&messages);
+        assert_eq!(claude_source_shards().len(), 1);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(
+                message_cache::CacheIdentity::for_client(ClientId::Claude),
+                &transcript,
+            )
+            .is_some());
+    }
 
     #[test]
     fn antigravity_response_ids_deduplicate_across_independent_sessions() {
@@ -7677,7 +7967,11 @@ mod tests {
     #[must_use = "the redirect is undone as soon as the guard drops; bind it to a \
                   named variable that outlives the test body"]
     fn redirect_cache_home(home: &std::path::Path) -> crate::paths::test_env::EnvGuard {
-        let mut env = crate::paths::test_env::EnvGuard::capture(&["HOME", "TOKSCALE_CONFIG_DIR"]);
+        let mut env = crate::paths::test_env::EnvGuard::capture(&[
+            "HOME",
+            "TOKSCALE_CONFIG_DIR",
+            "TOKSCALE_PRICING_CACHE_ONLY",
+        ]);
         point_cache_home(&mut env, home);
         env
     }
@@ -7696,6 +7990,131 @@ mod tests {
             .into_iter()
             .filter(|message| message.contains("unreadable compressed Codex rollout"))
             .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn codex_late_token_count_for_a_counted_record_stays_counted_once_cold_and_warm() {
+        // Turn 2's response is recorded just before UTC midnight. Turn 3
+        // starts before turn 2's token_count is written, which emits the
+        // record on its own; the token_count then arrives late. A warm scan
+        // resumes from the cached parse state at either split point and must
+        // count every response once, on the same day as a cold scan.
+        fn usage(input: i64, cached: i64, output: i64) -> String {
+            format!(
+                r#"{{"input_tokens":{input},"cached_input_tokens":{cached},"output_tokens":{output},"reasoning_output_tokens":0,"total_tokens":{}}}"#,
+                input + output
+            )
+        }
+        let thread = "01a0f000-0000-7000-8000-0000000000b1";
+        let turn = |ts: &str, id: &str| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"{id}\"}}}}\n{{\"timestamp\":\"{ts}\",\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"{id}\",\"model\":\"gpt-5.5\"}}}}\n"
+            )
+        };
+        let record = |ts: &str, id: &str, response: &str, u: (i64, i64, i64)| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"token_usage_record\",\"payload\":{{\"thread_id\":\"{thread}\",\"turn_id\":\"{id}\",\"response_id\":\"{response}\",\"usage\":{}}}}}\n",
+                usage(u.0, u.1, u.2)
+            )
+        };
+        let token_count = |ts: &str, total: (i64, i64, i64), last: (i64, i64, i64)| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{},\"last_token_usage\":{}}}}}}}\n",
+                usage(total.0, total.1, total.2),
+                usage(last.0, last.1, last.2)
+            )
+        };
+        let head = format!(
+            "{{\"timestamp\":\"2026-10-01T23:57:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\",\"originator\":\"codex_vscode\",\"source\":\"vscode\",\"model_provider\":\"openai\"}}}}\n"
+        ) + &turn("2026-10-01T23:58:00Z", "turn-1")
+            + &record("2026-10-01T23:58:05Z", "turn-1", "resp-1", (100, 80, 10))
+            + &token_count("2026-10-01T23:58:05.005Z", (100, 80, 10), (100, 80, 10))
+            + &turn("2026-10-01T23:59:00Z", "turn-2")
+            + &record("2026-10-01T23:59:59.500Z", "turn-2", "resp-2", (500, 200, 40));
+        let next_turn = turn("2026-10-02T00:00:01Z", "turn-3");
+        let tail = token_count("2026-10-02T00:00:01.500Z", (600, 280, 50), (500, 200, 40))
+            + &record("2026-10-02T00:00:05Z", "turn-3", "resp-3", (30, 0, 3))
+            + &token_count("2026-10-02T00:00:05.005Z", (630, 280, 53), (30, 0, 3));
+        let rows = |messages: &[UnifiedMessage]| {
+            let mut rows: Vec<(i64, String)> = messages
+                .iter()
+                .map(|m| {
+                    let day = chrono::DateTime::from_timestamp_millis(m.timestamp)
+                        .unwrap()
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    (m.tokens.total(), day)
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        let expected = vec![
+            (33, "2026-10-02".to_string()),
+            (110, "2026-10-01".to_string()),
+            (540, "2026-10-01".to_string()),
+        ];
+
+        // First scan sees the record still pending, or already emitted and
+        // remembered as settled once turn 3 has started.
+        for (first_part, settled_before_append) in
+            [(head.clone(), false), (head.clone() + &next_turn, true)]
+        {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let sessions = source_home.path().join(".codex/sessions/2026/10/01");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let path = sessions.join(format!("rollout-2026-10-01T23-57-00-{thread}.jsonl"));
+            std::fs::write(&path, &first_part).unwrap();
+            let clients = vec!["codex".to_string()];
+            let home = source_home.path().to_str().unwrap();
+
+            let cold = parse_all_messages_with_pricing(home, &clients, None);
+            assert_eq!(cold.len(), if settled_before_append { 2 } else { 1 });
+            let cached_state = message_cache::SourceMessageCache::load()
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
+                .and_then(|entry| entry.codex_incremental)
+                .expect("the first scan caches the parse state")
+                .state;
+            assert_eq!(
+                cached_state.pending_usage_record.is_some(),
+                !settled_before_append
+            );
+            assert_eq!(
+                cached_state.settled_usage_records.len(),
+                usize::from(settled_before_append)
+            );
+            // v16 keeps v15's fallback-dedup event ordinal beside the records.
+            assert_eq!(cached_state.usage_event_ordinal, 1);
+
+            let rest = if settled_before_append {
+                tail.clone()
+            } else {
+                next_turn.clone() + &tail
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(rest.as_bytes()).unwrap();
+            file.flush().unwrap();
+            drop(file);
+
+            let warm = parse_all_messages_with_pricing(home, &clients, None);
+            assert_eq!(
+                rows(&warm),
+                expected,
+                "warm scan, settled before append: {settled_before_append}"
+            );
+            let keys: HashSet<_> = warm.iter().map(|m| m.dedup_key.clone().unwrap()).collect();
+            assert_eq!(keys.len(), 3);
+            assert_eq!(rows(&sessions::codex::parse_codex_file(&path)), expected);
+        }
     }
 
     #[test]
@@ -7901,7 +8320,7 @@ mod tests {
         let assert_warning = |warning: &str| {
             assert!(warning.contains("skipped 3 unreadable compressed Codex rollout files"));
             assert!(warning.contains("2 decode failures"));
-            assert!(warning.contains("1 exceeded the 256 MiB decoded-size limit"));
+            assert!(warning.contains("1 exceeded the 1024 MiB decoded-size limit"));
             assert!(warning.contains("Recorded token totals may omit these files"));
             assert!(warning.contains("capped.jsonl.zst\" (decoded size limit exceeded"));
             assert!(warning.contains("copy.jsonl.zst\" (decode failed"));

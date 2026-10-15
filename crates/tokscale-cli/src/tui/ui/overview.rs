@@ -8,6 +8,7 @@ use super::widgets::{
 };
 use crate::tui::app::{App, ChartGranularity};
 use crate::tui::i18n::{tr, MessageKey};
+use crate::ui_glyphs::AMBIENT_STABLE_SEPARATOR as SEPARATOR;
 use tokscale_core::GroupBy;
 
 struct ModelRowData {
@@ -176,7 +177,10 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw(format!(" {}", name)));
 
         if i < top_models.len() - 1 {
-            spans.push(Span::styled("  ·", Style::default().fg(muted_color)));
+            spans.push(Span::styled(
+                format!("  {}", SEPARATOR),
+                Style::default().fg(muted_color),
+            ));
         }
     }
 
@@ -381,11 +385,11 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             vec![
                 Span::styled("  In: ", subtle_text_style),
                 Span::styled(format_tokens(model.tokens_input), secondary_text_style),
-                Span::styled(" · Out: ", subtle_text_style),
+                Span::styled(format!(" {} Out: ", SEPARATOR), subtle_text_style),
                 Span::styled(format_tokens(model.tokens_output), secondary_text_style),
-                Span::styled(" · CR: ", subtle_text_style),
+                Span::styled(format!(" {} CR: ", SEPARATOR), subtle_text_style),
                 Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
-                Span::styled(" · CW: ", subtle_text_style),
+                Span::styled(format!(" {} CW: ", SEPARATOR), subtle_text_style),
                 Span::styled(
                     format_tokens(model.tokens_cache_write),
                     secondary_text_style,

@@ -15,6 +15,7 @@
 > | [<img alt="GitHub Follow" src="https://img.shields.io/github/followers/junhoyeo?style=flat-square&logo=github&labelColor=black&color=24292f" width="156px" />](https://github.com/junhoyeo) | Follow [@junhoyeo](https://github.com/junhoyeo) on GitHub for more projects. Hacking on AI, infra, and everything in between. |
 > | :-----| :----- |
 > [<img alt="Discord link" src="https://img.shields.io/discord/1480206352755458110?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square" width="156px" />](https://discord.gg/h6DUGWdBbm) | Come hang out in our [Discord](https://discord.gg/h6DUGWdBbm) — and surround yourself with the world's top-tier vibers. |
+> [<img alt="X follow" src="https://img.shields.io/badge/follow-%40Tokscale-000000?style=flat-square&logo=x&logoColor=white&labelColor=black" width="156px" />](https://x.com/Tokscale) | Follow [@Tokscale](https://x.com/Tokscale) on X for release notes and updates. |
 > [<img alt="Sponsor Tokscale" src="https://img.shields.io/badge/sponsor-Tokscale-EA4AAA?style=flat-square&logo=githubsponsors&logoColor=white&labelColor=black" width="156px" />](https://github.com/sponsors/junhoyeo) | Support Tokscale's continued development through [GitHub Sponsors](https://github.com/sponsors/junhoyeo). |
 
 <div align="center">
@@ -43,6 +44,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -65,7 +70,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` and `$HERMES_HOME/profiles/*/state.db` (fallback: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (fallback: `~/.gemini/tmp/*/chats/*.json`) |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API usage cached at `~/.config/tokscale/cursor-cache/usage*.json` (legacy `usage*.csv` caches are still read; desktop auto-login or cookie paste; not `~/.cursor`) |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | shares `~/.config/manicode/` with Codebuff (same runtime); token usage is estimated from the transcript (no local usage; override via `FREEBUFF_DATA_DIR`) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -1537,7 +1542,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI usage events from `session-store.db` (no OTEL required); also auto-ingests `COPILOT_OTEL_FILE_EXPORTER_PATH` and Desktop `data.db` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | Configurable via `HERMES_HOME` env var ([source](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | Configurable via `GEMINI_CLI_HOME` env var |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | Uses `xdg-basedir` like OpenCode |
+| Amp | `~/.config/tokscale/amp-cache/` (+ legacy `~/.local/share/amp/`) | `%APPDATA%\tokscale\amp-cache\` (+ legacy `%USERPROFILE%\.local\share\amp\`) | Synced via `tokscale amp sync`; legacy path uses `xdg-basedir` like OpenCode |
 | Cursor | API sync | API sync | Data fetched from Cursor API and cached as `usage*.json` (legacy `usage*.csv` caches are still read); desktop auto-login reads auth only from `state.vscdb`; local `~/.cursor` session data is not parsed |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | Same path on all platforms |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | Same path on all platforms |

@@ -1537,6 +1537,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3188,6 +3194,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -3226,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "tokscale-cli"
-version = "4.18.0"
+version = "4.19.1"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -3272,12 +3279,13 @@ dependencies = [
  "usvg",
  "uuid",
  "windows-sys 0.61.2",
+ "yaml_serde",
  "zstd",
 ]
 
 [[package]]
 name = "tokscale-core"
-version = "4.18.0"
+version = "4.19.1"
 dependencies = [
  "bincode",
  "chrono",
@@ -3302,6 +3310,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wait-timeout",
  "walkdir",
  "zstd",
 ]
@@ -4113,6 +4122,19 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
+]
 
 [[package]]
 name = "yoke"

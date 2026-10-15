@@ -198,6 +198,12 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         }
     }
 
+    if clients.iter().any(|src| src == ClientId::Amp.as_str()) {
+        if let Some(warning) = crate::amp::auto_sync() {
+            println!("{}", warning.yellow());
+        }
+    }
+
     let include_cursor_in_graph = if include_cursor {
         let synced = cursor_sync_result
             .as_ref()

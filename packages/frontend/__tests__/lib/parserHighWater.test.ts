@@ -3,6 +3,7 @@ import {
   addClientBreakdownIncrement,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
+  scanScopeCoversFullHistory,
   SUPPORTED_VERSIONED_PARSERS,
   type ParserClientHighWaterState,
   type ParserHighWaterPlan,
@@ -1525,6 +1526,106 @@ describe("droid parser high-water", () => {
 
     expect(plan.mode).toBe("freeze");
     expect(plan.increments).toEqual({});
+  });
+});
+
+describe("per-client full-history scope", () => {
+  it("freezes only clients omitted from a new completeness declaration", () => {
+    const scope = {
+      // Legacy receivers fail closed for an incomplete client.
+      fullHistory: false,
+      fullHistoryClients: ["copilot", "droid"],
+    };
+    expect(scanScopeCoversFullHistory(scope, ["amp"])).toBe(false);
+    expect(scanScopeCoversFullHistory(scope, ["copilot"])).toBe(true);
+    expect(scanScopeCoversFullHistory(scope, ["copilot", "droid"])).toBe(true);
+  });
+
+  it("keeps the legacy global full-history meaning when the field is absent", () => {
+    expect(scanScopeCoversFullHistory({ fullHistory: true }, ["amp"])).toBe(true);
+    expect(scanScopeCoversFullHistory({ fullHistory: false }, ["amp"])).toBe(false);
+  });
+});
+
+describe("amp parser high-water", () => {
+  function contribution(date: string, tokens: number) {
+    return {
+      date,
+      clients: [{
+        client: "amp",
+        modelId: "claude-sonnet-4-0",
+        tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        cost: 0,
+        messages: 1,
+      }],
+    };
+  }
+
+  it("replaces a full re-attributed snapshot without changing lifetime tokens", () => {
+    // v1 dated this message on the thread-created day; v2 uses its server
+    // usage timestamp. A normal per-day guard would retain 100 on Apr 4 and
+    // add another 100 on Apr 9.
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const newDays = foldParserClientSnapshot([contribution("2026-04-09", 100)], "amp");
+    const plan = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.amp,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: newDays,
+    });
+
+    expect(SUPPORTED_VERSIONED_PARSERS.amp).toBe(2);
+    expect(plan.mode).toBe("replace");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays?.["2026-04-04"]).toBeUndefined();
+    expect(plan.layoutDays?.["2026-04-09"]?.tokens).toBe(100);
+    expect(plan.nextState?.aggregate.tokens).toBe(100);
+  });
+
+  it("freezes an aggregate-covering v2 snapshot when Amp cache coverage is incomplete", () => {
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const partialDays = foldParserClientSnapshot([contribution("2026-04-09", 150)], "amp");
+    const plan = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.amp,
+      fullHistory: false,
+      existingLegacyDays: oldDays,
+      incomingDays: partialDays,
+    });
+
+    expect(plan.mode).toBe("freeze");
+    expect(plan.increments).toEqual({});
+    expect(plan.layoutDays).toBeUndefined();
+  });
+
+  it("accepts v1 before transition and freezes it after a v2 baseline", () => {
+    const oldDays = foldParserClientSnapshot([contribution("2026-04-04", 100)], "amp");
+    const v1 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: oldDays,
+    });
+    expect(v1.mode).toBe("status-quo");
+
+    const v2 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 2,
+      fullHistory: true,
+      existingLegacyDays: oldDays,
+      incomingDays: foldParserClientSnapshot([contribution("2026-04-09", 100)], "amp"),
+    });
+    const staleV1 = planParserHighWaterSubmission({
+      client: "amp",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: {},
+      incomingDays: oldDays,
+      state: v2.nextState,
+    });
+    expect(staleV1.mode).toBe("freeze");
   });
 });
 

@@ -16,6 +16,7 @@
 > | [<img alt="GitHub Follow" src="https://img.shields.io/github/followers/junhoyeo?style=flat-square&logo=github&labelColor=black&color=24292f" width="156px" />](https://github.com/junhoyeo) | 在 GitHub 上关注 [@junhoyeo](https://github.com/junhoyeo) 获取更多项目。涉及 AI、基础设施等各个领域。 |
 > | :-----| :----- |
 > [<img alt="Discord link" src="https://img.shields.io/discord/1480206352755458110?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square" width="156px" />](https://discord.gg/h6DUGWdBbm) | 加入我们的 [Discord](https://discord.gg/h6DUGWdBbm) — 与全球顶尖的开发者一起交流。 |
+> [<img alt="X follow" src="https://img.shields.io/badge/follow-%40Tokscale-000000?style=flat-square&logo=x&logoColor=white&labelColor=black" width="156px" />](https://x.com/Tokscale) | 在 X 上关注 [@Tokscale](https://x.com/Tokscale)，获取版本发布和最新动态。 |
 > [<img alt="Sponsor Tokscale" src="https://img.shields.io/badge/sponsor-Tokscale-EA4AAA?style=flat-square&logo=githubsponsors&logoColor=white&labelColor=black" width="156px" />](https://github.com/sponsors/junhoyeo) | 通过 [GitHub Sponsors](https://github.com/sponsors/junhoyeo) 支持 Tokscale 的持续开发。 |
 
 <div align="center">
@@ -44,6 +45,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -66,7 +71,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 和 `$HERMES_HOME/profiles/*/state.db`（回退：`~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（回退：`~/.gemini/tmp/*/chats/*.json`） |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 用量缓存于 `~/.config/tokscale/cursor-cache/usage*.json`（仍会读取旧版 `usage*.csv` 缓存；桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/`（+ `manicode-dev`、`manicode-staging`；可通过 `CODEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | 与 Codebuff 共用 `~/.config/manicode/`（同一运行时）；令牌消耗从转录估算（无本地用量；可通过 `FREEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -1495,7 +1500,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 用量事件来自 `session-store.db`（无需 OTEL）；同时自动采集 `COPILOT_OTEL_FILE_EXPORTER_PATH` 和桌面端 `data.db` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | 可通过 `HERMES_HOME` 环境变量配置（[源码](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | 可通过 `GEMINI_CLI_HOME` 环境变量配置 |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | 与 OpenCode 一样使用 `xdg-basedir` |
+| Amp | `~/.config/tokscale/amp-cache/`（+ 旧版 `~/.local/share/amp/`） | `%APPDATA%\tokscale\amp-cache\`（+ 旧版 `%USERPROFILE%\.local\share\amp\`） | 通过 `tokscale amp sync` 同步；旧版路径与 OpenCode 一样使用 `xdg-basedir` |
 | Cursor | API 同步 | API 同步 | 通过 API 获取并缓存为 `usage*.json`（仍会读取旧版 `usage*.csv` 缓存）；桌面端自动登录仅读取 `state.vscdb` 认证；不解析本地 `~/.cursor` 会话数据 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 所有平台使用相同路径 |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 所有平台使用相同路径 |
