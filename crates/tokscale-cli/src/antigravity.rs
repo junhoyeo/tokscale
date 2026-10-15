@@ -2610,10 +2610,12 @@ fn https_rpc_request(
         // ~microsecond spawn cost is irrelevant next to a loopback RPC
         // with a 10s timeout, and a worker panic now degrades to `Err`
         // instead of unwinding into whatever thread called us.
+        let deadline = RPC_DEADLINE.with(|cell| *cell.borrow());
         let joined: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>> =
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| {
+                    .spawn(move || {
+                        set_rpc_deadline(deadline);
                         antigravity_https_runtime()
                             .block_on(https_rpc_once(connection, method, body))
                     })
@@ -2647,6 +2649,7 @@ async fn https_rpc_once(
         .header("Connect-Protocol-Version", "1")
         .header("X-Codeium-Csrf-Token", &connection.csrf_token)
         .json(body)
+        .timeout(rpc_timeout(Duration::from_secs(10)))
         .send()
         .await?;
     let status = response.status();
