@@ -51,21 +51,25 @@ fn api_key_from_env() -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-fn read_api_key() -> Result<Option<String>> {
-    if let Some(key) = api_key_from_env() {
-        return Ok(Some(key));
-    }
-    let Some(path) = secrets_path() else {
+fn api_key_from_secrets_path(path: Option<&std::path::Path>) -> Result<Option<String>> {
+    let Some(path) = path else {
         return Ok(None);
     };
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     Ok(serde_json::from_str::<Secrets>(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?
         .api_key)
+}
+
+fn read_api_key() -> Result<Option<String>> {
+    if let Some(key) = api_key_from_env() {
+        return Ok(Some(key));
+    }
+    api_key_from_secrets_path(secrets_path().as_deref())
 }
 
 /// Parse a dollar amount like "$4.50" or "$1,200.00" from text starting at the given prefix.
@@ -469,5 +473,13 @@ Acme Workspace: $5.33 remaining";
         let _ = parse_dollar_after("+$0.50円/hr", "+$");
         // Marker present but followed immediately by a multibyte char.
         let _ = parse_dollar_after("/$é", "/$");
+    }
+
+    #[test]
+    fn malformed_secrets_file_returns_its_parse_error() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "not json").unwrap();
+        let error = api_key_from_secrets_path(Some(temp.path())).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
     }
 }
