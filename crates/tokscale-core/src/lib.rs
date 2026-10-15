@@ -49,6 +49,12 @@ use std::time::Instant;
 static RETENTION_PROVENANCE_REBUILDS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Records every Claude transcript a scan continued from its checkpoint
+/// instead of parsing from byte 0. Paths are unique per test, so a test can
+/// assert on its own transcript while others run alongside it.
+#[cfg(test)]
+static CLAUDE_RESUMED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
 ///
 /// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
@@ -1454,6 +1460,65 @@ fn parse_all_messages_streaming<S: MessageSink>(
             Option<&message_cache::SourceFingerprint>,
         ) -> Option<message_cache::FingerprintStatus>,
     {
+        load_or_parse_resumable_source(
+            identity,
+            path,
+            source_cache,
+            pricing,
+            history,
+            fingerprint_from_path,
+            |path, fingerprint| {
+                let (messages, cacheable) = parse(path, fingerprint);
+                SourceParse {
+                    messages,
+                    cacheable,
+                    claude_checkpoint: None,
+                }
+            },
+            None,
+        )
+    }
+
+    /// One parse of a source file, and the Claude checkpoint it ended in, if
+    /// any (see [`sessions::claudecode::ClaudeCheckpoint`]).
+    struct SourceParse {
+        messages: Vec<UnifiedMessage>,
+        cacheable: bool,
+        claude_checkpoint: Option<sessions::claudecode::ClaudeCheckpoint>,
+    }
+
+    /// Continues a changed file's parse from the entry cached for it, or
+    /// returns `None` to have the whole file parsed instead.
+    type ResumeSource<'a> = &'a dyn Fn(
+        &Path,
+        &message_cache::CachedSourceEntry,
+        &message_cache::SourceFingerprint,
+    ) -> Option<SourceParse>;
+
+    /// The loader behind every `load_or_parse_source*` variant.
+    ///
+    /// `resume` is only tried when the fingerprint changed under a cached
+    /// entry, and before the full parse. Whatever it returns goes through the
+    /// same retention merge and entry rebuild as a full parse, so it has to
+    /// produce exactly the messages a full parse of the file would.
+    #[allow(clippy::too_many_arguments)]
+    fn load_or_parse_resumable_source<F, FingerprintFn>(
+        identity: message_cache::CacheIdentity,
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        history: HistoryRetention,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+        resume: Option<ResumeSource<'_>>,
+    ) -> CachedParseOutcome
+    where
+        F: Fn(&Path, Option<&message_cache::SourceFingerprint>) -> SourceParse,
+        FingerprintFn: Fn(
+            &Path,
+            Option<&message_cache::SourceFingerprint>,
+        ) -> Option<message_cache::FingerprintStatus>,
+    {
         let mut cached = source_cache.take(identity, path);
         // An entry written before retention provenance existed cannot say
         // which of its rows the live transcript already dropped, so serving it
@@ -1474,7 +1539,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let Some(fingerprint_status) =
             fingerprint_from_path(path, cached.as_ref().map(|entry| &entry.fingerprint))
         else {
-            let (mut messages, _) = parse(path, None);
+            let mut messages = parse(path, None).messages;
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
@@ -1521,7 +1586,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
             cached = Some(entry);
         }
 
-        let (mut messages, cacheable) = parse(path, Some(&fingerprint));
+        // An entry that needs its retention provenance rebuilt has to take the
+        // full parse, which is what re-derives it.
+        let resumed = match (resume, cached.as_ref()) {
+            (Some(resume), Some(entry)) if !rebuild_retention_provenance => {
+                resume(path, entry, &fingerprint)
+            }
+            _ => None,
+        };
+        let SourceParse {
+            mut messages,
+            cacheable,
+            claude_checkpoint,
+        } = resumed.unwrap_or_else(|| parse(path, Some(&fingerprint)));
         // Reaching here means the file changed under a cache entry we still
         // hold. For a source that rewrites transcripts in place that is not
         // only "new content appeared" — it can also be "already-published
@@ -1567,6 +1644,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 }
             })
         };
+        // The checkpoint describes the live messages, which come first in the
+        // entry; retained history follows them.
+        let cache_entry = cache_entry.map(|entry| entry.with_claude_checkpoint(claude_checkpoint));
         apply_pricing_to_messages(&mut messages, pricing);
 
         CachedParseOutcome {
@@ -1614,6 +1694,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// count, and neither do some keys inside an otherwise-qualifying lane —
     /// hence `key_is_globally_stable` rather than a blanket per-client
     /// promise.
+    #[allow(clippy::too_many_arguments)]
     fn load_or_parse_source_with_fingerprint_retaining_history<F, FingerprintFn>(
         identity: message_cache::CacheIdentity,
         path: &Path,
@@ -1622,15 +1703,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
         key_is_globally_stable: fn(&str) -> bool,
         fingerprint_from_path: FingerprintFn,
         parse: F,
+        resume: Option<ResumeSource<'_>>,
     ) -> CachedParseOutcome
     where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
+        F: Fn(&Path) -> SourceParse,
         FingerprintFn: Fn(
             &Path,
             Option<&message_cache::SourceFingerprint>,
         ) -> Option<message_cache::FingerprintStatus>,
     {
-        load_or_parse_source_with_fingerprint_and_policy(
+        load_or_parse_resumable_source(
             identity,
             path,
             source_cache,
@@ -1639,8 +1721,41 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 key_is_globally_stable,
             },
             fingerprint_from_path,
-            |path, _| (parse(path), true),
+            |path, _| parse(path),
+            resume,
         )
+    }
+
+    /// Continue a Claude Code transcript that only grew since its entry was
+    /// cached. A changed sidecar (the subagent meta file, a parent session, a
+    /// cc-mirror variant) can change messages before the checkpoint, so it
+    /// takes the full parse.
+    fn resume_claude_source(
+        path: &Path,
+        entry: &message_cache::CachedSourceEntry,
+        fingerprint: &message_cache::SourceFingerprint,
+        claude_home: &Path,
+    ) -> Option<SourceParse> {
+        let checkpoint = entry.claude_checkpoint.as_ref()?;
+        if entry.fingerprint.related_files != fingerprint.related_files {
+            return None;
+        }
+        let parsed = sessions::claudecode::resume_claude_file(
+            path,
+            Some(claude_home),
+            checkpoint,
+            &entry.messages,
+        )?;
+        #[cfg(test)]
+        CLAUDE_RESUMED_PATHS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(path.to_path_buf());
+        Some(SourceParse {
+            messages: parsed.messages,
+            cacheable: true,
+            claude_checkpoint: parsed.checkpoint,
+        })
     }
 
     fn load_or_parse_source_with_fingerprint_context<F, FingerprintFn>(
@@ -2440,7 +2555,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         Some(&claude_home),
                     )
                 },
-                |path| sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home)),
+                |path| {
+                    let parsed = sessions::claudecode::parse_claude_file_with_checkpoint(
+                        path,
+                        Some(&claude_home),
+                    );
+                    SourceParse {
+                        messages: parsed.messages,
+                        cacheable: true,
+                        claude_checkpoint: parsed.checkpoint,
+                    }
+                },
+                Some(&|path: &Path,
+                       entry: &message_cache::CachedSourceEntry,
+                       fingerprint: &message_cache::SourceFingerprint| {
+                    resume_claude_source(path, entry, fingerprint, &claude_home)
+                }),
             )
         })
         .collect();
@@ -3584,15 +3714,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         all_messages.extend(kilo_messages);
     }
 
-    let mut hermes_seen: HashSet<String> = HashSet::new();
-    for db_path in scan_result.hermes_db_paths() {
-        let hermes_messages = parse_hermes_sqlite_with_pricing(&db_path, pricing);
-        all_messages.extend(
-            hermes_messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut hermes_seen, message)),
-        );
-    }
+    // Hermes decides its day split at parse time (it allocates row buckets
+    // across days from the agent log), so it needs the pinned zone here — the
+    // post-parse `rebucket_days` pass cannot recover a split this grouping
+    // collapsed.
+    let hermes_bucket_timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
+    let hermes_databases = scan_result
+        .hermes_db_paths()
+        .into_iter()
+        .map(|db_path| parse_hermes_sqlite_with_pricing(&db_path, pricing, &hermes_bucket_timezone))
+        .collect();
+    all_messages.extend(select_best_covered_hermes_groups(hermes_databases));
 
     if let Some(db_path) = &scan_result.goose_db {
         let goose_messages: Vec<UnifiedMessage> = sessions::goose::parse_goose_sqlite(db_path)
@@ -5621,11 +5753,126 @@ fn merge_claude_cross_file_duplicate(
     apply_pricing_if_available(existing, pricing);
 }
 
+fn hermes_candidate_totals(messages: &[UnifiedMessage]) -> ([i128; 6], f64) {
+    let mut tokens = [0_i128; 6];
+    let mut cost = 0.0;
+    for message in messages {
+        tokens[0] += message.tokens.input as i128;
+        tokens[1] += message.tokens.output as i128;
+        tokens[2] += message.tokens.cache_read as i128;
+        tokens[3] += message.tokens.cache_write as i128;
+        tokens[4] += message.tokens.cache_write_1h as i128;
+        tokens[5] += message.tokens.reasoning as i128;
+        cost += message.cost;
+    }
+    (tokens, cost)
+}
+
+fn hermes_candidates_have_same_usage(a: &[UnifiedMessage], b: &[UnifiedMessage]) -> bool {
+    let (a_tokens, a_cost) = hermes_candidate_totals(a);
+    let (b_tokens, b_cost) = hermes_candidate_totals(b);
+    let cost_scale = a_cost.abs().max(b_cost.abs()).max(1.0);
+    a_tokens == b_tokens && (a_cost - b_cost).abs() <= 1e-9 * cost_scale
+}
+
+/// Select one copy of each Hermes (session, model, provider) group when the
+/// same database is discovered through default and extra roots. A log-split
+/// copy beats a start-day fallback only when their authoritative token and cost
+/// totals agree; otherwise the first database wins rather than replacing a
+/// complete row with a stale partial copy.
+///
+/// `message_count` belongs to the session rather than any model group. Group-
+/// by-group selection can mix copies from different databases whose primary
+/// model differs, so normalize the first database's count onto exactly one of
+/// the selected messages after choosing every group.
+fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec<UnifiedMessage> {
+    let mut group_order: Vec<(String, String, String)> = Vec::new();
+    let mut group_candidates: HashMap<(String, String, String), Vec<Vec<UnifiedMessage>>> =
+        HashMap::new();
+    let mut session_message_counts: HashMap<String, i32> = HashMap::new();
+
+    for messages in databases {
+        let mut database_session_counts: HashMap<String, i32> = HashMap::new();
+        for message in &messages {
+            database_session_counts
+                .entry(message.session_id.clone())
+                .and_modify(|count| *count = (*count).max(message.message_count))
+                .or_insert(message.message_count);
+        }
+        for (session_id, count) in database_session_counts {
+            session_message_counts.entry(session_id).or_insert(count);
+        }
+
+        let mut database_groups: HashMap<(String, String, String), Vec<UnifiedMessage>> =
+            HashMap::new();
+        let mut database_group_order: Vec<(String, String, String)> = Vec::new();
+        for message in messages {
+            let group = (
+                message.session_id.clone(),
+                message.model_id.clone(),
+                message.provider_id.clone(),
+            );
+            if !database_groups.contains_key(&group) {
+                database_group_order.push(group.clone());
+            }
+            database_groups.entry(group).or_default().push(message);
+        }
+        for group in database_group_order {
+            let group_messages = database_groups.remove(&group).unwrap_or_default();
+            if !group_candidates.contains_key(&group) {
+                group_order.push(group.clone());
+            }
+            group_candidates
+                .entry(group)
+                .or_default()
+                .push(group_messages);
+        }
+    }
+
+    let mut selected = Vec::new();
+    for group in group_order {
+        let candidates = group_candidates.remove(&group).unwrap_or_default();
+        let best = candidates.first().map_or(0, |baseline| {
+            if baseline.iter().any(sessions::hermes::message_is_day_split) {
+                0
+            } else {
+                candidates
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find(|(_, messages)| {
+                        messages.iter().any(sessions::hermes::message_is_day_split)
+                            && hermes_candidates_have_same_usage(baseline, messages)
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap_or(0)
+            }
+        });
+        if let Some(messages) = candidates.into_iter().nth(best) {
+            selected.extend(messages);
+        }
+    }
+
+    let mut counted_sessions = HashSet::new();
+    for message in &mut selected {
+        message.message_count = if counted_sessions.insert(message.session_id.clone()) {
+            session_message_counts
+                .get(&message.session_id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+    }
+    selected
+}
+
 fn parse_hermes_sqlite_with_pricing(
     db_path: &Path,
     pricing: Option<&pricing::PricingService>,
+    bucket_timezone: &bucket_tz::BucketTimezone,
 ) -> Vec<UnifiedMessage> {
-    sessions::hermes::parse_hermes_sqlite(db_path)
+    sessions::hermes::parse_hermes_sqlite_in(db_path, bucket_timezone)
         .into_iter()
         .map(|mut msg| {
             if msg.cost <= 0.0 {
@@ -6699,12 +6946,17 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     let hermes_db_paths = scan_result.hermes_db_paths();
     if !hermes_db_paths.is_empty() {
-        let mut hermes_seen: HashSet<String> = HashSet::new();
-        let hermes_msgs: Vec<ParsedMessage> = hermes_db_paths
+        let hermes_bucket_timezone =
+            bucket_tz::BucketTimezone::from_scanner_settings(&options.scanner_settings);
+        let hermes_databases = hermes_db_paths
             .iter()
-            .flat_map(|db_path| sessions::hermes::parse_hermes_sqlite(db_path))
-            .filter(|msg| should_keep_deduped_message(&mut hermes_seen, msg))
-            .map(|msg| unified_to_parsed(&msg))
+            .map(|db_path| {
+                sessions::hermes::parse_hermes_sqlite_in(db_path, &hermes_bucket_timezone)
+            })
+            .collect();
+        let hermes_msgs: Vec<ParsedMessage> = select_best_covered_hermes_groups(hermes_databases)
+            .iter()
+            .map(unified_to_parsed)
             .collect();
         let count = summed_parsed_message_count(&hermes_msgs);
         counts.set(ClientId::Hermes, count);
@@ -7251,13 +7503,13 @@ mod tests {
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
         parse_local_unified_messages, parse_local_unified_messages_deferred, parsed_to_unified,
         paths, prepare_submission_pricing, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, sessions, unified_to_parsed, validate_priced_messages,
-        ClientId, GraphPricingRequirement, GraphSink, GroupBy, LocalParseOptions, MessageSink,
-        MonthlyReportV2, MonthlyUsage, MonthlyUsageV2, ReportOptions, SourceCachePolicy,
-        TokenBreakdown, UnifiedMessage, UnpricedSubmissionUsage, AMBIGUOUS_MODEL_PRICING_REASON,
-        GRAPH_SINK_BATCH, INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
-        ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL, UNVERIFIED_MODEL_IDENTITY_REASON,
-        UNVERIFIED_PROVIDER_IDENTITY_REASON,
+        select_best_covered_hermes_groups, select_local_parse_pricing, sessions, unified_to_parsed,
+        validate_priced_messages, ClientId, GraphPricingRequirement, GraphSink, GroupBy,
+        LocalParseOptions, MessageSink, MonthlyReportV2, MonthlyUsage, MonthlyUsageV2,
+        ReportOptions, SourceCachePolicy, TokenBreakdown, UnifiedMessage, UnpricedSubmissionUsage,
+        AMBIGUOUS_MODEL_PRICING_REASON, GRAPH_SINK_BATCH, INCOMPLETE_MODEL_PRICING_REASON,
+        MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
+        UNVERIFIED_MODEL_IDENTITY_REASON, UNVERIFIED_PROVIDER_IDENTITY_REASON,
     };
     // Kept as its own statement rather than folded into the list above: that list
     // is edited by nearly every PR that touches this file, and sharing it made
@@ -11244,6 +11496,206 @@ mod tests {
                 .as_deref()
                 .is_some_and(|k| k.contains(":tool_result:"))),
             "the phantom tool_result row must not survive the rebuild"
+        );
+    }
+
+    /// A Claude Code transcript that only grew since the last scan continues
+    /// from its checkpoint, also after the checkpoint went through a shard on
+    /// disk, and the result equals a cold scan of the same bytes. One that was
+    /// rewritten before it grew takes the full parse.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_grown_transcript_resumes_and_matches_a_cold_scan() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let cold_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let path = claude_dir.join("session.jsonl");
+        let turn = |n: u32, output: u32| {
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"type":"user","timestamp":"2026-10-01T10:{n:02}:00.000Z","message":{{"role":"user","content":"turn {n}"}}}}"#
+                ),
+                format_args!(
+                    r#"{{"type":"assistant","timestamp":"2026-10-01T10:{n:02}:05.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":{output},"cache_read_input_tokens":100}}}}}}"#
+                ),
+            )
+        };
+        // The streamed completion of a response whose first line is already
+        // before the checkpoint.
+        let completion = |n: u32, output: u32| {
+            format!(
+                "{}\n",
+                format_args!(
+                    r#"{{"type":"assistant","timestamp":"2026-10-01T10:{n:02}:09.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":{output},"cache_read_input_tokens":100}}}}}}"#
+                ),
+            )
+        };
+        let append = |text: &str| {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        };
+        let scan = || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            messages
+                .into_iter()
+                .map(|message| {
+                    (
+                        message.dedup_key,
+                        message.timestamp,
+                        message.duration_ms,
+                        message.is_turn_start,
+                        message.tokens,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let resumes = || {
+            crate::CLAUDE_RESUMED_PATHS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|resumed| resumed.ends_with("demo/session.jsonl"))
+                .filter(|resumed| resumed.starts_with(source_home.path()))
+                .count()
+        };
+        let cold_scans = std::cell::Cell::new(0);
+        let cold_scan = |env: &mut crate::paths::test_env::EnvGuard| {
+            // A fresh cache home each time, so nothing is warm.
+            cold_scans.set(cold_scans.get() + 1);
+            let cold_dir = cold_cache_home.path().join(cold_scans.get().to_string());
+            point_cache_home(env, &cold_dir);
+            let cold = scan();
+            point_cache_home(env, cache_home.path());
+            cold
+        };
+
+        std::fs::write(&path, format!("{}{}", turn(1, 5), turn(2, 1))).unwrap();
+        assert_eq!(scan().len(), 2, "seed scan");
+        assert_eq!(resumes(), 0);
+
+        append(&format!("{}{}", completion(2, 50), turn(3, 7)));
+        let warm = scan();
+        assert_eq!(
+            resumes(),
+            1,
+            "a grown transcript resumes from its checkpoint"
+        );
+        assert_eq!(
+            warm,
+            cold_scan(&mut env),
+            "the resumed scan equals a cold one"
+        );
+        assert_eq!(
+            warm.len(),
+            3,
+            "the streamed completion merges into its turn"
+        );
+
+        // Every scan above wrote its entry back, so this checkpoint was read
+        // from a shard on disk.
+        append(&format!("{}{}", turn(4, 9), completion(4, 90)));
+        let warm = scan();
+        assert_eq!(resumes(), 2, "the checkpoint survives the shard round trip");
+        assert_eq!(warm, cold_scan(&mut env));
+
+        // Rewritten in place, then grown: the full parse.
+        let rewritten = std::fs::read_to_string(&path).unwrap().replacen(
+            "\"output_tokens\":5,",
+            "\"output_tokens\":6,",
+            1,
+        );
+        std::fs::write(&path, rewritten).unwrap();
+        append(&turn(5, 3));
+        let warm = scan();
+        assert_eq!(resumes(), 2, "a rewritten transcript does not resume");
+        assert_eq!(warm, cold_scan(&mut env));
+    }
+
+    /// A subagent transcript takes its name from its `.meta.json` sidecar, so
+    /// when the sidecar changed as the transcript grew, the messages before
+    /// the checkpoint change too and the transcript is parsed in full.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_grown_transcript_with_a_changed_sidecar_is_parsed_in_full() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let cold_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let path = claude_dir.join("agent-sidecar1.jsonl");
+        let meta = claude_dir.join("agent-sidecar1.meta.json");
+        let line = |n: u32| {
+            format!(
+                "{}\n",
+                format_args!(
+                    r#"{{"type":"assistant","isSidechain":true,"sessionId":"parent-1","agentId":"sidecar1","timestamp":"2026-10-01T10:{n:02}:05.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":5}}}}}}"#
+                ),
+            )
+        };
+        let scan = || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            messages
+                .into_iter()
+                .map(|message| (message.dedup_key, message.agent, message.tokens))
+                .collect::<Vec<_>>()
+        };
+
+        std::fs::write(&meta, r#"{"agentType":"explorer"}"#).unwrap();
+        std::fs::write(&path, line(1)).unwrap();
+        let seed = scan();
+        assert_eq!(seed.len(), 1, "seed scan");
+
+        std::fs::write(&meta, r#"{"agentType":"reviewer"}"#).unwrap();
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(line(2).as_bytes())
+                .unwrap();
+        }
+        let warm = scan();
+
+        point_cache_home(&mut env, cold_cache_home.path());
+        let cold = scan();
+        point_cache_home(&mut env, cache_home.path());
+        assert_eq!(cold.len(), 2);
+        assert_ne!(cold[0].1, seed[0].1, "the rename reaches a cold scan");
+        assert_eq!(warm, cold, "both messages carry the renamed agent");
+        assert!(
+            !crate::CLAUDE_RESUMED_PATHS
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|resumed| resumed.starts_with(source_home.path())),
+            "a changed sidecar takes the full parse"
         );
     }
 
@@ -19825,6 +20277,60 @@ mod tests {
     }
 
     #[test]
+    fn test_hermes_cross_database_selection_credits_session_count_once() {
+        let message = |model: &str, message_count: i32, split: bool| {
+            let mut message = UnifiedMessage::new(
+                "hermes",
+                model,
+                "anthropic",
+                "shared-session",
+                1_775_100_000_000,
+                TokenBreakdown {
+                    input: 10,
+                    ..Default::default()
+                },
+                0.01,
+            );
+            message.message_count = message_count;
+            message.dedup_key = Some(if split {
+                format!("hermes:shared-session:{model}:anthropic:2026-04-01")
+            } else {
+                format!("hermes:shared-session:{model}:anthropic")
+            });
+            message
+        };
+
+        // Per-group selection would otherwise choose two zero-count secondary
+        // groups and lose the session count completely.
+        let lost = select_best_covered_hermes_groups(vec![
+            vec![message("model-a", 7, false), message("model-b", 0, true)],
+            vec![message("model-a", 0, true), message("model-b", 7, false)],
+        ]);
+        assert_eq!(lost.iter().map(|m| m.message_count).sum::<i32>(), 7);
+
+        // The opposite log placement would choose both databases' primary
+        // groups and double the same session count without normalization.
+        let doubled = select_best_covered_hermes_groups(vec![
+            vec![message("model-a", 7, true), message("model-b", 0, false)],
+            vec![message("model-a", 0, false), message("model-b", 7, true)],
+        ]);
+        assert_eq!(doubled.iter().map(|m| m.message_count).sum::<i32>(), 7);
+
+        // A day suffix is not enough to prove that a later database is the
+        // same authoritative row. Do not let a stale ten-token split replace
+        // the first database's complete thousand-token fallback.
+        let mut complete = message("model-a", 7, false);
+        complete.tokens.input = 1_000;
+        complete.cost = 1.0;
+        let stale_split = message("model-a", 7, true);
+        let mismatched = select_best_covered_hermes_groups(vec![vec![complete], vec![stale_split]]);
+        assert_eq!(mismatched.len(), 1);
+        assert_eq!(mismatched[0].tokens.input, 1_000);
+        assert_eq!(mismatched[0].cost, 1.0);
+        assert!(!sessions::hermes::message_is_day_split(&mismatched[0]));
+    }
+
+    #[test]
     fn test_parse_local_clients_dedups_hermes_sessions_across_default_and_extra_dbs() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -19879,6 +20385,176 @@ mod tests {
         assert_eq!(parsed.messages[0].session_id, "shared-hermes-session");
         assert_eq!(parsed.messages[0].input, 100);
         assert_eq!(parsed.messages[0].output, 25);
+    }
+
+    /// One Hermes main-loop `API call #N` log line for the fixed test
+    /// model/provider, matching the `session_model_usage` rows
+    /// `insert_hermes_session` writes.
+    fn hermes_api_call_log_line(session: &str, call: i64, stamp: &str, input: i64) -> String {
+        let output = input / 4;
+        format!(
+            "{stamp} INFO [{session}] agent.conversation_loop: API call #{call}: model=claude-sonnet-4 provider=anthropic in={input} out={output} total={} latency=1.0s cache=0/{input} (0%) id=gen-{call}",
+            input + output
+        )
+    }
+
+    #[test]
+    fn test_parse_local_clients_dedups_hermes_split_group_across_default_and_extra_dbs() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Default database: the session, plus agent logs that split it across
+        // two logged days (60 and 40 fresh input, 15 and 10 output — the row's
+        // totals exactly, so no residual share).
+        let default_dir = temp_dir.path().join(".hermes");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join("state.db");
+        let default_conn = create_hermes_sqlite_db(&default_db);
+        insert_hermes_session(
+            &default_conn,
+            "shared-hermes-session",
+            "claude-sonnet-4",
+            2,
+            100,
+            25,
+            0.07,
+        );
+        drop(default_conn);
+        let logs_dir = default_dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("agent.log"),
+            format!(
+                "{}\n{}\n",
+                hermes_api_call_log_line("shared-hermes-session", 1, "2026-03-05 12:00:00,000", 60),
+                hermes_api_call_log_line("shared-hermes-session", 2, "2026-03-06 12:00:00,000", 40),
+            ),
+        )
+        .unwrap();
+
+        // Profile database: the same session again with no logs beside it, so
+        // it takes the whole-row fallback path.
+        let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        let profile_conn = create_hermes_sqlite_db(&profile_db);
+        insert_hermes_session(
+            &profile_conn,
+            "shared-hermes-session",
+            "claude-sonnet-4",
+            9,
+            999,
+            999,
+            9.99,
+        );
+        drop(profile_conn);
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["hermes".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        // The default database's two split days survive; the profile copy of
+        // the same group is dropped whole instead of landing as an undeduped
+        // third row next to the day-suffixed keys.
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 100);
+        assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 25);
+        assert!(
+            (parsed.messages.iter().map(|m| m.cost).sum::<f64>() - 0.07).abs() < 1e-9,
+            "the split days must carry the row's cost, and only once"
+        );
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.message_count).sum::<i32>(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_parse_local_clients_prefers_split_copy_when_fallback_db_comes_first() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Default database: the session with no logs beside it, so it takes
+        // the whole-row fallback path and is parsed first.
+        let default_dir = temp_dir.path().join(".hermes");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join("state.db");
+        let default_conn = create_hermes_sqlite_db(&default_db);
+        insert_hermes_session(
+            &default_conn,
+            "shared-hermes-session",
+            "claude-sonnet-4",
+            2,
+            100,
+            25,
+            0.07,
+        );
+        drop(default_conn);
+
+        // Profile database: the same session again, this time WITH logs that
+        // split it across two days. It is parsed second, so a first-wins
+        // dedup would keep the fallback and strand the later days on the
+        // start day — the bug this guards.
+        let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        let profile_conn = create_hermes_sqlite_db(&profile_db);
+        insert_hermes_session(
+            &profile_conn,
+            "shared-hermes-session",
+            "claude-sonnet-4",
+            2,
+            100,
+            25,
+            0.07,
+        );
+        drop(profile_conn);
+        let logs_dir = profile_dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("agent.log"),
+            format!(
+                "{}\n{}\n",
+                hermes_api_call_log_line("shared-hermes-session", 1, "2026-03-05 12:00:00,000", 60),
+                hermes_api_call_log_line("shared-hermes-session", 2, "2026-03-06 12:00:00,000", 40),
+            ),
+        )
+        .unwrap();
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["hermes".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        // The better-covered copy wins regardless of database order.
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 100);
+        assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 25);
+        assert!(
+            (parsed.messages.iter().map(|m| m.cost).sum::<f64>() - 0.07).abs() < 1e-9,
+            "the split days must carry the row's cost, and only once"
+        );
     }
 
     #[test]
