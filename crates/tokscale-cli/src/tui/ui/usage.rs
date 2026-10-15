@@ -13,6 +13,9 @@ use crate::tui::ui::widgets::{
     display_width, get_provider_shade, light_ratio_bar_spans, pad_start_to_width, pad_to_width,
     truncate_ellipsis_to_width as truncate_string, AMBIENT_STABLE_BORDER_SET,
 };
+use crate::ui_glyphs::{
+    AMBIENT_STABLE_SEPARATOR as SEPARATOR, AMBIENT_STABLE_SPACED_SEPARATOR as SPACED_SEPARATOR,
+};
 
 struct ButtonSpec {
     label: String,
@@ -136,13 +139,13 @@ fn status_label(app: &App) -> String {
         };
         if app.usage_fetch_diagnostics.is_empty() {
             format!(
-                "{} · {}",
+                "{} {SEPARATOR} {}",
                 providers_str,
                 identity_count_label(lang, inventory.saved, inventory.managed)
             )
         } else {
             format!(
-                "{} · {} · {}",
+                "{} {SEPARATOR} {} {SEPARATOR} {}",
                 providers_str,
                 identity_count_label(lang, inventory.saved, inventory.managed),
                 usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
@@ -191,7 +194,7 @@ fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> Stri
         (saved, 0) => format_count(saved, saved_label),
         (0, managed) => format_count(managed, managed_label),
         (saved, managed) => format!(
-            "{} · {}",
+            "{} {SEPARATOR} {}",
             format_count(saved, saved_label),
             format_count(managed, managed_label)
         ),
@@ -1096,7 +1099,7 @@ fn usage_status_summary_lines(
             let score = output_score(output);
             if score > 0.0 {
                 format!(
-                    "{} · {:.0}{}",
+                    "{} {SEPARATOR} {:.0}{}",
                     account_name(app, output),
                     score,
                     tr(lang, MessageKey::UsagePercentLeft)
@@ -1110,13 +1113,13 @@ fn usage_status_summary_lines(
         .unwrap_or_else(|| tr(lang, MessageKey::UsageNoResetData).to_string());
     let action = overall_action(app, outputs);
     let capacity = format!(
-        "{} · {} · {}{}",
+        "{} {SEPARATOR} {} {SEPARATOR} {}{}",
         capacity_count(lang, ready_count, MessageKey::CapacityReady),
         capacity_count(lang, watch_count, MessageKey::CapacityWatch),
         capacity_count(lang, critical_count, MessageKey::CapacityCritical),
         if unknown_count > 0 {
             format!(
-                " · {}",
+                " {SEPARATOR} {}",
                 capacity_count(lang, unknown_count, MessageKey::CapacityUnknown)
             )
         } else {
@@ -1461,7 +1464,7 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
             let reset = metric
                 .resets_at
                 .as_ref()
-                .map(|reset| format!(" · {}", helpers::format_reset_time(reset)))
+                .map(|reset| format!(" {SEPARATOR} {}", helpers::format_reset_time(reset)))
                 .unwrap_or_default();
             format!(
                 "{} {}{}",
@@ -1546,13 +1549,13 @@ fn provider_summary_line(
     let lang = app.settings.tui_language;
     let summary = if risk > 0 {
         format!(
-            "{count_label} · {} · {}",
+            "{count_label} {SEPARATOR} {} {SEPARATOR} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady),
             capacity_count(lang, risk, MessageKey::UsageAtRisk)
         )
     } else {
         format!(
-            "{count_label} · {}",
+            "{count_label} {SEPARATOR} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady)
         )
     };
@@ -1982,7 +1985,7 @@ fn selected_status_line(lang: TuiLanguage, output: &UsageOutput) -> String {
         .as_deref()
         .unwrap_or_else(|| tr(lang, MessageKey::LabelUnknown));
     format!(
-        "{} · {}",
+        "{} {SEPARATOR} {}",
         plan,
         account_readiness_label(lang, output, readiness_status(output))
     )
@@ -2074,7 +2077,7 @@ fn account_readiness_label(
     if account_state.eq_ignore_ascii_case(readiness) {
         readiness.to_string()
     } else {
-        format!("{account_state} · {readiness}")
+        format!("{account_state} {SEPARATOR} {readiness}")
     }
 }
 
@@ -2090,13 +2093,13 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
     let inventory = usage_inventory(outputs);
     let lang = app.settings.tui_language;
     let summary = format!(
-        "  {}  {} · {} · {}{}",
+        "  {}  {} {SEPARATOR} {} {SEPARATOR} {}{}",
         tr(lang, MessageKey::UsageSnapshot),
         capacity_count(lang, ready, MessageKey::CapacityReady),
         capacity_count(lang, at_risk, MessageKey::UsageAtRisk),
         identity_count_label(lang, inventory.saved, inventory.managed),
         if app.hide_usage_emails {
-            format!(" · {}", tr(lang, MessageKey::UsageEmailsHidden))
+            format!(" {SEPARATOR} {}", tr(lang, MessageKey::UsageEmailsHidden))
         } else {
             String::new()
         }
@@ -2368,7 +2371,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     ];
     if state_width > 0 {
         // Cells, not code points, in both the cut and the alignment.
-        // `활성 · 한도부족` is 9 code points and 15 cells, so a code-point
+        // `활성 ∙ 한도부족` is 9 code points and 15 cells, so a code-point
         // budget of 14 left it untruncated, unellipsised and one cell over its
         // column — and ratatui then clipped it at the panel edge with no
         // marker, the same failure mode as the Korean `메시지` header.
@@ -2387,7 +2390,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     let detail = if row.reset.is_empty() {
         row.limit.clone()
     } else {
-        format!("{} · {}", row.limit, row.reset)
+        format!("{} {SEPARATOR} {}", row.limit, row.reset)
     };
 
     let managed_label = if output.account.is_none() {
@@ -2472,7 +2475,7 @@ fn metric_summary(lang: TuiLanguage, output: &UsageOutput) -> String {
             format!("{label} {:.0}%", metric.remaining_percent)
         })
         .collect::<Vec<_>>();
-    parts.join(" · ")
+    parts.join(SPACED_SEPARATOR)
 }
 
 fn compact_metric_label(label: &str) -> String {
@@ -2790,7 +2793,7 @@ fn output_reset_label(app: &App, output: &UsageOutput) -> Option<String> {
     let metric = display_metric(output)?;
     let reset = metric.resets_at.as_ref()?;
     Some(format!(
-        "{} · {}",
+        "{} {SEPARATOR} {}",
         truncate_string(&account_name(app, output), 22),
         helpers::format_reset_time(reset)
     ))
@@ -2975,7 +2978,7 @@ fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput]) -> String {
         )
     };
     match nearest_credit_expiry_label(lang, &expiries) {
-        Some(nearest) => format!("{count} · {nearest}"),
+        Some(nearest) => format!("{count} {SEPARATOR} {nearest}"),
         None => count,
     }
 }
@@ -3009,7 +3012,7 @@ fn credits_status_line(output: &UsageOutput) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" · "))
+        Some(parts.join(SPACED_SEPARATOR))
     }
 }
 
@@ -3334,6 +3337,7 @@ mod tests {
         let line = metric_detail_line(&app, &metric, 72);
         let text = line_text(&line);
 
+        // The quota track stays with the block-visual exception tracked in #1445.
         assert!(text.contains("█"), "{text}");
         assert!(text.contains("·"), "{text}");
         assert!(!text.contains("░"), "{text}");
@@ -3736,11 +3740,21 @@ mod tests {
 
         let body = render_body(&mut app, 160, 28);
 
-        assert!(body.contains("2 providers · 1 saved · 1 managed"), "{body}");
+        assert!(body.contains("2 providers ∙ 1 saved ∙ 1 managed"), "{body}");
         assert!(
-            body.contains("Snapshot  2 ready · 0 at risk · 1 saved · 1 managed"),
+            body.contains("Snapshot  2 ready ∙ 0 at risk ∙ 1 saved ∙ 1 managed"),
             "{body}"
         );
+        for row in body
+            .lines()
+            .filter(|row| row.contains("providers") || row.contains("Snapshot"))
+        {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(row),
+                unicode_width::UnicodeWidthStr::width_cjk(row),
+                "usage chrome width changed in a CJK locale: {row:?}"
+            );
+        }
     }
 
     #[test]
@@ -3759,10 +3773,10 @@ mod tests {
             output("Copilot", None),
         ];
 
-        assert_eq!(status_label(&app), "2개 공급자 · 1개 저장됨 · 1개 관리됨");
+        assert_eq!(status_label(&app), "2개 공급자 ∙ 1개 저장됨 ∙ 1개 관리됨");
         assert_eq!(
             identity_count_label(TuiLanguage::Ko, 1, 1),
-            "1개 저장됨 · 1개 관리됨"
+            "1개 저장됨 ∙ 1개 관리됨"
         );
         assert_eq!(identity_count_label(TuiLanguage::Ko, 1, 0), "1개 저장됨");
         assert_eq!(identity_count_label(TuiLanguage::Ko, 0, 2), "2개 관리됨");
@@ -5000,7 +5014,7 @@ mod tests {
     }
 
     /// The narrow account row's state column is 14 cells and right-aligned.
-    /// `truncate_ellipsis` budgeted code points, so `활성 · 한도부족` (9 code
+    /// `truncate_ellipsis` budgeted code points, so `활성 ∙ 한도부족` (9 code
     /// points, 15 cells) was neither truncated nor marked, overran its column
     /// and was clipped at the panel edge — the same failure mode as the Korean
     /// `메시지` header, reintroduced in a body row.

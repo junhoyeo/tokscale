@@ -1041,6 +1041,9 @@ mod tests {
             session_id: id.to_string(),
             client: client.to_string(),
             title: None,
+            workspace_key: None,
+            workspace_label: None,
+            agents: Vec::new(),
             models: vec![SessionModel {
                 display_name: "test-model".to_string(),
                 provider: "test".to_string(),

@@ -34,13 +34,13 @@
 //! record of that turn when it has one.
 
 use super::utils::{
-    file_modified_timestamp_ms, for_each_json_line, lossy_lines, open_readonly_sqlite,
+    file_modified_timestamp_ms, for_each_archive_line, for_each_json_line, open_readonly_sqlite,
     parse_json_line, read_file_or_none, sqlite_for_each_row_on, timestamp_secs_to_ms, CamelUsage,
+    MAX_ARCHIVE_BYTES,
 };
 use super::UnifiedMessage;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -184,40 +184,18 @@ pub(crate) fn classify_openclaw_jsonl(path: &Path) -> OpenClawJsonlKind {
 /// checkpoint or recovery can hold an exclusive lock for a moment.
 const OPENCLAW_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(1500);
 
-// Archived transcripts are immutable zstd files. Bound expansion before parsing
-// so a corrupt archive cannot allocate its advertised decoded size.
-const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
-
-fn read_archive(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    let mut decoder = zstd::stream::read::Decoder::new(file)?;
-    decoder.window_log_max(26)?;
-    let mut bytes = Vec::new();
-    decoder.take(max_bytes + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(std::io::Error::other(
-            "decoded transcript exceeds archive limit",
-        ));
-    }
-    Ok(bytes)
-}
-
-fn for_each_transcript_line(path: &Path, sink: &mut dyn FnMut(usize, &str)) {
+fn for_each_transcript_line(path: &Path, sink: &mut dyn FnMut(usize, &str)) -> bool {
     if path.extension().is_none_or(|extension| extension != "zst") {
         for_each_json_line(path, sink);
-        return;
+        return true;
     }
 
-    match read_archive(path, MAX_ARCHIVE_BYTES) {
-        Ok(bytes) => {
-            for (index, line) in lossy_lines(bytes.as_slice()).enumerate() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    sink(index, trimmed);
-                }
-            }
+    match for_each_archive_line(path, MAX_ARCHIVE_BYTES, sink) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "Skipping OpenClaw archive");
+            false
         }
-        Err(error) => tracing::warn!(path = %path.display(), %error, "Skipping OpenClaw archive"),
     }
 }
 
@@ -532,7 +510,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
     let mut state = OpenClawSessionState::default();
     let mut buffer = Vec::with_capacity(4096);
 
-    for_each_transcript_line(session_path, &mut |_index, trimmed| {
+    let ok = for_each_transcript_line(session_path, &mut |_index, trimmed| {
         let Some(entry) = parse_json_line::<OpenClawEntry>(trimmed, &mut buffer) else {
             return;
         };
@@ -540,6 +518,10 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
             messages.push(message);
         }
     });
+
+    if !ok {
+        return Vec::new();
+    }
 
     messages
 }
@@ -1000,9 +982,11 @@ mod tests {
     fn compressed_archive_enforces_decoded_limit() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl.zst");
-        std::fs::write(&path, zstd::encode_all(&b"12345"[..], 0).unwrap()).unwrap();
-        assert_eq!(read_archive(&path, 5).unwrap(), b"12345");
-        assert!(read_archive(&path, 4).is_err());
+        std::fs::write(&path, zstd::encode_all(&b"12345\n"[..], 0).unwrap()).unwrap();
+        let mut lines = Vec::new();
+        assert!(for_each_archive_line(&path, 6, |_idx, line| lines.push(line.to_string())).is_ok());
+        assert_eq!(lines, vec!["12345"]);
+        assert!(for_each_archive_line(&path, 4, |_idx, _line| ()).is_err());
     }
 
     #[test]

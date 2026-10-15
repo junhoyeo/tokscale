@@ -8,6 +8,7 @@ import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug, getGroupMemberCount } from "@/lib/groups/queries";
 import { groupUrl } from "@/lib/seo/urls";
 import GroupDetailClient from "./GroupDetailClient";
+import { TOKSCALE_X_HANDLE } from "@/lib/community";
 
 interface GroupPageProps {
   params: Promise<{ slug: string }>;
@@ -52,6 +53,7 @@ export async function generateMetadata({ params }: GroupPageProps): Promise<Meta
     },
     twitter: {
       card: "summary_large_image",
+      site: TOKSCALE_X_HANDLE,
       title,
       description,
     },

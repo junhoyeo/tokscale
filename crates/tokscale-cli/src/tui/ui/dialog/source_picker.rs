@@ -15,6 +15,7 @@ use ratatui::{
 use crate::tui::client_ui;
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::AMBIENT_STABLE_SELECTED_CHECKBOX;
 use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
@@ -195,7 +196,11 @@ impl DialogContent for ClientPickerDialog {
             let is_selected = flat_idx == self.selected;
             let is_enabled = self.enabled.borrow().contains(&source);
 
-            let checkbox = if is_enabled { "[●]" } else { "[ ]" };
+            let checkbox = if is_enabled {
+                AMBIENT_STABLE_SELECTED_CHECKBOX
+            } else {
+                "[ ]"
+            };
             let key_hint = format!("[{}]", hotkey(source));
             let name = display_name(source);
 

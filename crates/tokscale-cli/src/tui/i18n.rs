@@ -138,6 +138,7 @@ pub enum MessageKey {
 
     // Footer counts & labels
     FooterTokens,
+    FooterUndated,
     CountModels,
     CountAgents,
     CountDay,
@@ -202,6 +203,20 @@ pub enum MessageKey {
     ConfirmYes,
     ConfirmNo,
 
+    // Dialog: Session Details
+    HelpSessionDetails,
+    SessionDetailDialogTitle,
+    SessionDetailDialogHint,
+    SessionDetailId,
+    SessionDetailTitle,
+    SessionDetailDirectory,
+    SessionDetailFirstActive,
+    SessionDetailSubagents,
+    SessionDetailSectionOverview,
+    SessionDetailSectionActivity,
+    SessionDetailSectionTokens,
+    SessionDetailReasoning,
+
     // Status / Messages
     StatusLoadedFromCache,
     StatusRefreshInProgress,
@@ -248,6 +263,7 @@ pub enum MessageKey {
 
     // Footer & Status (additional)
     StatusRefreshingBackground,
+    StatusSavingSourceCache,
     StatusLastUpdated,
     StatusLocal,
     StatusDevice,
@@ -578,6 +594,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::EmptyNoModelTrendData => "No daily data for this model yet. Press Esc to go back.",
 
         MessageKey::FooterTokens => " tokens",
+        MessageKey::FooterUndated => "undated",
         MessageKey::CountModels => "models",
         MessageKey::CountAgents => "agents",
         MessageKey::CountDay => "day",
@@ -593,7 +610,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::SortCost => "Cost",
         MessageKey::SortTokens => "Tokens",
 
-        MessageKey::HelpScroll => "↑↓ scroll • ←→/tab view",
+        MessageKey::HelpScroll => "▴▾ scroll ∙ ◂▸/tab view",
         MessageKey::HelpSort => "[d/t/c:sort]",
         MessageKey::HelpBack => "[esc:back]",
         MessageKey::HelpDetails => "[enter:details]",
@@ -612,13 +629,13 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::DialogNoResults => "No results",
 
         MessageKey::LanguageDialogTitle => " Select Language ",
-        MessageKey::LanguageDialogHint => "↑↓ navigate • Enter select • Esc cancel",
+        MessageKey::LanguageDialogHint => "▴▾ navigate ∙ Enter select ∙ Esc cancel",
 
         MessageKey::ClientDialogTitle => " Clients ",
-        MessageKey::ClientDialogHint => "↑↓ navigate • Enter toggle • Esc close",
+        MessageKey::ClientDialogHint => "▴▾ navigate ∙ Enter toggle ∙ Esc close",
 
         MessageKey::GroupByDialogTitle => " Group By ",
-        MessageKey::GroupByDialogHint => "↑↓ navigate • Enter select • Esc close",
+        MessageKey::GroupByDialogHint => "▴▾ navigate ∙ Enter select ∙ Esc close",
         MessageKey::GroupByModelLabel => "Model",
         MessageKey::GroupByModelDesc => "One row per model (merge clients & providers)",
         MessageKey::GroupByClientModelLabel => "Client + Model",
@@ -636,6 +653,19 @@ const fn tr_en(key: MessageKey) -> &'static str {
 
         MessageKey::ConfirmYes => "Yes",
         MessageKey::ConfirmNo => "No",
+
+        MessageKey::HelpSessionDetails => "[enter/i:details]",
+        MessageKey::SessionDetailDialogTitle => " Session Details ",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i close ∙ ▴▾/j/k scroll",
+        MessageKey::SessionDetailId => "Session ID",
+        MessageKey::SessionDetailTitle => "Title",
+        MessageKey::SessionDetailDirectory => "Directory",
+        MessageKey::SessionDetailFirstActive => "First Active",
+        MessageKey::SessionDetailSubagents => "Subagents",
+        MessageKey::SessionDetailSectionOverview => "Session Overview",
+        MessageKey::SessionDetailSectionActivity => "Activity",
+        MessageKey::SessionDetailSectionTokens => "Tokens & Cost",
+        MessageKey::SessionDetailReasoning => "Reasoning",
 
         MessageKey::StatusLoadedFromCache => "Loaded from cache",
         MessageKey::StatusRefreshInProgress => "Refresh already in progress",
@@ -678,6 +708,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::EmptyNoAgentMixed => "No agent breakdown is available for the current sources.\nOnly some sources record agent metadata.\nPress 's' to change sources or 'r' to refresh.",
 
         MessageKey::StatusRefreshingBackground => "Refreshing cached data in background...",
+        MessageKey::StatusSavingSourceCache => "Saving source cache in background...",
         MessageKey::StatusLastUpdated => "Last updated: ",
         MessageKey::StatusLocal => "local",
         MessageKey::StatusDevice => "1 device",
@@ -985,6 +1016,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "이 모델의 일별 데이터가 아직 없습니다. Esc를 눌러 돌아가기.",
 
         MessageKey::FooterTokens => " 토큰",
+        MessageKey::FooterUndated => "날짜 미상",
         MessageKey::CountModels => "개 모델",
         MessageKey::CountAgents => "개 에이전트",
         MessageKey::CountDay => "일",
@@ -1000,7 +1032,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "비용",
         MessageKey::SortTokens => "토큰",
 
-        MessageKey::HelpScroll => "↑↓ 스크롤 • ←→/tab 보기",
+        MessageKey::HelpScroll => "▴▾ 스크롤 ∙ ◂▸/tab 보기",
         MessageKey::HelpSort => "[d/t/c:정렬]",
         MessageKey::HelpBack => "[esc:뒤로]",
         MessageKey::HelpDetails => "[enter:상세]",
@@ -1019,13 +1051,13 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "결과 없음",
 
         MessageKey::LanguageDialogTitle => " 언어 선택 ",
-        MessageKey::LanguageDialogHint => "↑↓ 탐색 • Enter 선택 • Esc 취소",
+        MessageKey::LanguageDialogHint => "▴▾ 탐색 ∙ Enter 선택 ∙ Esc 취소",
 
         MessageKey::ClientDialogTitle => " 클라이언트 ",
-        MessageKey::ClientDialogHint => "↑↓ 탐색 • Enter 전환 • Esc 닫기",
+        MessageKey::ClientDialogHint => "▴▾ 탐색 ∙ Enter 전환 ∙ Esc 닫기",
 
         MessageKey::GroupByDialogTitle => " 그룹화 기준 ",
-        MessageKey::GroupByDialogHint => "↑↓ 탐색 • Enter 선택 • Esc 닫기",
+        MessageKey::GroupByDialogHint => "▴▾ 탐색 ∙ Enter 선택 ∙ Esc 닫기",
         MessageKey::GroupByModelLabel => "모델",
         MessageKey::GroupByModelDesc => "모델별 1개 행 (클라이언트 및 공급자 병합)",
         MessageKey::GroupByClientModelLabel => "클라이언트 + 모델",
@@ -1041,6 +1073,19 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::ConfirmYes => "예",
         MessageKey::ConfirmNo => "아니오",
+
+        MessageKey::HelpSessionDetails => "[enter/i:상세]",
+        MessageKey::SessionDetailDialogTitle => " 세션 상세 ",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 닫기 ∙ ▴▾/j/k 스크롤",
+        MessageKey::SessionDetailId => "세션 ID",
+        MessageKey::SessionDetailTitle => "제목",
+        MessageKey::SessionDetailDirectory => "디렉터리",
+        MessageKey::SessionDetailFirstActive => "시작 시간",
+        MessageKey::SessionDetailSubagents => "하위 에이전트",
+        MessageKey::SessionDetailSectionOverview => "세션 개요",
+        MessageKey::SessionDetailSectionActivity => "활동",
+        MessageKey::SessionDetailSectionTokens => "토큰 및 비용",
+        MessageKey::SessionDetailReasoning => "추론",
 
         MessageKey::StatusLoadedFromCache => "캐시에서 불러옴",
         MessageKey::StatusRefreshInProgress => "새로고침이 이미 진행 중입니다",
@@ -1083,6 +1128,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "현재 소스에 대한 에이전트 내역을 사용할 수 없습니다.\n일부 소스만 에이전트 메타데이터를 기록합니다.\n's'를 눌러 소스를 변경하거나 'r'을 눌러 새로고침하세요.",
 
         MessageKey::StatusRefreshingBackground => "백그라운드에서 캐시 데이터 새로고침 중...",
+        MessageKey::StatusSavingSourceCache => "백그라운드에서 소스 캐시 저장 중...",
         MessageKey::StatusLastUpdated => "마지막 업데이트: ",
         MessageKey::StatusLocal => "로컬",
         MessageKey::StatusDevice => "1대 기기",
@@ -1397,6 +1443,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "このモデルの日別データはまだありません。Escで戻る。",
 
         MessageKey::FooterTokens => " トークン",
+        MessageKey::FooterUndated => "日付不明",
         MessageKey::CountModels => "モデル",
         MessageKey::CountAgents => "エージェント",
         MessageKey::CountDay => "日",
@@ -1412,7 +1459,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "コスト",
         MessageKey::SortTokens => "トークン",
 
-        MessageKey::HelpScroll => "↑↓ スクロール • ←→/tab 表示切替",
+        MessageKey::HelpScroll => "▴▾ スクロール ∙ ◂▸/tab 表示切替",
         MessageKey::HelpSort => "[d/t/c:並替]",
         MessageKey::HelpBack => "[esc:戻る]",
         MessageKey::HelpDetails => "[enter:詳細]",
@@ -1431,13 +1478,13 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "結果がありません",
 
         MessageKey::LanguageDialogTitle => " 言語を選択 ",
-        MessageKey::LanguageDialogHint => "↑↓ 移動 • Enter 選択 • Esc キャンセル",
+        MessageKey::LanguageDialogHint => "▴▾ 移動 ∙ Enter 選択 ∙ Esc キャンセル",
 
         MessageKey::ClientDialogTitle => " クライアント ",
-        MessageKey::ClientDialogHint => "↑↓ 移動 • Enter 切替 • Esc 閉じる",
+        MessageKey::ClientDialogHint => "▴▾ 移動 ∙ Enter 切替 ∙ Esc 閉じる",
 
         MessageKey::GroupByDialogTitle => " グループ化 ",
-        MessageKey::GroupByDialogHint => "↑↓ 移動 • Enter 選択 • Esc 閉じる",
+        MessageKey::GroupByDialogHint => "▴▾ 移動 ∙ Enter 選択 ∙ Esc 閉じる",
         MessageKey::GroupByModelLabel => "モデル",
         MessageKey::GroupByModelDesc => "モデルごとに1行 (クライアント・プロバイダ統合)",
         MessageKey::GroupByClientModelLabel => "クライアント + モデル",
@@ -1453,6 +1500,19 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::ConfirmYes => "はい",
         MessageKey::ConfirmNo => "いいえ",
+
+        MessageKey::HelpSessionDetails => "[enter/i:詳細]",
+        MessageKey::SessionDetailDialogTitle => " セッション詳細 ",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 閉じる ∙ ▴▾/j/k スクロール",
+        MessageKey::SessionDetailId => "セッションID",
+        MessageKey::SessionDetailTitle => "タイトル",
+        MessageKey::SessionDetailDirectory => "ディレクトリ",
+        MessageKey::SessionDetailFirstActive => "開始日時",
+        MessageKey::SessionDetailSubagents => "サブエージェント",
+        MessageKey::SessionDetailSectionOverview => "セッション概要",
+        MessageKey::SessionDetailSectionActivity => "アクティビティ",
+        MessageKey::SessionDetailSectionTokens => "トークンとコスト",
+        MessageKey::SessionDetailReasoning => "推論",
 
         MessageKey::StatusLoadedFromCache => "キャッシュから読み込みました",
         MessageKey::StatusRefreshInProgress => "更新はすでに処理中です",
@@ -1495,6 +1555,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "現在のソースのエージェント内訳は利用できません。\n一部のソースのみがエージェントメタデータを記録します。\n's'でソースを変更するか、'r'で更新してください。",
 
         MessageKey::StatusRefreshingBackground => "バックグラウンドでキャッシュデータを更新中...",
+        MessageKey::StatusSavingSourceCache => "バックグラウンドでソースキャッシュを保存中...",
         MessageKey::StatusLastUpdated => "最終更新: ",
         MessageKey::StatusLocal => "ローカル",
         MessageKey::StatusDevice => "1台のデバイス",
@@ -1800,6 +1861,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "该模型暂无每日数据。按 Esc 返回。",
 
         MessageKey::FooterTokens => " Token",
+        MessageKey::FooterUndated => "日期未知",
         MessageKey::CountModels => "个模型",
         MessageKey::CountAgents => "个智能体",
         MessageKey::CountDay => "天",
@@ -1815,7 +1877,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "费用",
         MessageKey::SortTokens => "Token",
 
-        MessageKey::HelpScroll => "↑↓ 滚动 • ←→/tab 切换视图",
+        MessageKey::HelpScroll => "▴▾ 滚动 ∙ ◂▸/tab 切换视图",
         MessageKey::HelpSort => "[d/t/c:排序]",
         MessageKey::HelpBack => "[esc:返回]",
         MessageKey::HelpDetails => "[enter:详情]",
@@ -1834,13 +1896,13 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "无匹配结果",
 
         MessageKey::LanguageDialogTitle => " 选择语言 ",
-        MessageKey::LanguageDialogHint => "↑↓ 移动 • Enter 选择 • Esc 取消",
+        MessageKey::LanguageDialogHint => "▴▾ 移动 ∙ Enter 选择 ∙ Esc 取消",
 
         MessageKey::ClientDialogTitle => " 客户端 ",
-        MessageKey::ClientDialogHint => "↑↓ 移动 • Enter 切换 • Esc 关闭",
+        MessageKey::ClientDialogHint => "▴▾ 移动 ∙ Enter 切换 ∙ Esc 关闭",
 
         MessageKey::GroupByDialogTitle => " 分组依据 ",
-        MessageKey::GroupByDialogHint => "↑↓ 移动 • Enter 选择 • Esc 关闭",
+        MessageKey::GroupByDialogHint => "▴▾ 移动 ∙ Enter 选择 ∙ Esc 关闭",
         MessageKey::GroupByModelLabel => "模型",
         MessageKey::GroupByModelDesc => "每个模型一行 (合并客户端和供应商)",
         MessageKey::GroupByClientModelLabel => "客户端 + 模型",
@@ -1856,6 +1918,19 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::ConfirmYes => "是",
         MessageKey::ConfirmNo => "否",
+
+        MessageKey::HelpSessionDetails => "[enter/i:详情]",
+        MessageKey::SessionDetailDialogTitle => " 会话详情 ",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i 关闭 ∙ ▴▾/j/k 滚动",
+        MessageKey::SessionDetailId => "会话 ID",
+        MessageKey::SessionDetailTitle => "标题",
+        MessageKey::SessionDetailDirectory => "目录",
+        MessageKey::SessionDetailFirstActive => "开始时间",
+        MessageKey::SessionDetailSubagents => "子智能体",
+        MessageKey::SessionDetailSectionOverview => "会话概览",
+        MessageKey::SessionDetailSectionActivity => "活动",
+        MessageKey::SessionDetailSectionTokens => "Token 与费用",
+        MessageKey::SessionDetailReasoning => "推理",
 
         MessageKey::StatusLoadedFromCache => "已从缓存载入",
         MessageKey::StatusRefreshInProgress => "刷新已在进行中",
@@ -1898,6 +1973,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "当前数据源无可用智能体明细。\n仅部分源记录智能体元数据。\n按 's' 更改数据源或按 'r' 刷新。",
 
         MessageKey::StatusRefreshingBackground => "正在后台刷新缓存数据...",
+        MessageKey::StatusSavingSourceCache => "正在后台保存源缓存...",
         MessageKey::StatusLastUpdated => "最后更新: ",
         MessageKey::StatusLocal => "本地",
         MessageKey::StatusDevice => "1台设备",
@@ -2195,6 +2271,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoModelTrendData => "Pas encore de données quotidiennes pour ce modèle. Appuyez sur Échap pour revenir.",
 
         MessageKey::FooterTokens => " jetons",
+        MessageKey::FooterUndated => "sans date",
         MessageKey::CountModels => "modèles",
         MessageKey::CountAgents => "agents",
         MessageKey::CountDay => "jour",
@@ -2210,7 +2287,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::SortCost => "Coût",
         MessageKey::SortTokens => "Jetons",
 
-        MessageKey::HelpScroll => "↑↓ défiler • ←→/tab vue",
+        MessageKey::HelpScroll => "▴▾ défiler ∙ ◂▸/tab vue",
         MessageKey::HelpSort => "[d/t/c:tri]",
         MessageKey::HelpBack => "[esc:retour]",
         MessageKey::HelpDetails => "[enter:détails]",
@@ -2229,13 +2306,13 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::DialogNoResults => "Aucun résultat",
 
         MessageKey::LanguageDialogTitle => " Choisir la langue ",
-        MessageKey::LanguageDialogHint => "↑↓ naviguer • Enter sélectionner • Esc annuler",
+        MessageKey::LanguageDialogHint => "▴▾ naviguer ∙ Enter sélectionner ∙ Esc annuler",
 
         MessageKey::ClientDialogTitle => " Clients ",
-        MessageKey::ClientDialogHint => "↑↓ naviguer • Enter basculer • Esc fermer",
+        MessageKey::ClientDialogHint => "▴▾ naviguer ∙ Enter basculer ∙ Esc fermer",
 
         MessageKey::GroupByDialogTitle => " Grouper par ",
-        MessageKey::GroupByDialogHint => "↑↓ naviguer • Enter sélectionner • Esc fermer",
+        MessageKey::GroupByDialogHint => "▴▾ naviguer ∙ Enter sélectionner ∙ Esc fermer",
         MessageKey::GroupByModelLabel => "Modèle",
         MessageKey::GroupByModelDesc => "Une ligne par modèle (fusionner clients et fournisseurs)",
         MessageKey::GroupByClientModelLabel => "Client + Modèle",
@@ -2251,6 +2328,19 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
 
         MessageKey::ConfirmYes => "Oui",
         MessageKey::ConfirmNo => "Non",
+
+        MessageKey::HelpSessionDetails => "[enter/i:détails]",
+        MessageKey::SessionDetailDialogTitle => " Détails de la session ",
+        MessageKey::SessionDetailDialogHint => "Esc/q/Enter/i fermer ∙ ▴▾/j/k défiler",
+        MessageKey::SessionDetailId => "ID de session",
+        MessageKey::SessionDetailTitle => "Titre",
+        MessageKey::SessionDetailDirectory => "Répertoire",
+        MessageKey::SessionDetailFirstActive => "Première activité",
+        MessageKey::SessionDetailSubagents => "Sous-agents",
+        MessageKey::SessionDetailSectionOverview => "Vue d'ensemble de la session",
+        MessageKey::SessionDetailSectionActivity => "Activité",
+        MessageKey::SessionDetailSectionTokens => "Jetons et coût",
+        MessageKey::SessionDetailReasoning => "Raisonnement",
 
         MessageKey::StatusLoadedFromCache => "Chargé depuis le cache",
         MessageKey::StatusRefreshInProgress => "Actualisation déjà en cours",
@@ -2293,6 +2383,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::EmptyNoAgentMixed => "Aucune ventilation par agent n'est disponible pour les sources actuelles.\nSeules certaines sources enregistrent des métadonnées d'agent.\nAppuyez sur 's' pour changer de source ou 'r' pour actualiser.",
 
         MessageKey::StatusRefreshingBackground => "Actualisation des données en cache en arrière-plan...",
+        MessageKey::StatusSavingSourceCache => "Enregistrement du cache source en arrière-plan...",
         MessageKey::StatusLastUpdated => "Dernière mise à jour : ",
         MessageKey::StatusLocal => "local",
         MessageKey::StatusDevice => "1 appareil",
@@ -2536,6 +2627,41 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_glyphs::{
+        AMBIENT_STABLE_HORIZONTAL_NAVIGATION, AMBIENT_STABLE_SEPARATOR,
+        AMBIENT_STABLE_VERTICAL_NAVIGATION,
+    };
+
+    #[test]
+    fn navigation_hints_use_shared_width_stable_chrome() {
+        for lang in TuiLanguage::ALL {
+            for key in [
+                MessageKey::HelpScroll,
+                MessageKey::LanguageDialogHint,
+                MessageKey::ClientDialogHint,
+                MessageKey::GroupByDialogHint,
+                MessageKey::SessionDetailDialogHint,
+            ] {
+                let hint = tr(lang, key);
+                assert!(
+                    hint.contains(AMBIENT_STABLE_VERTICAL_NAVIGATION),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+                assert!(
+                    hint.contains(AMBIENT_STABLE_SEPARATOR),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+                assert!(
+                    !hint.chars().any(|ch| "↑↓←→•".contains(ch)),
+                    "{lang:?} {key:?}: {hint:?}"
+                );
+            }
+            assert!(
+                tr(lang, MessageKey::HelpScroll).contains(AMBIENT_STABLE_HORIZONTAL_NAVIGATION),
+                "{lang:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_all_languages_have_valid_native_names() {
@@ -2727,6 +2853,7 @@ mod tests {
             MessageKey::EmptyNoModelDetailsDay,
             MessageKey::EmptyNoModelTrendData,
             MessageKey::FooterTokens,
+            MessageKey::FooterUndated,
             MessageKey::CountModels,
             MessageKey::CountAgents,
             MessageKey::CountDay,
@@ -2776,6 +2903,18 @@ mod tests {
             MessageKey::GroupByClientSessionDesc,
             MessageKey::ConfirmYes,
             MessageKey::ConfirmNo,
+            MessageKey::HelpSessionDetails,
+            MessageKey::SessionDetailDialogTitle,
+            MessageKey::SessionDetailDialogHint,
+            MessageKey::SessionDetailId,
+            MessageKey::SessionDetailTitle,
+            MessageKey::SessionDetailDirectory,
+            MessageKey::SessionDetailFirstActive,
+            MessageKey::SessionDetailSubagents,
+            MessageKey::SessionDetailSectionOverview,
+            MessageKey::SessionDetailSectionActivity,
+            MessageKey::SessionDetailSectionTokens,
+            MessageKey::SessionDetailReasoning,
             MessageKey::StatusLoadedFromCache,
             MessageKey::StatusRefreshInProgress,
             MessageKey::StatusLanguageChanged,
@@ -2812,6 +2951,7 @@ mod tests {
             MessageKey::EmptyNoAgentCodex,
             MessageKey::EmptyNoAgentMixed,
             MessageKey::StatusRefreshingBackground,
+            MessageKey::StatusSavingSourceCache,
             MessageKey::StatusLastUpdated,
             MessageKey::StatusLocal,
             MessageKey::StatusDevice,

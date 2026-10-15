@@ -240,6 +240,9 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   scanScope: z.object({
     parserVersions: z.record(SourceSchema, NonNegativeIntegerSchema.min(1)),
     fullHistory: z.boolean(),
+    // New CLIs declare completeness per client. Absence preserves the legacy
+    // meaning where `fullHistory` applies to every declared parser.
+    fullHistoryClients: z.array(SourceSchema).optional(),
     // Retained protocol metadata. The high-water cannot yet use it as proof
     // that local history was pruned.
     retentionFloors: z

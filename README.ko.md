@@ -16,6 +16,7 @@
 > | [<img alt="GitHub Follow" src="https://img.shields.io/github/followers/junhoyeo?style=flat-square&logo=github&labelColor=black&color=24292f" width="156px" />](https://github.com/junhoyeo) | GitHub에서 [@junhoyeo](https://github.com/junhoyeo)를 팔로우하고 더 많은 프로젝트를 만나보세요. AI, 인프라 등 다양한 분야를 다룹니다. |
 > | :-----| :----- |
 > [<img alt="Discord link" src="https://img.shields.io/discord/1480206352755458110?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square" width="156px" />](https://discord.gg/h6DUGWdBbm) | [Discord](https://discord.gg/h6DUGWdBbm)에서 함께해요 — 세계 최고의 바이버들과 어울리세요. |
+> [<img alt="X follow" src="https://img.shields.io/badge/follow-%40Tokscale-000000?style=flat-square&logo=x&logoColor=white&labelColor=black" width="156px" />](https://x.com/Tokscale) | X에서 [@Tokscale](https://x.com/Tokscale)을 팔로우하고 릴리스 소식과 업데이트를 받아보세요. |
 > [<img alt="Sponsor Tokscale" src="https://img.shields.io/badge/sponsor-Tokscale-EA4AAA?style=flat-square&logo=githubsponsors&logoColor=white&labelColor=black" width="156px" />](https://github.com/sponsors/junhoyeo) | [GitHub Sponsors](https://github.com/sponsors/junhoyeo)를 통해 Tokscale의 지속적인 개발을 후원해 주세요. |
 
 <div align="center">
@@ -43,6 +44,10 @@
 |:---:|:---:|
 | ![TUI Daily Summary](.github/assets/tui-daily.png) | ![TUI Stats](.github/assets/tui-stats.png) | 
 
+| Session Details | Hourly |
+|:---:|:---:|
+| ![TUI Session Details](.github/assets/tui-sessions.png) | ![TUI Hourly](.github/assets/tui-hourly.png) |
+
 | Frontend (3D Contributions Graph) | Wrapped 2025 |
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
@@ -58,20 +63,20 @@
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+, `opencode-stable.db` 등 모든 채널 포함) 또는 `~/.local/share/opencode/storage/message/` |
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` 및 `~/.claude/transcripts/` |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (`*/agent/openclaw-agent.sqlite` + `*/sessions/*.jsonl`; + 레거시: `.clawdbot`, `.moltbot`, `.moldbot`) |
-| <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` |
+| <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` 및 `~/.codex/archived_sessions/` (`*.jsonl`과 zstd로 압축된 `*.jsonl.zst`, 기타 아카이브 사본 포함; 같은 rollout의 사본은 한 번만 집계) |
 | <img width="48px" src="https://github.com/PrimeIntellect-ai.png" alt="Prime Agent" /> | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `~/.prime/agent/sessions/` 및 `~/.prime/agent/session-artifacts/` (RLM 하위 세션) |
-| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) |
+| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/` 및 `~/.codex/archived_sessions/`의 rollout (`model_provider: sakana`) |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/session-store.db` (CLI 사용량 이벤트; OTEL 불필요), `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`), `~/.copilot/data.db` |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 및 `$HERMES_HOME/profiles/*/state.db` (폴백: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (데스크톱 자동 로그인 또는 쿠키 붙여넣기; `~/.cursor` 아님) |
-| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 사용량을 `~/.config/tokscale/cursor-cache/usage*.json`에 캐싱 (레거시 `usage*.csv` 캐시도 계속 읽음; 데스크톱 자동 로그인 또는 쿠키 붙여넣기; `~/.cursor` 아님) |
+| <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.config/tokscale/amp-cache/threads/` (`tokscale amp sync`) |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; `CODEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-freebuff.png" alt="Freebuff" /> | [Freebuff](https://github.com/CodebuffAI/freebuff) | Codebuff와 동일한 `~/.config/manicode/` 공유 (동일 런타임); 토큰 사용량은 트랜스크립트에서 추정 (로컬 사용량 없음; `FREEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` |
 | <img width="48px" src="https://omp.sh/favicon-180x180.png" alt="Oh My Pi" /> | [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) | `~/.omp/agent/sessions/**/*.jsonl` |
-| <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR`로 오버라이드 가능) |
+| <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR`로 오버라이드 가능) 및 `~/.omo/agent/sessions/` (OmO Native, omo-ai 5.1.0+), 그리고 각 프로젝트의 `.omo/senpi-task/children/`에 있는 태스크 하위 세션; 다른 OmO 위치는 `scanner.extraScanPaths.senpi`로 추가 |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/` (`KIMCHI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl` (`REASONIX_STATE_HOME` 또는 `REASONIX_HOME`으로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (override via `KIMI_CODE_HOME`) kimi-work: desktop app-data root (auto-discovered) |
@@ -609,15 +614,15 @@ tokscale autosubmit disable
 
 ### Cursor IDE 명령어
 
-Cursor IDE 지원은 Cursor의 웹 API 내보내기를 사용하며, Tokscale이 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱합니다. Tokscale은 `~/.cursor` 아래의 로컬 Cursor Agent CLI 상태를 파싱하지 않으며, 데스크톱 SQLite DB를 사용량 원장으로 취급하지도 않습니다.
+Cursor IDE 지원은 Cursor의 웹 사용량 API를 사용하며, Tokscale이 `~/.config/tokscale/cursor-cache/usage*.json`에 캐싱합니다. Tokscale은 `~/.cursor` 아래의 로컬 Cursor Agent CLI 상태를 파싱하지 않으며, 데스크톱 SQLite DB를 사용량 원장으로 취급하지도 않습니다.
 
-Cursor 데스크톱 앱이 설치되어 있고 로그인되어 있으면, `tokscale cursor login`은 Cursor의 `state.vscdb`에서 `cursorAuth/accessToken`을 우선 읽어 세션 쿠키를 자동으로 만듭니다. `tokscale cursor sync`도 가능할 때 이 토큰을 갱신합니다. 사용량 행은 계속 Cursor usage-export API에서만 가져옵니다.
+Cursor 데스크톱 앱이 설치되어 있고 로그인되어 있으면, `tokscale cursor login`은 Cursor의 `state.vscdb`에서 `cursorAuth/accessToken`을 우선 읽어 세션 쿠키를 자동으로 만듭니다. `tokscale cursor sync`도 가능할 때 이 토큰을 갱신합니다. 사용량 행은 계속 Cursor 사용량 API에서만 가져옵니다.
 
 설정 (데스크톱 자동 로그인):
 
 1. Cursor 데스크톱 앱에 로그인하세요.
 2. `tokscale cursor login --name work`를 실행하세요 (로컬 데스크톱 세션이 있으면 자동 감지).
-3. `tokscale cursor sync --json`을 실행해 `~/.config/tokscale/cursor-cache/usage.csv`를 채우세요.
+3. `tokscale cursor sync --json`을 실행해 `~/.config/tokscale/cursor-cache/usage.json`을 채우세요.
 4. `tokscale --client cursor` 또는 아무 리포트 명령을 실행하세요.
 
 대체 방법 (브라우저 쿠키 수동 붙여넣기) — 데스크톱 로그인을 쓸 수 없을 때:
@@ -645,7 +650,10 @@ tokscale cursor accounts
 # 캐시된 Cursor 사용량 수동 새로고침
 tokscale cursor sync --json
 
-# 활성 계정 전환 (cursor-cache/usage.csv에 동기화되는 계정 제어)
+# 느리거나 사용량이 아주 많은 계정에 시간을 더 주기 (전체 예산, 초 단위)
+tokscale cursor sync --timeout 600
+
+# 활성 계정 전환 (cursor-cache/usage.json에 동기화되는 계정 제어)
 tokscale cursor switch work
 
 # 특정 계정 로그아웃 (기록은 보관, 합산에서는 제외)
@@ -661,9 +669,19 @@ tokscale cursor logout --all
 tokscale cursor logout --all --purge-cache
 ```
 
-기본적으로 Tokscale은 `cursor-cache/usage*.csv`를 읽어 저장된 모든 Cursor 계정의 사용량을 합산합니다. 활성 계정은 `usage.csv`에 동기화되고, 추가 계정은 `usage.<account>.csv`에 동기화됩니다.
+기본적으로 Tokscale은 `cursor-cache/usage*.json`을 읽어 저장된 모든 Cursor 계정의 사용량을 합산합니다. 활성 계정은 `usage.json`에 동기화되고, 추가 계정은 `usage.<account>.json`에 동기화됩니다. 이전 버전의 Tokscale이 만든 레거시 CSV 캐시(`usage.csv`, `usage.<account>.csv`)도 아직 JSON 캐시가 없는 계정이라면 계속 읽습니다. 해당 계정이 다음에 동기화에 성공하면 JSON 캐시를 쓰고 CSV는 `cursor-cache/archive/`로 옮깁니다.
 
 로그아웃 시 Tokscale은 캐시된 사용량을 `cursor-cache/archive/`로 옮겨 더 이상 합산되지 않도록 합니다. 캐시된 사용량을 대신 삭제하려면 `--purge-cache`를 사용하세요.
+
+`tokscale cursor sync`는 저장된 각 계정의 사용량 기록을 페이지 단위로 내려받고, 계정마다 전체 시간 예산을 하나씩 적용합니다. 기본 예산은 120초에서 시작해 Cursor가 알려 주는 해당 계정의 사용량 이벤트 수에 맞춰 최대 1800초(30분)까지 늘어납니다. 고정된 예산을 쓰려면 한 번만 적용할 때는 `--timeout <SECONDS>`를 넘기고, 계속 적용하려면 `settings.json`(기본 위치는 `~/.config/tokscale/settings.json`; Windows, `XDG_CONFIG_HOME`, `TOKSCALE_CONFIG_DIR`은 [설정](#설정) 참고)에 `cursor.syncTimeoutSeconds`를 저장하세요. 둘 다 1-86400 사이의 정수(초)를 받습니다. 설정에 그 밖의 값이 있으면 `--timeout` 없이 실행한 `tokscale cursor sync`가 경고를 출력하고 기본 예산을 씁니다. 플래그가 설정보다 우선하고, 설정은 기본 예산보다 우선합니다.
+
+```json
+{
+  "cursor": {
+    "syncTimeoutSeconds": 600
+  }
+}
+```
 
 ### Antigravity 명령어
 
@@ -904,7 +922,7 @@ tokscale codex status --name personal --json
 
 ### 설정
 
-Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
+Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다. 기본 위치는 `~/.config/tokscale/settings.json`입니다. Linux에서 `XDG_CONFIG_HOME`이 설정되어 있으면 `$XDG_CONFIG_HOME/tokscale/settings.json`이고, Windows에서는 `%APPDATA%\tokscale\settings.json`입니다. `TOKSCALE_CONFIG_DIR`을 설정하면 모든 플랫폼에서 그 디렉터리를 대신 씁니다. 설정 디렉터리를 전혀 찾을 수 없으면 현재 작업 디렉터리의 `./.tokscale/settings.json`을 씁니다:
 
 ```json
 {
@@ -940,6 +958,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | `usage.disabledProviders` | string[] | `[]` | 자격 증명 탐색이나 네트워크 접근 전에 건너뛸 구독 usage 프로바이더. 유효한 ID(대소문자 무시, 앞뒤 공백 허용): `claude`, `codex`, `zai`, `amp`, `antigravity`, `copilot`, `grok`, `kimi`, `minimax`, `minimax-token-plan`, `warp`, `sakana`, `opencode-go`. 알 수 없는 ID는 무시됩니다. 비활성화된 프로바이더는 캐시된 TUI 카드와 진단에서도 숨겨집니다. 변경 사항은 다음 `tokscale usage` 실행 또는 TUI 시작/새로고침부터 적용됩니다. |
 | `light.writeCache` | boolean | `false` | `true`이면 `tokscale --light`가 렌더링 직후 TUI 캐시를 원자적으로 덮어씁니다. CLI 플래그 `--write-cache` / `--no-write-cache`가 실행별로 우선합니다. |
 | `minutelyTabEnabled` | boolean | `false` | TUI에 분 단위 Minutely 탭을 표시하고 데이터 로딩 중에 분 단위 집계를 수행합니다. 대부분의 사용자에게 분 단위 세분화는 틈새/진단 뷰이며, 대규모 데이터셋에서는 분 단위 버케팅에 무시할 수 없는 비용이 들기 때문에 기본적으로 비활성화되어 있습니다. |
+| `cursor.syncTimeoutSeconds` | number | 미설정 | `tokscale cursor sync`가 계정별 사용량을 내려받을 때 쓰는 전체 시간 예산(초, 1-86400). 설정하지 않으면 120초에서 시작해 Cursor가 알려 주는 사용량 이벤트 수에 맞춰 최대 1800초까지 늘어납니다. `tokscale cursor sync --timeout <SECONDS>`가 실행별로 우선합니다. [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요. |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale의 기본 home-root 위치 밖에 있는 세션을 위한 클라이언트별 추가 스캔 루트 |
 | `scanner.bucketTimezone` | string | 자동 감지 | 이 기기가 사용량 날짜를 버킷화하는 시간대의 IANA 이름(예: `"Asia/Seoul"`). 최초 실행 시 자동으로 기록됩니다. 직접 편집하는 대신 `tokscale config set timezone <zone>`을 사용하세요. |
 
@@ -966,7 +985,7 @@ IANA 시간대 이름만 허용됩니다. `+09:00` 같은 고정 UTC 오프셋�
 
 기존 설치는 시간대를 고정할 때까지 영향을 받지 않습니다. 고정하는 실행은 이미 사용 중인 시간대를 기록하며, 이미 고정된 시간대가 있는 기기를 Tokscale이 자동으로 다시 고정하지 않습니다.
 
-`scanner.extraScanPaths`는 프로젝트 단위 `.codex` 디렉터리나 가져온 Gemini/OpenClaw 히스토리 같은 영구적인 추가 루트에 사용하세요. Tokscale은 `$HERMES_HOME/profiles/*/state.db` 아래의 Hermes 프로필 데이터베이스를 자동으로 발견합니다(`HERMES_HOME`이 없으면 `~/.hermes/profiles/*/state.db`). 비표준 Hermes 프로필 위치에만 `scanner.extraScanPaths.hermes`를 사용하세요. Hermes 항목은 `state.db`를 포함하는 프로필 디렉터리를 가리키거나 `state.db` 파일을 직접 가리킬 수 있습니다. Tokscale은 매 실행마다 이 경로들을 기본 스캔 루트와 병합하고, 겹치는 루트는 정규 경로(canonical path) 기준으로 중복 제거합니다.
+`scanner.extraScanPaths`는 프로젝트 단위 `.codex` 디렉터리나 가져온 Gemini/OpenClaw 히스토리 같은 영구적인 추가 루트에 사용하세요. Tokscale은 `$HERMES_HOME/profiles/*/state.db` 아래의 Hermes 프로필 데이터베이스를 자동으로 발견합니다(`HERMES_HOME`이 없으면 `~/.hermes/profiles/*/state.db`). 비표준 Hermes 프로필 위치에만 `scanner.extraScanPaths.hermes`를 사용하세요. Hermes 항목은 `state.db`를 포함하는 프로필 디렉터리를 가리키거나 `state.db` 파일을 직접 가리킬 수 있습니다. `~/.omo/agent` 밖에 있는 OmO Native 에이전트 디렉터리는 `scanner.extraScanPaths.senpi`에 추가하세요. 항목은 에이전트 디렉터리나 그 안의 `sessions/` 디렉터리를 가리킬 수 있습니다([Senpi (OmO Native)](#senpi-omo-native) 참조). Tokscale은 매 실행마다 이 경로들을 기본 스캔 루트와 병합하고, 겹치는 루트는 정규 경로(canonical path) 기준으로 중복 제거합니다.
 
 `defaultClients`로 개인 기본값을 고정할 수 있습니다 — 예를 들어 OpenCode와 Claude만 사용한다면 `["opencode", "claude"]`로 설정하면, `tokscale`(플래그 없이)은 모든 리포트를 자동으로 해당 클라이언트로 범위를 좁힙니다. 단일 실행에 대해 재정의하려면 명령줄에서 `--client`를 전달하세요.
 
@@ -1482,8 +1501,8 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Copilot CLI | `~/.copilot/session-store.db`, `~/.copilot/otel/`, `~/.copilot/data.db` | `%USERPROFILE%\.copilot\session-store.db`, `%USERPROFILE%\.copilot\otel\`, `%USERPROFILE%\.copilot\data.db` | CLI 사용량 이벤트는 `session-store.db`에서 수집 (OTEL 불필요); `COPILOT_OTEL_FILE_EXPORTER_PATH`와 Desktop `data.db`도 자동 수집 |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME` 환경변수로 설정 가능 ([소스](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | `GEMINI_CLI_HOME` 환경변수로 설정 가능 |
-| Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCode와 동일하게 `xdg-basedir` 사용 |
-| Cursor | API 동기화 | API 동기화 | API로 가져와 `usage*.csv`로 캐시; 데스크톱 자동 로그인은 `state.vscdb` 인증만 읽음; 로컬 `~/.cursor` 세션 데이터는 파싱하지 않음 |
+| Amp | `~/.config/tokscale/amp-cache/` (+ 레거시 `~/.local/share/amp/`) | `%APPDATA%\tokscale\amp-cache\` (+ 레거시 `%USERPROFILE%\.local\share\amp\`) | `tokscale amp sync`로 동기화. 레거시 경로는 OpenCode와 동일하게 `xdg-basedir` 사용 |
+| Cursor | API 동기화 | API 동기화 | API로 가져와 `usage*.json`으로 캐시(레거시 `usage*.csv` 캐시도 계속 읽음); 데스크톱 자동 로그인은 `state.vscdb` 인증만 읽음; 로컬 `~/.cursor` 세션 데이터는 파싱하지 않음 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 모든 플랫폼에서 동일한 경로 |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 모든 플랫폼에서 동일한 경로 |
 | Oh My Pi | `~/.omp/` | `%USERPROFILE%\.omp\` | 모든 플랫폼에서 동일한 경로 ([Oh My Pi](https://github.com/can1357/oh-my-pi)) |
@@ -1686,12 +1705,14 @@ Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude 
 
 ### Codex CLI
 
-위치: `~/.codex/sessions/*.jsonl`
+위치: `~/.codex/sessions/` 및 `~/.codex/archived_sessions/` (`*.jsonl` rollout, zstd로 압축된 `*.jsonl.zst` 사본, `.jsonl` 이름 뒤에 접미사를 붙인 기타 아카이브 사본)
 
 `token_count` 이벤트가 있는 이벤트 기반 형식:
 ```json
 {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 567}}}}
 ```
+
+같은 rollout의 사본은 한 번만 집계됩니다. 두 디렉터리에 모두 있거나 일반 파일과 압축 파일로 함께 있는 세션도 사용량이 두 번 잡히지 않습니다.
 
 ### Copilot CLI
 
@@ -1742,7 +1763,7 @@ Tokscale은 `chat` span을 토큰 집계의 출처로 취급하고, 도구 span�
 
 ### Cursor IDE
 
-위치: `~/.config/tokscale/cursor-cache/usage*.csv` (Cursor API를 통해 동기화)
+위치: `~/.config/tokscale/cursor-cache/usage*.json` (Cursor API를 통해 동기화; 같은 계정의 JSON 캐시가 없으면 레거시 `usage*.csv` 캐시도 계속 읽음)
 
 Cursor 데이터는 세션 토큰을 사용하여 Cursor API에서 가져와 로컬에 캐시됩니다. 인증은 Cursor 데스크톱 `state.vscdb`(`cursorAuth/accessToken`만)에서 가져오거나 브라우저 쿠키를 붙여 넣을 수 있습니다. Tokscale은 리포트를 위해 API 캐시 파일을 읽으며, 로컬 `~/.cursor` 세션 데이터나 데스크톱 사용량 테이블은 파싱하지 않습니다. 설정 안내는 [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요.
 
@@ -1820,6 +1841,24 @@ Hermes는 세션 수준 사용량을 SQLite `sessions` 테이블에 저장합니
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+```
+
+### Senpi (OmO Native)
+
+위치: `~/.senpi/agent/sessions/<encoded-cwd>/*.jsonl` 및 `~/.omo/agent/sessions/<encoded-cwd>/*.jsonl` (OmO Native, omo-ai 5.1.0+), 그리고 각 프로젝트의 `.omo/senpi-task/children/` 아래 태스크 하위 세션
+
+Senpi는 Pi와 같은 JSONL 세션 형식을 사용합니다. OmO는 태스크 하위 세션을 각 프로젝트 안에 저장하므로, Tokscale은 두 세션 트리의 세션 헤더에서 `cwd`를 읽고 `<project>/.omo/senpi-task/children/`가 있는 모든 프로젝트에서 이 디렉터리를 스캔합니다. OmO의 `task.state_dir`가 절대 경로로 설정되어 있으면(프로젝트의 `.omo/omo.jsonc` 또는 `.omo/omo.json`, 또는 `~/.omo/` 아래의 같은 파일) 대신 `<state_dir>/children/`를 스캔합니다.
+
+OmO 에이전트 디렉터리가 다른 곳에 있다면 `settings.json`(기본 위치는 `~/.config/tokscale/settings.json`; Windows, `XDG_CONFIG_HOME`, `TOKSCALE_CONFIG_DIR`은 [설정](#설정) 참고)의 `scanner.extraScanPaths.senpi`에 추가하세요. 항목은 에이전트 디렉터리나 그 안의 `sessions/` 디렉터리를 가리킬 수 있습니다. Tokscale은 그곳의 세션을 스캔하고, 세션에 기록된 프로젝트의 태스크 하위 세션도 같은 방식으로 찾습니다:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "senpi": ["/Users/me/custom/omo/agent"]
+    }
+  }
+}
 ```
 
 ### Prime Agent

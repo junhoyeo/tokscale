@@ -1017,6 +1017,37 @@ fn sandbox_config_dir(tmp: &Path) -> std::path::PathBuf {
     tmp.join(".config").join("tokscale")
 }
 
+/// Keep submit fixtures from enumerating real desktop processes. `submit` now
+/// refreshes Antigravity before scanning; HOME alone cannot contain `ps` or
+/// PowerShell discovery. The child executes only this fixture-owned shim, which
+/// reports no candidate processes on every supported platform.
+fn discovery_shim_path(tmp: &Path) -> std::ffi::OsString {
+    let bin = tmp.join(".tokscale-test-bin");
+    fs::create_dir_all(&bin).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ps = bin.join("ps");
+        fs::write(&ps, "#!/bin/sh\nprintf 'PID PPID COMMAND\\n'\n").unwrap();
+        fs::set_permissions(&ps, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(windows)]
+    {
+        // `Command::new("powershell")` resolves this through PATHEXT before
+        // the host PowerShell. Its JSON is the empty process collection expected
+        // by `parse_windows_process_candidates`.
+        fs::write(bin.join("powershell.cmd"), "@echo []\r\n").unwrap();
+    }
+
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
+
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
@@ -1024,6 +1055,7 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
+        .env("PATH", discovery_shim_path(tmp))
         // `pricing` intentionally bypasses TOKSCALE_PRICING_CACHE_ONLY; the
         // loopback proxies below are the offline guarantee for every command.
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
@@ -3480,6 +3512,7 @@ fn test_submit_tip_recommends_only_the_client_filter() {
         .stdout(predicate::str::contains(
             "Tip: narrow the scan with `--client <id>` for a faster submit.",
         ))
+        .stdout(predicate::str::contains("Syncing Antigravity usage data...").not())
         .stdout(predicate::str::is_match(r"Tip:.*--since").unwrap().not());
 }
 
@@ -3613,6 +3646,14 @@ fn test_models_json_output() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        json["undatedTokens"],
+        serde_json::json!({
+            "input":0, "output":0, "cacheRead":0, "cacheWrite":0,
+            "cacheWrite1h":0, "reasoning":0,
+        })
+    );
 
     assert!(json.get("groupBy").is_some(), "Missing groupBy field");
     assert!(json.get("entries").is_some(), "Missing entries field");
@@ -4050,6 +4091,145 @@ fn test_monthly_json_output() {
     assert!(first.get("reasoning").is_some());
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
+}
+
+#[test]
+fn missing_codex_usage_cli_warns_without_changing_json_or_recorded_totals() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("rollout.jsonl");
+    let activity = concat!(
+        r#"{"timestamp":"2020-01-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+        "\n"
+    );
+    fs::write(&path, activity).unwrap();
+    let report = || {
+        cmd_with_home(tmp.path())
+            .args([
+                "monthly",
+                "--json",
+                "--no-spinner",
+                "--client",
+                "codex",
+                "--home",
+                tmp.path().to_str().unwrap(),
+                "--since",
+                "2026-05-01",
+                "--until",
+                "2026-05-31",
+            ])
+            .output()
+            .unwrap()
+    };
+    // The source warning covers inspected files even outside the report dates,
+    // and must survive the next process reading an unchanged source cache.
+    for _ in 0..2 {
+        let output = report();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"], serde_json::json!([]));
+        assert_eq!(json["totalCost"], 0.0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr
+                .matches("contain Codex activity but no supported usage records")
+                .count(),
+            1
+        );
+        assert!(stderr.contains("1 of 1 inspected rollout files"));
+        assert!(stderr.contains("independently of the selected report dates"));
+    }
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    use std::io::Write;
+    file.write_all(concat!(
+        r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-30T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":10}}}}"#,
+        "\n"
+    ).as_bytes()).unwrap();
+    file.flush().unwrap();
+    drop(file);
+    for _ in 0..2 {
+        let output = report();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"][0]["input"], 90);
+        assert_eq!(json["entries"][0]["output"], 20);
+        assert_eq!(json["entries"][0]["cacheRead"], 10);
+    }
+}
+
+#[test]
+fn missing_codex_usage_cli_excludes_zero_malformed_and_openclaw_sources() {
+    let activity = concat!(
+        r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+        "\n"
+    );
+    for content in [
+        String::new(),
+        r#"{"type":"session_meta","payload":{"id":"metadata-only"}}"#.to_string(),
+        format!("{activity}not json\n"),
+        format!(
+            "{activity}{}\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}"#
+        ),
+        format!(
+            "{}\n{activity}",
+            r#"{"type":"session_meta","payload":{"originator":"openclaw"}}"#
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        prime_pricing_cache(tmp.path());
+        let sessions = tmp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout.jsonl"), content).unwrap();
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "monthly",
+                "--json",
+                "--no-spinner",
+                "--client",
+                "codex",
+                "--home",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"], serde_json::json!([]));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"));
+    }
+}
+
+#[test]
+fn missing_codex_usage_task_report_warns_and_excludes_injected_context() {
+    let activity = concat!(
+        r#"{"type":"response_item","payload":{"type":"web_search_call"}}"#,
+        "\n"
+    );
+    for (content, expected) in [
+        (activity.to_string(), true),
+        (format!("{activity}{}\n", r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}"#), false),
+        (concat!(r#"{"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>cwd=/tmp</environment_context>"}}"#, "\n").to_string(), false),
+    ] {
+        let tmp = create_empty_fixture_dir();
+        let sessions = tmp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout.jsonl"), content).unwrap();
+        for _ in 0..2 {
+            let output = cmd_with_home(tmp.path())
+                .args(["report", "--no-summarize", "--json"])
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report, serde_json::json!([]));
+            assert_eq!(String::from_utf8_lossy(&output.stderr).contains("source-completeness diagnostic"), expected);
+        }
+    }
 }
 
 #[test]
@@ -5059,7 +5239,7 @@ fn test_clients_json_includes_claude_desktop_diagnostic() {
     let diagnostics = claude["diagnostics"].as_array().unwrap();
 
     assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
+        item["code"] == "claude_desktop_partial_history"
             && item["severity"] == "warning"
             && item["message"]
                 .as_str()
@@ -5193,8 +5373,8 @@ fn test_clients_home_override_ignores_conflicting_claude_config_dir_env() {
     let diagnostics = claude["diagnostics"].as_array().unwrap();
     let desktop_diagnostic = diagnostics
         .iter()
-        .find(|item| item["code"] == "claude_desktop_not_scanned")
-        .expect("claude_desktop_not_scanned diagnostic should be present");
+        .find(|item| item["code"] == "claude_desktop_partial_history")
+        .expect("claude_desktop_partial_history diagnostic should be present");
     let paths = desktop_diagnostic["paths"].as_array().unwrap();
 
     for label in ["claudeCodeProjects", "claudeCodeTranscripts"] {
@@ -5228,7 +5408,7 @@ fn test_clients_command_includes_claude_desktop_diagnostic_text() {
             "Claude Desktop app data was detected",
         ))
         .stdout(predicate::str::contains(
-            "Claude Code JSONL transcripts only",
+            "Local transcripts and available conversation-cache counters",
         ));
 }
 
@@ -5247,11 +5427,11 @@ fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude
     let diagnostics = json["diagnostics"].as_array().unwrap();
 
     assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
+        item["code"] == "claude_desktop_partial_history"
             && item["message"]
                 .as_str()
                 .unwrap()
-                .contains("Tokscale counts Claude Code JSONL transcripts")
+                .contains("Local transcripts and available conversation-cache counters")
     }));
 }
 
@@ -7069,4 +7249,48 @@ fn test_auto_pinning_does_not_shadow_a_legacy_settings_file_it_cannot_open() {
         r#"{"colorPalette":"green"}"#,
         "and the legacy file itself must be left alone"
     );
+}
+
+#[test]
+fn test_codex_compressed_session_reports_usage() {
+    let tmp = TempDir::new().unwrap();
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let content = concat!(
+        r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#,
+        "\n"
+    );
+    let compressed_file = sessions.join("fixture.jsonl.zst");
+    fs::write(
+        &compressed_file,
+        zstd::encode_all(content.as_bytes(), 0).unwrap(),
+    )
+    .unwrap();
+
+    // Check a cold archive scan, an uncompressed duplicate, and the warm cache.
+    for scan in 0..3 {
+        if scan == 1 {
+            fs::write(sessions.join("fixture.jsonl"), content).unwrap();
+        }
+        let output = cmd_with_home(tmp.path())
+            .args(["--client", "codex", "--json", "--no-spinner"])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
+        assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
+        assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
+        assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+        assert_eq!(json["entries"][0]["reasoning"].as_i64().unwrap(), 10);
+    }
 }

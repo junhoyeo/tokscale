@@ -2,6 +2,7 @@ use crate::clients::ClientId;
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -9,6 +10,8 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -74,6 +77,44 @@ const MAX_CACHE_SHARD_BYTES: u64 = 256 * 1024 * 1024;
 const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+const SOURCE_CACHE_ABORT_POINT_ENV: &str = "TOKSCALE_TEST_SOURCE_CACHE_ABORT_POINT";
+#[cfg(test)]
+const SOURCE_CACHE_ABORT_PATHS_ENV: &str = "TOKSCALE_TEST_SOURCE_CACHE_ABORT_PATHS";
+#[cfg(test)]
+const SOURCE_CACHE_ABORT_MARKER_ENV: &str = "TOKSCALE_TEST_SOURCE_CACHE_ABORT_MARKER";
+#[cfg(test)]
+static SOURCE_CACHE_COMMITTED_SHARDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn write_source_cache_abort_marker(point: &str) {
+    let marker = std::env::var_os(SOURCE_CACHE_ABORT_MARKER_ENV)
+        .expect("source-cache abort child requires a marker path");
+    let mut file = File::create(PathBuf::from(marker)).expect("abort marker must be creatable");
+    file.write_all(point.as_bytes())
+        .expect("abort marker must be writable");
+    file.sync_all().expect("abort marker must be durable");
+}
+
+#[cfg(test)]
+fn abort_source_cache_save_at(point: &str) {
+    if std::env::var(SOURCE_CACHE_ABORT_POINT_ENV).as_deref() == Ok(point) {
+        write_source_cache_abort_marker(point);
+        std::process::abort();
+    }
+}
+
+#[cfg(test)]
+fn abort_source_cache_save_after_first_committed_shard() {
+    if std::env::var(SOURCE_CACHE_ABORT_POINT_ENV).as_deref() == Ok("mid-batch")
+        && SOURCE_CACHE_COMMITTED_SHARDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+    {
+        write_source_cache_abort_marker("mid-batch");
+        std::process::abort();
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -1082,6 +1123,17 @@ pub fn parser_generation() -> u64 {
             acc = acc.wrapping_mul(FNV_PRIME);
         }
     }
+    // Claude's retention-preserving rebuilds do not bump its source-cache
+    // version: doing so would discard compacted history. Derived totals must
+    // still refresh when those live transcripts are reparsed.
+    for byte in CLAUDE_RETAINED_PARSE_GENERATION.to_le_bytes() {
+        acc ^= u64::from(byte);
+        acc = acc.wrapping_mul(FNV_PRIME);
+    }
+    // Desktop adds live cache balances to Claude's existing transcript lane.
+    // Invalidate derived totals without discarding retained transcript history.
+    acc ^= 2; // Claude Desktop parser generation: preserve full request identities
+    acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
 
@@ -1182,14 +1234,16 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
         members: &[
             (ClientId::RooCode, 0),
             (ClientId::KiloCode, 0),
-            // +2 for Cline's independent history. v1->v2: standalone Cline
+            // +3 for Cline's independent history. v1->v2: standalone Cline
             // messages subtract cache buckets from gross input tokens,
             // reject non-finite costs, and preserve zero-cost reports.
             // v2->v3: content-aware Cline CLI turn-start classification
             // now recognizes user tool-result records as continuations
             // instead of beginning a new turn, so cached turns must be
             // reparsed.
-            (ClientId::Cline, 2),
+            // v4->v5: clamp CLI input after signed cache subtraction so warm
+            // sources cannot replay negative tokens into submission totals.
+            (ClientId::Cline, 3),
         ],
     },
     SharedParserFamily {
@@ -1335,7 +1389,24 @@ fn parser_version(client: ClientId) -> u32 {
         // so it could land without another bump.
         // v10->v11: standalone `task_started` events reset duration anchors so
         // resumed turns cannot inherit the idle gap from a previous turn.
-        ClientId::Codex => 11,
+        // v11->v12: retain own-activity and supported-usage flags so a warm
+        // scan can diagnose active rollouts with no ledger, including zero
+        // counters and appended usage that clears the diagnostic.
+        // v12->v13: also retain gateway activity for Synthetic-only scans.
+        // v13->v14: support zstd-compressed transcripts (`.jsonl.zst`) in
+        // Codex sessions and archives.
+        // v14->v15: assign stable cross-copy dedup keys to usage rows that use
+        // the file-mtime fallback timestamp, and persist their event ordinal.
+        // v15->v16: count token_usage_record rows that no token_count confirms,
+        // including context compaction requests, and retain the pending/settled
+        // record state needed to do so.
+        // v16->v17: safely skip oversized JSONL records while retaining later
+        // usage in large compressed rollouts. v16 cache entries predate this
+        // bounded parser behavior and must be reparsed.
+        // v17->v18: settle pending token_usage_record rows when turn_aborted or
+        // task_complete ends their turn. Completed v17 rollouts keep the same
+        // fingerprint, so their undercounted entries must be reparsed.
+        ClientId::Codex => 18,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -1405,12 +1476,10 @@ fn parser_version(client: ClientId) -> u32 {
         // an invalidation debt forward, and a further bump would have had
         // nothing to invalidate.
         ClientId::OpenCodeReview => 3,
-        // Kiro's structured messages.jsonl turns now back-calculate the
-        // start anchor from `turn_end - elapsedTime` when the user prompt's
-        // own timestamp is missing/unparseable, instead of falling through
-        // to the (end-anchored) turn_end timestamp. Second-round follow-up
-        // to #890.
-        ClientId::Kiro => 2,
+        // v3 assigns CLI metering credits per turn instead of putting the
+        // conversation sum on the first message. Reparse unchanged sources
+        // so cached Unknown costs cannot be token-priced a second time.
+        ClientId::Kiro => 3,
         // Kimi v2 checks token buckets without an overflowing sum. v2->v3:
         // symbolic usage-record models now resolve from the latest llm.request.
         // v3->v4: non-positive wire timestamps (kimi-cli `timestamp`,
@@ -1528,6 +1597,10 @@ fn parser_version(client: ClientId) -> u32 {
         // byte-identical before and after, so only this bump discards the v1
         // rows still holding a provider-reported zero.
         ClientId::Fx => 2,
+        // v1->v2: `amp threads export` payloads carry a per-message
+        // `usage.timestamp`. Reparse old rows so those messages move off the
+        // synthesized `created + messageId * 1000` time onto their real day.
+        ClientId::Amp => 2,
         // The remaining clients parse their own formats and have never
         // shipped a parser-only change that leaves byte-identical input
         // parsing differently, so all of them are at version 1. Repeating
@@ -1542,7 +1615,6 @@ fn parser_version(client: ClientId) -> u32 {
         // either added to a shared family (its version then derives from
         // the family's driver base) or given an explicit independent arm.
         ClientId::Gemini => 1,
-        ClientId::Amp => 1,
         ClientId::Qwen => 1,
         ClientId::Mux => 1,
         ClientId::Crush => 1,
@@ -1644,10 +1716,14 @@ struct CacheShardKey {
 /// [`CachedSourceEntry::needs_retention_provenance_migration`]) or re-parses
 /// every Claude transcript on every scan forever.
 ///
-/// `usize::MAX` is never a real message index, so appending it records
-/// "provenance is present, retained set may be empty" without changing the
-/// serialized layout.
-const CLAUDE_RETENTION_PROVENANCE_MARKER: usize = usize::MAX;
+/// The marker also versions retention-preserving parser rebuilds. Generation 2
+/// reads advisor iterations that generation 1 ignored. The old marker forces
+/// one live reparse through the retaining loader, preserving compacted turns
+/// rather than evicting the whole source cache with a parser-version bump.
+/// Neither marker is a real message index; the serialized layout is unchanged.
+const CLAUDE_RETAINED_PARSE_GENERATION: u32 = 2;
+const CLAUDE_RETENTION_PROVENANCE_MARKER: usize =
+    usize::MAX - (CLAUDE_RETAINED_PARSE_GENERATION as usize - 1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedSourceEntry {
@@ -2322,14 +2398,15 @@ impl CachedSourceEntry {
         self.parser_namespace == ClientId::Claude.as_str()
     }
 
-    /// Whether this Claude entry predates retention provenance.
+    /// Whether this Claude entry needs a retention-preserving parser rebuild.
     ///
     /// Entries written before the provenance marker existed carry retained
     /// turns mixed in with live ones and no way to tell them apart, so reading
     /// one as-is presents a stale copy of a response as if the live transcript
     /// still contained it. The reader rebuilds those entries once (see
     /// `lib.rs`), which re-derives the retained set from the live bytes and
-    /// writes the marker, and this then reports `false` forever after.
+    /// writes the current marker, and this then reports `false` until another
+    /// retention-preserving parser generation is introduced.
     ///
     /// The distinction has to survive on disk, and it cannot be a new struct
     /// field: `CachedSourceEntry` is bincode-encoded without field names, so
@@ -2549,12 +2626,86 @@ struct CacheState {
 /// size of its own output — a single-message `-c droid` scan peaked at 1.16 GB
 /// against a 358 MB cache, and the TUI paid that peak again on every
 /// auto-refresh until the process was killed (#1100).
+#[cfg(test)]
+pub(crate) type TestSourceCachePersistObserver = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SOURCE_CACHE_PERSIST_OBSERVER: std::cell::RefCell<Option<TestSourceCachePersistObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestSourceCachePersistObserverGuard(Option<TestSourceCachePersistObserver>);
+
+#[cfg(test)]
+pub(crate) fn install_test_source_cache_persist_observer(
+    observer: TestSourceCachePersistObserver,
+) -> TestSourceCachePersistObserverGuard {
+    let previous = TEST_SOURCE_CACHE_PERSIST_OBSERVER.with(|slot| slot.replace(Some(observer)));
+    TestSourceCachePersistObserverGuard(previous)
+}
+
+#[cfg(test)]
+impl Drop for TestSourceCachePersistObserverGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TEST_SOURCE_CACHE_PERSIST_OBSERVER.with(|slot| {
+            let _ = slot.replace(previous);
+        });
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
     state: Mutex<CacheState>,
     /// `false` for [`SourceCachePolicy::InMemory`] callers, who must never
     /// touch the on-disk shards.
     persistent: bool,
+}
+
+// A shard can be as large as `MAX_CACHE_SHARD_BYTES`, and one transaction
+// temporarily holds decoded entries plus a serialized envelope. Keep at most
+// two such transactions in flight: this preserves the cache's bounded-memory
+// design while still overlapping the F_FULLFSYNC barriers that dominate cold
+// saves on Apple filesystems.
+//
+// Windows stays serial. Each transaction executes both `FlushFileBuffers` and
+// a write-through `MoveFileExW`. In the #1446 Windows CI comparison, enabling
+// overlap coincided with the integration suite taking more than twice as long
+// and unrelated child-process smoke tests moving from about 10s to 50s. It did
+// not reveal a sharing or atomicity failure -- all shard round-trip/concurrency
+// tests passed -- so retaining the established serial I/O is the safe default.
+#[cfg(not(windows))]
+const MAX_PARALLEL_SHARD_SAVE_LANES: usize = 2;
+#[cfg(windows)]
+const MAX_PARALLEL_SHARD_SAVE_LANES: usize = 1;
+
+fn run_shard_save_batch<T, R, F>(items: Vec<T>, persist: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync + Send,
+{
+    let lane_count = items.len().min(MAX_PARALLEL_SHARD_SAVE_LANES);
+    if lane_count == 0 {
+        return Vec::new();
+    }
+
+    let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
+    for (index, item) in items.into_iter().enumerate() {
+        lanes[index % lane_count].push((index, item));
+    }
+
+    let mut indexed_results: Vec<(usize, R)> = lanes
+        .into_par_iter()
+        .flat_map_iter(|lane| lane.into_iter().map(|(index, item)| (index, persist(item))))
+        .collect();
+    indexed_results.sort_unstable_by_key(|(index, _)| *index);
+    indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect()
 }
 
 impl SourceMessageCache {
@@ -2872,9 +3023,16 @@ impl SourceMessageCache {
     }
 
     fn save_if_dirty_with_limit(&mut self, max_shard_bytes: u64) {
+        #[cfg(test)]
+        let persist_observer =
+            TEST_SOURCE_CACHE_PERSIST_OBSERVER.with(|slot| slot.borrow().clone());
         let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
         if !state.dirty {
             return;
+        }
+        #[cfg(test)]
+        if let Some(observer) = persist_observer {
+            observer();
         }
 
         let Some(shard_root) = cache_shard_dir() else {
@@ -2939,76 +3097,103 @@ impl SourceMessageCache {
         affected_shards.extend(dirty_by_shard.keys().cloned());
         affected_shards.extend(deleted_by_shard.keys().cloned());
 
-        let mut successful_shards = HashSet::new();
+        // Prepare namespace directories before entering the parallel batch. Each
+        // worker then owns one distinct final path while the cross-process lock
+        // remains held for the complete read/merge/replace transaction.
+        let mut prepared_namespaces = HashSet::new();
+        let mut unavailable_namespaces = HashSet::new();
+        let mut shard_jobs = Vec::with_capacity(affected_shards.len());
         for shard_key in affected_shards {
             let Some(identity) = CacheIdentity::current_for_namespace(&shard_key.namespace) else {
                 continue;
             };
-            let parser_dir = shard_root.join(identity.namespace);
-            if let Err(error) = ensure_cache_dir(&parser_dir) {
-                warn_cache_failure_once(
-                    "source message cache parser directory is unavailable",
-                    &parser_dir,
-                    &error,
-                );
+            if unavailable_namespaces.contains(identity.namespace) {
                 continue;
             }
+            if prepared_namespaces.insert(identity.namespace) {
+                let parser_dir = shard_root.join(identity.namespace);
+                if let Err(error) = ensure_cache_dir(&parser_dir) {
+                    warn_cache_failure_once(
+                        "source message cache parser directory is unavailable",
+                        &parser_dir,
+                        &error,
+                    );
+                    unavailable_namespaces.insert(identity.namespace);
+                    continue;
+                }
+            }
             let final_path = shard_path(&shard_root, &shard_key);
+            shard_jobs.push((shard_key, identity, final_path));
+        }
 
-            let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
-                match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
-                    ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
-                        entries
-                            .into_iter()
-                            .filter(|entry| entry.identity_is_current())
-                            .map(|entry| (CacheKey::from_entry(&entry), entry))
-                            .filter(|(key, _)| key.shard() == shard_key)
-                            .collect()
-                    }
-                    ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
-                    ShardReadStatus::Invalid(error) => {
-                        warn_cache_failure_once(
-                            "source message cache shard is invalid",
-                            &final_path,
-                            &error,
-                        );
-                        HashMap::new()
-                    }
-                };
-
-            if let Some(deleted) = deleted_by_shard.get(&shard_key) {
-                for (key, reason) in deleted {
-                    let should_remove = match reason {
-                        DeletionReason::Missing => !key.path.to_path_buf().exists(),
-                        DeletionReason::Invalidated(expected) => merged_entries
-                            .get(key)
-                            .is_some_and(|entry| entry.fingerprint == *expected),
-                    };
-                    if should_remove {
-                        merged_entries.remove(key);
-                    }
-                }
-            }
-            if let Some(dirty) = dirty_by_shard.get(&shard_key) {
-                for key in dirty {
-                    if let Some(entry) = state.entries.get(key) {
-                        let mut entry = entry.clone();
-                        // Another process holding the lock before us may have
-                        // stored history for this same path that our in-memory
-                        // entry never saw. Union it in rather than replacing
-                        // wholesale — see `absorb_retained_history`.
-                        if let Some(stored) = merged_entries.remove(key) {
-                            entry.absorb_retained_history(&stored);
+        let entries_by_key = &state.entries;
+        let shard_results =
+            run_shard_save_batch(shard_jobs, |(shard_key, identity, final_path)| {
+                let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
+                    match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
+                        ShardReadStatus::Loaded(entries) | ShardReadStatus::Migrated(entries) => {
+                            entries
+                                .into_iter()
+                                .filter(|entry| entry.identity_is_current())
+                                .map(|entry| (CacheKey::from_entry(&entry), entry))
+                                .filter(|(key, _)| key.shard() == shard_key)
+                                .collect()
                         }
-                        entry.remove_claude_synthetic_placeholders();
-                        merged_entries.insert(key.clone(), entry);
+                        ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
+                        ShardReadStatus::Invalid(error) => {
+                            warn_cache_failure_once(
+                                "source message cache shard is invalid",
+                                &final_path,
+                                &error,
+                            );
+                            HashMap::new()
+                        }
+                    };
+
+                if let Some(deleted) = deleted_by_shard.get(&shard_key) {
+                    for (key, reason) in deleted {
+                        let should_remove = match reason {
+                            DeletionReason::Missing => !key.path.to_path_buf().exists(),
+                            DeletionReason::Invalidated(expected) => merged_entries
+                                .get(key)
+                                .is_some_and(|entry| entry.fingerprint == *expected),
+                        };
+                        if should_remove {
+                            merged_entries.remove(key);
+                        }
                     }
                 }
-            }
+                if let Some(dirty) = dirty_by_shard.get(&shard_key) {
+                    for key in dirty {
+                        if let Some(entry) = entries_by_key.get(key) {
+                            let mut entry = entry.clone();
+                            // Another process holding the lock before us may have
+                            // stored history for this same path that our in-memory
+                            // entry never saw. Union it in rather than replacing
+                            // wholesale — see `absorb_retained_history`.
+                            if let Some(stored) = merged_entries.remove(key) {
+                                entry.absorb_retained_history(&stored);
+                            }
+                            entry.remove_claude_synthetic_placeholders();
+                            merged_entries.insert(key.clone(), entry);
+                        }
+                    }
+                }
 
-            let mut entries: Vec<CachedSourceEntry> = merged_entries.into_values().collect();
-            entries.sort_by_key(|left| left.path.to_path_buf());
-            match write_shard_with_limit(&final_path, identity, &entries, max_shard_bytes) {
+                let mut entries: Vec<CachedSourceEntry> = merged_entries.into_values().collect();
+                entries.sort_by_key(|left| left.path.to_path_buf());
+                let result =
+                    write_shard_with_limit(&final_path, identity, &entries, max_shard_bytes);
+                #[cfg(test)]
+                if result.is_ok() {
+                    abort_source_cache_save_after_first_committed_shard();
+                }
+                (shard_key, final_path, result)
+            });
+
+        let mut successful_shards = HashSet::new();
+        for (shard_key, final_path, result) in shard_results {
+            match result {
                 Ok(()) => {
                     successful_shards.insert(shard_key);
                 }
@@ -3353,6 +3538,8 @@ fn write_shard_with_limit(
     // the canonical shard before the replacement is completely serialized and
     // fsynced, or one failed large shard write could destroy its last good copy.
     let write_result = (|| -> std::io::Result<()> {
+        #[cfg(test)]
+        abort_source_cache_save_at("before-temp");
         let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
         bincode::options()
@@ -3362,7 +3549,11 @@ fn write_shard_with_limit(
         writer.flush()?;
         writer.get_ref().sync_all()?;
         drop(writer);
+        #[cfg(test)]
+        abort_source_cache_save_at("after-temp-sync");
         crate::fs_atomic::replace_file(&tmp_path, final_path)?;
+        #[cfg(test)]
+        abort_source_cache_save_at("after-rename");
         let final_file = OpenOptions::new().read(true).write(true).open(final_path)?;
         final_file.sync_all()?;
         Ok(())
@@ -3608,6 +3799,7 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+    use wait_timeout::ChildExt;
 
     #[test]
     #[serial_test::serial]
@@ -3774,7 +3966,7 @@ mod tests {
     ///
     /// The restore has to be a `Drop` guard rather than a trailing call. A
     /// failing assertion panics before any trailing restore runs, and of the
-    /// four keys here `TOKSCALE_CONFIG_DIR` is consulted first on every
+    /// variables here `TOKSCALE_CONFIG_DIR` is consulted first on every
     /// platform — so a leaked one aims every later test in this binary at a
     /// `TempDir` that has already been dropped, which is the contamination this
     /// sandbox exists to prevent. `serial_test` prevents overlap, not
@@ -3787,6 +3979,9 @@ mod tests {
             "XDG_CONFIG_HOME",
             "XDG_CACHE_HOME",
             "TOKSCALE_CONFIG_DIR",
+            SOURCE_CACHE_ABORT_POINT_ENV,
+            SOURCE_CACHE_ABORT_PATHS_ENV,
+            SOURCE_CACHE_ABORT_MARKER_ENV,
         ]);
         env.set("HOME", temp_home);
         env.set("XDG_CONFIG_HOME", temp_home.join(".config"));
@@ -3805,6 +4000,9 @@ mod tests {
             "TOKSCALE_CONFIG_DIR",
             temp_home.join(".config").join("tokscale"),
         );
+        env.remove(SOURCE_CACHE_ABORT_POINT_ENV);
+        env.remove(SOURCE_CACHE_ABORT_PATHS_ENV);
+        env.remove(SOURCE_CACHE_ABORT_MARKER_ENV);
         env
     }
 
@@ -4327,22 +4525,226 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn advisor_usage_rebuilds_warm_claude_and_mirror_caches_without_losing_history() {
+        use std::sync::atomic::Ordering::Relaxed;
+        for mirror in [false, true] {
+            let cache_home = TempDir::new().unwrap();
+            let _env = sandbox_cache_env(cache_home.path());
+            let source_home = TempDir::new().unwrap();
+            let config = if mirror {
+                let variant = source_home.path().join(".cc-mirror/anthropic-mirror");
+                let config = variant.join("config");
+                std::fs::create_dir_all(&variant).unwrap();
+                std::fs::write(
+                    variant.join("variant.json"),
+                    serde_json::json!({
+                        "name": "anthropic-mirror", "provider": "anthropic", "configDir": config
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                config
+            } else {
+                source_home.path().join(".claude")
+            };
+            let source = config.join("projects/repro/live.jsonl");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            let record = r#"{"type":"assistant","timestamp":"2026-10-02T20:10:51.000Z","requestId":"req_adv","message":{"id":"msg_adv","model":"claude-opus-5-5","usage":{"input_tokens":4,"output_tokens":779,"iterations":[{"type":"advisor_message","model":"claude-fable-5-1","input_tokens":114995,"output_tokens":2343}]}}}"#;
+            std::fs::write(&source, record).unwrap();
+            let parsed = crate::sessions::claudecode::parse_claude_file_with_home(
+                &source,
+                Some(source_home.path()),
+            );
+            let main = parsed[0].clone();
+            let mut compacted = main.clone();
+            compacted.dedup_key = Some("msg_compacted:req_old".to_string());
+            compacted.tokens.input = 7;
+            compacted.tokens.output = 3;
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let fingerprint = SourceFingerprint::from_claude_code_path_with_home(
+                &source,
+                Some(source_home.path()),
+            )
+            .unwrap();
+            // Seed the exact old marker and parent-only output of the prior parser.
+            let entry = CachedSourceEntry::new(
+                identity,
+                &source,
+                fingerprint.clone(),
+                vec![main, compacted],
+                vec![1, usize::MAX],
+                None,
+            );
+            let path = cache_shard_path(identity, &source);
+            ensure_cache_dir(path.parent().unwrap()).unwrap();
+            write_shard_with_limit(&path, identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+            let old = SourceMessageCache::load();
+            let entry = old.get(identity, &source).unwrap();
+            assert!(entry.needs_retention_provenance_migration());
+            assert_eq!(
+                entry.messages.len(),
+                2,
+                "history must remain readable before rebuilding"
+            );
+            let scan = || {
+                let mut messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["claude".to_string()],
+                    None,
+                    false,
+                    &crate::scanner::ScannerSettings::default(),
+                );
+                messages.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
+                messages
+            };
+            let rebuilt = scan();
+            assert_eq!(rebuilt.len(), 3);
+            assert_eq!(rebuilt.iter().map(|m| m.tokens.input).sum::<i64>(), 115006);
+            assert_eq!(rebuilt.iter().map(|m| m.message_count).sum::<i32>(), 2);
+            let advisor = rebuilt
+                .iter()
+                .find(|m| m.model_id == "claude-fable-5-1")
+                .unwrap();
+            assert_eq!(advisor.tokens.output, 2343);
+            assert_eq!(
+                advisor.client,
+                if mirror {
+                    "cc-mirror/anthropic-mirror"
+                } else {
+                    "claude"
+                }
+            );
+            let cache = SourceMessageCache::load();
+            let entry = cache.get(identity, &source).unwrap();
+            assert_eq!(
+                entry.fingerprint, fingerprint,
+                "upgrade must reparse unchanged bytes"
+            );
+            assert!(!entry.needs_retention_provenance_migration());
+            assert_eq!(
+                entry.retained_message_keys(),
+                HashSet::from(["msg_compacted:req_old".to_string()])
+            );
+            let rebuilds = crate::RETENTION_PROVENANCE_REBUILDS.load(Relaxed);
+            assert_eq!(scan(), rebuilt);
+            assert_eq!(
+                crate::RETENTION_PROVENANCE_REBUILDS.load(Relaxed),
+                rebuilds,
+                "subsequent scans must be warm hits"
+            );
+            std::fs::write(source.with_file_name("fork.jsonl"), record).unwrap();
+            let forked = scan();
+            let usage = |messages: &[UnifiedMessage]| {
+                messages
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.dedup_key.clone(),
+                            m.model_id.clone(),
+                            m.tokens.clone(),
+                            m.message_count,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // The first sorted live copy owns session attribution; usage is stable.
+            assert_eq!(
+                usage(&forked),
+                usage(&rebuilt),
+                "fork copies must not count advisors twice"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cline_input_rebuilds_predecessor_cache_for_unchanged_transcript() {
+        let home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(home.path());
+        let session = home.path().join(".cline/data/sessions/s1");
+        fs::create_dir_all(&session).unwrap();
+        let path = session.join("s1.messages.json");
+        fs::write(&path, r#"{"sessionId":"s1","messages":[{"id":"a1","role":"assistant","ts":1786406085634,"modelInfo":{"id":"deepseek-v4-flash","provider":"opencode-go"},"metrics":{"inputTokens":10,"outputTokens":10,"cacheReadTokens":100,"cacheWriteTokens":50,"cost":0.01}}]}"#).unwrap();
+        let fingerprint = match SourceFingerprint::check_cline_path_samples_only(&path, None) {
+            Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+            other => panic!("expected initial fingerprint, got {other:?}"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Cline);
+        let predecessor = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: crate::sessions::roocode::ROO_KILO_TASK_LOG_PARSER_BASE_VERSION + 2,
+        };
+        let mut legacy = crate::sessions::cline::parse_cline_file(&path);
+        assert_eq!(legacy.len(), 1);
+        legacy[0].tokens.input = -140;
+        let entry = CachedSourceEntry::new(
+            predecessor,
+            &path,
+            fingerprint.clone(),
+            legacy,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, predecessor, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let parsed = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["cline".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].tokens.input, 0,
+            "unchanged warm sources must not retain negative input"
+        );
+        assert_eq!(parsed[0].tokens.total(), 160);
+        assert!(matches!(
+            SourceFingerprint::check_cline_path_samples_only(&path, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache.get(identity, &path).unwrap();
+        assert_eq!(rebuilt.parser_version, identity.parser_version);
+        assert_eq!(rebuilt.messages, parsed);
+        let warm = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["cline".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(warm, parsed);
+        assert_eq!(cache.get(identity, &path).unwrap().messages, parsed);
+    }
+
+    #[test]
     fn test_devin_parser_versions_invalidate_v3_entries() {
         assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
     #[test]
-    fn test_codex_parser_version_invalidates_v10_entries() {
+    fn test_codex_parser_version_invalidates_v11_entries() {
         // v6->v7 splits `reasoning_output_tokens` out of the Codex output
         // bucket, v7->v8 retags rollouts OpenClaw originated as openclaw, and
         // v8->v9 buckets agent attribution into "Codex" / "Codex Subagent" /
         // "Codex Guardian" / "Codex Headless" instead of the per-thread random
-        // nickname; v9->v10 retains service_tier for Fast mode pricing, and
+        // nickname; v9->v10 retains service_tier for Fast mode pricing,
         // v10->v11 resets duration anchors at standalone task_started events.
+        // v11->v13 retains source completeness and gateway activity for empty
+        // results, v13->v14 decodes compressed archives (.jsonl.zst),
+        // v14->v15 stabilizes fallback-timestamp dedup across rollout copies,
+        // v15->v16 counts usage records no token_count confirms, v16->v17
+        // skips oversized records while preserving later usage, and v17->v18
+        // settles pending usage when terminal events end a turn.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 11);
+        assert_eq!(parser_version(ClientId::Codex), 18);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -4370,7 +4772,7 @@ mod tests {
         assert_eq!(parser_version(ClientId::DevinCli), 4);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
-        assert_eq!(parser_version(ClientId::Kiro), 2);
+        assert_eq!(parser_version(ClientId::Kiro), 3);
     }
 
     #[test]
@@ -4727,6 +5129,271 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_compressed_archives_discard_cached_empty_v11_results() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home.path().join("rollout.jsonl.zst");
+        let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
+{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#;
+        fs::write(&source, zstd::encode_all(&content[..], 0).unwrap()).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let old_identity = CacheIdentity {
+            parser_version: 11,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let entry = CachedSourceEntry::new(
+            old_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old_identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(identity, &source).is_none());
+        let parsed = crate::sessions::codex::parse_codex_file(&source);
+        assert_eq!(parsed.len(), 1);
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        assert_eq!(warm.get(identity, &source).unwrap().messages, parsed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_v15_shards_are_reparsed_with_compaction_usage_records() {
+        // A context compaction request's usage is only in its
+        // `token_usage_record`; the token_count after `compacted` does not
+        // advance. A finished rollout keeps its fingerprint, and the loader
+        // serves a nonempty entry for an unchanged file without calling the
+        // parser, so only the version bump can retire a v15 entry (written
+        // with v15's fallback-dedup state) that holds the rollout without the
+        // compaction.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = temp_home
+            .path()
+            .join("rollout-2026-10-01T00-00-00-01a0f000-0000-7000-8000-000000000001.jsonl");
+        fs::write(
+            &source,
+            br#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"id":"01a0f000-0000-7000-8000-000000000001","originator":"codex_vscode","source":"vscode","model_provider":"openai"}}
+{"timestamp":"2026-10-01T00:01:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}
+{"timestamp":"2026-10-01T00:01:05Z","type":"token_usage_record","payload":{"turn_id":"turn-1","response_id":"resp-1","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110}}}
+{"timestamp":"2026-10-01T00:01:05.005Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-10-01T00:02:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-10-01T00:02:00.005Z","type":"token_usage_record","payload":{"turn_id":"turn-2","response_id":"resp-2","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":40,"total_tokens":540}}}
+{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}
+{"timestamp":"2026-10-01T00:02:00.020Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}
+"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let stale_identity = CacheIdentity {
+            parser_version: 15,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        // What v15 cached: the token_count row of turn 1 only.
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![UnifiedMessage::new(
+                identity.namespace,
+                "gpt-5.5",
+                "openai",
+                "01a0f000-0000-7000-8000-000000000001",
+                1790812865000,
+                TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 80,
+                    cache_write: 0,
+                    cache_write_1h: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut cache = SourceMessageCache::load();
+        assert!(
+            cache.get(identity, &source).is_none(),
+            "a v15 entry lacks the compaction's usage and must not be served"
+        );
+        assert_eq!(SourceFingerprint::from_path(&source).unwrap(), fingerprint);
+        let parsed = crate::sessions::codex::parse_codex_file(&source);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed.iter().map(|m| m.tokens.total()).sum::<i64>(),
+            110 + 540
+        );
+        cache.insert(CachedSourceEntry::new(
+            identity,
+            &source,
+            fingerprint,
+            parsed.clone(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let warm = SourceMessageCache::load();
+        let cached = warm.get(identity, &source).unwrap();
+        assert_eq!(cached.parser_version, 18);
+        assert_eq!(cached.messages, parsed);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_v17_shards_are_reparsed_with_terminal_usage_records() {
+        // A response cut off before token_count leaves its usage only in a
+        // `token_usage_record`; turn_aborted proves that no confirmation can
+        // follow. A finished rollout keeps its fingerprint, and the loader
+        // serves a nonempty entry for an unchanged file without calling the
+        // parser, so only the version bump can retire the undercounted v17
+        // entry and include the terminal turn's usage.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let sessions = temp_home.path().join(".codex/sessions/2026/10/01");
+        fs::create_dir_all(&sessions).unwrap();
+        let source =
+            sessions.join("rollout-2026-10-01T00-00-00-01a0f000-0000-7000-8000-000000000001.jsonl");
+        fs::write(
+            &source,
+            br#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"id":"01a0f000-0000-7000-8000-000000000001","originator":"codex_vscode","source":"vscode","model_provider":"openai"}}
+{"timestamp":"2026-10-01T00:01:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}
+{"timestamp":"2026-10-01T00:01:05Z","type":"token_usage_record","payload":{"turn_id":"turn-1","response_id":"resp-1","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110}}}
+{"timestamp":"2026-10-01T00:01:05.005Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-10-01T00:02:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-10-01T00:02:00.005Z","type":"token_usage_record","payload":{"turn_id":"turn-2","response_id":"resp-2","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":40,"total_tokens":540}}}
+{"timestamp":"2026-10-01T00:02:00.010Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-2"}}
+"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let stale_identity = CacheIdentity {
+            parser_version: 17,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        // What v17 cached: the token_count row of turn 1 only. Its incremental
+        // metadata is valid for the unchanged file, so generation v17 would
+        // reuse this undercounted row instead of reparsing.
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![UnifiedMessage::new(
+                identity.namespace,
+                "gpt-5.5",
+                "openai",
+                "01a0f000-0000-7000-8000-000000000001",
+                1790812865000,
+                TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 80,
+                    cache_write: 0,
+                    cache_write_1h: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            Some(CodexIncrementalCache {
+                state: CodexParseState::default(),
+                consumed_offset: fingerprint.size,
+                ends_with_newline: true,
+                prefix_hash: fingerprint.content_hash,
+            }),
+        );
+        assert!(codex_cache_entry_matches_fingerprint(
+            &stale_entry,
+            &fingerprint
+        ));
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        assert_eq!(SourceFingerprint::from_path(&source).unwrap(), fingerprint);
+        let options = crate::LocalParseOptions {
+            home_dir: Some(temp_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["codex".to_string()]),
+            ..crate::LocalParseOptions::default()
+        };
+
+        // Drive the complete production scanner/cache path. It must reject
+        // the unchanged v17 entry and fully parse the terminal turn.
+        let reparsed = crate::parse_local_unified_messages_with_pricing(options.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(reparsed.len(), 2);
+        assert_eq!(
+            reparsed
+                .iter()
+                .map(|message| message.tokens.total())
+                .sum::<i64>(),
+            110 + 540
+        );
+
+        let fresh_cache = SourceMessageCache::load();
+        let fresh_entry = fresh_cache
+            .get(identity, &source)
+            .expect("the production scan must persist a v18 replacement");
+        assert_eq!(fresh_entry.parser_version, 18);
+        assert!(
+            codex_cache_entry_matches_fingerprint(&fresh_entry, &fingerprint),
+            "the v18 replacement must carry valid incremental metadata"
+        );
+
+        // Scan again through the same production path and verify that the
+        // valid warm entry preserves the reparsed result.
+        let cached = crate::parse_local_unified_messages_with_pricing(options, None)
+            .await
+            .unwrap();
+        assert_eq!(cached, reparsed);
+        let warm_cache = SourceMessageCache::load();
+        let warm_entry = warm_cache.get(identity, &source).unwrap();
+        assert!(codex_cache_entry_matches_fingerprint(
+            &warm_entry,
+            &fingerprint
+        ));
     }
 
     #[test]
@@ -5761,7 +6428,7 @@ mod tests {
                 &[
                     (ClientId::RooCode, 0),
                     (ClientId::KiloCode, 0),
-                    (ClientId::Cline, 2),
+                    (ClientId::Cline, 3),
                 ],
             ),
             (
@@ -6319,6 +6986,94 @@ mod tests {
         );
         assert_eq!(third[0].tokens, first[0].tokens);
         assert_warm("a re-parsed session");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kiro_cli_credit_cache_is_rebuilt_without_source_changes() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let source = PathBuf::from(
+            ClientId::Kiro
+                .data()
+                .resolve_path_with_env_strategy(&source_home.path().to_string_lossy(), false),
+        )
+        .join("credits.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            r#"{"session_id":"cached-credits","session_state":{"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1,"output_token_count":2,"metering_usage":[{"value":0.25,"unit":"credit"}]},{"input_token_count":3,"output_token_count":4,"metering_usage":[{"value":0.25,"unit":"credit"}]}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(source.with_extension("jsonl"), "").unwrap();
+        let fingerprint = match SourceFingerprint::check_kiro_path_samples_only(&source, None)
+            .unwrap()
+        {
+            FingerprintStatus::Changed(fingerprint) => fingerprint,
+            FingerprintStatus::Unchanged => panic!("an uncached source must build a fingerprint"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Kiro);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: 2,
+        };
+        let mut stale_messages = crate::sessions::kiro::parse_kiro_file(&source);
+        assert_eq!(stale_messages.len(), 2);
+        stale_messages[0].cost = 0.02;
+        stale_messages[0].mark_provider_reported_cost();
+        stale_messages[1].cost = 0.0;
+        stale_messages[1].cost_source = crate::sessions::CostSource::Unknown;
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            stale_messages,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+        assert!(SourceMessageCache::load().get(identity, &source).is_none());
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&source, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let parse = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["kiro".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let first = parse();
+        assert_eq!(first.len(), 2);
+        for message in &first {
+            assert!((message.cost - 0.01).abs() < 1e-9);
+            assert_eq!(
+                message.cost_source,
+                crate::sessions::CostSource::ProviderReported
+            );
+        }
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt.get(identity, &source).unwrap();
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages, first);
+        assert_eq!(
+            parse(),
+            first,
+            "warm cache must retain per-turn cost authority"
+        );
     }
 
     #[test]
@@ -7367,6 +8122,82 @@ mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn test_shard_save_batch_overlaps_work_with_a_bounded_lane_count() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc, Condvar};
+        use std::time::Duration;
+
+        // A larger enclosing registry must not raise the cache's own in-flight
+        // budget. The gate keeps the first jobs resident long enough to measure
+        // actual overlap without relying on a sleep.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let coordinator_gate = Arc::clone(&gate);
+        let coordinator = std::thread::spawn(move || {
+            let first = started_rx.recv_timeout(Duration::from_secs(5));
+            let second = started_rx.recv_timeout(Duration::from_secs(5));
+            let (open, ready) = &*coordinator_gate;
+            *open.lock().unwrap() = true;
+            ready.notify_all();
+            assert!(first.is_ok(), "the first shard never started");
+            assert!(second.is_ok(), "the shard batch ran serially");
+        });
+
+        let work: Vec<u8> = (0..8).collect();
+        let results = pool.install(|| {
+            run_shard_save_batch(work.clone(), |item| {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(current, Ordering::SeqCst);
+                let _ = started_tx.send(item);
+                let (open, ready) = &*gate;
+                let mut open = open.lock().unwrap();
+                while !*open {
+                    open = ready.wait(open).unwrap();
+                }
+                drop(open);
+                active.fetch_sub(1, Ordering::SeqCst);
+                item
+            })
+        });
+        coordinator.join().unwrap();
+        assert_eq!(
+            results, work,
+            "parallel completion must preserve input order"
+        );
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            MAX_PARALLEL_SHARD_SAVE_LANES
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shard_save_batch_stays_serial() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        assert_eq!(MAX_PARALLEL_SHARD_SAVE_LANES, 1);
+        let active = AtomicUsize::new(0);
+        let max_active = AtomicUsize::new(0);
+        let work: Vec<u8> = (0..8).collect();
+        let results = run_shard_save_batch(work.clone(), |item| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(current, Ordering::SeqCst);
+            active.fetch_sub(1, Ordering::SeqCst);
+            item
+        });
+
+        assert_eq!(results, work);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_source_message_cache_round_trips_across_distinct_shards() {
@@ -7390,6 +8221,46 @@ mod tests {
         assert_eq!(loaded.entry_count(), 2);
         assert!(loaded.get(identity, &path_one).is_some());
         assert!(loaded.get(identity, &path_two).is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parallel_save_clears_only_successful_shards() {
+        const TEST_SHARD_LIMIT: u64 = 8 * 1024;
+
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (small_path, oversized_path) = write_sources_in_distinct_shards(&source_dir, identity);
+
+        let small_key = CacheKey::new(identity, &small_path);
+        let oversized_key = CacheKey::new(identity, &oversized_path);
+        let small = test_entry(identity, &small_path, "small");
+        let mut oversized = test_entry(identity, &oversized_path, "oversized");
+        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize);
+
+        let mut cache = SourceMessageCache::default();
+        cache.insert(small);
+        cache.insert(oversized);
+        cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
+
+        assert!(cache_shard_path(identity, &small_path).is_file());
+        assert!(!cache_shard_path(identity, &oversized_path).is_file());
+        {
+            let state = cache.state();
+            assert!(!state.dirty_keys.contains(&small_key));
+            assert!(state.dirty_keys.contains(&oversized_key));
+        }
+
+        cache.insert(test_entry(identity, &oversized_path, "retried"));
+        cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
+        assert!(!cache.is_dirty());
+        assert!(matches!(
+            read_shard(&cache_shard_path(identity, &oversized_path), identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].messages[0].session_id == "retried"
+        ));
     }
 
     #[test]
@@ -8466,6 +9337,260 @@ mod tests {
             Vec::new(),
             None,
         )
+    }
+
+    fn cancellation_entry(
+        identity: CacheIdentity,
+        path: &Path,
+        label: usize,
+        live_input: i64,
+        include_retained: bool,
+    ) -> CachedSourceEntry {
+        let live_key = format!("msg_live_{label}:req_live_{label}");
+        let retained_key = format!("msg_retained_{label}:req_retained_{label}");
+        let mut live = keyed_message(identity.namespace, &format!("session-{label}"), &live_key);
+        live.tokens.input = live_input;
+        let mut messages = vec![live];
+        let retained_keys = if include_retained {
+            messages.push(keyed_message(
+                identity.namespace,
+                &format!("session-{label}"),
+                &retained_key,
+            ));
+            HashSet::from([retained_key])
+        } else {
+            HashSet::new()
+        };
+        CachedSourceEntry::new_with_retained_message_keys(
+            identity,
+            path,
+            SourceFingerprint::from_path(path).unwrap(),
+            messages,
+            &retained_keys,
+        )
+    }
+
+    fn assert_cancellation_shard_is_old_or_merged(
+        identity: CacheIdentity,
+        path: &Path,
+        label: usize,
+    ) -> bool {
+        let shard = cache_shard_path(identity, path);
+        let entries = match read_shard(&shard, identity) {
+            ShardReadStatus::Loaded(entries) => entries,
+            other => panic!(
+                "canonical shard {} did not decode as current: {}",
+                shard.display(),
+                shard_read_status_name(&other)
+            ),
+        };
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path.to_path_buf() == path)
+            .expect("canonical shard must contain its source entry");
+        let keys: HashSet<&str> = entry
+            .messages
+            .iter()
+            .filter_map(|message| message.dedup_key.as_deref())
+            .collect();
+        let live_key = format!("msg_live_{label}:req_live_{label}");
+        let retained_key = format!("msg_retained_{label}:req_retained_{label}");
+        assert_eq!(
+            keys,
+            HashSet::from([live_key.as_str(), retained_key.as_str()]),
+            "old and merged-new snapshots must both retain live and cache-only keys"
+        );
+        assert_eq!(
+            entry.retained_message_keys(),
+            HashSet::from([retained_key]),
+            "cache-only provenance must survive every cancellation point"
+        );
+        let live_input = entry
+            .messages
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some(live_key.as_str()))
+            .unwrap()
+            .tokens
+            .input;
+        assert!(
+            matches!(live_input, 10 | 100),
+            "canonical must be exactly the old or merged-new snapshot, got live input {live_input}"
+        );
+        live_input == 100
+    }
+
+    fn shard_read_status_name(status: &ShardReadStatus) -> &'static str {
+        match status {
+            ShardReadStatus::Missing => "missing",
+            ShardReadStatus::Stale => "stale",
+            ShardReadStatus::Invalid(_) => "invalid",
+            ShardReadStatus::Loaded(_) => "loaded",
+            ShardReadStatus::Migrated(_) => "migrated",
+        }
+    }
+
+    fn cancellation_hidden_temps(identity: CacheIdentity) -> Vec<PathBuf> {
+        let dir = cache_shard_dir().unwrap().join(identity.namespace);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn source_cache_abort_child() {
+        let Ok(paths_json) = std::env::var(SOURCE_CACHE_ABORT_PATHS_ENV) else {
+            return;
+        };
+        let paths: Vec<PathBuf> = serde_json::from_str(&paths_json).unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let mut cache = SourceMessageCache::load();
+        for (label, path) in paths.iter().enumerate() {
+            cache.insert(cancellation_entry(identity, path, label, 100, false));
+        }
+        cache.save_if_dirty();
+        panic!("configured source-cache abort point was not reached");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn source_cache_abort_matrix_preserves_canonical_retained_history() {
+        for point in [
+            "before-temp",
+            "after-temp-sync",
+            "after-rename",
+            "mid-batch",
+        ] {
+            let temp_home = TempDir::new().unwrap();
+            let _cache_env = sandbox_cache_env(temp_home.path());
+            let source_dir = TempDir::new().unwrap();
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let (first, second) = write_sources_in_distinct_shards(&source_dir, identity);
+            let paths = if point == "mid-batch" {
+                vec![first, second]
+            } else {
+                vec![first]
+            };
+
+            let mut seed = SourceMessageCache::load();
+            for (label, path) in paths.iter().enumerate() {
+                seed.insert(cancellation_entry(identity, path, label, 10, true));
+            }
+            seed.save_if_dirty();
+            for (label, path) in paths.iter().enumerate() {
+                assert!(!assert_cancellation_shard_is_old_or_merged(
+                    identity, path, label
+                ));
+            }
+
+            let marker = temp_home.path().join(format!("abort-{point}.marker"));
+            std::fs::write(&marker, b"").unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("message_cache::tests::source_cache_abort_child")
+                .arg("--nocapture")
+                .env(SOURCE_CACHE_ABORT_POINT_ENV, point)
+                .env(SOURCE_CACHE_ABORT_MARKER_ENV, &marker)
+                // A fresh child initializes Rayon's global pool from this value.
+                // Serial shard lanes make the mid-batch snapshot deterministic:
+                // exactly one canonical commits before the abort.
+                .env("RAYON_NUM_THREADS", "1")
+                .env(
+                    SOURCE_CACHE_ABORT_PATHS_ENV,
+                    serde_json::to_string(&paths).unwrap(),
+                )
+                .spawn()
+                .unwrap();
+            let status = match child
+                .wait_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+            {
+                Some(status) => status,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{point}: abort child exceeded 60-second bound");
+                }
+            };
+            assert!(!status.success(), "{point}: child must abort");
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                point,
+                "{point}: child must durably mark the exact abort hook reached"
+            );
+            assert_ne!(
+                status.code(),
+                Some(101),
+                "{point}: child panicked instead of hitting process::abort"
+            );
+
+            let mut merged_count = 0;
+            for (label, path) in paths.iter().enumerate() {
+                if assert_cancellation_shard_is_old_or_merged(identity, path, label) {
+                    merged_count += 1;
+                }
+            }
+            match point {
+                "before-temp" | "after-temp-sync" => assert_eq!(merged_count, 0),
+                "after-rename" => assert_eq!(merged_count, 1),
+                "mid-batch" => assert_eq!(merged_count, 1),
+                _ => unreachable!(),
+            }
+
+            // The normal lazy loader scans the namespace directory. Any hidden
+            // temp left by the killed child must be ignored there too, not only
+            // by the direct canonical decoder above.
+            let loaded = SourceMessageCache::load();
+            for (label, path) in paths.iter().enumerate() {
+                let entry = loaded
+                    .get(identity, path)
+                    .expect("canonical entry must reload after process abort");
+                let keys: HashSet<String> = entry
+                    .messages
+                    .iter()
+                    .filter_map(|message| message.dedup_key.clone())
+                    .collect();
+                assert_eq!(
+                    keys,
+                    HashSet::from([
+                        format!("msg_live_{label}:req_live_{label}"),
+                        format!("msg_retained_{label}:req_retained_{label}"),
+                    ])
+                );
+            }
+
+            let hidden_temps = cancellation_hidden_temps(identity);
+            if point == "after-temp-sync" {
+                assert_eq!(hidden_temps.len(), 1, "synced temp must remain after abort");
+                let loaded = SourceMessageCache::load();
+                for path in &paths {
+                    assert!(
+                        loaded.get(identity, path).is_some(),
+                        "hidden temp must not shadow the canonical shard"
+                    );
+                }
+            }
+
+            let mut retry = SourceMessageCache::load();
+            for (label, path) in paths.iter().enumerate() {
+                retry.insert(cancellation_entry(identity, path, label, 100, false));
+            }
+            retry.save_if_dirty();
+            for (label, path) in paths.iter().enumerate() {
+                assert!(
+                    assert_cancellation_shard_is_old_or_merged(identity, path, label),
+                    "{point}: retry must commit merged-new snapshot"
+                );
+            }
+        }
     }
 
     fn synthetic_placeholder_message(session_id: &str, dedup_key: &str) -> UnifiedMessage {

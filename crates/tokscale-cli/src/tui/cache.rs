@@ -120,6 +120,8 @@ struct CachedUsageData {
     hourly: Vec<CachedHourlyUsage>,
     graph: Option<CachedGraphData>,
     total_tokens: u64,
+    #[serde(default)]
+    undated_tokens: u64,
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
@@ -639,6 +641,7 @@ impl From<&UsageData> for CachedUsageData {
             hourly: u.hourly.iter().map(|h| h.into()).collect(),
             graph: u.graph.as_ref().map(|g| g.into()),
             total_tokens: u.total_tokens,
+            undated_tokens: u.undated_tokens,
             total_cost: u.total_cost,
             current_streak: u.current_streak,
             longest_streak: u.longest_streak,
@@ -680,6 +683,7 @@ impl TryFrom<CachedUsageData> for UsageData {
             sessions_rolled: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
+            undated_tokens: u.undated_tokens,
             total_cost: u.total_cost,
             loading: false,
             error: None,
@@ -1298,6 +1302,39 @@ mod tests {
         assert!(
             matches!(result, CacheResult::Miss),
             "a stale parser generation must Miss, not Stale -- Stale is painted just like Fresh; got {}",
+            other_variant_name(&result)
+        );
+    }
+
+    #[test]
+    fn a_cache_from_the_previous_claude_desktop_generation_misses() {
+        // Fixed value emitted by the first Desktop implementation (b161de41),
+        // before fdf7e4d0 changed its suffix from 1 to 2 to preserve full
+        // request identities. Deriving this from the current generation would
+        // let the test pass even if that invalidation bump were removed.
+        const PREVIOUS_DESKTOP_GENERATION: u64 = 3_619_169_160_637_170_511;
+        let mut value: serde_json::Value = serde_json::from_str(LEGACY_FALLBACK_PAYLOAD).unwrap();
+        value["parserGeneration"] = serde_json::json!(PREVIOUS_DESKTOP_GENERATION);
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let scope = CacheReportScope::default();
+
+        let previous: CachedTUIData = serde_json::from_value(value.clone()).unwrap();
+        let result = classify_cached_payload(previous, &clients, &GroupBy::Model, &scope);
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "the pre-fix Desktop aggregate must rebuild, not paint old totals; got {}",
+            other_variant_name(&result)
+        );
+
+        // The same payload is otherwise valid: changing only its generation
+        // to the current value must admit it. This prevents an unrelated
+        // schema, scope or client mismatch from making the regression pass.
+        value["parserGeneration"] = serde_json::json!(tokscale_core::parser_generation());
+        let current: CachedTUIData = serde_json::from_value(value).unwrap();
+        let result = classify_cached_payload(current, &clients, &GroupBy::Model, &scope);
+        assert!(
+            matches!(result, CacheResult::Fresh(_)),
+            "the generation-only control must be Fresh; got {}",
             other_variant_name(&result)
         );
     }
