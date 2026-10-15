@@ -34,7 +34,7 @@ const Controls = styled.div`
   align-items: end;
   gap: 12px;
   label { display: grid; max-width: 100%; gap: 6px; color: var(--service-text-muted); font-size: 0.8125rem; }
-  select {
+  select, input {
     min-height: 44px;
     max-width: 100%;
     padding: 8px;
@@ -45,7 +45,7 @@ const Controls = styled.div`
     font-size: 0.875rem;
     color-scheme: dark;
   }
-  select:focus-visible { outline: 2px solid var(--service-focus); }
+  select:focus-visible, input:focus-visible { outline: 2px solid var(--service-focus); }
 `;
 
 export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged }: GroupReportingSettingsProps) {
@@ -87,16 +87,23 @@ export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged
   return (
     <Panel aria-label="Group reporting settings">
       <h2>Reporting calendar</h2>
-      <p>Choose the shared calendar for this group. Submitted daily totals keep their original dates.</p>
+      <p>Choose the shared calendar for this group. Enter any IANA time zone; common zones are suggested. Submitted daily totals keep their original dates.</p>
       <form onSubmit={(event) => { event.preventDefault(); void saveCalendar(); }}>
         <Controls>
           <label>Time zone
-            <select aria-label="Time zone" value={selectedTimeZone} onChange={(event) => setSelectedTimeZone(event.target.value)} disabled={pending}>
-              {!COMMON_TIMEZONE_GROUPS.some((group) => group.zones.includes(selectedTimeZone)) && <option value={selectedTimeZone}>{selectedTimeZone}</option>}
-              {COMMON_TIMEZONE_GROUPS.map((group) => <optgroup key={group.region} label={group.region}>
-                {group.zones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
-              </optgroup>)}
-            </select>
+            <input
+              aria-label="Time zone"
+              list="group-reporting-time-zones"
+              value={selectedTimeZone}
+              onChange={(event) => setSelectedTimeZone(event.target.value)}
+              disabled={pending}
+              spellCheck={false}
+            />
+            <datalist id="group-reporting-time-zones">
+              {COMMON_TIMEZONE_GROUPS.flatMap((group) => group.zones).map((zone) => (
+                <option key={zone} value={zone} />
+              ))}
+            </datalist>
           </label>
           <label>Week starts on
             <select aria-label="Week starts on" value={selectedWeekStart} onChange={(event) => setSelectedWeekStart(Number(event.target.value))} disabled={pending}>
