@@ -336,6 +336,11 @@ where
     result.listed = threads.len();
 
     let threads_dir = threads_dir(cache_dir);
+    let invalid_ids: Vec<String> = threads
+        .iter()
+        .filter(|thread| !is_valid_thread_id(&thread.id))
+        .map(|thread| thread.id.clone())
+        .collect();
     let pending: Vec<AmpThreadSummary> = threads
         .into_iter()
         .filter(|thread| is_valid_thread_id(&thread.id))
@@ -344,7 +349,7 @@ where
                 || !threads_dir.join(format!("{}.json", thread.id)).is_file()
         })
         .collect();
-    result.unchanged = result.listed - pending.len();
+    result.unchanged = result.listed - pending.len() - invalid_ids.len();
 
     if let Err(error) = ensure_private_dir(cache_dir).and_then(|_| ensure_private_dir(&threads_dir))
     {
@@ -394,13 +399,19 @@ where
     let exported = exported.into_inner().unwrap();
     let failures = failures.into_inner().unwrap();
     result.exported = exported.len();
-    result.failed = failures.len();
+    result.failed = failures.len() + invalid_ids.len();
     result.remaining = timed_out.into_inner();
     result.complete = result.failed == 0 && result.remaining == 0;
     index.complete = result.complete;
     index.threads.extend(exported);
 
     let mut problems = Vec::new();
+    if let Some(first) = invalid_ids.first() {
+        problems.push(format!(
+            "{} thread(s) had invalid ids (first: {first})",
+            invalid_ids.len()
+        ));
+    }
     if let Some(first) = failures.first() {
         problems.push(format!(
             "{} thread export(s) failed (first: {first})",
@@ -436,8 +447,8 @@ fn sync_amp_cache(timeout: Duration) -> SyncAmpResult {
 }
 
 /// True when no sync attempt is recorded within [`AMP_AUTO_SYNC_FRESHNESS`].
-fn auto_sync_is_due(cache_dir: &Path) -> bool {
-    let Some(last_attempt) = load_index(cache_dir).last_attempt_at else {
+fn auto_sync_is_due(index: &AmpSyncIndex) -> bool {
+    let Some(last_attempt) = index.last_attempt_at.as_ref() else {
         return true;
     };
     let Ok(last_attempt) = chrono::DateTime::parse_from_rfc3339(&last_attempt) else {
@@ -467,8 +478,9 @@ fn has_cached_threads(cache_dir: &Path) -> bool {
 /// then read the existing cache.
 pub fn auto_sync_status() -> AutoSyncAmpResult {
     let cache_dir = get_amp_cache_dir();
-    let persisted_complete = load_index(&cache_dir).complete;
-    if find_amp_binary().is_none() || !auto_sync_is_due(&cache_dir) {
+    let persisted_index = load_index(&cache_dir);
+    let persisted_complete = persisted_index.complete;
+    if find_amp_binary().is_none() || !auto_sync_is_due(&persisted_index) {
         return AutoSyncAmpResult {
             warning: None,
             cache_complete: persisted_complete,
@@ -768,6 +780,23 @@ mod tests {
         assert!(!is_valid_thread_id("T-../../etc/passwd"));
         assert!(!is_valid_thread_id("T-"));
         assert!(!is_valid_thread_id("thread-1"));
+    }
+
+    #[test]
+    fn invalid_listed_thread_makes_the_cache_incomplete() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fake = FakeAmp::new(vec![summary("T-valid", "1"), summary("bad/id", "1")]);
+
+        let result = sync(temp.path(), &fake);
+
+        assert!(result.synced);
+        assert!(!result.complete);
+        assert_eq!(result.failed, 1);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("1 thread(s) had invalid ids (first: bad/id)")
+        );
+        assert!(!load_index(temp.path()).complete);
     }
 
     #[test]
