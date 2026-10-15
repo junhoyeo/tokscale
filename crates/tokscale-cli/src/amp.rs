@@ -76,12 +76,11 @@ pub struct SyncAmpResult {
 pub struct AutoSyncAmpResult {
     pub warning: Option<String>,
     pub cache_complete: bool,
-    pub has_cached_threads: bool,
 }
 
 impl AutoSyncAmpResult {
     pub fn allows_full_history(&self) -> bool {
-        self.cache_complete || !self.has_cached_threads
+        self.cache_complete
     }
 }
 
@@ -484,7 +483,6 @@ pub fn auto_sync_status() -> AutoSyncAmpResult {
         return AutoSyncAmpResult {
             warning: None,
             cache_complete: persisted_complete,
-            has_cached_threads: has_cached_threads(&cache_dir),
         };
     }
     let had_cache = has_cached_threads(&cache_dir);
@@ -502,7 +500,6 @@ pub fn auto_sync_status() -> AutoSyncAmpResult {
     AutoSyncAmpResult {
         warning,
         cache_complete: result.complete,
-        has_cached_threads: has_cached_threads(&cache_dir),
     }
 }
 
@@ -800,16 +797,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_amp_cache_does_not_block_other_clients_full_history() {
-        assert!(AutoSyncAmpResult::default().allows_full_history());
-        assert!(!AutoSyncAmpResult {
-            has_cached_threads: true,
-            ..AutoSyncAmpResult::default()
-        }
-        .allows_full_history());
+    fn full_history_requires_a_successfully_completed_listing() {
+        assert!(!AutoSyncAmpResult::default().allows_full_history());
         assert!(AutoSyncAmpResult {
             cache_complete: true,
-            has_cached_threads: true,
             ..AutoSyncAmpResult::default()
         }
         .allows_full_history());
