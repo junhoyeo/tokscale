@@ -136,7 +136,10 @@ pub(crate) fn normalize_syntactic(model_id: &str) -> String {
         name = base_model.to_string();
     }
     if let Some((base_model, potential_date)) = name.rsplit_once('-') {
-        if potential_date.len() == 8 && potential_date.chars().all(|c| c.is_ascii_digit()) {
+        if !base_model.is_empty()
+            && potential_date.len() == 8
+            && potential_date.chars().all(|c| c.is_ascii_digit())
+        {
             name = base_model.to_string();
         }
     }
@@ -9145,6 +9148,7 @@ mod tests {
             normalize_model_for_grouping("按需模型-20241022"),
             "按需模型"
         );
+        assert_eq!(normalize_model_for_grouping("-12345678"), "-12345678");
     }
 
     #[test]
