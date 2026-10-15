@@ -1047,12 +1047,33 @@ const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
 /// returned, which callers treat as a recoverable "skip this backend" signal.
+const MAX_CAPTURED_SUBPROCESS_BYTES: usize = 16 * 1024 * 1024;
+
+fn drain_subprocess_pipe(
+    mut pipe: impl std::io::Read + Send + 'static,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = pipe.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(read) > MAX_CAPTURED_SUBPROCESS_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("subprocess output exceeded {MAX_CAPTURED_SUBPROCESS_BYTES} byte limit"),
+            ));
+        }
+        output.extend_from_slice(&chunk[..read]);
+    }
+}
+
 pub(crate) fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
     stdin_bytes: Option<&[u8]>,
 ) -> std::io::Result<Output> {
-    use std::io::Read;
     use std::thread;
     use std::time::Instant;
 
@@ -1060,37 +1081,28 @@ pub(crate) fn run_command_with_timeout(
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
     }
-
     let mut child = cmd.spawn()?;
-
-    // Write to stdin (if requested) before draining output, then drop the
-    // handle so the child sees EOF.
     if let Some(bytes) = stdin_bytes {
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(bytes)?;
         }
     }
-
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| std::io::Error::other("failed to capture subprocess stdout"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
-
-    let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf)?;
-        Ok(buf)
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = stdout_tx.send(drain_subprocess_pipe(stdout));
     });
-    let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        stderr.read_to_end(&mut buf)?;
-        Ok(buf)
+    thread::spawn(move || {
+        let _ = stderr_tx.send(drain_subprocess_pipe(stderr));
     });
-
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -1106,14 +1118,20 @@ pub(crate) fn run_command_with_timeout(
         }
         thread::sleep(Duration::from_millis(25));
     };
-
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| std::io::Error::other("subprocess stdout reader thread panicked"))??;
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| std::io::Error::other("subprocess stderr reader thread panicked"))??;
-
+    let receive = |rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|error| match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "subprocess exited but a descendant kept an output pipe open",
+                ),
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    std::io::Error::other("subprocess output reader stopped")
+                }
+            })?
+    };
+    let stdout = receive(stdout_rx)?;
+    let stderr = receive(stderr_rx)?;
     Ok(Output {
         status,
         stdout,
@@ -2446,5 +2464,12 @@ mod tests {
     fn parse_openai_content_returns_none_without_choices() {
         assert_eq!(parse_openai_content(r#"{"error":"nope"}"#), None);
         assert_eq!(parse_openai_content("not json"), None);
+    }
+
+    #[test]
+    fn bounded_subprocess_drain_rejects_oversized_output() {
+        let bytes = vec![0_u8; MAX_CAPTURED_SUBPROCESS_BYTES + 1];
+        let error = drain_subprocess_pipe(std::io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }
