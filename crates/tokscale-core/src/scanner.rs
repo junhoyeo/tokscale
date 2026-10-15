@@ -3045,21 +3045,42 @@ fn scan_all_clients_with_env_strategy_inner(
 /// the synced cache root, so a thread is parsed from exactly one file. The
 /// cached copy always wins: it is exported from the server, which holds a
 /// superset of what the legacy local file recorded.
+fn amp_file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    path.metadata().ok()?.modified().ok()
+}
+
+fn amp_cache_is_at_least_as_fresh(
+    cache_mtime: Option<std::time::SystemTime>,
+    legacy_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    match (cache_mtime, legacy_mtime) {
+        (Some(cache_mtime), Some(legacy_mtime)) => cache_mtime >= legacy_mtime,
+        _ => true,
+    }
+}
+
 fn prefer_amp_cache_over_legacy(files: &mut Vec<PathBuf>, cache_root: &Path) {
-    let cached_names: HashSet<std::ffi::OsString> = files
+    let cached: std::collections::HashMap<std::ffi::OsString, PathBuf> = files
         .iter()
         .filter(|path| path.starts_with(cache_root))
-        .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| (name.to_os_string(), path.clone()))
+        })
         .collect();
-    if cached_names.is_empty() {
-        return;
-    }
-
     files.retain(|path| {
-        path.starts_with(cache_root)
-            || path
-                .file_name()
-                .is_none_or(|name| !cached_names.contains(name))
+        if path.starts_with(cache_root) {
+            return true;
+        }
+        let Some(name) = path.file_name() else {
+            return true;
+        };
+        let Some(cache) = cached.get(name) else {
+            return true;
+        };
+        // Prefer the server projection only when it is at least as fresh. A
+        // local thread written after the last sync may contain newer messages.
+        amp_cache_is_at_least_as_fresh(amp_file_mtime(cache), amp_file_mtime(path))
     });
 }
 
@@ -9439,5 +9460,18 @@ mod tests {
             discover_senpi_omo_children_roots(&temp.path().join("no-such-root"), None).is_empty(),
             "a missing sessions root must discover nothing"
         );
+    }
+
+    #[test]
+    fn amp_scan_keeps_newer_legacy_duplicate() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        assert!(!amp_cache_is_at_least_as_fresh(
+            Some(epoch),
+            Some(epoch + std::time::Duration::from_secs(1)),
+        ));
+        assert!(amp_cache_is_at_least_as_fresh(
+            Some(epoch + std::time::Duration::from_secs(1)),
+            Some(epoch),
+        ));
     }
 }
