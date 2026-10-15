@@ -1905,6 +1905,7 @@ where
 
     let mut total_rows = 0;
     let mut success_count = 0;
+    let mut refreshed_secondary_paths = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
 
     for (account_id, credentials) in &store.accounts {
@@ -1946,6 +1947,9 @@ where
                 } else {
                     total_rows += event_count;
                     success_count += 1;
+                    if !is_active {
+                        refreshed_secondary_paths.insert(file_path.clone());
+                    }
                     // Archive (don't delete) the legacy CSV counterpart now that
                     // JSON is authoritative: pre-migration history survives and
                     // the scanner never parses both and double-counts this account.
@@ -1973,11 +1977,13 @@ where
     // failed fetch that still has a good `usage.json` clears the duplicate so the
     // scanner never reads both JSON caches and double-counts the active account.
     // The JSON dup is a stale copy (removed); the legacy CSV dup is archived so
-    // pre-migration history survives.
+    // pre-migration history survives. A secondary successfully refreshed in this
+    // run may share the active account's sanitized path. Keep its just-written
+    // JSON instead of deleting a successful sync result as an active duplicate.
     if cache_dir.join("usage.json").exists() {
         let active_sanitized = sanitize_account_id_for_filename(&store.active_account_id);
         let dup_json = cache_dir.join(format!("usage.{active_sanitized}.json"));
-        if dup_json.exists() {
+        if dup_json.exists() && !refreshed_secondary_paths.contains(&dup_json) {
             let _ = fs::remove_file(&dup_json);
         }
         let dup_csv = cache_dir.join(format!("usage.{active_sanitized}.csv"));
@@ -5002,6 +5008,84 @@ mod tests {
             "both legacy CSVs must be archived, not deleted"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_cleanup_keeps_refreshed_secondary_with_colliding_active_id() -> Result<()> {
+        for active_fails in [false, true] {
+            let temp = TempDir::new()?;
+            let active_id = "team/account-a";
+            let secondary_id = "team@account-a";
+            let accounts = [active_id, secondary_id]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        CursorCredentials {
+                            session_token: id.to_string(),
+                            user_id: Some(id.to_string()),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            expires_at: None,
+                            label: None,
+                        },
+                    )
+                })
+                .collect();
+            save_credentials_store_in_home(
+                temp.path(),
+                &CursorCredentialsStore {
+                    version: 1,
+                    active_account_id: active_id.to_string(),
+                    accounts,
+                },
+            )?;
+            let credentials_before = fs::read(cursor_credentials_path(temp.path()))?;
+            let cache_dir = cursor_cache_dir(temp.path());
+            fs::create_dir_all(&cache_dir)?;
+            let active_json =
+                String::from_utf8(json_page(1, &[&json_event("active-history", "7200000")]))?;
+            fs::write(cache_dir.join("usage.json"), &active_json)?;
+            let secondary_json =
+                String::from_utf8(json_page(1, &[&json_event("secondary-history", "7200000")]))?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+                temp.path(),
+                |fetch| {
+                    let response = if fetch.session_token == active_id {
+                        if active_fails {
+                            Err(anyhow::anyhow!("active unavailable"))
+                        } else {
+                            Ok(active_json.clone())
+                        }
+                    } else {
+                        Ok(secondary_json.clone())
+                    };
+                    async move { response }
+                },
+            ));
+            assert!(result.synced, "secondary sync must succeed: {result:?}");
+            assert_eq!(result.error.is_some(), active_fails);
+            assert_eq!(
+                fs::read_to_string(cache_dir.join("usage.json"))?,
+                active_json
+            );
+            assert_eq!(
+                fs::read(cursor_credentials_path(temp.path()))?,
+                credentials_before
+            );
+            let secondary_path = cache_dir.join("usage.team-account-a.json");
+            assert_eq!(
+                fs::read_to_string(&secondary_path).ok().as_deref(),
+                Some(secondary_json.as_str()),
+                "cleanup must retain the freshly written secondary; active_fails={active_fails}"
+            );
+            let rows = tokscale_core::sessions::cursor::parse_cursor_file(&secondary_path);
+            assert_eq!(rows.len(), 1, "secondary history must remain reportable");
+            assert_eq!(rows[0].session_id, "secondary-history");
+            assert_eq!(rows[0].tokens.input, 10);
+            assert_eq!(rows[0].tokens.output, 5);
+        }
         Ok(())
     }
 
