@@ -129,6 +129,7 @@ export interface PublicProfileRouteParams {
 export async function getPublicProfileResponse(
   request: Request,
   { params }: PublicProfileRouteParams,
+  now: Date = new Date(),
 ) {
   try {
     const { username } = await params;
@@ -136,7 +137,6 @@ export async function getPublicProfileResponse(
     const period = parseProfilePeriod(searchParams.get("period"));
     // One clock reading for the whole request, so a UTC midnight crossed
     // mid-request cannot put the query and the window on different days.
-    const now = new Date();
     // The window a period request draws ends on the anchor, which is only known
     // once the stats query returns. The anchor can only move *forward* of UTC
     // today, so a window measured back from UTC today starts on or before the
@@ -824,6 +824,9 @@ export async function loadPublicProfileForPage(
   username: string,
   period: PublicProfilePeriod,
 ): Promise<PublicProfilePageResult> {
+  const now = new Date();
+  const utcDateKey =
+    period === "all" ? "all" : toUtcDateString(getUtcToday(now));
   const load = unstable_cache(
     async (): Promise<PublicProfilePageResult> => {
       const query = period === "all" ? "" : `?period=${period}`;
@@ -832,6 +835,7 @@ export async function loadPublicProfileForPage(
           `http://tokscale.internal/api/users/${encodeURIComponent(username)}${query}`,
         ),
         { params: Promise.resolve({ username }) },
+        now,
       );
 
       if (response.status === 308) {
@@ -847,7 +851,7 @@ export async function loadPublicProfileForPage(
 
       return { data: await response.json(), kind: "data" };
     },
-    ["public-profile-page", username, period],
+    ["public-profile-page", username, period, utcDateKey],
     {
       revalidate: 60,
       tags: [`user:${normalizeUsernameCacheKey(username)}`],

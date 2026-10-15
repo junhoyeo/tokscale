@@ -173,8 +173,10 @@ vi.mock("drizzle-orm", () => ({
 }));
 
 type ModuleExports = typeof import("../../src/app/api/users/[username]/route");
+type DataModuleExports = typeof import("../../src/lib/publicProfileData");
 
 let GET: ModuleExports["GET"];
+let loadPublicProfileForPage: DataModuleExports["loadPublicProfileForPage"];
 
 function serializeSqlCalls(): string[] {
   return mockState.sql.mock.calls.map((call) => {
@@ -195,16 +197,46 @@ function collapseSql(text: string | undefined): string {
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/users/[username]/route");
+  const dataModule = await import("../../src/lib/publicProfileData");
   GET = routeModule.GET;
+  loadPublicProfileForPage = dataModule.loadPublicProfileForPage;
 });
 
 beforeEach(() => {
   mockState.reset();
   unstableCacheMock.mockClear();
+  unstableCacheMock.mockImplementation((fn: () => unknown) => fn);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("public profile page cache", () => {
+  it("rolls finite-period keys over at UTC midnight", async () => {
+    unstableCacheMock.mockImplementation(
+      () => async () => ({ kind: "error", status: 599 }),
+    );
+    vi.useFakeTimers();
+
+    vi.setSystemTime(new Date("2026-01-31T23:59:59.000Z"));
+    await loadPublicProfileForPage("alice", "this-month");
+    vi.setSystemTime(new Date("2026-02-01T00:00:01.000Z"));
+    await loadPublicProfileForPage("alice", "this-month");
+
+    expect(unstableCacheMock).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Function),
+      ["public-profile-page", "alice", "this-month", "2026-01-31"],
+      expect.any(Object),
+    );
+    expect(unstableCacheMock).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Function),
+      ["public-profile-page", "alice", "this-month", "2026-02-01"],
+      expect.any(Object),
+    );
+  });
 });
 
 describe("GET /api/users/[username]", () => {
