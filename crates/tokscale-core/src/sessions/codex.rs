@@ -12,7 +12,7 @@
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, is_zst_path, parse_timestamp_value,
-    session_id_from_path, MAX_ARCHIVE_BYTES,
+    session_id_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
@@ -80,11 +80,16 @@ pub struct CodexPayload {
     /// until the next snapshot — unlike the request-scoped arms below, it must
     /// not be reset at `turn_context` boundaries.
     pub thread_settings: Option<CodexThreadSettings>,
-    /// Request-level usage item; kept as a service-tier forward-compat arm in
-    /// case Codex ever stamps the tier on request-level usage records. Its
-    /// token counters are not emitted separately because the existing
-    /// token_count stream already accounts for them.
+    /// Usage of one model response on a `token_usage_record` item. The
+    /// token_count stream normally reports the same response right after it,
+    /// so the record only counts when no token_count confirms it; see
+    /// `CodexParseState::pending_usage_record`. Also a service-tier
+    /// forward-compat arm in case Codex stamps the tier here.
     pub usage: Option<CodexTokenUsage>,
+    /// `token_usage_record` only: the response the usage belongs to.
+    pub response_id: Option<String>,
+    /// `token_usage_record` only: the thread whose response this is.
+    pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     /// Unix timestamp (seconds) from `task_started` events. Legacy Codex turns
     /// may use UUID v4 ids, so this is their only causal ordering signal.
@@ -209,6 +214,14 @@ impl CodexTotals {
             cached: self.cached - previous.cached,
             reasoning: self.reasoning - previous.reasoning,
         })
+    }
+
+    /// Whether two usage reports describe the same response: input and output
+    /// must each match. The cached split of the input and the reasoning share
+    /// of the output are not compared, since those are the parts a
+    /// `token_usage_record` and a `token_count` may report differently.
+    fn reports_same_response(self, other: Self) -> bool {
+        self.input == other.input && self.output == other.output
     }
 
     fn saturating_add(self, other: Self) -> Self {
@@ -387,7 +400,92 @@ pub(crate) struct CodexParseState {
     /// re-parses, since a mirror row for an earlier turn still has to yield.
     #[serde(default)]
     pub turn_coverage: CodexTurnCoverage,
+    /// The latest `token_usage_record` that no token_count has confirmed yet.
+    ///
+    /// Codex writes one `token_usage_record` per model response and then a
+    /// `token_count` whose `last_token_usage` is that same response, so the
+    /// token_count stream stays the usage source and a confirmed record adds
+    /// nothing. A context compaction request is the exception: its record is
+    /// followed by a `compacted` item and a token_count that does not advance
+    /// the totals, so the compaction's tokens appear in the record alone. A
+    /// response whose turn ended before its token_count was written leaves
+    /// the same trace. The record is therefore held here and settled against
+    /// the usage the next token_count actually emits, whichever form that
+    /// token_count takes (cumulative and last, total-only delta, last-only):
+    /// - a token_count whose emitted usage reports this response (input and
+    ///   output each equal; the cached and reasoning splits may differ)
+    ///   confirms it, and the response is counted once, from the token_count;
+    /// - a forked child's replayed parent snapshot drops it, since the record
+    ///   is part of the same replay;
+    /// - the next `token_usage_record` or the start of another turn arriving
+    ///   first emits it as its own usage row, and so does, after a `compacted`
+    ///   item, a token_count that emits nothing (Codex's non-advancing
+    ///   estimate) or reports a different response.
+    ///
+    /// Outside compaction, a token_count that emits a different response still
+    /// confirms the record by order: in every rollout measured the two are
+    /// equal, and reading a mismatch as "unconfirmed" would count every
+    /// response twice if Codex ever reported them differently. A token_count
+    /// that reports a record already emitted on its own is recognized through
+    /// [`CodexParseState::settled_usage_records`] instead.
+    ///
+    /// A record whose `thread_id` names another thread is never held: this
+    /// rollout's token_counts do not report it, and its own thread counts it.
+    ///
+    /// A record still pending at the end of the file stays pending: the
+    /// rollout may still be written, and an incremental re-parse resolves it
+    /// once its token_count or the next turn appears. `#[serde(default)]`
+    /// keeps it across incremental re-parses.
+    #[serde(default)]
+    pub pending_usage_record: Option<CodexPendingUsageRecord>,
+    /// Usage of the latest records emitted on their own, at most
+    /// [`SETTLED_USAGE_RECORD_LIMIT`], oldest first.
+    ///
+    /// A record is emitted when the next turn or record arrives before its
+    /// token_count, so its token_count can still come later. Such a late
+    /// report would otherwise count the response a second time, with a
+    /// different key and possibly in another day. A token_count whose emitted
+    /// usage matches an entry is taken as that late report: it advances the
+    /// baseline, emits nothing, and consumes the entry. `#[serde(default)]`
+    /// keeps the entries across incremental re-parses, so a late report in an
+    /// appended chunk is recognized as well.
+    #[serde(default)]
+    pub settled_usage_records: std::collections::VecDeque<CodexTotals>,
 }
+
+/// A `token_usage_record` waiting for a token_count to confirm it; see
+/// [`CodexParseState::pending_usage_record`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CodexPendingUsageRecord {
+    usage: CodexTotals,
+    timestamp_ms: Option<i64>,
+    turn_id: Option<String>,
+    response_id: Option<String>,
+    service_tier: Option<String>,
+    /// The record's own model, when Codex writes one; the turn's model
+    /// otherwise.
+    #[serde(default)]
+    model: Option<String>,
+    /// A `compacted` item followed the record; the next token_count settles
+    /// it (see [`CodexParseState::pending_usage_record`]).
+    #[serde(default)]
+    after_compacted: bool,
+    /// The record came after a human `user_message` that no usage row has
+    /// marked yet, so if it is emitted it is the turn's first reply.
+    #[serde(default)]
+    turn_start: bool,
+}
+
+impl CodexPendingUsageRecord {
+    /// Whether usage a token_count emits reports this record's response.
+    fn reported_by(&self, emitted: CodexTotals) -> bool {
+        self.usage.reports_same_response(emitted)
+    }
+}
+
+/// How many records emitted on their own are remembered for a late
+/// token_count (see [`CodexParseState::settled_usage_records`]).
+const SETTLED_USAGE_RECORD_LIMIT: usize = 16;
 
 /// Which of a thread's turns a rollout recorded usage for.
 ///
@@ -421,6 +519,11 @@ impl CodexTurnCoverage {
 
 /// Client id the `codex` parser tags rollouts OpenClaw drove with.
 pub(crate) const OPENCLAW_CLIENT_ID: &str = "openclaw";
+
+// Codex rollouts can include large tool output and image data. This bounds total
+// decoded input separately from the per-record bound below.
+pub(crate) const MAX_CODEX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Codex thread id from a rollout filename, `rollout-<timestamp>-<uuid>.jsonl`.
 ///
@@ -549,6 +652,9 @@ pub(crate) struct ParsedCodexFile {
     /// read failure.
     pub archive_failure: Option<CodexArchiveFailure>,
     reader_error: Option<(std::io::ErrorKind, String)>,
+    /// Oversized records are consumed without materializing them so later usage
+    /// rows can still be parsed.
+    pub skipped_oversized_records: u64,
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
@@ -562,6 +668,8 @@ impl ParsedCodexFile {
 
 #[cfg(test)]
 static ARCHIVE_LIMIT_OVERRIDES: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
+#[cfg(test)]
+static RECORD_LIMIT_OVERRIDES: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
 
 /// Keeps one path-scoped decoded-size limit installed for a test. The exact
 /// path lookup reaches Rayon workers without a process-wide tuning variable.
@@ -619,10 +727,83 @@ fn archive_limit_for_path(_path: &Path) -> u64 {
         return max_bytes;
     }
 
-    MAX_ARCHIVE_BYTES
+    MAX_CODEX_ARCHIVE_BYTES
+}
+
+#[cfg(test)]
+pub(crate) struct RecordLimitOverrideGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for RecordLimitOverrideGuard {
+    fn drop(&mut self) {
+        let Ok(mut overrides) = RECORD_LIMIT_OVERRIDES.lock() else {
+            return;
+        };
+        if let Some(overrides) = overrides.as_mut() {
+            overrides.remove(&self.path);
+        }
+        if matches!(overrides.as_ref(), Some(overrides) if overrides.is_empty()) {
+            *overrides = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_record_limit_override(
+    path: &Path,
+    max_bytes: usize,
+) -> RecordLimitOverrideGuard {
+    let path = path.to_path_buf();
+    let inserted = {
+        let mut overrides = RECORD_LIMIT_OVERRIDES.lock().unwrap();
+        let overrides = overrides.get_or_insert_with(HashMap::new);
+        overrides.insert(path.clone(), max_bytes).is_none()
+    };
+    assert!(
+        inserted,
+        "a Codex record limit override is already registered for this path"
+    );
+    RecordLimitOverrideGuard { path }
+}
+
+fn record_limit_for_path(_path: &Path) -> usize {
+    #[cfg(test)]
+    if let Some(max_bytes) = RECORD_LIMIT_OVERRIDES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|overrides| overrides.get(_path).copied())
+    {
+        return max_bytes;
+    }
+
+    MAX_CODEX_RECORD_BYTES
 }
 
 impl CodexParseState {
+    /// Consume the settled record `emitted` reports, if there is one; see
+    /// [`CodexParseState::settled_usage_records`].
+    fn take_settled_usage_record(&mut self, emitted: CodexTotals) -> bool {
+        let Some(index) = self
+            .settled_usage_records
+            .iter()
+            .position(|usage| usage.reports_same_response(emitted))
+        else {
+            return false;
+        };
+        self.settled_usage_records.remove(index);
+        true
+    }
+
+    fn remember_settled_usage_record(&mut self, usage: CodexTotals) {
+        if self.settled_usage_records.len() == SETTLED_USAGE_RECORD_LIMIT {
+            self.settled_usage_records.pop_front();
+        }
+        self.settled_usage_records.push_back(usage);
+    }
+
     pub(crate) fn is_missing_usage(&self) -> bool {
         !self.session_owned_by_openclaw && self.has_own_activity && !self.has_supported_usage
     }
@@ -693,12 +874,124 @@ struct PendingCodexMessage {
     fallback_dedup: Option<CodexFallbackDedupIdentity>,
 }
 
+enum BoundedJsonlRead {
+    Eof,
+    Line(u64),
+    Oversized(u64),
+}
+
+/// Reads one JSONL record without allowing it to grow `line` beyond `max_bytes`.
+/// An oversized record is consumed through its newline in fixed-size BufRead chunks.
+fn read_bounded_jsonl_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<BoundedJsonlRead> {
+    line.clear();
+    let mut consumed = 0_u64;
+    let mut oversized = false;
+    let mut utf8_tail = Vec::with_capacity(3);
+    loop {
+        let (take, has_newline) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                if !oversized && !utf8_tail.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "incomplete UTF-8 at end of JSONL record",
+                    ));
+                }
+                return Ok(if consumed == 0 {
+                    BoundedJsonlRead::Eof
+                } else if oversized {
+                    BoundedJsonlRead::Oversized(consumed)
+                } else {
+                    BoundedJsonlRead::Line(consumed)
+                });
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            if !oversized {
+                if line
+                    .len()
+                    .saturating_add(utf8_tail.len())
+                    .saturating_add(take)
+                    > max_bytes
+                {
+                    oversized = true;
+                } else {
+                    let mut utf8 = Vec::with_capacity(utf8_tail.len() + take);
+                    utf8.extend_from_slice(&utf8_tail);
+                    utf8.extend_from_slice(&available[..take]);
+                    match std::str::from_utf8(&utf8) {
+                        Ok(chunk) => {
+                            line.push_str(chunk);
+                            utf8_tail.clear();
+                        }
+                        Err(error) if error.error_len().is_none() => {
+                            let valid_up_to = error.valid_up_to();
+                            // A BufRead boundary may bisect a valid multi-byte character.
+                            let chunk = std::str::from_utf8(&utf8[..valid_up_to]).unwrap();
+                            line.push_str(chunk);
+                            utf8_tail.clear();
+                            utf8_tail.extend_from_slice(&utf8[valid_up_to..]);
+                        }
+                        Err(error) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                error,
+                            ));
+                        }
+                    }
+                }
+            }
+            (take, take < available.len() || available[take - 1] == b'\n')
+        };
+        reader.consume(take);
+        consumed += take as u64;
+        if has_newline {
+            if !oversized && !utf8_tail.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "incomplete UTF-8 at end of JSONL record",
+                ));
+            }
+            return Ok(if oversized {
+                BoundedJsonlRead::Oversized(consumed)
+            } else {
+                BoundedJsonlRead::Line(consumed)
+            });
+        }
+    }
+}
+
+#[cfg(test)]
 fn parse_codex_reader<R: BufRead>(
+    reader: R,
+    session_id: &str,
+    fallback_timestamp: i64,
+    start_offset: u64,
+    state: CodexParseState,
+) -> ParsedCodexFile {
+    parse_codex_reader_with_record_limit(
+        reader,
+        session_id,
+        fallback_timestamp,
+        start_offset,
+        state,
+        MAX_CODEX_RECORD_BYTES,
+    )
+}
+
+fn parse_codex_reader_with_record_limit<R: BufRead>(
     mut reader: R,
     session_id: &str,
     fallback_timestamp: i64,
     start_offset: u64,
     mut state: CodexParseState,
+    max_record_bytes: usize,
 ) -> ParsedCodexFile {
     let mut messages = Vec::with_capacity(64);
     let mut fallback_timestamp_indices = Vec::new();
@@ -707,21 +1000,26 @@ fn parse_codex_reader<R: BufRead>(
     let mut consumed_offset = start_offset;
     let mut parse_succeeded = true;
     let mut reader_error = None;
+    let mut skipped_oversized_records = 0_u64;
     let mut pending_model_messages = Vec::new();
     let mut unresolved_model_events = false;
 
     loop {
-        line.clear();
-        let bytes_read = match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(bytes_read) => bytes_read,
+        let bytes_read = match read_bounded_jsonl_line(&mut reader, &mut line, max_record_bytes) {
+            Ok(BoundedJsonlRead::Eof) => break,
+            Ok(BoundedJsonlRead::Line(bytes_read)) => bytes_read,
+            Ok(BoundedJsonlRead::Oversized(bytes_read)) => {
+                consumed_offset += bytes_read;
+                skipped_oversized_records += 1;
+                continue;
+            }
             Err(error) => {
                 parse_succeeded = false;
                 reader_error = Some((error.kind(), error.to_string()));
                 break;
             }
         };
-        consumed_offset += bytes_read as u64;
+        consumed_offset += bytes_read;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -735,15 +1033,90 @@ fn parse_codex_reader<R: BufRead>(
             if let Some(payload) = entry.payload {
                 // Request-level usage records carry actual per-response tier
                 // metadata in newer Codex rollouts. The token_count snapshots
-                // remain the canonical usage source to avoid counting each
-                // response a second time.
+                // remain the canonical usage source; a record only counts when
+                // no token_count confirms it (see `pending_usage_record`).
                 if entry.entry_type == "token_usage_record" {
-                    if !state.forked_child_waiting_for_turn_context {
-                        if let Some(service_tier) = extract_request_service_tier(&payload) {
+                    // Another thread's response (a subagent's, say) is not
+                    // reported by this rollout's token_counts; its own
+                    // rollout counts it.
+                    let from_other_thread = payload
+                        .thread_id
+                        .as_deref()
+                        .zip(state.session_id_from_meta.as_deref())
+                        .is_some_and(|(thread, own)| thread != own);
+                    if !state.forked_child_waiting_for_turn_context && !from_other_thread {
+                        let service_tier = extract_request_service_tier(&payload);
+                        // A record still pending here never got its
+                        // token_count, so its usage is counted from it now,
+                        // before this record's tier becomes the request tier.
+                        emit_unconfirmed_usage_record(
+                            &mut state,
+                            session_id,
+                            fallback_timestamp,
+                            &mut messages,
+                            &mut fallback_timestamp_indices,
+                            &mut pending_model_messages,
+                        );
+                        if let Some(service_tier) = service_tier.clone() {
                             state.request_service_tier = Some(service_tier);
+                        }
+                        state.pending_usage_record = payload
+                            .usage
+                            .as_ref()
+                            .filter(|usage| usage.has_supported_counters())
+                            .map(|usage| CodexPendingUsageRecord {
+                                usage: CodexTotals::from_usage(usage),
+                                timestamp_ms: parse_codex_entry_timestamp(
+                                    entry.timestamp.as_deref(),
+                                ),
+                                turn_id: payload
+                                    .turn_id
+                                    .clone()
+                                    .or_else(|| state.current_turn_id.clone()),
+                                response_id: payload.response_id.clone(),
+                                service_tier,
+                                model: extract_model(&payload),
+                                after_compacted: false,
+                                turn_start: state.pending_turn_start,
+                            });
+                        // A held record is a usage ledger even before it is
+                        // settled, so the rollout is not reported as unmetered.
+                        if state.pending_usage_record.is_some() {
+                            state.has_supported_usage = true;
                         }
                     }
                     continue;
+                }
+
+                // A new turn ends any wait for the previous turn's token_count,
+                // so the pending record is counted now. A `compacted` item only
+                // marks it: the next token_count settles a compaction record.
+                if !state.forked_child_waiting_for_turn_context {
+                    if entry.entry_type == "compacted" {
+                        if let Some(record) = state.pending_usage_record.as_mut() {
+                            record.after_compacted = true;
+                        }
+                    }
+                    let starts_other_turn = (entry.entry_type == "event_msg"
+                        && payload.payload_type.as_deref() == Some("task_started"))
+                        // A `turn_context` without an id starts a turn of its
+                        // own unless a `task_started` just announced it, and
+                        // that `task_started` has already settled the record.
+                        || (entry.entry_type == "turn_context"
+                            && state
+                                .pending_usage_record
+                                .as_ref()
+                                .is_some_and(|record| record.turn_id != payload.turn_id));
+                    if starts_other_turn {
+                        emit_unconfirmed_usage_record(
+                            &mut state,
+                            session_id,
+                            fallback_timestamp,
+                            &mut messages,
+                            &mut fallback_timestamp_indices,
+                            &mut pending_model_messages,
+                        );
+                    }
                 }
 
                 // The service tier's only real wire location today: a
@@ -1105,6 +1478,10 @@ fn parse_codex_reader<R: BufRead>(
                         if total_usage == Some(CodexTotals::default()) {
                             state.has_supported_usage |= has_supported_counters;
                         }
+                        // The record just before a replayed parent snapshot
+                        // is the parent's replayed record of that response,
+                        // which the parent rollout counts already.
+                        state.pending_usage_record = None;
                         continue;
                     }
                     state.forked_child_inherited_baseline = None;
@@ -1114,59 +1491,114 @@ fn parse_codex_reader<R: BufRead>(
                     // ledger exists, even when accounting emits no message.
                     state.has_supported_usage |= has_supported_counters;
 
-                    let (tokens, next_totals) =
-                        match (total_usage, last_usage, state.previous_totals) {
-                            // Both present with previous baseline (standard path)
-                            (Some(total), Some(last), Some(previous)) => {
-                                if total == previous {
-                                    continue;
-                                }
-                                if total.delta_from(previous).is_none()
-                                    && total.looks_like_stale_regression(previous, last)
-                                {
-                                    continue;
-                                }
-                                (last.into_tokens(), Some(total))
+                    // The usage this token_count emits, in whichever form the
+                    // snapshot reports it, and the baseline it leaves behind;
+                    // `None` when it emits nothing.
+                    let emitted = match (total_usage, last_usage, state.previous_totals) {
+                        // Both present with previous baseline (standard path)
+                        (Some(total), Some(last), Some(previous)) => {
+                            if total == previous
+                                || (total.delta_from(previous).is_none()
+                                    && total.looks_like_stale_regression(previous, last))
+                            {
+                                None
+                            } else {
+                                Some((last, Some(total)))
                             }
-                            // Both present, first event — use last (NOT full total) to
-                            // avoid overcounting tokens carried from a resumed session.
-                            (Some(total), Some(last), None) => (last.into_tokens(), Some(total)),
-                            // Only total, have previous (defensive — upstream schema
-                            // requires both when info is present)
-                            (Some(total), None, Some(previous)) => {
-                                if total == previous {
-                                    continue;
-                                }
-                                if let Some(delta) = total.delta_from(previous) {
-                                    (delta.into_tokens(), Some(total))
-                                } else {
-                                    state.previous_totals = Some(total);
-                                    continue;
-                                }
+                        }
+                        // Both present, first event — use last (NOT full total) to
+                        // avoid overcounting tokens carried from a resumed session.
+                        (Some(total), Some(last), None) => Some((last, Some(total))),
+                        // Only total, have previous (defensive — upstream schema
+                        // requires both when info is present)
+                        (Some(total), None, Some(previous)) => {
+                            if total == previous {
+                                None
+                            } else if let Some(delta) = total.delta_from(previous) {
+                                Some((delta, Some(total)))
+                            } else {
+                                state.previous_totals = Some(total);
+                                None
                             }
-                            // Only total, first event, no last — legacy/degraded path
-                            (Some(total), None, None) => (total.into_tokens(), Some(total)),
-                            // Only last, have previous
-                            (None, Some(last), Some(previous)) => {
-                                (last.into_tokens(), Some(previous.saturating_add(last)))
-                            }
-                            // Only last, no previous
-                            (None, Some(last), None) => (last.into_tokens(), None),
-                            // Neither
-                            (None, None, _) => continue,
-                        };
-
+                        }
+                        // Only total, first event, no last — legacy/degraded path
+                        (Some(total), None, None) => Some((total, Some(total))),
+                        // Only last, have previous
+                        (None, Some(last), Some(previous)) => {
+                            Some((last, Some(previous.saturating_add(last))))
+                        }
+                        // Only last, no previous
+                        (None, Some(last), None) => Some((last, None)),
+                        // Neither
+                        (None, None, _) => None,
+                    }
                     // Skip zero-token snapshots without advancing the baseline so
                     // that post-compaction zero totals don't inflate later deltas.
-                    if tokens.input == 0
-                        && tokens.output == 0
-                        && tokens.cache_read == 0
-                        && tokens.reasoning == 0
-                    {
-                        continue;
-                    }
+                    .filter(|(usage, _)| {
+                        let tokens = usage.into_tokens();
+                        tokens.input != 0
+                            || tokens.output != 0
+                            || tokens.cache_read != 0
+                            || tokens.reasoning != 0
+                    });
 
+                    let Some((emitted_usage, next_totals)) = emitted else {
+                        // A token_count that emits nothing after `compacted`
+                        // (Codex's non-advancing estimate) did not report the
+                        // compaction, so its record is the only report of it.
+                        if state
+                            .pending_usage_record
+                            .as_ref()
+                            .is_some_and(|record| record.after_compacted)
+                        {
+                            emit_unconfirmed_usage_record(
+                                &mut state,
+                                session_id,
+                                fallback_timestamp,
+                                &mut messages,
+                                &mut fallback_timestamp_indices,
+                                &mut pending_model_messages,
+                            );
+                        }
+                        continue;
+                    };
+                    let tokens = emitted_usage.into_tokens();
                     state.previous_totals = next_totals;
+
+                    // Settle the pending record against the usage this
+                    // token_count emits (see `pending_usage_record`).
+                    let reports_pending = state
+                        .pending_usage_record
+                        .as_ref()
+                        .is_some_and(|record| record.reported_by(emitted_usage));
+                    if reports_pending {
+                        // The same response: counted once, from here.
+                        state.pending_usage_record = None;
+                    } else if state.take_settled_usage_record(emitted_usage) {
+                        // A late report of a response whose record was
+                        // already counted on its own. The baseline moves on,
+                        // and any pending record waits for its own report.
+                        continue;
+                    } else if state
+                        .pending_usage_record
+                        .as_ref()
+                        .is_some_and(|record| record.after_compacted)
+                    {
+                        // This token_count reports another response, so the
+                        // compaction before it is counted from its record.
+                        emit_unconfirmed_usage_record(
+                            &mut state,
+                            session_id,
+                            fallback_timestamp,
+                            &mut messages,
+                            &mut fallback_timestamp_indices,
+                            &mut pending_model_messages,
+                        );
+                    } else {
+                        // Outside compaction the next report confirms the
+                        // record by order (see `pending_usage_record`).
+                        state.pending_usage_record = None;
+                    }
 
                     let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref());
                     let timestamp = state
@@ -1177,39 +1609,12 @@ fn parse_codex_reader<R: BufRead>(
                         parsed_timestamp,
                     );
 
-                    let agent = if state.session_is_headless {
-                        Some(CODEX_HEADLESS_AGENT.to_string())
-                    } else {
-                        state.session_agent.clone()
-                    };
-
-                    let provider = state
-                        .session_provider
-                        .as_deref()
-                        .or_else(|| model.as_deref().and_then(inferred_provider_from_model))
-                        .unwrap_or("openai");
-
-                    // A rollout OpenClaw drove is OpenClaw's usage: tag it so
-                    // and key it by the Codex thread id, which is what
-                    // OpenClaw's transcript mirror names when it refers back
-                    // to this thread.
-                    let (client, message_session_id) = if state.session_owned_by_openclaw {
-                        (
-                            OPENCLAW_CLIENT_ID,
-                            state.session_id_from_meta.as_deref().unwrap_or(session_id),
-                        )
-                    } else {
-                        ("codex", session_id)
-                    };
-                    let mut message = UnifiedMessage::new_with_agent(
-                        client,
-                        model.clone().unwrap_or_else(|| "unknown".to_string()),
-                        provider,
-                        message_session_id.to_string(),
+                    let mut message = new_codex_usage_message(
+                        &state,
+                        session_id,
+                        model.as_deref(),
                         timestamp,
                         tokens,
-                        0.0,
-                        agent,
                     );
                     message.service_tier = state
                         .request_service_tier
@@ -1372,8 +1777,130 @@ fn parse_codex_reader<R: BufRead>(
         parse_succeeded,
         archive_failure: None,
         reader_error,
+        skipped_oversized_records,
         unresolved_model_events,
         state,
+    }
+}
+
+/// A usage message for this rollout, attributed the way every Codex usage
+/// row is: client, session, provider and agent come from the session state.
+fn new_codex_usage_message(
+    state: &CodexParseState,
+    session_id: &str,
+    model: Option<&str>,
+    timestamp: i64,
+    tokens: TokenBreakdown,
+) -> UnifiedMessage {
+    let agent = if state.session_is_headless {
+        Some(CODEX_HEADLESS_AGENT.to_string())
+    } else {
+        state.session_agent.clone()
+    };
+
+    let provider = state
+        .session_provider
+        .as_deref()
+        .or_else(|| model.and_then(inferred_provider_from_model))
+        .unwrap_or("openai");
+
+    // A rollout OpenClaw drove is OpenClaw's usage: tag it so and key it by
+    // the Codex thread id, which is what OpenClaw's transcript mirror names
+    // when it refers back to this thread.
+    let (client, message_session_id) = if state.session_owned_by_openclaw {
+        (
+            OPENCLAW_CLIENT_ID,
+            state.session_id_from_meta.as_deref().unwrap_or(session_id),
+        )
+    } else {
+        ("codex", session_id)
+    };
+    UnifiedMessage::new_with_agent(
+        client,
+        model.unwrap_or("unknown").to_string(),
+        provider,
+        message_session_id.to_string(),
+        timestamp,
+        tokens,
+        0.0,
+        agent,
+    )
+}
+
+/// Count the pending `token_usage_record` as its own usage row: no token_count
+/// confirmed it before another record or another turn arrived, or the
+/// token_count after its `compacted` item did not report it, so the
+/// token_count stream never counted its tokens. See
+/// [`CodexParseState::pending_usage_record`] for the rule.
+fn emit_unconfirmed_usage_record(
+    state: &mut CodexParseState,
+    session_id: &str,
+    fallback_timestamp: i64,
+    messages: &mut Vec<UnifiedMessage>,
+    fallback_timestamp_indices: &mut Vec<usize>,
+    pending_model_messages: &mut Vec<PendingCodexMessage>,
+) {
+    let Some(record) = state.pending_usage_record.take() else {
+        return;
+    };
+    let tokens = record.usage.into_tokens();
+    if tokens.input == 0 && tokens.output == 0 && tokens.cache_read == 0 && tokens.reasoning == 0 {
+        return;
+    }
+    let model = record.model.clone().or_else(|| state.current_model.clone());
+    let timestamp = record.timestamp_ms.unwrap_or(fallback_timestamp);
+    let mut message =
+        new_codex_usage_message(state, session_id, model.as_deref(), timestamp, tokens);
+    // The first reply after human input marks the turn start, as on the
+    // token_count path; a mark left for a later turn is not taken.
+    if record.turn_start && state.pending_turn_start {
+        message.is_turn_start = true;
+        state.pending_turn_start = false;
+    }
+    message.service_tier = record
+        .service_tier
+        .clone()
+        .or_else(|| state.request_service_tier.clone())
+        .or_else(|| state.thread_service_tier.clone());
+    // The record names its response, which is the identity sibling fork
+    // replays share; without one, the record's time and counters stand in.
+    let dedup_scope_id = state
+        .session_forked_from_id
+        .as_deref()
+        .or(state.session_id_from_meta.as_deref())
+        .unwrap_or(session_id);
+    message.dedup_key = Some(match record.response_id.as_deref() {
+        Some(response_id) => format!("codex:usage-record:{dedup_scope_id}:{response_id}"),
+        None => format!(
+            "codex:usage-record:{}:{}:{}:{}:{}:{}",
+            dedup_scope_id,
+            timestamp,
+            record.usage.input,
+            record.usage.output,
+            record.usage.cached,
+            record.usage.reasoning
+        ),
+    });
+    message.set_workspace(
+        state.session_workspace_key.clone(),
+        state.session_workspace_label.clone(),
+    );
+    state.turn_coverage.record(record.turn_id.as_deref());
+    state.has_supported_usage = true;
+    state.remember_settled_usage_record(record.usage);
+    if model.is_some() {
+        messages.push(message);
+        if record.timestamp_ms.is_none() {
+            fallback_timestamp_indices.push(messages.len() - 1);
+        }
+    } else {
+        // The row carries its own `codex:usage-record:` key, so the fallback
+        // identity a token_count row would need is not used.
+        pending_model_messages.push(PendingCodexMessage {
+            message,
+            used_fallback_timestamp: record.timestamp_ms.is_none(),
+            fallback_dedup: None,
+        });
     }
 }
 
@@ -1708,6 +2235,7 @@ fn failed_codex_parse(
         parse_succeeded: false,
         archive_failure,
         reader_error: None,
+        skipped_oversized_records: 0,
         unresolved_model_events: false,
         state,
     }
@@ -1749,7 +2277,14 @@ pub(crate) fn parse_codex_file_incremental(
 
         let archive_limit = archive_limit_for_path(path);
         let reader = BufReader::new(decoder.take(archive_limit.saturating_add(1)));
-        let mut parsed = parse_codex_reader(reader, &session_id, fallback_timestamp, 0, state);
+        let mut parsed = parse_codex_reader_with_record_limit(
+            reader,
+            &session_id,
+            fallback_timestamp,
+            0,
+            state,
+            record_limit_for_path(path),
+        );
         parsed.archive_failure = if parsed.consumed_offset > archive_limit {
             Some(CodexArchiveFailure::decoded_size_limit(path, archive_limit))
         } else if let Some((kind, message)) = parsed.reader_error.take() {
@@ -1758,6 +2293,14 @@ pub(crate) fn parse_codex_file_incremental(
         } else {
             None
         };
+        if parsed.skipped_oversized_records > 0 {
+            tracing::warn!(
+                path = %path.display(),
+                max_bytes = record_limit_for_path(path),
+                skipped_records = parsed.skipped_oversized_records,
+                "Skipped oversized Codex JSONL records while retaining later usage"
+            );
+        }
         if parsed.archive_failure.is_some() || !parsed.parse_succeeded {
             parsed.messages.clear();
             parsed.fallback_timestamp_indices.clear();
@@ -1776,7 +2319,14 @@ pub(crate) fn parse_codex_file_incremental(
     }
 
     let reader = BufReader::new(file);
-    parse_codex_reader(reader, &session_id, fallback_timestamp, start_offset, state)
+    parse_codex_reader_with_record_limit(
+        reader,
+        &session_id,
+        fallback_timestamp,
+        start_offset,
+        state,
+        record_limit_for_path(path),
+    )
 }
 
 fn extract_model(payload: &CodexPayload) -> Option<String> {
@@ -2079,6 +2629,22 @@ mod tests {
         file
     }
 
+    #[test]
+    fn bounded_jsonl_reader_preserves_utf8_split_across_chunks() {
+        let input = "a한b\n";
+        let mut reader = std::io::BufReader::with_capacity(2, Cursor::new(input.as_bytes()));
+        let mut line = String::new();
+
+        let result = read_bounded_jsonl_line(&mut reader, &mut line, input.len()).unwrap();
+
+        assert!(matches!(result, BoundedJsonlRead::Line(bytes) if bytes == input.len() as u64));
+        assert_eq!(line, input);
+        assert!(matches!(
+            read_bounded_jsonl_line(&mut reader, &mut line, input.len()).unwrap(),
+            BoundedJsonlRead::Eof
+        ));
+    }
+
     const UNMETERED_ACTIVITY: &str = concat!(
         r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
         "\n"
@@ -2277,11 +2843,18 @@ mod tests {
 
     impl BufRead for FailAfterFirstLine {
         fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.fail_next_read {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "synthetic line decode failure",
+                ));
+            }
             self.inner.fill_buf()
         }
 
         fn consume(&mut self, amt: usize) {
             self.inner.consume(amt);
+            self.fail_next_read |= amt > 0;
         }
 
         fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
@@ -4674,6 +5247,33 @@ mod tests {
     }
 
     #[test]
+    fn compressed_archive_skips_oversized_record_and_retains_later_usage() {
+        use std::io::Write as _;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("oversized-record.jsonl.zst");
+        let oversized_record = format!(
+            r#"{{"timestamp":"2026-10-01T00:00:01Z","type":"response_item","payload":{{"type":"function_call_output","output":"{}"}}}}"#,
+            "x".repeat(1024)
+        );
+        let mut encoder =
+            zstd::stream::write::Encoder::new(std::fs::File::create(&path).unwrap(), 0).unwrap();
+        writeln!(encoder, r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{{"model":"gpt-5"}}}}"#).unwrap();
+        writeln!(encoder, "{oversized_record}").unwrap();
+        writeln!(encoder, r#"{{"timestamp":"2026-10-01T00:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}},"last_token_usage":{{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}}}}}"#).unwrap();
+        encoder.finish().unwrap();
+
+        let _limit = register_record_limit_override(&path, 512);
+        let parsed = parse_codex_file_incremental(&path, 0, CodexParseState::default());
+
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.archive_failure.is_none());
+        assert_eq!(parsed.skipped_oversized_records, 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].tokens.total(), 160);
+    }
+
+    #[test]
     fn compressed_archive_open_failure_retains_io_cause() {
         let dir = TempDir::new().unwrap();
         let missing_path = dir.path().join("missing.jsonl.zst");
@@ -4755,5 +5355,906 @@ mod tests {
             malformed.archive_failure.is_none(),
             "decoded malformed JSON is not an archive read failure"
         );
+    }
+
+    // Rollout lines shaped like Codex 0.153+ app-server rollouts: one
+    // `token_usage_record` per model response, followed by the token_count
+    // that reports the same response. A context compaction request writes its
+    // record, then `compacted`, then a token_count that does not advance.
+    const COMPACTION_THREAD: &str = "01a0f000-0000-7000-8000-000000000001";
+
+    fn usage_json(input: i64, cached: i64, output: i64) -> String {
+        format!(
+            r#"{{"input_tokens":{input},"cached_input_tokens":{cached},"output_tokens":{output},"reasoning_output_tokens":0,"total_tokens":{}}}"#,
+            input + output
+        )
+    }
+
+    fn record_line(ts: &str, turn: &str, response: &str, usage: (i64, i64, i64)) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"token_usage_record","payload":{{"thread_id":"{COMPACTION_THREAD}","turn_id":"{turn}","response_id":"{response}","usage":{}}}}}"#,
+            usage_json(usage.0, usage.1, usage.2)
+        ) + "\n"
+    }
+
+    fn token_count_line(ts: &str, total: (i64, i64, i64), last: (i64, i64, i64)) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{},"last_token_usage":{}}}}}}}"#,
+            usage_json(total.0, total.1, total.2),
+            usage_json(last.0, last.1, last.2)
+        ) + "\n"
+    }
+
+    fn turn_lines(ts: &str, turn: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{turn}"}}}}"#
+        ) + "\n"
+            + &format!(
+                r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"turn_id":"{turn}","model":"gpt-5.5"}}}}"#
+            )
+            + "\n"
+    }
+
+    fn session_meta_line(originator: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{{"id":"{COMPACTION_THREAD}","originator":"{originator}","cli_version":"0.153.0","source":"vscode","model_provider":"openai","cwd":"/workspace/project"}}}}"#
+        ) + "\n"
+    }
+
+    /// Turn 1 answers once, turn 2 compacts the context, turn 3 answers once.
+    fn compaction_rollout(originator: &str) -> String {
+        let compacted = r#"{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#.to_string() + "\n";
+        session_meta_line(originator)
+            + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+            + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+            + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+            + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+            + &record_line("2026-10-01T00:02:00.005Z", "turn-2", "resp-2", (500, 200, 40))
+            + &compacted
+            // Totals stay at turn 1's; the compaction never reaches them.
+            + &token_count_line("2026-10-01T00:02:00.020Z", (100, 80, 10), (0, 0, 0))
+            + &turn_lines("2026-10-01T00:03:00Z", "turn-3")
+            + &record_line("2026-10-01T00:03:05Z", "turn-3", "resp-3", (50, 0, 5))
+            + &token_count_line("2026-10-01T00:03:05.005Z", (150, 80, 15), (50, 0, 5))
+    }
+
+    fn total_tokens(messages: &[UnifiedMessage]) -> i64 {
+        messages.iter().map(|m| m.tokens.total()).sum()
+    }
+
+    #[test]
+    fn test_compaction_usage_record_is_counted() {
+        let file = create_test_file(&compaction_rollout("codex_vscode"));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 3, "turn 1, the compaction, turn 3");
+        let compaction = &messages[1];
+        assert_eq!(compaction.client, "codex");
+        assert_eq!(compaction.model_id, "gpt-5.5");
+        assert_eq!(compaction.tokens.input, 300);
+        assert_eq!(compaction.tokens.cache_read, 200);
+        assert_eq!(compaction.tokens.output, 40);
+        assert_eq!(
+            compaction.timestamp,
+            parse_codex_entry_timestamp(Some("2026-10-01T00:02:00.005Z")).unwrap()
+        );
+        assert_eq!(
+            compaction.dedup_key.as_deref(),
+            Some(format!("codex:usage-record:{COMPACTION_THREAD}:resp-2").as_str())
+        );
+        // Every response counted once: 110 + 540 + 55.
+        assert_eq!(total_tokens(&messages), 705);
+    }
+
+    #[test]
+    fn test_usage_records_confirmed_by_token_count_are_not_counted_again() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:01Z", "turn-1", "resp-1", (100, 0, 10))
+                + &token_count_line("2026-10-01T00:01:01.005Z", (100, 0, 10), (100, 0, 10))
+                + &record_line("2026-10-01T00:01:02Z", "turn-1", "resp-2", (120, 100, 20))
+                + &token_count_line("2026-10-01T00:01:02.005Z", (220, 100, 30), (120, 100, 20))
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &record_line("2026-10-01T00:02:01Z", "turn-2", "resp-3", (130, 120, 5))
+                + &token_count_line("2026-10-01T00:02:01.005Z", (350, 220, 35), (130, 120, 5))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|m| m
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count")));
+        assert_eq!(total_tokens(&messages), 385);
+    }
+
+    #[test]
+    fn test_rollout_without_usage_records_is_unchanged() {
+        // Older Codex wrote no `token_usage_record`, and some reset the
+        // totals to zero after compacting. Nothing about that stream changes.
+        let compacted = r#"{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#.to_string() + "\n";
+        let file = create_test_file(
+            &(session_meta_line("codex_cli_rs")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &token_count_line("2026-10-01T00:01:05Z", (100, 80, 10), (100, 80, 10))
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &compacted
+                + &token_count_line("2026-10-01T00:02:00.020Z", (0, 0, 0), (0, 0, 0))
+                + &turn_lines("2026-10-01T00:03:00Z", "turn-3")
+                + &token_count_line("2026-10-01T00:03:05Z", (50, 0, 5), (50, 0, 5))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        let summary: Vec<(i64, i64, i64)> = messages
+            .iter()
+            .map(|m| (m.tokens.input, m.tokens.cache_read, m.tokens.output))
+            .collect();
+        assert_eq!(summary, vec![(20, 80, 10), (50, 0, 5)]);
+        assert!(messages.iter().all(|m| m
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count")));
+    }
+
+    #[test]
+    fn test_usage_record_left_without_token_count_by_its_turn_is_counted() {
+        // The response finished but its turn ended before the token_count
+        // was written; the next turn's start settles it.
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line("2026-10-01T00:01:09Z", "turn-1", "resp-2", (110, 100, 4))
+                + &turn_lines("2026-10-01T00:05:00Z", "turn-2")
+                + &record_line("2026-10-01T00:05:05Z", "turn-2", "resp-3", (120, 110, 6))
+                + &token_count_line("2026-10-01T00:05:05.005Z", (220, 190, 16), (120, 110, 6))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some(format!("codex:usage-record:{COMPACTION_THREAD}:resp-2").as_str())
+        );
+        assert_eq!(total_tokens(&messages), 110 + 114 + 126);
+    }
+
+    #[test]
+    fn test_usage_record_pending_at_end_of_chunk_waits_for_its_token_count() {
+        let mut file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))),
+        );
+
+        let first = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(first.messages.is_empty(), "the token_count may still come");
+        assert!(first.state.pending_usage_record.is_some());
+
+        // The cached state round-trips through serde between scans.
+        let state: CodexParseState =
+            serde_json::from_str(&serde_json::to_string(&first.state).unwrap()).unwrap();
+        file.write_all(
+            token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10)).as_bytes(),
+        )
+        .unwrap();
+        file.flush().unwrap();
+        let second = parse_codex_file_incremental(file.path(), first.consumed_offset, state);
+
+        assert_eq!(second.messages.len(), 1);
+        assert_eq!(total_tokens(&second.messages), 110);
+        assert!(second.state.pending_usage_record.is_none());
+    }
+
+    #[test]
+    fn test_openclaw_rollout_compaction_is_openclaw_usage_of_its_turn() {
+        let file = create_test_file(&compaction_rollout("openclaw"));
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert_eq!(parsed.messages.len(), 3);
+        assert!(parsed
+            .messages
+            .iter()
+            .all(|m| m.client == OPENCLAW_CLIENT_ID && m.session_id == COMPACTION_THREAD));
+        assert_eq!(total_tokens(&parsed.messages), 705);
+        // The compaction turn is recorded, so OpenClaw's mirror row for it
+        // yields to the rollout like every other turn.
+        assert!(parsed.state.turn_coverage.turn_ids.contains("turn-2"));
+    }
+
+    #[test]
+    fn test_forked_child_replayed_parent_compaction_is_not_counted() {
+        let child = "01a0f000-0000-7000-8000-0000000000c1";
+        let compacted = r#"{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#.to_string() + "\n";
+        let file = create_test_file(
+            &(format!(
+                r#"{{"timestamp":"2026-10-01T01:00:00Z","type":"session_meta","payload":{{"id":"{child}","forked_from_id":"{COMPACTION_THREAD}","originator":"codex_vscode","source":"vscode","model_provider":"openai"}}}}"#
+            ) + "\n"
+                // Replayed parent history, compaction included.
+                + &record_line("2026-10-01T00:02:00.005Z", "turn-2", "resp-2", (500, 200, 40))
+                + &compacted
+                + &token_count_line("2026-10-01T00:02:00.020Z", (100, 80, 10), (0, 0, 0))
+                // The child's own turn.
+                + r#"{"timestamp":"2026-10-01T01:00:01Z","type":"turn_context","payload":{"turn_id":"01a0f000-0001-7000-8000-000000000001","model":"gpt-5.5"}}"#
+                + "\n"
+                + &record_line("2026-10-01T01:00:05Z", "child-turn", "resp-9", (40, 0, 4))
+                + &token_count_line("2026-10-01T01:00:05.005Z", (140, 80, 14), (40, 0, 4))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1, "only the child's own response");
+        assert_eq!(total_tokens(&messages), 44);
+    }
+
+    #[test]
+    fn test_forked_child_parent_record_replayed_after_gate_is_not_counted() {
+        // A forked child can keep replaying parent history after its first
+        // turn_context, and the replay can carry the parent's records too.
+        // The replayed snapshot is skipped, and its record goes with it.
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":"vscode","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:57.994Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.947Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.9475Z","type":"token_usage_record","payload":{"turn_id":"p","response_id":"parent-resp","usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.948Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55},"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.2525Z","type":"token_usage_record","payload":{"turn_id":"c","response_id":"child-resp","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.253Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":310,"output_tokens":32,"total_tokens":342},"last_token_usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1, "only the child's own response");
+        assert_eq!(total_tokens(&messages), 12);
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count"));
+    }
+
+    #[test]
+    fn test_unconfirmed_record_row_keeps_reasoning_tier_and_falls_back_without_response_id() {
+        let compacted = r#"{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#.to_string() + "\n";
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + r#"{"timestamp":"2026-10-01T00:02:00.005Z","type":"token_usage_record","payload":{"turn_id":"turn-2","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":540,"service_tier":"priority"}}}"#
+                + "\n"
+                + &compacted
+                + &estimate_token_count_line("2026-10-01T00:02:00.020Z", (0, 0, 0), 15823)),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        let row = &messages[0];
+        assert_eq!(row.tokens.input, 300);
+        assert_eq!(row.tokens.cache_read, 200);
+        assert_eq!(row.tokens.output, 30, "reasoning is a subset of output");
+        assert_eq!(row.tokens.reasoning, 10);
+        assert_eq!(row.service_tier.as_deref(), Some("priority"));
+        let timestamp = parse_codex_entry_timestamp(Some("2026-10-01T00:02:00.005Z")).unwrap();
+        assert_eq!(
+            row.dedup_key.as_deref(),
+            Some(
+                format!("codex:usage-record:{COMPACTION_THREAD}:{timestamp}:500:40:200:10")
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn test_compaction_in_the_shape_codex_writes_it() {
+        // Seen in real rollouts: after `compacted` the same turn's
+        // turn_context is re-emitted, and the token_count that follows keeps
+        // the totals but repeats a nonzero `last_token_usage`. The next turn
+        // also starts with a duplicate snapshot before its own response.
+        let compacted = r#"{"timestamp":"2026-10-01T00:02:00.010Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#.to_string() + "\n";
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-2",
+                    "resp-2",
+                    (500, 200, 40),
+                )
+                + &compacted
+                + r#"{"timestamp":"2026-10-01T00:02:00.015Z","type":"turn_context","payload":{"turn_id":"turn-2","model":"gpt-5.5"}}"#
+                + "\n"
+                + &token_count_line("2026-10-01T00:02:00.020Z", (100, 80, 10), (100, 80, 10))
+                + &turn_lines("2026-10-01T00:03:00Z", "turn-3")
+                + &token_count_line("2026-10-01T00:03:00.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line("2026-10-01T00:03:05Z", "turn-3", "resp-3", (30, 0, 3))
+                + &token_count_line("2026-10-01T00:03:05.005Z", (130, 80, 13), (30, 0, 3))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        let totals: Vec<i64> = messages.iter().map(|m| m.tokens.total()).collect();
+        assert_eq!(totals, vec![110, 540, 33]);
+    }
+
+    fn compacted_line(ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"compacted","payload":{{"message":"","replacement_history":[]}}}}"#
+        ) + "\n"
+    }
+
+    /// The token_count Codex writes after a remote compaction: the totals do
+    /// not move, and `last_token_usage` carries only an estimated
+    /// `total_tokens` with zero counters.
+    fn estimate_token_count_line(ts: &str, total: (i64, i64, i64), estimate: i64) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{},"last_token_usage":{{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":{estimate}}}}}}}}}"#,
+            usage_json(total.0, total.1, total.2)
+        ) + "\n"
+    }
+
+    fn turn_totals(messages: &[UnifiedMessage]) -> Vec<i64> {
+        messages.iter().map(|m| m.tokens.total()).collect()
+    }
+
+    #[test]
+    fn test_compaction_followed_by_estimate_token_count_is_counted() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line("2026-10-01T00:01:06Z", "turn-1", "resp-c", (500, 200, 40))
+                + &compacted_line("2026-10-01T00:01:06.010Z")
+                + r#"{"timestamp":"2026-10-01T00:01:06.015Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}"#
+                + "\n"
+                + &estimate_token_count_line("2026-10-01T00:01:06.020Z", (100, 80, 10), 15823)
+                + &record_line("2026-10-01T00:01:07Z", "turn-1", "resp-2", (30, 0, 3))
+                + &token_count_line("2026-10-01T00:01:07.005Z", (130, 80, 13), (30, 0, 3))),
+        );
+
+        assert_eq!(
+            turn_totals(&parse_codex_file(file.path())),
+            vec![110, 540, 33]
+        );
+    }
+
+    #[test]
+    fn test_inline_compaction_reported_by_token_count_is_counted_once() {
+        // An inline compaction reports its response through a token_count
+        // before `compacted`, then Codex writes the estimate snapshot.
+        let file = create_test_file(
+            &(session_meta_line("codex_cli_rs")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line("2026-10-01T00:01:06Z", "turn-1", "resp-c", (500, 200, 40))
+                + &token_count_line("2026-10-01T00:01:06.005Z", (600, 280, 50), (500, 200, 40))
+                + &compacted_line("2026-10-01T00:01:06.010Z")
+                + &estimate_token_count_line("2026-10-01T00:01:06.020Z", (600, 280, 50), 15823)
+                + &record_line("2026-10-01T00:01:07Z", "turn-1", "resp-2", (30, 0, 3))
+                + &token_count_line("2026-10-01T00:01:07.005Z", (630, 280, 53), (30, 0, 3))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 540, 33]);
+        assert!(messages.iter().all(|m| m
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count")));
+    }
+
+    #[test]
+    fn test_compaction_reported_by_the_token_count_after_compacted_is_counted_once() {
+        // Should Codex start reporting the compaction in the token_count
+        // after `compacted`, that token_count counts it and the record is
+        // confirmed rather than counted a second time.
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-1",
+                    "resp-2",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &token_count_line("2026-10-01T00:02:00.020Z", (600, 280, 50), (500, 200, 40))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 540]);
+        assert!(messages.iter().all(|m| m
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count")));
+    }
+
+    #[test]
+    fn test_forked_child_parent_compaction_replayed_after_gate_is_not_counted() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":"vscode","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:57.994Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.947Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.9475Z","type":"token_usage_record","payload":{"turn_id":"p","response_id":"parent-compact","usage":{"input_tokens":500,"output_tokens":40,"total_tokens":540}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.9476Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.948Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":15823}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.2525Z","type":"token_usage_record","payload":{"turn_id":"c","response_id":"child-resp","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.253Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":310,"output_tokens":32,"total_tokens":342},"last_token_usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}}"#,
+            "\n"
+        ));
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert_eq!(
+            turn_totals(&parsed.messages),
+            vec![12],
+            "only the child's own response"
+        );
+        assert!(!parsed.state.turn_coverage.turn_ids.contains("p"));
+    }
+
+    #[test]
+    fn test_usage_record_from_another_thread_is_not_counted() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &format!(
+                    r#"{{"timestamp":"2026-10-01T00:01:02Z","type":"token_usage_record","payload":{{"thread_id":"01a0f000-0000-7000-8000-0000000000aa","turn_id":"turn-x","response_id":"resp-x","usage":{}}}}}"#,
+                    usage_json(900, 0, 90)
+                )
+                + "\n"
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &format!(
+                    r#"{{"timestamp":"2026-10-01T00:01:06Z","type":"token_usage_record","payload":{{"thread_id":"01a0f000-0000-7000-8000-0000000000aa","turn_id":"turn-x","response_id":"resp-y","usage":{}}}}}"#,
+                    usage_json(800, 0, 80)
+                )
+                + "\n"
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")),
+        );
+
+        assert_eq!(turn_totals(&parse_codex_file(file.path())), vec![110]);
+    }
+
+    #[test]
+    fn test_unconfirmed_record_uses_its_own_model_when_it_names_one() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &format!(
+                    r#"{{"timestamp":"2026-10-01T00:02:00.005Z","type":"token_usage_record","payload":{{"thread_id":"{COMPACTION_THREAD}","turn_id":"turn-2","response_id":"resp-2","model":"gpt-5.4-mini","usage":{}}}}}"#,
+                    usage_json(500, 200, 40)
+                )
+                + "\n"
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &estimate_token_count_line("2026-10-01T00:02:00.020Z", (0, 0, 0), 15823)),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn test_incremental_split_between_record_and_compacted_matches_full_parse() {
+        let full = compaction_rollout("codex_vscode");
+        let cut = full.find(r#""type":"compacted""#).unwrap();
+        let cut = full[..cut].rfind('\n').unwrap() + 1;
+        let mut file = create_test_file(&full[..cut]);
+        let first = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        let state: CodexParseState =
+            serde_json::from_str(&serde_json::to_string(&first.state).unwrap()).unwrap();
+        file.write_all(&full.as_bytes()[cut..]).unwrap();
+        file.flush().unwrap();
+        let second = parse_codex_file_incremental(file.path(), first.consumed_offset, state);
+
+        let incremental: Vec<(i64, Option<String>)> = first
+            .messages
+            .iter()
+            .chain(second.messages.iter())
+            .map(|m| (m.tokens.total(), m.dedup_key.clone()))
+            .collect();
+        let whole: Vec<(i64, Option<String>)> = parse_codex_file(file.path())
+            .iter()
+            .map(|m| (m.tokens.total(), m.dedup_key.clone()))
+            .collect();
+        assert_eq!(incremental, whole);
+        assert_eq!(total_tokens(&parse_codex_file(file.path())), 705);
+        assert!(second.state.turn_coverage.turn_ids.contains("turn-2"));
+    }
+
+    #[test]
+    fn test_cut_off_response_before_turn_aborted_at_end_of_file_stays_pending() {
+        // Known limitation, pinned so a change to it is deliberate: a final
+        // response with no token_count and no later turn is never emitted.
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + r#"{"timestamp":"2026-10-01T00:01:06Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}"#
+                + "\n"),
+        );
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert!(parsed.messages.is_empty());
+        assert!(parsed.state.pending_usage_record.is_some());
+    }
+
+    #[test]
+    fn test_compaction_only_turn_with_cut_off_response_at_end_of_file() {
+        // Known limitation, pinned: the compaction row records turn 2, so
+        // OpenClaw's mirror row for turn 2 yields, while the cut-off response
+        // after it stays pending at the end of a finished file.
+        let file = create_test_file(
+            &(session_meta_line("openclaw")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-2",
+                    "resp-c",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &estimate_token_count_line("2026-10-01T00:02:00.020Z", (100, 80, 10), 15823)
+                + &record_line("2026-10-01T00:02:05Z", "turn-2", "resp-2", (70, 0, 7))),
+        );
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert_eq!(turn_totals(&parsed.messages), vec![110, 540]);
+        assert!(parsed.state.turn_coverage.turn_ids.contains("turn-2"));
+        assert!(parsed.state.pending_usage_record.is_some());
+    }
+
+    #[test]
+    fn test_unconfirmed_record_keeps_its_own_tier_when_the_next_record_names_one() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &format!(
+                    r#"{{"timestamp":"2026-10-01T00:01:06Z","type":"token_usage_record","payload":{{"thread_id":"{COMPACTION_THREAD}","turn_id":"turn-1","response_id":"resp-2","usage":{{"input_tokens":30,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0,"total_tokens":33,"service_tier":"priority"}}}}}}"#
+                )
+                + "\n"
+                + &token_count_line("2026-10-01T00:01:06.005Z", (30, 0, 3), (30, 0, 3))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 33]);
+        assert_eq!(messages[0].service_tier, None, "resp-1 named no tier");
+        assert_eq!(messages[1].service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn test_record_pending_at_end_of_file_still_counts_as_a_usage_ledger() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + UNMETERED_ACTIVITY
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))),
+        );
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert!(parsed.messages.is_empty());
+        assert!(parsed.state.has_supported_usage);
+        assert!(!parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn test_turn_context_without_turn_id_ends_the_previous_turns_wait() {
+        // A `turn_context` without an id, and no `task_started` before it,
+        // starts another turn; the previous turn's record is settled there
+        // instead of being taken as confirmed by the new turn's token_count.
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + r#"{"timestamp":"2026-10-01T00:02:00Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#
+                + "\n"
+                + &token_count_line("2026-10-01T00:02:05.005Z", (30, 0, 3), (30, 0, 3))),
+        );
+
+        assert_eq!(turn_totals(&parse_codex_file(file.path())), vec![110, 33]);
+    }
+
+    #[test]
+    fn test_unconfirmed_record_after_human_message_is_the_turn_start() {
+        let user_message = r#"{"timestamp":"2026-10-01T00:02:00.001Z","type":"event_msg","payload":{"type":"user_message","message":"summarize the log"}}"#.to_string() + "\n";
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &user_message
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-2",
+                    "resp-c",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &estimate_token_count_line("2026-10-01T00:02:00.020Z", (0, 0, 0), 15823)
+                + &record_line("2026-10-01T00:02:05Z", "turn-2", "resp-2", (30, 0, 3))
+                + &token_count_line("2026-10-01T00:02:05.005Z", (30, 0, 3), (30, 0, 3))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![540, 33]);
+        assert!(
+            messages[0].is_turn_start,
+            "the compaction is the first reply"
+        );
+        assert!(!messages[1].is_turn_start);
+    }
+
+    fn total_only_token_count_line(ts: &str, total: (i64, i64, i64)) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{}}}}}}}"#,
+            usage_json(total.0, total.1, total.2)
+        ) + "\n"
+    }
+
+    fn last_only_token_count_line(ts: &str, last: (i64, i64, i64)) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{}}}}}}}"#,
+            usage_json(last.0, last.1, last.2)
+        ) + "\n"
+    }
+
+    fn utc_day(timestamp_ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(timestamp_ms)
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string()
+    }
+
+    #[test]
+    fn test_compaction_confirmed_by_a_last_only_token_count_is_counted_once() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:02:00Z", "turn-2")
+                + &record_line("2026-10-01T00:02:00.005Z", "turn-2", "resp-2", (500, 0, 40))
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &last_only_token_count_line("2026-10-01T00:02:00.020Z", (500, 0, 40))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![540]);
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count"));
+    }
+
+    #[test]
+    fn test_compaction_confirmed_by_a_total_only_token_count_is_counted_once() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-1",
+                    "resp-2",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &total_only_token_count_line("2026-10-01T00:02:00.020Z", (600, 280, 50))),
+        );
+
+        assert_eq!(turn_totals(&parse_codex_file(file.path())), vec![110, 540]);
+    }
+
+    #[test]
+    fn test_compaction_confirmed_by_a_last_only_token_count_after_a_baseline_is_counted_once() {
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-1",
+                    "resp-2",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &last_only_token_count_line("2026-10-01T00:02:00.020Z", (500, 200, 40))),
+        );
+
+        assert_eq!(turn_totals(&parse_codex_file(file.path())), vec![110, 540]);
+    }
+
+    #[test]
+    fn test_compaction_is_not_confirmed_by_a_response_with_the_same_token_sum() {
+        // (500 in, 40 out) and (400 in, 140 out) both sum to 540; they are
+        // different responses, so the compaction is counted from its record.
+        let file = create_test_file(
+            &(session_meta_line("codex_vscode")
+                + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                + &token_count_line("2026-10-01T00:01:05.005Z", (100, 80, 10), (100, 80, 10))
+                + &record_line(
+                    "2026-10-01T00:02:00.005Z",
+                    "turn-1",
+                    "resp-c",
+                    (500, 200, 40),
+                )
+                + &compacted_line("2026-10-01T00:02:00.010Z")
+                + &token_count_line("2026-10-01T00:02:00.020Z", (500, 80, 150), (400, 0, 140))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 540, 540]);
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some(format!("codex:usage-record:{COMPACTION_THREAD}:resp-c").as_str())
+        );
+        assert_eq!(
+            (messages[2].tokens.input, messages[2].tokens.output),
+            (400, 140)
+        );
+    }
+
+    /// Turn 1 answers; turn 2's response is recorded just before UTC
+    /// midnight; turn 3 starts before turn 2's token_count is written, and
+    /// that token_count arrives late, then turn 3 answers.
+    fn late_confirmation_rollout() -> (String, String) {
+        let head = session_meta_line("codex_vscode")
+            + &turn_lines("2026-10-01T23:58:00Z", "turn-1")
+            + &record_line("2026-10-01T23:58:05Z", "turn-1", "resp-1", (100, 80, 10))
+            + &token_count_line("2026-10-01T23:58:05.005Z", (100, 80, 10), (100, 80, 10))
+            + &turn_lines("2026-10-01T23:59:00Z", "turn-2")
+            + &record_line(
+                "2026-10-01T23:59:59.500Z",
+                "turn-2",
+                "resp-2",
+                (500, 200, 40),
+            )
+            + &turn_lines("2026-10-02T00:00:01Z", "turn-3");
+        let tail = token_count_line("2026-10-02T00:00:01.500Z", (600, 280, 50), (500, 200, 40))
+            + &record_line("2026-10-02T00:00:05Z", "turn-3", "resp-3", (30, 0, 3))
+            + &token_count_line("2026-10-02T00:00:05.005Z", (630, 280, 53), (30, 0, 3));
+        (head, tail)
+    }
+
+    #[test]
+    fn test_late_token_count_for_a_record_already_counted_adds_nothing() {
+        let (head, tail) = late_confirmation_rollout();
+        let file = create_test_file(&(head + &tail));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 540, 33]);
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some(format!("codex:usage-record:{COMPACTION_THREAD}:resp-2").as_str())
+        );
+        assert_eq!(utc_day(messages[1].timestamp), "2026-10-01");
+    }
+
+    #[test]
+    fn test_late_token_count_does_not_take_the_next_turns_pending_record() {
+        // Turn 3's record is already pending when turn 2's late token_count
+        // arrives; the late report settles nothing for turn 3.
+        let (head, _) = late_confirmation_rollout();
+        let file = create_test_file(
+            &(head
+                + &record_line("2026-10-02T00:00:01.200Z", "turn-3", "resp-3", (30, 0, 3))
+                + &token_count_line("2026-10-02T00:00:01.500Z", (600, 280, 50), (500, 200, 40))
+                + &token_count_line("2026-10-02T00:00:05.005Z", (630, 280, 53), (30, 0, 3))),
+        );
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(turn_totals(&messages), vec![110, 540, 33]);
+        assert!(messages[2]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:token_count"));
+    }
+
+    #[test]
+    fn test_late_token_count_across_incremental_chunks_matches_full_parse() {
+        let (head, tail) = late_confirmation_rollout();
+        let full = head.clone() + &tail;
+        let whole = parse_codex_file(create_test_file(&full).path());
+        let whole_rows: Vec<(i64, String)> = whole
+            .iter()
+            .map(|m| (m.tokens.total(), utc_day(m.timestamp)))
+            .collect();
+        assert_eq!(
+            whole_rows,
+            vec![
+                (110, "2026-10-01".to_string()),
+                (540, "2026-10-01".to_string()),
+                (33, "2026-10-02".to_string())
+            ]
+        );
+
+        // Split after the record (still pending) and after the next turn's
+        // start (already emitted and remembered as settled).
+        let after_record = head
+            .rfind(r#""type":"event_msg","payload":{"type":"task_started","turn_id":"turn-3""#)
+            .unwrap();
+        let after_record = head[..after_record].rfind('\n').unwrap() + 1;
+        for cut in [after_record, head.len()] {
+            let mut file = create_test_file(&full[..cut]);
+            let first = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+            let state: CodexParseState =
+                serde_json::from_str(&serde_json::to_string(&first.state).unwrap()).unwrap();
+            file.write_all(&full.as_bytes()[cut..]).unwrap();
+            file.flush().unwrap();
+            let second = parse_codex_file_incremental(file.path(), first.consumed_offset, state);
+            let rows: Vec<(i64, String)> = first
+                .messages
+                .iter()
+                .chain(second.messages.iter())
+                .map(|m| (m.tokens.total(), utc_day(m.timestamp)))
+                .collect();
+            assert_eq!(rows, whole_rows, "cut at byte {cut}");
+        }
+    }
+
+    #[test]
+    fn test_settled_usage_records_are_bounded() {
+        let mut state = CodexParseState::default();
+        for input in 0..(SETTLED_USAGE_RECORD_LIMIT as i64 + 4) {
+            state.remember_settled_usage_record(CodexTotals {
+                input,
+                output: 1,
+                cached: 0,
+                reasoning: 0,
+            });
+        }
+
+        assert_eq!(
+            state.settled_usage_records.len(),
+            SETTLED_USAGE_RECORD_LIMIT
+        );
+        assert_eq!(state.settled_usage_records.front().unwrap().input, 4);
     }
 }

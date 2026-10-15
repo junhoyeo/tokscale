@@ -461,6 +461,17 @@ enum ConfigSubcommand {
 }
 
 #[derive(Subcommand)]
+enum AmpSubcommand {
+    #[command(about = "Export Amp threads into the local cache via the amp CLI")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Total sync timeout in seconds (default: 60)")]
+        timeout: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CursorSubcommand {
     #[command(about = "Login to Cursor (auto-detect desktop session, or paste browser token)")]
     Login {
@@ -579,17 +590,6 @@ enum TraeSubcommand {
         since: Option<i64>,
         #[arg(long, help = "Include auxiliary usage types (not just main chat)")]
         include_aux: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum AmpSubcommand {
-    #[command(about = "Export Amp threads into the local cache via the amp CLI")]
-    Sync {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-        #[arg(long, help = "Total sync timeout in seconds (default: 60)")]
-        timeout: Option<u64>,
     },
 }
 
@@ -721,7 +721,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -761,7 +761,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -799,7 +799,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&date, &cli.home);
                 let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -872,7 +872,7 @@ fn main() -> Result<()> {
             let (since, until) = build_date_filter(&date, &cli.home);
             let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
-            auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
+            auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
                 cli.theme.as_deref().unwrap_or(""),
                 cli.refresh,
@@ -1080,7 +1080,7 @@ fn main() -> Result<()> {
                 let (since, until) = build_date_filter(&cli.date, &cli.home);
                 let year = normalize_year_filter(&cli.date);
                 ensure_home_supported_for_tui(&cli.home)?;
-                auto_sync_remote_caches_before_tui(&cli.home, &clients)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     cli.theme.as_deref().unwrap_or(""),
                     cli.refresh,
@@ -1760,6 +1760,23 @@ fn should_auto_sync_cursor_for_local_report(
     home_dir.is_none() && client_filter_includes_cursor(clients)
 }
 
+fn auto_sync_amp_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Option<String> {
+    if home_dir.is_some() || !client_filter_includes_amp(clients) {
+        return None;
+    }
+    amp::auto_sync()
+}
+
+fn emit_amp_sync_warning(warning: Option<&str>) {
+    if let Some(warning) = warning {
+        use colored::Colorize;
+        eprintln!("{}", warning.yellow());
+    }
+}
+
 fn auto_sync_cursor_for_local_report(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
@@ -1800,30 +1817,10 @@ where
     }
 }
 
-/// The Amp cache lives under the Tokscale config dir, so `--home` reports
-/// never sync it.
-fn auto_sync_amp_for_local_report(
-    home_dir: &Option<String>,
-    clients: &Option<Vec<String>>,
-) -> Option<String> {
-    if home_dir.is_some() || !client_filter_includes_amp(clients) {
-        return None;
-    }
-    amp::auto_sync()
-}
-
-fn emit_amp_sync_warning(warning: Option<&str>) {
-    if let Some(warning) = warning {
-        use colored::Colorize;
-        eprintln!("{}", warning.yellow());
-    }
-}
-
-fn auto_sync_remote_caches_before_tui(
+fn auto_sync_cursor_before_tui(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> Result<()> {
-    emit_amp_sync_warning(auto_sync_amp_for_local_report(home_dir, clients).as_deref());
     let had_cursor_cache = has_cursor_usage_cache_for_report(home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(clients);
     let cursor_sync_result = auto_sync_cursor_for_local_report(home_dir, clients);
@@ -2215,8 +2212,6 @@ struct LocalReportContext {
     spinner: Option<LightSpinner>,
     cursor_sync_result: Option<cursor::SyncCursorResult>,
     cursor_setup_warnings: Vec<String>,
-    /// Shown once the spinner stops so it does not interleave with it.
-    pending_amp_sync_warning: Option<String>,
     use_env_roots: bool,
     start: std::time::Instant,
 }
@@ -2233,10 +2228,6 @@ impl LocalReportContext {
         let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
         let spinner = spinner_message.map(LightSpinner::start);
         let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-        let mut pending_amp_sync_warning = auto_sync_amp_for_local_report(&home_dir, &clients);
-        if spinner.is_none() {
-            emit_amp_sync_warning(pending_amp_sync_warning.take().as_deref());
-        }
         let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
         let use_env_roots = use_env_roots(&home_dir);
 
@@ -2253,7 +2244,6 @@ impl LocalReportContext {
             spinner,
             cursor_sync_result,
             cursor_setup_warnings,
-            pending_amp_sync_warning,
             use_env_roots,
             start: std::time::Instant::now(),
         }
@@ -2274,7 +2264,6 @@ impl LocalReportContext {
         if let Some(spinner) = self.spinner.take() {
             spinner.stop();
         }
-        emit_amp_sync_warning(self.pending_amp_sync_warning.take().as_deref());
     }
 
     fn report_options(&self, group_by: tokscale_core::GroupBy) -> tokscale_core::ReportOptions {
@@ -4991,10 +4980,6 @@ struct TsTimeMetrics {
 
 const SUBMISSION_PARSER_VERSION: u32 = 1;
 const COPILOT_SUBMISSION_PARSER_VERSION: u32 = 2;
-// Amp v2 moves existing exported messages from synthesized creation-time dates
-// to the server-provided usage timestamp. The receiver replaces the complete
-// Amp daily layout at this generation, preserving lifetime totals.
-const AMP_SUBMISSION_PARSER_VERSION: u32 = 2;
 // The receiver admits the MiMo CLI/desktop split atomically only when both
 // selected surfaces declare this generation and cover the credited history.
 // This is a submission contract, independent of the on-disk parser cache version.
@@ -5153,7 +5138,6 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
         .map(|client| {
             let version = match client.as_str() {
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
-                "amp" => AMP_SUBMISSION_PARSER_VERSION,
                 "micode" | "micode-desktop" => MICODE_SUBMISSION_PARSER_VERSION,
                 _ => SUBMISSION_PARSER_VERSION,
             };
@@ -6551,6 +6535,77 @@ fn run_submit_command(
                     "{}",
                     format!("  Cursor sync failed; using cached data: {}", err).yellow()
                 );
+            }
+        }
+    }
+
+    let include_antigravity = clients
+        .as_ref()
+        .is_none_or(|s| s.iter().any(|src| src == "antigravity"));
+    let has_antigravity_cache = antigravity::has_antigravity_cache();
+    if include_antigravity {
+        match antigravity::detect_antigravity_connections() {
+            Ok(active_connections) if !active_connections.is_empty() => {
+                println!("{}", "  Syncing Antigravity usage data...".bright_black());
+                let sync_result = antigravity::sync_antigravity_cache_with_connections(
+                    &active_connections,
+                    false,
+                );
+                if sync_result.synced {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity: {} session{} synced from {} active connection{}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.connections,
+                            if sync_result.connections == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                        .bright_black()
+                    );
+                } else if sync_result.partial {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity sync was partial: {} session{} refreshed, {} retained from cache, {} failed: {}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.retained_sessions,
+                            sync_result.failed_sessions,
+                            sync_result.error.as_deref().unwrap_or("unknown sync error")
+                        )
+                        .yellow()
+                    );
+                } else if let Some(err) = sync_result.error {
+                    if has_antigravity_cache {
+                        println!(
+                            "{}",
+                            format!("  Antigravity sync failed; using cached data: {}", err)
+                                .yellow()
+                        );
+                    } else {
+                        println!("{}", format!("  Antigravity sync failed: {}", err).yellow());
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                if has_antigravity_cache {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed; using cached data: {}", err)
+                            .yellow()
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed: {}", err).yellow()
+                    );
+                }
             }
         }
     }
@@ -9502,25 +9557,17 @@ mod tests {
 
     #[test]
     fn submit_scan_scope_separates_parser_identity_from_full_history() {
-        let clients = vec![
-            "codex".to_string(),
-            "copilot".to_string(),
-            "amp".to_string(),
-        ];
+        let clients = vec!["codex".to_string(), "copilot".to_string()];
         let full = submit_scan_scope(Some(&clients), true).expect("full scope");
         let partial = submit_scan_scope(Some(&clients), false).expect("partial scope");
 
         assert!(full.full_history);
         assert!(!partial.full_history);
         assert_eq!(full.parser_versions, partial.parser_versions);
-        assert_eq!(full.parser_versions.len(), 3);
+        assert_eq!(full.parser_versions.len(), 2);
         assert_eq!(
             full.parser_versions.get("copilot"),
             Some(&COPILOT_SUBMISSION_PARSER_VERSION)
-        );
-        assert_eq!(
-            full.parser_versions.get("amp"),
-            Some(&AMP_SUBMISSION_PARSER_VERSION)
         );
         assert!(!full.parser_versions.contains_key("claude"));
     }

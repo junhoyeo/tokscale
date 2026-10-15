@@ -1154,7 +1154,7 @@ fn codex_archive_failure_warning(
         ));
     }
     if size_limit_failures > 0 {
-        let limit_mib = sessions::utils::MAX_ARCHIVE_BYTES / (1024 * 1024);
+        let limit_mib = sessions::codex::MAX_CODEX_ARCHIVE_BYTES / (1024 * 1024);
         categories.push(format!(
             "{size_limit_failures} exceeded the {limit_mib} MiB decoded-size limit"
         ));
@@ -7994,6 +7994,131 @@ mod tests {
 
     #[test]
     #[serial]
+    fn codex_late_token_count_for_a_counted_record_stays_counted_once_cold_and_warm() {
+        // Turn 2's response is recorded just before UTC midnight. Turn 3
+        // starts before turn 2's token_count is written, which emits the
+        // record on its own; the token_count then arrives late. A warm scan
+        // resumes from the cached parse state at either split point and must
+        // count every response once, on the same day as a cold scan.
+        fn usage(input: i64, cached: i64, output: i64) -> String {
+            format!(
+                r#"{{"input_tokens":{input},"cached_input_tokens":{cached},"output_tokens":{output},"reasoning_output_tokens":0,"total_tokens":{}}}"#,
+                input + output
+            )
+        }
+        let thread = "01a0f000-0000-7000-8000-0000000000b1";
+        let turn = |ts: &str, id: &str| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"{id}\"}}}}\n{{\"timestamp\":\"{ts}\",\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"{id}\",\"model\":\"gpt-5.5\"}}}}\n"
+            )
+        };
+        let record = |ts: &str, id: &str, response: &str, u: (i64, i64, i64)| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"token_usage_record\",\"payload\":{{\"thread_id\":\"{thread}\",\"turn_id\":\"{id}\",\"response_id\":\"{response}\",\"usage\":{}}}}}\n",
+                usage(u.0, u.1, u.2)
+            )
+        };
+        let token_count = |ts: &str, total: (i64, i64, i64), last: (i64, i64, i64)| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{},\"last_token_usage\":{}}}}}}}\n",
+                usage(total.0, total.1, total.2),
+                usage(last.0, last.1, last.2)
+            )
+        };
+        let head = format!(
+            "{{\"timestamp\":\"2026-10-01T23:57:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\",\"originator\":\"codex_vscode\",\"source\":\"vscode\",\"model_provider\":\"openai\"}}}}\n"
+        ) + &turn("2026-10-01T23:58:00Z", "turn-1")
+            + &record("2026-10-01T23:58:05Z", "turn-1", "resp-1", (100, 80, 10))
+            + &token_count("2026-10-01T23:58:05.005Z", (100, 80, 10), (100, 80, 10))
+            + &turn("2026-10-01T23:59:00Z", "turn-2")
+            + &record("2026-10-01T23:59:59.500Z", "turn-2", "resp-2", (500, 200, 40));
+        let next_turn = turn("2026-10-02T00:00:01Z", "turn-3");
+        let tail = token_count("2026-10-02T00:00:01.500Z", (600, 280, 50), (500, 200, 40))
+            + &record("2026-10-02T00:00:05Z", "turn-3", "resp-3", (30, 0, 3))
+            + &token_count("2026-10-02T00:00:05.005Z", (630, 280, 53), (30, 0, 3));
+        let rows = |messages: &[UnifiedMessage]| {
+            let mut rows: Vec<(i64, String)> = messages
+                .iter()
+                .map(|m| {
+                    let day = chrono::DateTime::from_timestamp_millis(m.timestamp)
+                        .unwrap()
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    (m.tokens.total(), day)
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        let expected = vec![
+            (33, "2026-10-02".to_string()),
+            (110, "2026-10-01".to_string()),
+            (540, "2026-10-01".to_string()),
+        ];
+
+        // First scan sees the record still pending, or already emitted and
+        // remembered as settled once turn 3 has started.
+        for (first_part, settled_before_append) in
+            [(head.clone(), false), (head.clone() + &next_turn, true)]
+        {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let sessions = source_home.path().join(".codex/sessions/2026/10/01");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let path = sessions.join(format!("rollout-2026-10-01T23-57-00-{thread}.jsonl"));
+            std::fs::write(&path, &first_part).unwrap();
+            let clients = vec!["codex".to_string()];
+            let home = source_home.path().to_str().unwrap();
+
+            let cold = parse_all_messages_with_pricing(home, &clients, None);
+            assert_eq!(cold.len(), if settled_before_append { 2 } else { 1 });
+            let cached_state = message_cache::SourceMessageCache::load()
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
+                .and_then(|entry| entry.codex_incremental)
+                .expect("the first scan caches the parse state")
+                .state;
+            assert_eq!(
+                cached_state.pending_usage_record.is_some(),
+                !settled_before_append
+            );
+            assert_eq!(
+                cached_state.settled_usage_records.len(),
+                usize::from(settled_before_append)
+            );
+            // v16 keeps v15's fallback-dedup event ordinal beside the records.
+            assert_eq!(cached_state.usage_event_ordinal, 1);
+
+            let rest = if settled_before_append {
+                tail.clone()
+            } else {
+                next_turn.clone() + &tail
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(rest.as_bytes()).unwrap();
+            file.flush().unwrap();
+            drop(file);
+
+            let warm = parse_all_messages_with_pricing(home, &clients, None);
+            assert_eq!(
+                rows(&warm),
+                expected,
+                "warm scan, settled before append: {settled_before_append}"
+            );
+            let keys: HashSet<_> = warm.iter().map(|m| m.dedup_key.clone().unwrap()).collect();
+            assert_eq!(keys.len(), 3);
+            assert_eq!(rows(&sessions::codex::parse_codex_file(&path)), expected);
+        }
+    }
+
+    #[test]
+    #[serial]
     fn codex_fallback_copy_dedup_is_content_sensitive_cold_warm_and_local() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
@@ -8195,7 +8320,7 @@ mod tests {
         let assert_warning = |warning: &str| {
             assert!(warning.contains("skipped 3 unreadable compressed Codex rollout files"));
             assert!(warning.contains("2 decode failures"));
-            assert!(warning.contains("1 exceeded the 256 MiB decoded-size limit"));
+            assert!(warning.contains("1 exceeded the 1024 MiB decoded-size limit"));
             assert!(warning.contains("Recorded token totals may omit these files"));
             assert!(warning.contains("capped.jsonl.zst\" (decoded size limit exceeded"));
             assert!(warning.contains("copy.jsonl.zst\" (decode failed"));
