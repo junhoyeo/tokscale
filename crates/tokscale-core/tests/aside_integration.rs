@@ -617,31 +617,50 @@ fn aside_reads_one_hour_cache_writes_and_clamps_them() {
 }
 
 /// The 1h bucket has to survive the cache, export and legacy lanes too, or the
-/// rate is correct on a cold scan and wrong on every later one.
+/// rate is correct on a cold scan and wrong on every later one. The warm pass
+/// is the one that matters: a cache entry that never recorded the bucket
+/// restores the cheaper 5-minute rate on every run after the first.
 #[tokio::test]
-async fn aside_one_hour_cache_writes_survive_the_public_lane() {
+#[serial_test::serial]
+async fn aside_one_hour_cache_writes_survive_every_lane() {
+    use tokscale_core::{parse_local_clients, parse_local_unified_messages_with_pricing};
     let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let _env = common::EnvGuard::set(&[
+        ("TOKSCALE_CONFIG_DIR", cache.path().as_os_str()),
+        ("XDG_CACHE_HOME", cache.path().as_os_str()),
+    ]);
     let row = serde_json::json!({
         "role": "assistant", "timestamp": 1_788_609_600_000_i64,
         "model": "claude-fable-5", "provider": "ai-gateway",
         "responseId": "one-hour",
         "usage": {"input": 1, "cacheWrite": 100, "cacheWrite1h": 40}
     });
-    write_session(home.path(), &(row.to_string() + "\n"));
+    let options = write_session(home.path(), &(row.to_string() + "\n"));
 
-    let messages = parse_local_unified_messages_with_pricing_uncached(
-        LocalParseOptions {
-            home_dir: Some(home.path().to_string_lossy().into_owned()),
-            clients: Some(vec!["aside".into()]),
-            ..Default::default()
-        },
-        None,
-    )
-    .await
-    .unwrap();
+    // When every public lane consumes the same native fixture.
+    let uncached = parse_local_unified_messages_with_pricing_uncached(options.clone(), None)
+        .await
+        .unwrap();
+    let cold = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let warm = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let legacy = parse_local_clients(options).unwrap();
 
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].tokens.cache_write, 100);
-    assert_eq!(messages[0].tokens.cache_write_1h, 40);
-    assert_eq!(messages[0].provider_id, "anthropic");
+    // Then the 1h subset and the mapped vendor survive the cache round trip.
+    assert_eq!(cold, warm, "a cache hit must not drop the 1h bucket");
+    for messages in [&uncached, &cold, &warm] {
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100);
+        assert_eq!(messages[0].tokens.cache_write_1h, 40);
+        assert_eq!(messages[0].provider_id, "anthropic");
+    }
+    // And the export/submission lane reports them too.
+    assert_eq!(legacy.messages.len(), 1);
+    assert_eq!(legacy.messages[0].cache_write, 100);
+    assert_eq!(legacy.messages[0].cache_write_1h, 40);
+    assert_eq!(legacy.messages[0].provider_id, "anthropic");
 }
