@@ -3,10 +3,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, display_width, format_cache_hit_rate, format_cost,
-    format_cost_per_million, format_tokens, get_compact_client_display_name, prefix_to_width,
-    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
-    AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
+    display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
+    truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -314,7 +313,7 @@ impl SessionColumn {
                 if s.turn_count > 0 {
                     s.turn_count.to_string()
                 } else {
-                    "\u{2014}".to_string()
+                    app.glyphs.missing.to_string()
                 },
                 ctx,
             )),
@@ -328,7 +327,12 @@ impl SessionColumn {
             Self::CacheWrite => Cell::from(self.fit(format_tokens(s.tokens.cache_write), ctx))
                 .style(app.theme.metric_cache_write_style()),
             Self::CacheHit => Cell::from(self.fit(
-                format_cache_hit_rate(s.tokens.cache_read, s.tokens.input, s.tokens.cache_write),
+                format_cache_hit_rate(
+                    s.tokens.cache_read,
+                    s.tokens.input,
+                    s.tokens.cache_write,
+                    app.glyphs,
+                ),
                 ctx,
             ))
             .style(app.theme.count_style()),
@@ -338,19 +342,21 @@ impl SessionColumn {
                 .style(app.theme.metric_total_style()),
             Self::Cost => Cell::from(self.fit(format_cost(s.cost), ctx))
                 .style(Style::default().fg(Color::Green)),
-            Self::CostPerMillion => {
-                Cell::from(self.fit(format_cost_per_million(s.cost, s.tokens.total()), ctx))
-                    .style(Style::default().fg(Color::Rgb(150, 200, 150)))
-            }
-            Self::Duration => {
-                Cell::from(self.fit(format_duration(s.first_active_ms, s.last_active_ms), ctx))
-                    .style(app.theme.hint_key_style())
-            }
+            Self::CostPerMillion => Cell::from(self.fit(
+                format_cost_per_million(s.cost, s.tokens.total(), app.glyphs),
+                ctx,
+            ))
+            .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+            Self::Duration => Cell::from(self.fit(
+                format_duration(s.first_active_ms, s.last_active_ms, app.glyphs),
+                ctx,
+            ))
+            .style(app.theme.hint_key_style()),
             Self::LastActive => Cell::from(
                 self.fit(
                     ms_to_local_naive(s.last_active_ms)
                         .map(|dt| dt.format(ctx.last_active_fmt).to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .unwrap_or_else(|| app.glyphs.missing.to_string()),
                     ctx,
                 ),
             )
@@ -586,7 +592,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabSessions)),
@@ -656,8 +662,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -739,7 +745,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if session.turn_count > 0 {
                         session.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -797,7 +803,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if sessions_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(sessions_len, scroll_offset, visible_height);
@@ -823,12 +829,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// A multi-model session always ends in an ellipsis when some of its models did
 /// not fit, so a session that switched models never renders as a single-model
 /// one. One cell is held back for that marker when there is more than one model.
-/// The marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal
+/// The marker comes from the active glyph set; the safe marker is one cell in every terminal
 /// locale; U+2026 is East-Asian-Ambiguous and would be two cells under a CJK
 /// locale, overflowing the budget this cell promises to keep.
 fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
-        return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
+        return Cell::from(app.glyphs.missing.to_string())
+            .style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -857,13 +864,16 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
             spans.push(Span::styled(name.clone(), Style::default().fg(color)));
             budget -= model_len;
         } else if budget <= 1 {
-            spans.push(Span::styled(MIDDLE_ELLIPSIS, Style::default().fg(color)));
+            spans.push(Span::styled(
+                app.glyphs.ellipsis,
+                Style::default().fg(color),
+            ));
             budget = 0;
             ellipsis = true;
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{head}{MIDDLE_ELLIPSIS}"),
+                format!("{head}{}", app.glyphs.ellipsis),
                 Style::default().fg(color),
             ));
             budget = 0;
@@ -876,7 +886,7 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
     // name already carries its own ellipsis, so only mark the clean-break case.
     if shown < models.len() && !ellipsis {
         spans.push(Span::styled(
-            MIDDLE_ELLIPSIS,
+            app.glyphs.ellipsis,
             Style::default().fg(app.theme.muted),
         ));
     }
@@ -897,10 +907,10 @@ fn ms_to_local_naive(ms: i64) -> Option<NaiveDateTime> {
 }
 
 /// Human-readable elapsed time between first and last message in a session.
-/// Returns "—" when the bounds are missing or inverted.
-fn format_duration(first_ms: i64, last_ms: i64) -> String {
+/// Returns the active missing-value marker when bounds are missing or inverted.
+fn format_duration(first_ms: i64, last_ms: i64, glyphs: crate::ui_glyphs::Glyphs) -> String {
     if first_ms <= 0 || last_ms <= 0 || last_ms < first_ms {
-        return "\u{2014}".to_string();
+        return glyphs.missing.to_string();
     }
     let secs = (last_ms - first_ms) / 1000;
     if secs <= 0 {
@@ -1041,6 +1051,9 @@ mod tests {
             session_id: id.to_string(),
             client: client.to_string(),
             title: None,
+            workspace_key: None,
+            workspace_label: None,
+            agents: Vec::new(),
             models: vec![SessionModel {
                 display_name: "test-model".to_string(),
                 provider: "test".to_string(),
@@ -1481,8 +1494,8 @@ mod tests {
                         let arrow = |f: SortField| -> &'static str {
                             match (f == field, direction) {
                                 (false, _) => "",
-                                (true, SortDirection::Ascending) => " ▴",
-                                (true, SortDirection::Descending) => " ▾",
+                                (true, SortDirection::Ascending) => app.glyphs.sort_up,
+                                (true, SortDirection::Descending) => app.glyphs.sort_down,
                             }
                         };
                         // Asked of the renderer's own helpers, never restated
@@ -2223,6 +2236,7 @@ mod tests {
     /// are all held to the same invariant: the frame measures identically in
     /// both ambients.
     fn assert_frame_measures_the_same_in_a_cjk_locale(app: &mut App, width: u16, height: u16) {
+        app.glyphs = crate::ui_glyphs::Glyphs::ascii_safe();
         let frame = render_body(app, width, height);
         for row in frame.lines() {
             assert_eq!(
@@ -2323,22 +2337,52 @@ mod tests {
 
     #[test]
     fn format_duration_handles_days_hours_minutes_seconds() {
-        assert_eq!(format_duration(0, 1000), "—");
-        assert_eq!(format_duration(1000, 500), "—");
-        assert_eq!(format_duration(1000, 1000), "0s");
-        assert_eq!(format_duration(0, 0), "—");
-        assert_eq!(format_duration(1000, 2000), "1s");
-        assert_eq!(format_duration(1000, 61_000), "1m");
-        assert_eq!(format_duration(1000, 3_661_000), "1h 1m");
-        assert_eq!(format_duration(1000, 90_061_000), "1d 1h");
+        assert_eq!(
+            format_duration(0, 1000, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 500, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 1000, crate::ui_glyphs::Glyphs::unicode()),
+            "0s"
+        );
+        assert_eq!(
+            format_duration(0, 0, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 2000, crate::ui_glyphs::Glyphs::unicode()),
+            "1s"
+        );
+        assert_eq!(
+            format_duration(1000, 61_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1m"
+        );
+        assert_eq!(
+            format_duration(1000, 3_661_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1h 1m"
+        );
+        assert_eq!(
+            format_duration(1000, 90_061_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1d 1h"
+        );
     }
 
     #[test]
     fn format_duration_boundary_units() {
         // exactly one hour without extra minutes (use a real first_ms since
         // first_ms == 0 short-circuits to "—")
-        assert_eq!(format_duration(1_000, 3_601_000), "1h 0m");
+        assert_eq!(
+            format_duration(1_000, 3_601_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1h 0m"
+        );
         // exactly one day
-        assert_eq!(format_duration(1_000, 86_401_000), "1d 0h");
+        assert_eq!(
+            format_duration(1_000, 86_401_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1d 0h"
+        );
     }
 }

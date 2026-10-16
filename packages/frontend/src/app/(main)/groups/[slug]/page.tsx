@@ -8,6 +8,7 @@ import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug, getGroupMemberCount } from "@/lib/groups/queries";
 import { groupUrl } from "@/lib/seo/urls";
 import GroupDetailClient from "./GroupDetailClient";
+import { TOKSCALE_X_HANDLE } from "@/lib/community";
 
 interface GroupPageProps {
   params: Promise<{ slug: string }>;
@@ -52,6 +53,7 @@ export async function generateMetadata({ params }: GroupPageProps): Promise<Meta
     },
     twitter: {
       card: "summary_large_image",
+      site: TOKSCALE_X_HANDLE,
       title,
       description,
     },
@@ -85,7 +87,7 @@ export default async function GroupPage({ params }: GroupPageProps) {
 
   const [memberCount, initialData] = await Promise.all([
     getGroupMemberCount(group.id),
-    getGroupLeaderboardData(group.id, "all", 1, 50, "tokens"),
+    getGroupLeaderboardData(group.id, "all", 1, 50, "tokens", "", group.timeZone, group.weekStartsOn),
   ]);
 
   return (
@@ -98,6 +100,8 @@ export default async function GroupPage({ params }: GroupPageProps) {
           description: group.description,
           avatarUrl: group.avatarUrl,
           isPublic: group.isPublic,
+          timeZone: group.timeZone,
+          weekStartsOn: group.weekStartsOn,
           memberCount,
           membership,
         }}

@@ -21,8 +21,13 @@ fn should_forward_key_event(key: &KeyEvent) -> bool {
 }
 
 impl EventHandler {
-    pub fn new(tick_rate: Duration) -> Self {
+    pub fn new_with_pending_keys(tick_rate: Duration, pending_keys: Vec<KeyEvent>) -> Self {
         let (tx, rx) = mpsc::channel();
+        for key in pending_keys {
+            // The receiver is alive for the whole constructor, so this cannot
+            // fail. Queue before spawning to preserve startup input ordering.
+            let _ = tx.send(Event::Key(key));
+        }
         let event_tx = tx.clone();
 
         thread::spawn(move || loop {
@@ -67,7 +72,9 @@ impl EventHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::should_forward_key_event;
+    use std::time::Duration;
+
+    use super::{should_forward_key_event, Event, EventHandler};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn key(kind: KeyEventKind) -> KeyEvent {
@@ -76,6 +83,17 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             kind,
             state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn pending_probe_keys_are_delivered_before_live_input() {
+        let expected = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut handler =
+            EventHandler::new_with_pending_keys(Duration::from_millis(1), vec![expected]);
+        match handler.next().unwrap() {
+            Event::Key(actual) => assert_eq!(actual, expected),
+            _ => panic!("pending key was not the first event"),
         }
     }
 

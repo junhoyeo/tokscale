@@ -7,9 +7,8 @@ import { profileUrl } from '@/lib/seo/urls';
 import { getSession } from '@/lib/auth/session';
 import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
-
-const PROFILE_PERIODS = ["all", "week", "month"] as const;
-type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
+import { PROFILE_PERIODS, type ProfilePeriod } from '@/lib/reportingPeriods';
+import { TOKSCALE_X_HANDLE } from '@/lib/community';
 
 function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
   const period = Array.isArray(value) ? value[0] : value;
@@ -80,6 +79,7 @@ export async function generateMetadata({ params }: { params: Promise<{ username:
     },
     twitter: {
       card: 'summary_large_image',
+      site: TOKSCALE_X_HANDLE,
       title: `@${username}'s Token Usage | Tokscale`,
     },
   };

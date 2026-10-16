@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { TOKSCALE_X_HANDLE } from "@/lib/community";
 import { getPublicOrigin } from "./urls";
 
 export function getRootMetadata(origin = getPublicOrigin()): Metadata {
@@ -26,6 +27,7 @@ export function getRootMetadata(origin = getPublicOrigin()): Metadata {
     },
     twitter: {
       card: "summary_large_image",
+      site: TOKSCALE_X_HANDLE,
       title: "Tokscale - AI Token Usage Tracker & Leaderboard",
       description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen.",
       images: [ogImage],

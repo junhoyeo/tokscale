@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::clients::ClientId;
+use crate::clients::{ClientId, PathRoot};
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -510,8 +510,8 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                                 .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
                         })
                 }
-                // OpenClaw: live transcripts plus every copy OpenClaw makes of
-                // one by appending a suffix to the `.jsonl` name — published
+                // OpenClaw and Codex: live transcripts plus every copy made
+                // by appending a suffix to the `.jsonl` name — published
                 // archives (`<id>.jsonl.deleted.<ts>`, `<id>.jsonl.reset.<ts>`, and
                 // their zstd form `<id>.jsonl.zst`),
                 // doctor backups (`<id>.jsonl.pre-doctor-<repair>-<ts>.bak`) and
@@ -796,6 +796,23 @@ pub fn built_in_extra_scan_paths_for(
                 .into_iter()
                 .map(|path| (ClientId::Claude, path)),
         );
+        paths.extend(
+            crate::claude_desktop::transcript_roots(Path::new(home_dir))
+                .into_iter()
+                .map(|path| (ClientId::Claude, path)),
+        );
+    }
+
+    if enabled.contains(&ClientId::Amp) {
+        // Amp moved threads server-side; the primary root is now the
+        // `tokscale amp sync` cache. Older Amp builds wrote thread files here,
+        // so keep reading them. `prefer_amp_cache_over_legacy` drops a legacy
+        // file when the cache holds the same thread.
+        let xdg_data = PathRoot::XdgData.resolve_with_env_strategy(home_dir, use_env_roots);
+        paths.push((
+            ClientId::Amp,
+            PathBuf::from(join_native(&xdg_data, "amp/threads")),
+        ));
     }
 
     if enabled.contains(&ClientId::Senpi) {
@@ -803,13 +820,19 @@ pub fn built_in_extra_scan_paths_for(
         // so it is read once rather than per discovered project.
         // Only a usable user-level `state_dir` propagates; a user `task` block
         // without one leaves each project on its own default layout.
-        let user_state_dir = match omo_task_state(&Path::new(home_dir).join(".omo")) {
-            OmoTaskState::StateDir(path) => Some(path),
-            OmoTaskState::DefaultLayout | OmoTaskState::Unset => None,
-        };
+        let user_state_dir = senpi_user_state_dir(home_dir);
+        // OmO Native has exactly one built-in location. A relocated OmO agent
+        // or sessions directory is configured persistently through
+        // `scanner.extraScanPaths.senpi` in settings.json, which accepts either
+        // the agent dir or its `sessions/` dir and also discovers the task
+        // children those transcripts point at (see `extra_scan_paths_for`
+        // below). Tokscale deliberately reads no OmO-specific environment
+        // variable for this.
+        let omo_sessions = join_native_path(Path::new(home_dir), ".omo/agent/sessions");
+
         if use_env_roots {
-            let env_session_dir =
-                std::env::var_os("SENPI_CODING_AGENT_SESSION_DIR").filter(|path| !path.is_empty());
+            let env_session_dir = std::env::var_os("SENPI_CODING_AGENT_SESSION_DIR")
+                .filter(|path| !path.to_string_lossy().trim().is_empty());
             if let Some(path) = &env_session_dir {
                 paths.push((ClientId::Senpi, PathBuf::from(path)));
             }
@@ -826,11 +849,18 @@ pub fn built_in_extra_scan_paths_for(
             // happens to run from and the home directory. Recover every other
             // project root from the global sessions tree, where each per-project
             // subdirectory's transcripts record the true `cwd` in their header line.
+            //
+            // OmO Native (omo-ai 5.1.0+) keeps its sessions under `~/.omo/agent/sessions`
+            // instead of legacy `~/.senpi/agent/sessions`. Include both sessions trees
+            // so child roots of every project are recovered whichever layout is in use.
             let senpi_root = ClientId::Senpi
                 .data()
                 .root
                 .resolve_with_env_strategy(home_dir, use_env_roots);
-            let mut sessions_roots = vec![PathBuf::from(join_native(&senpi_root, "sessions"))];
+            let mut sessions_roots = vec![
+                PathBuf::from(join_native(&senpi_root, "sessions")),
+                omo_sessions.clone(),
+            ];
             if let Some(path) = &env_session_dir {
                 sessions_roots.push(PathBuf::from(path));
             }
@@ -843,6 +873,7 @@ pub fn built_in_extra_scan_paths_for(
             }
         }
 
+        paths.push((ClientId::Senpi, omo_sessions));
         paths.push((
             ClientId::Senpi,
             senpi_omo_children_root(Path::new(home_dir), user_state_dir.as_deref()),
@@ -909,6 +940,13 @@ fn omo_task_state(omo_dir: &Path) -> OmoTaskState {
         };
     }
     OmoTaskState::Unset
+}
+
+fn senpi_user_state_dir(home_dir: &str) -> Option<PathBuf> {
+    match omo_task_state(&Path::new(home_dir).join(".omo")) {
+        OmoTaskState::StateDir(path) => Some(path),
+        OmoTaskState::DefaultLayout | OmoTaskState::Unset => None,
+    }
 }
 
 /// The OmO task-children root to scan for one project.
@@ -1535,6 +1573,27 @@ fn devin_cli_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBu
     roots
 }
 
+// Goose CLI uses the native roaming directory; Desktop synthesizes APPDATA
+// from HOME when it is absent. Keep selection independent of the system lookup
+// so both layouts can be tested without fixtures in the real Windows profile.
+#[cfg(any(target_os = "windows", test))]
+fn discover_goose_windows_db(
+    app_data: Option<PathBuf>,
+    native_roaming: Option<PathBuf>,
+    desktop_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let desktop_roaming = if app_data.is_none() {
+        desktop_home.map(|home| home.join("AppData").join("Roaming"))
+    } else {
+        None
+    };
+    [app_data.or(native_roaming), desktop_roaming]
+        .into_iter()
+        .flatten()
+        .map(|root| root.join("Block/goose/data/sessions/sessions.db"))
+        .find(|db| db.is_file())
+}
+
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
     // Roo/KiloCode require local + remote and server task roots, and Crush
@@ -2017,6 +2076,30 @@ fn scan_all_clients_with_env_strategy_inner(
             devin_cli_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
+        } else if client_id == ClientId::Senpi {
+            let user_state_dir = senpi_user_state_dir(home_dir);
+            for child_root in discover_senpi_omo_children_roots(&path, user_state_dir.as_deref()) {
+                push_unique_scan_task(
+                    &mut tasks,
+                    &mut seen_scan_roots,
+                    ClientId::Senpi,
+                    child_root,
+                );
+            }
+            let sessions_sub = path.join("sessions");
+            if sessions_sub.is_dir() {
+                for child_root in
+                    discover_senpi_omo_children_roots(&sessions_sub, user_state_dir.as_deref())
+                {
+                    push_unique_scan_task(
+                        &mut tasks,
+                        &mut seen_scan_roots,
+                        ClientId::Senpi,
+                        child_root,
+                    );
+                }
+            }
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         } else {
             if client_id == ClientId::OpenClaw {
                 openclaw_agent_roots.push(path.clone());
@@ -2509,51 +2592,80 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Goose) {
-        if use_env_roots {
-            if let Ok(custom_root) = std::env::var("GOOSE_PATH_ROOT") {
-                let trimmed = custom_root.trim();
-                if !trimmed.is_empty() {
-                    let custom_path = PathBuf::from(trimmed).join("data/sessions/sessions.db");
-                    if custom_path.is_file() {
-                        result.goose_db = Some(custom_path);
-                    }
+        let custom_root = if use_env_roots {
+            std::env::var_os("GOOSE_PATH_ROOT")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        } else {
+            None
+        };
+        if let Some(custom_root) = custom_root {
+            // Goose treats a valid override as authoritative even before its DB exists.
+            let custom_path = custom_root.join("data/sessions/sessions.db");
+            if custom_path.is_file() {
+                result.goose_db = Some(custom_path);
+            }
+        } else {
+            #[cfg(target_os = "windows")]
+            if use_env_roots && result.goose_db.is_none() {
+                let app_data = std::env::var_os("APPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from);
+                let profile_home = std::env::home_dir();
+                // Match Goose's etcetera strategy, not Tokscale's HOME redirect.
+                let native_roaming = dirs::data_dir().or_else(|| {
+                    profile_home
+                        .as_ref()
+                        .map(|home| home.join("AppData").join("Roaming"))
+                });
+                let desktop_home = std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or(profile_home);
+                result.goose_db = discover_goose_windows_db(app_data, native_roaming, desktop_home);
+            }
+            if !use_env_roots && result.goose_db.is_none() {
+                let windows_path = PathBuf::from(home_dir)
+                    .join("AppData/Roaming/Block/goose/data/sessions/sessions.db");
+                if windows_path.is_file() {
+                    result.goose_db = Some(windows_path);
                 }
             }
-        }
-        if result.goose_db.is_none() {
-            let xdg_path = ClientId::Goose
-                .data()
-                .resolve_path_with_env_strategy(home_dir, use_env_roots);
-            let xdg = PathBuf::from(xdg_path);
-            if xdg.is_file() {
-                result.goose_db = Some(xdg);
+            if result.goose_db.is_none() {
+                let xdg_path = ClientId::Goose
+                    .data()
+                    .resolve_path_with_env_strategy(home_dir, use_env_roots);
+                let xdg = PathBuf::from(xdg_path);
+                if xdg.is_file() {
+                    result.goose_db = Some(xdg);
+                }
             }
-        }
-        if result.goose_db.is_none() {
-            let macos_path = PathBuf::from(format!(
-                "{}/Library/Application Support/goose/sessions/sessions.db",
-                home_dir
-            ));
-            if macos_path.is_file() {
-                result.goose_db = Some(macos_path);
+            if result.goose_db.is_none() {
+                let macos_path = PathBuf::from(format!(
+                    "{}/Library/Application Support/goose/sessions/sessions.db",
+                    home_dir
+                ));
+                if macos_path.is_file() {
+                    result.goose_db = Some(macos_path);
+                }
             }
-        }
-        if result.goose_db.is_none() {
-            let legacy_macos_path = PathBuf::from(format!(
-                "{}/Library/Application Support/Block/goose/sessions/sessions.db",
-                home_dir
-            ));
-            if legacy_macos_path.is_file() {
-                result.goose_db = Some(legacy_macos_path);
+            if result.goose_db.is_none() {
+                let legacy_macos_path = PathBuf::from(format!(
+                    "{}/Library/Application Support/Block/goose/sessions/sessions.db",
+                    home_dir
+                ));
+                if legacy_macos_path.is_file() {
+                    result.goose_db = Some(legacy_macos_path);
+                }
             }
-        }
-        if result.goose_db.is_none() {
-            let legacy_xdg_path = PathBuf::from(format!(
-                "{}/.local/share/Block/goose/sessions/sessions.db",
-                home_dir
-            ));
-            if legacy_xdg_path.is_file() {
-                result.goose_db = Some(legacy_xdg_path);
+            if result.goose_db.is_none() {
+                let legacy_xdg_path = PathBuf::from(format!(
+                    "{}/.local/share/Block/goose/sessions/sessions.db",
+                    home_dir
+                ));
+                if legacy_xdg_path.is_file() {
+                    result.goose_db = Some(legacy_xdg_path);
+                }
             }
         }
     }
@@ -2969,7 +3081,57 @@ fn scan_all_clients_with_env_strategy_inner(
     // twice.
     prefer_cursor_json_over_csv(result.get_mut(ClientId::Cursor));
 
+    if enabled.contains(&ClientId::Amp) {
+        let amp_cache_root = ClientId::Amp
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        prefer_amp_cache_over_legacy(result.get_mut(ClientId::Amp), Path::new(&amp_cache_root));
+    }
+
     result
+}
+
+/// Drop each legacy Amp thread file whose `T-*.json` name also exists under
+/// the synced cache root, so a thread is parsed from exactly one file. The
+/// cached copy always wins: it is exported from the server, which holds a
+/// superset of what the legacy local file recorded.
+fn amp_file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    path.metadata().ok()?.modified().ok()
+}
+
+fn amp_cache_is_at_least_as_fresh(
+    cache_mtime: Option<std::time::SystemTime>,
+    legacy_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    match (cache_mtime, legacy_mtime) {
+        (Some(cache_mtime), Some(legacy_mtime)) => cache_mtime >= legacy_mtime,
+        _ => true,
+    }
+}
+
+fn prefer_amp_cache_over_legacy(files: &mut Vec<PathBuf>, cache_root: &Path) {
+    let cached: std::collections::HashMap<std::ffi::OsString, PathBuf> = files
+        .iter()
+        .filter(|path| path.starts_with(cache_root))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| (name.to_os_string(), path.clone()))
+        })
+        .collect();
+    files.retain(|path| {
+        if path.starts_with(cache_root) {
+            return true;
+        }
+        let Some(name) = path.file_name() else {
+            return true;
+        };
+        let Some(cache) = cached.get(name) else {
+            return true;
+        };
+        // Prefer the server projection only when it is at least as fresh. A
+        // local thread written after the last sync may contain newer messages.
+        !amp_cache_is_at_least_as_fresh(amp_file_mtime(cache), amp_file_mtime(path))
+    });
 }
 
 /// Drop each Cursor `usage[.account].csv` whose `usage[.account].json` sibling
@@ -3008,11 +3170,208 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
+    fn write_db(db: PathBuf) -> PathBuf {
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        File::create(&db).unwrap();
+        db
+    }
+
+    fn mock_goose_windows_db(roaming: &Path) -> PathBuf {
+        write_db(roaming.join("Block/goose/data/sessions/sessions.db"))
+    }
+
+    fn scan_goose(home: &Path, use_env_roots: bool) -> Option<PathBuf> {
+        scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["goose".into()], use_env_roots)
+            .goose_db
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_goose_explicit_home_ignores_host_roots() {
+        let home = TempDir::new().unwrap();
+        let host = TempDir::new().unwrap();
+        let root = home.path();
+        let custom = host.path().join("custom");
+        let host_xdg = host.path().join("xdg");
+        let host_appdata = host.path().join("appdata");
+        write_db(custom.join("data/sessions/sessions.db"));
+        write_db(host_xdg.join("goose/sessions/sessions.db"));
+        mock_goose_windows_db(&host_appdata);
+        let appdata_db = mock_goose_windows_db(&root.join("AppData/Roaming"));
+        let xdg_db = write_db(root.join(".local/share/goose/sessions/sessions.db"));
+        let mut env = EnvGuard::capture(&["GOOSE_PATH_ROOT", "XDG_DATA_HOME", "APPDATA", "HOME"]);
+        env.set("GOOSE_PATH_ROOT", &custom);
+        env.set("XDG_DATA_HOME", &host_xdg);
+        env.set("APPDATA", &host_appdata);
+        let scan = || scan_goose(root, false);
+        assert_eq!(scan(), Some(appdata_db.clone()), "prefers supplied AppData");
+        fs::remove_file(&appdata_db).unwrap();
+        assert_eq!(scan(), Some(xdg_db.clone()), "falls back to supplied XDG");
+        fs::remove_file(xdg_db).unwrap();
+        assert_eq!(scan(), None, "does not fall back to host roots");
+        #[cfg(target_os = "windows")]
+        {
+            mock_goose_windows_db(&host.path().join("desktop/AppData/Roaming"));
+            env.remove("APPDATA");
+            env.set("HOME", host.path().join("desktop"));
+            assert_eq!(scan(), None, "--home ignores a Desktop HOME database");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[serial]
+    fn test_scan_goose_prefers_native_windows_database_to_legacy() {
+        let home = TempDir::new().unwrap();
+        let root = home.path();
+        let app_data = root.join("appdata");
+        let native_db = mock_goose_windows_db(&app_data);
+        write_db(root.join("xdg/goose/sessions/sessions.db"));
+        let mut env = EnvGuard::capture(&["GOOSE_PATH_ROOT", "XDG_DATA_HOME", "APPDATA"]);
+        env.remove("GOOSE_PATH_ROOT");
+        env.set("XDG_DATA_HOME", root.join("xdg"));
+        env.set("APPDATA", &app_data);
+        let scan = || scan_goose(root, true);
+        assert_eq!(scan().as_ref(), Some(&native_db), "native beats stale XDG");
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_goose_preserves_compatibility_database_precedence() {
+        let home = TempDir::new().unwrap();
+        let root = home.path();
+        let empty_appdata = root.join("empty-appdata");
+        fs::create_dir_all(&empty_appdata).unwrap();
+        let mut env = EnvGuard::capture(&["GOOSE_PATH_ROOT", "XDG_DATA_HOME", "APPDATA"]);
+        env.remove("GOOSE_PATH_ROOT");
+        env.set("XDG_DATA_HOME", root.join("xdg"));
+        env.set("APPDATA", &empty_appdata);
+        let scan = || scan_goose(root, true);
+        let dbs = [
+            "xdg/goose/sessions/sessions.db",
+            "Library/Application Support/goose/sessions/sessions.db",
+            "Library/Application Support/Block/goose/sessions/sessions.db",
+            ".local/share/Block/goose/sessions/sessions.db",
+        ]
+        .map(|rel| write_db(root.join(rel)));
+        for db in &dbs {
+            assert_eq!(scan().as_ref(), Some(db), "legacy databases stay in order");
+            fs::remove_file(db).unwrap();
+        }
+        assert_eq!(scan(), None, "legacy chain ends empty");
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_goose_path_root_is_absolute_and_authoritative() {
+        let cwd = std::env::current_dir().unwrap();
+        let home = TempDir::new_in(&cwd).unwrap();
+        let root = home.path();
+        let custom = root.join("custom");
+        let custom_db = write_db(custom.join("data/sessions/sessions.db"));
+        let xdg_db = write_db(root.join("xdg/goose/sessions/sessions.db"));
+        let native_db = mock_goose_windows_db(&root.join("appdata"));
+        let mut env = EnvGuard::capture(&["GOOSE_PATH_ROOT", "XDG_DATA_HOME", "APPDATA"]);
+        env.set("XDG_DATA_HOME", root.join("xdg"));
+        env.set("APPDATA", root.join("appdata"));
+        env.set("GOOSE_PATH_ROOT", &custom);
+        let scan = || scan_goose(root, true);
+        assert_eq!(scan(), Some(custom_db.clone()), "absolute override used");
+        fs::remove_file(&custom_db).unwrap();
+        assert_eq!(scan(), None, "override does not fall through");
+        File::create(&custom_db).unwrap();
+        let fallback = if cfg!(target_os = "windows") {
+            native_db
+        } else {
+            xdg_db
+        };
+        env.set("GOOSE_PATH_ROOT", custom.strip_prefix(&cwd).unwrap());
+        assert_eq!(scan(), Some(fallback.clone()), "relative override ignored");
+        env.set("GOOSE_PATH_ROOT", format!(" {}", custom.display()));
+        assert_eq!(scan(), Some(fallback), "leading space is not trimmed");
+    }
+
+    #[test]
+    #[serial]
+    fn test_goose_windows_db_prefers_appdata_then_native_then_desktop() {
+        let dir = TempDir::new().unwrap();
+        let app_data = dir.path().join("appdata");
+        let native = dir.path().join("native");
+        let desktop = dir.path().join("desktop");
+        let native_db = mock_goose_windows_db(&native);
+        let desktop_db = mock_goose_windows_db(&desktop.join("AppData/Roaming"));
+        assert_eq!(
+            discover_goose_windows_db(
+                Some(app_data.clone()),
+                Some(native.clone()),
+                Some(desktop.clone()),
+            ),
+            None,
+            "APPDATA without a database hides native and Desktop"
+        );
+        let app_db = mock_goose_windows_db(&app_data);
+        assert_eq!(
+            discover_goose_windows_db(Some(app_data), Some(native.clone()), Some(desktop.clone())),
+            Some(app_db),
+            "APPDATA database is selected alone"
+        );
+        assert_eq!(
+            discover_goose_windows_db(None, Some(native.clone()), Some(desktop.clone())),
+            Some(native_db.clone()),
+            "native wins when both databases exist"
+        );
+        fs::remove_file(&native_db).unwrap();
+        assert_eq!(
+            discover_goose_windows_db(None, Some(native), Some(desktop)),
+            Some(desktop_db),
+            "Desktop is used when native has no database"
+        );
+        // Keep the path cwd-relative; canonicalizing it would not exercise relative HOME.
+        let cwd = std::env::current_dir().unwrap();
+        let rel_dir = TempDir::new_in(&cwd).unwrap();
+        mock_goose_windows_db(&rel_dir.path().join("AppData/Roaming"));
+        let relative_home = rel_dir.path().strip_prefix(&cwd).unwrap().to_path_buf();
+        assert_eq!(
+            discover_goose_windows_db(None, None, Some(relative_home.clone())),
+            Some(relative_home.join("AppData/Roaming/Block/goose/data/sessions/sessions.db")),
+            "relative HOME resolves the Desktop database"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    #[serial]
+    fn test_scan_goose_does_not_follow_windows_appdata_off_windows() {
+        let home = TempDir::new().unwrap();
+        let root = home.path();
+        mock_goose_windows_db(&root.join("appdata"));
+        mock_goose_windows_db(&root.join("AppData/Roaming"));
+        let mut env = EnvGuard::capture(&["GOOSE_PATH_ROOT", "XDG_DATA_HOME", "APPDATA"]);
+        env.remove("GOOSE_PATH_ROOT");
+        env.set("XDG_DATA_HOME", root.join("xdg"));
+        env.set("APPDATA", root.join("appdata"));
+        assert_eq!(scan_goose(root, true), None, "ignores AppData off Windows");
+    }
+
     fn scan_without_extra_dirs(home_dir: &str, clients: &[String]) -> ScanResult {
         let mut extra = EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS", "TOKSCALE_HEADLESS_DIR"]);
         extra.remove("TOKSCALE_EXTRA_DIRS");
         extra.remove("TOKSCALE_HEADLESS_DIR");
         scan_all_clients(home_dir, clients)
+    }
+
+    fn senpi_test_env_guard() -> EnvGuard {
+        let mut env = EnvGuard::capture(&[
+            "SENPI_CODING_AGENT_DIR",
+            "SENPI_CODING_AGENT_SESSION_DIR",
+            "OMO_CODING_AGENT_DIR",
+            "OMO_CODING_AGENT_SESSION_DIR",
+        ]);
+        env.remove("SENPI_CODING_AGENT_DIR");
+        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
+        env.remove("OMO_CODING_AGENT_DIR");
+        env.remove("OMO_CODING_AGENT_SESSION_DIR");
+        env
     }
 
     fn restore_env(var: &str, previous: Option<String>) {
@@ -3637,6 +3996,54 @@ mod tests {
                 "usage.json".to_string(),
                 "usage.team-a.json".to_string(),
                 "usage.team-b.csv".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_amp_scan_prefers_cache_over_legacy_thread_with_same_name() {
+        let home = TempDir::new().unwrap();
+        let config = home.path().join("config");
+        let mut env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_DATA_HOME"]);
+        env.set("TOKSCALE_CONFIG_DIR", &config);
+        env.remove("XDG_DATA_HOME");
+
+        let cache_dir = config.join("amp-cache/threads");
+        let legacy_dir = home.path().join(".local/share/amp/threads");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&legacy_dir).unwrap();
+        // Same thread in both roots, one only in the cache, one only legacy.
+        for (dir, name) in [
+            (&legacy_dir, "T-shared.json"),
+            (&cache_dir, "T-shared.json"),
+            (&cache_dir, "T-cache-only.json"),
+            (&legacy_dir, "T-legacy-only.json"),
+        ] {
+            File::create(dir.join(name)).unwrap();
+        }
+
+        let result = scan_without_extra_dirs(home.path().to_str().unwrap(), &["amp".to_string()]);
+        let mut files: Vec<_> = result
+            .get(ClientId::Amp)
+            .iter()
+            .map(|path| {
+                let root = if path.starts_with(&cache_dir) {
+                    "cache"
+                } else {
+                    "legacy"
+                };
+                format!("{root}/{}", path.file_name().unwrap().to_string_lossy())
+            })
+            .collect();
+        files.sort();
+
+        assert_eq!(
+            files,
+            vec![
+                "cache/T-cache-only.json",
+                "cache/T-shared.json",
+                "legacy/T-legacy-only.json",
             ]
         );
     }
@@ -5542,7 +5949,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_scan_all_clients_senpi() {
+        let _env = senpi_test_env_guard();
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_senpi_dir(home);
@@ -6800,6 +7209,41 @@ mod tests {
         assert_eq!(result.get(ClientId::Codex).len(), 2);
 
         restore_env("CODEX_HOME", previous_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn scan_codex_compressed_transcripts_reaches_the_parser() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        let archived = dir.path().join(".codex/archived_sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&archived).unwrap();
+        let content = br#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}
+{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#;
+
+        fs::write(
+            sessions.join("rollout-1.jsonl.zst"),
+            zstd::encode_all(&content[..], 0).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            archived.join("rollout-2.jsonl.zst"),
+            zstd::encode_all(&content[..], 0).unwrap(),
+        )
+        .unwrap();
+        fs::write(sessions.join("unrelated.zst"), b"not a session").unwrap();
+
+        let mut env = EnvGuard::capture(&["CODEX_HOME"]);
+        env.set("CODEX_HOME", dir.path().join(".codex"));
+        let scan = scan_without_extra_dirs(dir.path().to_str().unwrap(), &["codex".to_string()]);
+
+        assert_eq!(scan.get(ClientId::Codex).len(), 2);
+        for path in scan.get(ClientId::Codex) {
+            let messages = crate::sessions::codex::parse_codex_file(path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 160);
+        }
     }
 
     #[test]
@@ -8150,8 +8594,7 @@ mod tests {
     #[serial]
     fn test_senpi_omo_task_children_root_uses_native_separators() {
         let project_dir = TempDir::new().unwrap();
-        let mut env = EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(project_dir.path());
         let enabled = HashSet::from([ClientId::Senpi]);
 
@@ -8276,10 +8719,7 @@ mod tests {
         let home_dir = TempDir::new().unwrap();
         let other_dir = TempDir::new().unwrap();
         let child_session = setup_mock_senpi_omo_child(home_dir.path());
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(other_dir.path());
 
         let result =
@@ -8302,8 +8742,7 @@ mod tests {
         let child_session = setup_mock_senpi_omo_child(home_dir.path());
         let project_children = project_dir.path().join(".omo/senpi-task/children");
         let redirected_agent = TempDir::new().unwrap();
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
+        let mut env = senpi_test_env_guard();
         env.set("SENPI_CODING_AGENT_DIR", redirected_agent.path());
         env.set("SENPI_CODING_AGENT_SESSION_DIR", &project_children);
         let _current_dir = CurrentDirGuard::set(project_dir.path());
@@ -8330,9 +8769,7 @@ mod tests {
         let other_dir = TempDir::new().unwrap();
         let child_session = setup_mock_senpi_omo_child(home_dir.path());
         let children_dir = home_dir.path().join(".omo/senpi-task/children");
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let mut env = senpi_test_env_guard();
         env.set("SENPI_CODING_AGENT_SESSION_DIR", &children_dir);
         let _current_dir = CurrentDirGuard::set(other_dir.path());
         let enabled = HashSet::from([ClientId::Senpi]);
@@ -8364,10 +8801,7 @@ mod tests {
         let home_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
         let child_session = setup_mock_senpi_omo_child(project_dir.path());
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
         let result =
@@ -8391,9 +8825,7 @@ mod tests {
         let redirected_sessions = TempDir::new().unwrap();
         let redirected_session = redirected_sessions.path().join("redirected.jsonl");
         File::create(&redirected_session).unwrap();
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let mut env = senpi_test_env_guard();
         env.set("SENPI_CODING_AGENT_SESSION_DIR", redirected_sessions.path());
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
@@ -8419,9 +8851,7 @@ mod tests {
         let children_dir = project_dir.path().join(".omo/senpi-task/children");
         let task_dir = children_dir.join("task-123");
         let exact_session_dir = task_dir.join("sessions/task-123");
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let mut env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
         for env_root in [
@@ -8460,9 +8890,7 @@ mod tests {
             &symlink_root,
         )
         .unwrap();
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_DIR", "SENPI_CODING_AGENT_SESSION_DIR"]);
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let mut env = senpi_test_env_guard();
         env.set("SENPI_CODING_AGENT_SESSION_DIR", &symlink_root);
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
@@ -8511,10 +8939,7 @@ mod tests {
             "2026-08-31T00-00-00-000Z_global.jsonl",
             project_dir.path(),
         );
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR", "SENPI_CODING_AGENT_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(elsewhere.path());
 
         let result =
@@ -8533,6 +8958,214 @@ mod tests {
         assert_eq!(canonical_files.len(), 2);
     }
 
+    fn write_omo_agent_session(
+        home_dir: &Path,
+        project_key: &str,
+        file_name: &str,
+        cwd: &Path,
+    ) -> PathBuf {
+        let dir = home_dir
+            .join(".omo")
+            .join("agent")
+            .join("sessions")
+            .join(project_key);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"test\",\"timestamp\":\"2026-08-31T00:00:00.000Z\",\"cwd\":{}}}\n",
+                json_path_literal(cwd)
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_discovers_omo_agent_sessions_and_task_children_by_default() {
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let omo_session = write_omo_agent_session(
+            home_dir.path(),
+            "--project--",
+            "2026-08-31T00-00-00-000Z_omo.jsonl",
+            project_dir.path(),
+        );
+        let _env = senpi_test_env_guard();
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert!(
+            canonical_files.contains(&child_session),
+            "OmO child sessions must be discovered from ~/.omo/agent/sessions by default"
+        );
+        assert!(
+            canonical_files.contains(&omo_session.canonicalize().unwrap()),
+            "Main sessions in ~/.omo/agent/sessions must be discovered by default"
+        );
+        assert_eq!(canonical_files.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_extra_scan_paths_discovers_task_children() {
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let custom_dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let custom_session_dir = custom_dir.path().join("custom_sessions");
+        let project_session_dir = custom_session_dir.join("--project--");
+        fs::create_dir_all(&project_session_dir).unwrap();
+        let main_session = project_session_dir.join("main.jsonl");
+        fs::write(
+            &main_session,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"test\",\"timestamp\":\"2026-08-31T00:00:00.000Z\",\"cwd\":{}}}\n",
+                json_path_literal(project_dir.path())
+            ),
+        )
+        .unwrap();
+
+        let _env = senpi_test_env_guard();
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let mut settings = ScannerSettings::default();
+        settings
+            .extra_scan_paths
+            .insert("senpi".to_string(), vec![custom_session_dir]);
+
+        let result = scan_all_clients_with_scanner_settings(
+            home_dir.path().to_str().unwrap(),
+            &["senpi".to_string()],
+            true,
+            &settings,
+        );
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert!(
+            canonical_files.contains(&child_session),
+            "OmO child sessions must be discovered from extra_scan_paths.senpi"
+        );
+        assert!(
+            canonical_files.contains(&main_session.canonicalize().unwrap()),
+            "Main sessions in extra_scan_paths.senpi must be scanned"
+        );
+        assert_eq!(canonical_files.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_ignores_omo_environment_overrides() {
+        // Relocated OmO directories are a persisted setting
+        // (`scanner.extraScanPaths.senpi`), not an environment variable, so
+        // these variables must not add or move any scan root.
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let omo_session = write_omo_agent_session(
+            home_dir.path(),
+            "--project--",
+            "2026-08-31T00-00-00-000Z_omo.jsonl",
+            project_dir.path(),
+        );
+        let redirected_sessions = TempDir::new().unwrap();
+        File::create(redirected_sessions.path().join("redirected.jsonl")).unwrap();
+        let redirected_agent = TempDir::new().unwrap();
+        let redirected_agent_session = redirected_agent
+            .path()
+            .join("sessions")
+            .join("--elsewhere--")
+            .join("redirected.jsonl");
+        fs::create_dir_all(redirected_agent_session.parent().unwrap()).unwrap();
+        File::create(&redirected_agent_session).unwrap();
+        let mut env = senpi_test_env_guard();
+        env.set("OMO_CODING_AGENT_SESSION_DIR", redirected_sessions.path());
+        env.set("OMO_CODING_AGENT_DIR", redirected_agent.path());
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert_eq!(
+            canonical_files,
+            HashSet::from([child_session, omo_session.canonicalize().unwrap()]),
+            "only the built-in ~/.omo/agent/sessions tree and its task children are scanned"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_extra_scan_paths_accepts_an_omo_agent_dir() {
+        // `scanner.extraScanPaths.senpi` replaces the removed OmO environment
+        // overrides: pointing it at a relocated agent dir (the parent of
+        // `sessions/`) must find the main transcripts and their task children.
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let custom_agent = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let child_session = setup_mock_senpi_omo_child(project_dir.path());
+        let custom_session = custom_agent
+            .path()
+            .join("sessions")
+            .join("--project--")
+            .join("2026-08-31T00-00-00-000Z_omo.jsonl");
+        fs::create_dir_all(custom_session.parent().unwrap()).unwrap();
+        fs::write(
+            &custom_session,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"test\",\"timestamp\":\"2026-08-31T00:00:00.000Z\",\"cwd\":{}}}\n",
+                json_path_literal(project_dir.path())
+            ),
+        )
+        .unwrap();
+
+        let _env = senpi_test_env_guard();
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let mut settings = ScannerSettings::default();
+        settings
+            .extra_scan_paths
+            .insert("senpi".to_string(), vec![custom_agent.path().to_path_buf()]);
+
+        let result = scan_all_clients_with_scanner_settings(
+            home_dir.path().to_str().unwrap(),
+            &["senpi".to_string()],
+            true,
+            &settings,
+        );
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert!(canonical_files.contains(&child_session));
+        assert!(canonical_files.contains(&custom_session.canonicalize().unwrap()));
+        assert_eq!(canonical_files.len(), 2);
+    }
+
     #[test]
     #[serial]
     fn test_senpi_global_sessions_ignore_projects_without_children() {
@@ -8545,10 +9178,7 @@ mod tests {
             "2026-08-31T00-00-00-000Z_bare.jsonl",
             bare_project.path(),
         );
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR", "SENPI_CODING_AGENT_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(elsewhere.path());
 
         let result =
@@ -8578,10 +9208,7 @@ mod tests {
             "2026-08-31T00-00-00-000Z_global.jsonl",
             project_dir.path(),
         );
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR", "SENPI_CODING_AGENT_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(project_dir.path());
 
         let result =
@@ -8626,10 +9253,7 @@ mod tests {
             "2026-08-31T00-00-00-000Z_newer.jsonl",
             newer_project.path(),
         );
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR", "SENPI_CODING_AGENT_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(elsewhere.path());
 
         let result =
@@ -9009,10 +9633,7 @@ mod tests {
             "2026-08-31T00-00-00-000Z_global.jsonl",
             project_dir.path(),
         );
-        let mut env =
-            EnvGuard::capture(&["SENPI_CODING_AGENT_SESSION_DIR", "SENPI_CODING_AGENT_DIR"]);
-        env.remove("SENPI_CODING_AGENT_SESSION_DIR");
-        env.remove("SENPI_CODING_AGENT_DIR");
+        let _env = senpi_test_env_guard();
         let _current_dir = CurrentDirGuard::set(elsewhere.path());
 
         let result =
@@ -9072,5 +9693,18 @@ mod tests {
             discover_senpi_omo_children_roots(&temp.path().join("no-such-root"), None).is_empty(),
             "a missing sessions root must discover nothing"
         );
+    }
+
+    #[test]
+    fn amp_scan_keeps_newer_legacy_duplicate() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        assert!(!amp_cache_is_at_least_as_fresh(
+            Some(epoch),
+            Some(epoch + std::time::Duration::from_secs(1)),
+        ));
+        assert!(amp_cache_is_at_least_as_fresh(
+            Some(epoch + std::time::Duration::from_secs(1)),
+            Some(epoch),
+        ));
     }
 }

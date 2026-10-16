@@ -2,10 +2,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, fit_workspace_label_to_width, format_cache_hit_rate, format_cost,
-    format_cost_per_million, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name, total_tokens_cell, truncate_text, truncate_to_width,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    fit_workspace_label_to_width, format_cache_hit_rate, format_cost, format_cost_per_million,
+    format_ms_per_1k, format_tokens, get_client_display_name, get_provider_display_name,
+    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -238,7 +237,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabModels)),
@@ -285,8 +284,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -400,11 +399,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_tokens(model.tokens.cache_write))
                         .style(metric_cache_write_style),
                     total_tokens_cell(model.tokens.total(), &app.theme),
-                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
-                        .style(app.theme.hint_key_style()),
+                    Cell::from(format_ms_per_1k(
+                        model.performance.ms_per_1k_tokens,
+                        app.glyphs,
+                    ))
+                    .style(app.theme.hint_key_style()),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                    Cell::from(format_cost_per_million(
+                        model.cost,
+                        model.tokens.total(),
+                        app.glyphs,
+                    ))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             } else {
                 vec![
@@ -427,14 +433,22 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         model.tokens.cache_read,
                         model.tokens.input,
                         model.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(model.tokens.total(), &app.theme),
-                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
-                        .style(app.theme.hint_key_style()),
+                    Cell::from(format_ms_per_1k(
+                        model.performance.ms_per_1k_tokens,
+                        app.glyphs,
+                    ))
+                    .style(app.theme.hint_key_style()),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                    Cell::from(format_cost_per_million(
+                        model.cost,
+                        model.tokens.total(),
+                        app.glyphs,
+                    ))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             };
 
@@ -459,7 +473,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if models_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(models_len, scroll_offset, visible_height);

@@ -156,6 +156,68 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("anthropic/claude-4-6-opus", "claude-opus-4-6");
     m.insert("anthropic/claude-4-6-sonnet", "claude-sonnet-4-6");
     m.insert("anthropic/claude-4-6-haiku", "claude-haiku-4-6");
+    m.insert("claude-sonnet-4-6-low", "claude-sonnet-4-6");
+    m.insert("claude-sonnet-4-6-medium", "claude-sonnet-4-6");
+    m.insert("claude-sonnet-4-6-high", "claude-sonnet-4-6");
+    m.insert("claude-sonnet-4.6-low", "claude-sonnet-4-6");
+    m.insert("claude-sonnet-4.6-medium", "claude-sonnet-4-6");
+    m.insert("claude-sonnet-4.6-high", "claude-sonnet-4-6");
+
+    // Claude 5.5 generation aliases, reasoning-effort tiers and dotted spellings
+    m.insert("claude-opus-5-5-thinking", "claude-opus-5-5");
+    m.insert("claude-sonnet-5-5-thinking", "claude-sonnet-5-5");
+    m.insert("claude-haiku-5-5-thinking", "claude-haiku-5-5");
+    m.insert("claude-opus-5.5-thinking", "claude-opus-5-5");
+    m.insert("claude-sonnet-5.5-thinking", "claude-sonnet-5-5");
+    m.insert("claude-haiku-5.5-thinking", "claude-haiku-5-5");
+    m.insert("claude-opus-5-5", "claude-opus-5-5");
+    m.insert("claude-sonnet-5-5", "claude-sonnet-5-5");
+    m.insert("claude-haiku-5-5", "claude-haiku-5-5");
+    m.insert("claude-opus-5.5", "claude-opus-5-5");
+    m.insert("claude-sonnet-5.5", "claude-sonnet-5-5");
+    m.insert("claude-haiku-5.5", "claude-haiku-5-5");
+
+    m.insert("claude-sonnet-5-5-low", "claude-sonnet-5-5");
+    m.insert("claude-sonnet-5-5-medium", "claude-sonnet-5-5");
+    m.insert("claude-sonnet-5-5-high", "claude-sonnet-5-5");
+    m.insert("claude-sonnet-5.5-low", "claude-sonnet-5-5");
+    m.insert("claude-sonnet-5.5-medium", "claude-sonnet-5-5");
+    m.insert("claude-sonnet-5.5-high", "claude-sonnet-5-5");
+
+    m.insert("claude-opus-5-5-low", "claude-opus-5-5");
+    m.insert("claude-opus-5-5-medium", "claude-opus-5-5");
+    m.insert("claude-opus-5-5-high", "claude-opus-5-5");
+    m.insert("claude-opus-5.5-low", "claude-opus-5-5");
+    m.insert("claude-opus-5.5-medium", "claude-opus-5-5");
+    m.insert("claude-opus-5.5-high", "claude-opus-5-5");
+
+    m.insert("claude-haiku-5-5-low", "claude-haiku-5-5");
+    m.insert("claude-haiku-5-5-medium", "claude-haiku-5-5");
+    m.insert("claude-haiku-5-5-high", "claude-haiku-5-5");
+    m.insert("claude-haiku-5.5-low", "claude-haiku-5-5");
+    m.insert("claude-haiku-5.5-medium", "claude-haiku-5-5");
+    m.insert("claude-haiku-5.5-high", "claude-haiku-5-5");
+
+    m.insert("anthropic/claude-5-5-opus", "claude-opus-5-5");
+    m.insert("anthropic/claude-5-5-sonnet", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-5-5-haiku", "claude-haiku-5-5");
+    m.insert("anthropic/claude-5.5-opus", "claude-opus-5-5");
+    m.insert("anthropic/claude-5.5-sonnet", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-5.5-haiku", "claude-haiku-5-5");
+
+    m.insert("anthropic/claude-sonnet-5-5", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5.5", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-opus-5-5", "claude-opus-5-5");
+    m.insert("anthropic/claude-opus-5.5", "claude-opus-5-5");
+    m.insert("anthropic/claude-haiku-5-5", "claude-haiku-5-5");
+    m.insert("anthropic/claude-haiku-5.5", "claude-haiku-5-5");
+
+    m.insert("anthropic/claude-sonnet-5-5-low", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5-5-medium", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5-5-high", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5.5-low", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5.5-medium", "claude-sonnet-5-5");
+    m.insert("anthropic/claude-sonnet-5.5-high", "claude-sonnet-5-5");
     m.insert("gemini-3.1-pro-high", "gemini-3.1-pro");
     m.insert("gemini-3.1-pro-low", "gemini-3.1-pro");
     m.insert("gemini-3-pro-high", "gemini-3-pro");
@@ -644,5 +706,83 @@ mod tests {
         // `databricks/databricks-claude-sonnet-4-1` today (#1062), so aliasing
         // the Copilot spelling onto it would route usage to the wrong rates.
         assert_eq!(super::resolve_alias("claude-sonnet-41"), None);
+    }
+
+    #[test]
+    fn resolves_claude_5_5_aliases_and_reasoning_tiers() {
+        let cases = [
+            ("claude-sonnet-5-5-medium", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5-low", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5-high", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5-thinking", "claude-sonnet-5-5"),
+            ("claude-sonnet-5.5-medium", "claude-sonnet-5-5"),
+            ("claude-sonnet-5.5-low", "claude-sonnet-5-5"),
+            ("claude-sonnet-5.5-high", "claude-sonnet-5-5"),
+            ("claude-sonnet-5.5-thinking", "claude-sonnet-5-5"),
+            ("claude-sonnet-5.5", "claude-sonnet-5-5"),
+            ("CLAUDE-SONNET-5-5-MEDIUM", "claude-sonnet-5-5"),
+            ("claude-opus-5-5-thinking", "claude-opus-5-5"),
+            ("claude-opus-5.5-thinking", "claude-opus-5-5"),
+            ("claude-opus-5.5", "claude-opus-5-5"),
+            ("claude-opus-5-5-low", "claude-opus-5-5"),
+            ("claude-haiku-5.5", "claude-haiku-5-5"),
+            ("claude-haiku-5-5-low", "claude-haiku-5-5"),
+            ("anthropic/claude-5-5-sonnet", "claude-sonnet-5-5"),
+            ("anthropic/claude-5.5-sonnet", "claude-sonnet-5-5"),
+            ("anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"),
+            ("anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"),
+            ("anthropic/claude-sonnet-5-5-medium", "claude-sonnet-5-5"),
+            ("anthropic/claude-sonnet-5-5-low", "claude-sonnet-5-5"),
+            ("claude-sonnet-4-6-medium", "claude-sonnet-4-6"),
+            ("claude-sonnet-4-6-low", "claude-sonnet-4-6"),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(
+                super::resolve_alias(raw),
+                Some(expected),
+                "raw model: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_claude_sonnet_5_5_tiers_resolve_submission_safe() {
+        let pricing = super::super::litellm::ModelPricing {
+            input_cost_per_token: Some(2e-6),
+            output_cost_per_token: Some(1e-5),
+            cache_read_input_token_cost: Some(1e-7),
+            cache_creation_input_token_cost: Some(2.5e-6),
+            ..Default::default()
+        };
+        let service = super::super::PricingService::new(
+            HashMap::from([("claude-sonnet-5-5".to_string(), pricing)]),
+            HashMap::new(),
+        );
+        let usage = crate::TokenBreakdown {
+            input: 1_000,
+            output: 100,
+            cache_read: 500,
+            cache_write: 200,
+            cache_write_1h: 0,
+            reasoning: 0,
+        };
+
+        for model_id in [
+            "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-low",
+            "claude-sonnet-5-5-high",
+            "claude-sonnet-5.5-medium",
+            "claude-sonnet-5.5-low",
+            "anthropic/claude-sonnet-5-5-medium",
+        ] {
+            let result = service
+                .lookup_with_source_and_provider(model_id, None, Some("anthropic"))
+                .unwrap_or_else(|| panic!("failed to resolve {model_id}"));
+            assert_eq!(result.matched_key, "claude-sonnet-5-5");
+            assert!(result.evidence.alias_applied);
+            assert!(result.evidence.is_submission_safe());
+            assert!(service.covers_usage_with_provider(model_id, Some("anthropic"), &usage));
+        }
     }
 }

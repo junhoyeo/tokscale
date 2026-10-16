@@ -1,25 +1,72 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Timeout for every Cursor HTTP request. Picked to bound the worst case for
-/// auto-sync (which runs synchronously before local reports and the TUI) while
-/// still tolerating routine API latency. If the network is hung, the report
-/// proceeds against cached data after this timeout instead of stalling forever.
-/// Explicit `tokscale cursor sync` overrides this for the usage-CSV download
-/// with [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
+/// Timeout for every Cursor HTTP request, and the wall-clock budget for an
+/// implicit pre-report sync. A cached account downloads new events plus a
+/// bounded correction overlap from its recent history. If the network is
+/// hung, the report proceeds against cached data after this timeout instead of
+/// stalling forever. Explicit `tokscale cursor sync` overrides it with
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`].
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Per-request timeout for the usage-CSV download during an explicit
-/// `tokscale cursor sync`. Large accounts export CSVs that take well over the
-/// default [`CURSOR_HTTP_TIMEOUT`] to generate and stream (issue #1175); the
-/// user asked for the sync, so waiting longer beats failing fast.
-const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Re-fetch one hour before each account's newest cached event for delayed
+/// billing corrections. Older cached history is retained, but corrections
+/// outside this bounded window are not refreshed by incremental sync.
+const CURSOR_USAGE_CORRECTION_WINDOW_MS: i64 = 60 * 60 * 1000;
+// Allow small clock skew, but keep it below the correction overlap so an
+// accepted future row cannot move the next window beyond current usage.
+const CURSOR_USAGE_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+/// Largest explicit sync budget a user can configure, through
+/// `tokscale cursor sync --timeout` or `cursor.syncTimeoutSeconds` in
+/// settings.json. Twenty-four hours is far beyond any real history walk.
+/// Keeping a bound also keeps the `Instant` deadline arithmetic in range: an
+/// unbounded 19-digit `--timeout` used to panic with "overflow when adding
+/// duration to instant".
+pub const CURSOR_MAX_SYNC_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// Per-request timeout for the usage download during an explicit
+/// `tokscale cursor sync`. Large accounts take well over the default
+/// [`CURSOR_HTTP_TIMEOUT`] to page (issue #1175); the user asked for the sync,
+/// so waiting longer beats failing fast. When this default is in use, the walk
+/// may expand it from the advertised event count up to 30 minutes.
+pub const CURSOR_EXPLICIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Seconds allocated per page when dynamically scaling the explicit sync budget
+/// to the advertised `totalUsageEventsCount`.
+const CURSOR_DYNAMIC_BUDGET_SECS_PER_PAGE: u64 = 3;
+
+/// Maximum duration dynamic scaling may expand the explicit sync budget to.
+const CURSOR_MAX_DYNAMIC_SYNC_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Compute the dynamic sync timeout budget for a Cursor usage events walk.
+///
+/// Accounts with tens of thousands of rows require multiple paginated requests.
+/// When no explicit custom timeout is given, Tokscale dynamically scales the budget
+/// based on the advertised total count and the observed page yield, allocating
+/// 3 seconds per estimated page (clamped between the initial budget and 1,800s).
+pub fn compute_dynamic_cursor_budget(
+    total_events: u64,
+    effective_page_size: usize,
+    initial_budget: Duration,
+) -> Duration {
+    if effective_page_size == 0 {
+        return initial_budget;
+    }
+    let total_pages = (total_events.saturating_add(effective_page_size as u64 - 1))
+        / (effective_page_size as u64);
+    let estimated_needed =
+        Duration::from_secs(total_pages.saturating_mul(CURSOR_DYNAMIC_BUDGET_SECS_PER_PAGE));
+    estimated_needed
+        .max(initial_budget)
+        .min(CURSOR_MAX_DYNAMIC_SYNC_TIMEOUT)
+}
 
 /// Skip implicit pre-report sync when every expected Cursor account cache file
 /// was modified within this window. Prevents `tokscale models` (and its
@@ -89,10 +136,36 @@ const USAGE_SUMMARY_ENDPOINT: &str = "https://cursor.com/api/usage-summary";
 /// `totalUsageEventsCount` events (or a page comes back short/empty).
 const CURSOR_JSON_PAGE_SIZE: usize = 500;
 
-/// Hard ceiling on pages walked in one fetch, so a server that keeps returning
-/// full pages (or a mis-reported total) can't spin forever. At the page size
-/// above this admits up to a quarter-million events.
+/// Page ceiling for one fetch at the requested page size, so a server that
+/// keeps returning full pages (or a mis-reported total) can't spin forever.
+/// At the page size above this admits up to a quarter-million events.
 const CURSOR_MAX_JSON_PAGES: usize = 500;
+
+/// The event budget behind [`CURSOR_MAX_JSON_PAGES`]. When Cursor clamps the
+/// requested page size (it has been seen returning 100 rows for a 500-row
+/// request), a fixed page ceiling would quietly shrink this budget fivefold and
+/// fail every history above ~50,000 events, so the page ceiling is derived from
+/// the page size the server actually honours instead.
+const CURSOR_MAX_JSON_EVENTS: usize = CURSOR_JSON_PAGE_SIZE * CURSOR_MAX_JSON_PAGES;
+
+/// Smallest page yield the derived ceiling is sized for, which bounds the
+/// walk at `CURSOR_MAX_JSON_EVENTS / 50` = 5,000 pages however hard a server
+/// clamps. The byte cap and the time budget still bound the walk as well.
+const CURSOR_MIN_PAGE_YIELD_FOR_LIMIT: usize = 50;
+
+/// How many pages one fetch may walk, given the largest page the server has
+/// returned so far. Pages are full except the last, so the largest page seen
+/// is the page size the server honours. The result never drops below
+/// [`CURSOR_MAX_JSON_PAGES`].
+fn cursor_page_limit(largest_page_yield: usize) -> usize {
+    if largest_page_yield == 0 {
+        return CURSOR_MAX_JSON_PAGES;
+    }
+    let honoured = largest_page_yield.max(CURSOR_MIN_PAGE_YIELD_FOR_LIMIT);
+    CURSOR_MAX_JSON_EVENTS
+        .div_ceil(honoured)
+        .max(CURSOR_MAX_JSON_PAGES)
+}
 
 /// Cumulative ceiling on the usage-events JSON downloaded in one fetch, enforced
 /// *while* each page is read rather than after it has all arrived, and counted
@@ -156,14 +229,6 @@ pub struct SyncCursorResult {
     pub synced: bool,
     pub rows: usize,
     pub error: Option<String>,
-}
-
-pub fn get_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(cursor_credentials_path(&home_dir()?))
-}
-
-pub fn get_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(cursor_cache_dir(&home_dir()?))
 }
 
 fn migrate_cache_dir_from_old_path_in_home(home_dir: &Path) {
@@ -240,6 +305,232 @@ fn count_cursor_json_events(json_text: &str) -> usize {
                 .map(|events| events.len())
         })
         .unwrap_or(0)
+}
+
+/// Events already stored in an aggregated usage-events cache. Invalid JSON or a
+/// missing `usageEventsDisplay` array is an empty history, so a corrupt cache
+/// cannot watermark an incremental sync.
+fn cached_usage_events(json_text: Option<&str>) -> Vec<serde_json::Value> {
+    let Some(json_text) = json_text else {
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(json_text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("usageEventsDisplay")
+                .and_then(|events| events.as_array())
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+/// Only report-usable rows with plausible positive timestamps can advance sync
+/// progress or establish pagination ordering. Other rows remain in the raw cache.
+fn usable_cursor_event_timestamp_ms(event: &serde_json::Value, max_timestamp: i64) -> Option<i64> {
+    tokscale_core::sessions::cursor::parse_cursor_usage_event_timestamp(event)
+        .filter(|timestamp| *timestamp > 0 && *timestamp <= max_timestamp)
+}
+
+/// Newest usable timestamp in a cache. No usable timestamp forces a full fetch.
+fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -> Option<i64> {
+    events
+        .iter()
+        .filter_map(|event| usable_cursor_event_timestamp_ms(event, max_timestamp))
+        .max()
+}
+
+/// Identity of a usage event for incremental merge.
+///
+/// Accepted rows use the report parser's projection of every immutable known
+/// field: trimmed model/session ids (one missing-id fallback), integer timestamp
+/// and defaulted/coerced/clamped token counts. Mutable billing and unknown fields
+/// are omitted so a re-fetched correction replaces its cached row; the multiset
+/// merge separately preserves repeated events with the same projection. Rejected
+/// rows retain their raw identity; only object key ordering is canonicalized.
+fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
+    let mut identity = if let Some(parsed) =
+        tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
+    {
+        // Restrict accepted rows to the report parser's immutable projection.
+        // Cursor exposes no stable event id, so multiplicity is tracked by the
+        // merge rather than by unknown fields that billing corrections may change.
+        serde_json::json!({
+            "conversationId": parsed.conversation_id,
+            "model": parsed.model,
+            "timestamp": parsed.timestamp,
+            "tokenUsage": {
+                "inputTokens": parsed.tokens.input,
+                "outputTokens": parsed.tokens.output,
+                "cacheReadTokens": parsed.tokens.cache_read,
+                "cacheWriteTokens": parsed.tokens.cache_write,
+            },
+        })
+    } else {
+        // Rejected rows cannot be projected safely. Keep their complete raw
+        // identity so unrelated malformed data is never discarded.
+        event.clone()
+    };
+    identity.sort_all_objects();
+    serde_json::to_string(&identity).unwrap_or_default()
+}
+
+/// Reconcile `incoming` (just fetched, newest first) with `existing` (the cache).
+/// Incoming is authoritative for every identity present in the completed overlap,
+/// so all cached occurrences of those identities are replaced. Every incoming
+/// occurrence is retained because Cursor has no stable event id and distinct
+/// billable events may have identical parser fields. Cached identities the new
+/// pages never reached stay in the result.
+fn merge_cursor_usage_events(
+    existing: Vec<serde_json::Value>,
+    incoming: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let capacity = existing.len().saturating_add(incoming.len());
+    let mut incoming_identities = HashSet::with_capacity(incoming.len());
+    let mut merged = Vec::with_capacity(capacity);
+    for event in incoming {
+        incoming_identities.insert(cursor_usage_event_identity(&event));
+        merged.push(event);
+    }
+
+    for event in existing {
+        if !incoming_identities.contains(&cursor_usage_event_identity(&event)) {
+            merged.push(event);
+        }
+    }
+    merged
+}
+
+/// Keep recent rows and raw rows that cannot establish ordering. Only a usable,
+/// plausible older row can end the bounded walk through the correction window.
+fn filter_cursor_usage_page(
+    events: &[serde_json::Value],
+    sync_start: Option<i64>,
+    max_timestamp: i64,
+) -> (Vec<&serde_json::Value>, bool) {
+    let Some(sync_start) = sync_start else {
+        return (events.iter().collect(), false);
+    };
+    let mut crossed = false;
+    let fresh = events
+        .iter()
+        .filter(|event| {
+            if usable_cursor_event_timestamp_ms(event, max_timestamp)
+                .is_some_and(|timestamp| timestamp < sync_start)
+            {
+                crossed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (fresh, crossed)
+}
+
+fn usage_events_request_body(
+    page: usize,
+    page_size: usize,
+    sync_start: Option<i64>,
+) -> serde_json::Value {
+    match sync_start {
+        Some(sync_start) => serde_json::json!({
+            "teamId": 0,
+            "startDate": sync_start,
+            "page": page,
+            "pageSize": page_size,
+        }),
+        None => serde_json::json!({
+            "teamId": 0,
+            "page": page,
+            "pageSize": page_size,
+        }),
+    }
+}
+
+fn cursor_budget_label(budget: Duration) -> String {
+    if budget.as_secs() >= 1 {
+        format!("{}s", budget.as_secs())
+    } else {
+        format!("{}ms", budget.as_millis())
+    }
+}
+
+fn cursor_fetch_progress(
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+) -> String {
+    let pages_word = if pages_completed == 1 {
+        "page"
+    } else {
+        "pages"
+    };
+    let events = match total {
+        Some(total) => format!("{events_collected}/{total} events"),
+        None => format!("{events_collected} events"),
+    };
+    format!("{pages_completed} {pages_word}, {events} collected")
+}
+
+fn cursor_with_cause(message: String, cause: &str) -> String {
+    if cause.is_empty() {
+        message
+    } else {
+        format!("{message}: {cause}")
+    }
+}
+
+/// What to print when the paginated walk runs out of its wall-clock budget.
+/// `reqwest`'s own `Display` is only "error sending request for url (...)",
+/// which is how a budget expiry was reported as a network failure.
+fn cursor_budget_exhausted_message(
+    budget: Duration,
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+    cause: &str,
+) -> String {
+    cursor_with_cause(
+        format!(
+            "Cursor usage events fetch exceeded its {} time budget ({})",
+            cursor_budget_label(budget),
+            cursor_fetch_progress(pages_completed, events_collected, total)
+        ),
+        cause,
+    )
+}
+
+/// A single page hit its request timeout while the overall walk budget remains.
+/// Naming `page_timeout` here keeps a scaled explicit sync from claiming the
+/// expanded overall budget was used up.
+fn cursor_request_timeout_message(
+    page_timeout: Duration,
+    pages_completed: usize,
+    events_collected: usize,
+    total: Option<u64>,
+    cause: &str,
+) -> String {
+    cursor_with_cause(
+        format!(
+            "Cursor usage events request timed out after its {} time budget ({})",
+            cursor_budget_label(page_timeout),
+            cursor_fetch_progress(pages_completed, events_collected, total)
+        ),
+        cause,
+    )
+}
+
+fn cursor_sync_error_text(err: &anyhow::Error) -> String {
+    tokscale_core::pricing::describe_error(err.as_ref())
+}
+
+fn error_is_reqwest_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|reqwest_err| reqwest_err.is_timeout())
+    })
 }
 
 fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
@@ -465,14 +756,19 @@ pub fn read_local_cursor_session_token() -> Result<String> {
 /// Save credentials while preserving an existing account label / created_at when
 /// the caller does not supply a new label (used by local desktop refresh).
 fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
+    upsert_credentials_in_home(&home_dir()?, token, label)
+}
+
+fn upsert_credentials_in_home(home: &Path, token: &str, label: Option<&str>) -> Result<String> {
     let account_id = derive_account_id(token);
     let user_id = extract_user_id_from_session_token(token);
 
-    let mut store = load_credentials_store().unwrap_or_else(|| CursorCredentialsStore {
-        version: 1,
-        active_account_id: account_id.clone(),
-        accounts: HashMap::new(),
-    });
+    let mut store =
+        load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
+            version: 1,
+            active_account_id: account_id.clone(),
+            accounts: HashMap::new(),
+        });
 
     if let Some(lbl) = label {
         let needle = lbl.trim().to_lowercase();
@@ -516,11 +812,13 @@ fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
     // reconciliation would treat the previous account's `usage.json` as the new
     // active account's and could drop the new account's only cache.
     let old_active_id = store.active_account_id.clone();
-    let reconciled = if old_active_id != account_id {
-        reconcile_cache_files(&old_active_id, &account_id)
-    } else {
-        Ok(())
-    };
+    let reconciled = prepare_cursor_cache_layout(&cursor_cache_dir(home), &store).and_then(|()| {
+        if old_active_id != account_id {
+            reconcile_cache_files_in_dir(&cursor_cache_dir(home), &old_active_id, &account_id)
+        } else {
+            Ok(())
+        }
+    });
 
     // A freshly read desktop token is worth keeping even when the cache files
     // could not be moved, so the accounts are saved either way. Only point
@@ -529,7 +827,7 @@ fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
     if reconciled.is_ok() {
         store.active_account_id = account_id.clone();
     }
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
     reconciled?;
     Ok(account_id)
 }
@@ -580,6 +878,251 @@ fn sanitize_account_id_for_filename(account_id: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+/// Hash the exact ID, including case and whitespace. Sanitized names cannot
+/// distinguish accounts and are retained only for human-readable archive labels.
+fn cursor_account_cache_stem(account_id: &str) -> String {
+    format!("account-{:x}", Sha256::digest(account_id.as_bytes()))
+}
+
+#[cfg(test)]
+#[derive(Deserialize)]
+struct CursorCacheOwnership {
+    #[serde(rename = "_tokscale")]
+    metadata: Option<CursorCacheOwner>,
+}
+
+#[cfg(test)]
+#[derive(Deserialize)]
+struct CursorCacheOwner {
+    version: u32,
+    #[serde(rename = "accountId")]
+    account_id: String,
+}
+
+#[cfg(test)]
+fn cursor_cache_owner(contents: &str) -> Option<String> {
+    let value: CursorCacheOwnership = serde_json::from_str(contents).ok()?;
+    let metadata = value.metadata?;
+    if metadata.version != 1 {
+        return None;
+    }
+    Some(metadata.account_id)
+}
+
+fn legacy_cursor_cache_owner(contents: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(contents).ok()?;
+    let object = value.as_object()?;
+    if object.contains_key("_owner") || object.contains_key("zzTokscaleOwner") {
+        return None;
+    }
+    let metadata = object.get("_tokscale")?.as_object()?;
+    if metadata.get("version")?.as_u64()? != 1 {
+        return None;
+    }
+    metadata.get("accountId")?.as_str().map(str::to_string)
+}
+
+/// New caches carry a fixed-size owner hash and random generation at the start,
+/// plus the same generation at the end. Reading both bounded regions verifies
+/// ownership and catches truncated or mismatched cache moves without traversing
+/// a potentially 64 MiB usage array. Older caches fall back to one full parse
+/// until the next successful sync writes the envelope.
+#[derive(Deserialize)]
+struct CursorCacheOwnerHeader {
+    version: u32,
+    #[serde(rename = "ownerHash")]
+    owner_hash: String,
+    generation: String,
+}
+
+#[derive(Deserialize)]
+struct CursorCacheOwnerFooter {
+    version: u32,
+    generation: String,
+}
+
+const CURSOR_CACHE_OWNER_ENVELOPE_BYTES: usize = 1024;
+const CURSOR_CACHE_OWNER_HEADER_PREFIX: &[u8] = br#"{"_owner":"#;
+const CURSOR_CACHE_OWNER_FOOTER_PREFIX: &[u8] = br#","zzTokscaleOwner":"#;
+
+fn cursor_cache_owner_hash(account_id: &str) -> String {
+    format!("{:x}", Sha256::digest(account_id.as_bytes()))
+}
+
+fn cursor_cache_owner_hash_from_envelope(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let mut prefix = Vec::with_capacity(CURSOR_CACHE_OWNER_ENVELOPE_BYTES);
+    (&mut file)
+        .take(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    let header_json = prefix.strip_prefix(CURSOR_CACHE_OWNER_HEADER_PREFIX)?;
+    let mut header_stream =
+        serde_json::Deserializer::from_slice(header_json).into_iter::<CursorCacheOwnerHeader>();
+    let header = header_stream.next()?.ok()?;
+    if header_json.get(header_stream.byte_offset()) != Some(&b',') {
+        return None;
+    }
+
+    let suffix_len = file_len.min(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64) as usize;
+    file.seek(SeekFrom::End(-(suffix_len as i64))).ok()?;
+    let mut suffix = vec![0; suffix_len];
+    file.read_exact(&mut suffix).ok()?;
+    let footer_start = suffix
+        .windows(CURSOR_CACHE_OWNER_FOOTER_PREFIX.len())
+        .rposition(|window| window == CURSOR_CACHE_OWNER_FOOTER_PREFIX)?;
+    let footer_json = &suffix[footer_start + CURSOR_CACHE_OWNER_FOOTER_PREFIX.len()..];
+    let mut footer_stream =
+        serde_json::Deserializer::from_slice(footer_json).into_iter::<CursorCacheOwnerFooter>();
+    let footer = footer_stream.next()?.ok()?;
+    if footer_json.get(footer_stream.byte_offset()..) != Some(b"}".as_slice()) {
+        return None;
+    }
+
+    (header.version == 1
+        && footer.version == 1
+        && header.generation == footer.generation
+        && header.owner_hash.len() == 64
+        && header
+            .owner_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(header.owner_hash)
+}
+
+fn cursor_cache_advertises_owner_envelope(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut prefix = Vec::with_capacity(CURSOR_CACHE_OWNER_ENVELOPE_BYTES);
+    if (&mut file)
+        .take(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    if prefix.starts_with(CURSOR_CACHE_OWNER_HEADER_PREFIX) {
+        return true;
+    }
+
+    let suffix_len = file_len.min(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64) as usize;
+    if file.seek(SeekFrom::End(-(suffix_len as i64))).is_err() {
+        return false;
+    }
+    let mut suffix = vec![0; suffix_len];
+    file.read_exact(&mut suffix).is_ok()
+        && suffix
+            .windows(CURSOR_CACHE_OWNER_FOOTER_PREFIX.len())
+            .any(|window| window == CURSOR_CACHE_OWNER_FOOTER_PREFIX)
+}
+
+fn cursor_cache_owner_hash_from_file(path: &Path) -> Option<String> {
+    if let Some(owner_hash) = cursor_cache_owner_hash_from_envelope(path) {
+        return Some(owner_hash);
+    }
+    if cursor_cache_advertises_owner_envelope(path) {
+        return None;
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    legacy_cursor_cache_owner(&contents).map(|account_id| cursor_cache_owner_hash(&account_id))
+}
+
+fn owned_cursor_cache(contents: &str, account_id: &str) -> Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(contents)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Cursor usage cache must be a JSON object"))?;
+    let generation = uuid::Uuid::new_v4().to_string();
+    object.insert(
+        "_owner".to_string(),
+        serde_json::json!({
+            "version": 1,
+            "ownerHash": cursor_cache_owner_hash(account_id),
+            "generation": generation.clone(),
+        }),
+    );
+    object.insert(
+        "_tokscale".to_string(),
+        serde_json::json!({"version": 1, "accountId": account_id}),
+    );
+    object.insert(
+        "zzTokscaleOwner".to_string(),
+        serde_json::json!({"version": 1, "generation": generation}),
+    );
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// Unmarked legacy files have no provable owner. Preserve them outside the
+/// scanner's live paths before any incremental fetch or account lifecycle move.
+/// A failed backup aborts the operation; no account may borrow that watermark.
+fn prepare_cursor_cache_layout(cache_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    let mut preserved = 0;
+    for entry in fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_cursor_usage_cache_filename(name) {
+            continue;
+        }
+        let path = entry.path();
+        if !entry.file_type()?.is_file() {
+            anyhow::bail!("Cursor cache is not a regular file: {}", path.display());
+        }
+        let owner_hash = cursor_cache_owner_hash_from_file(&path);
+        let owner_id = owner_hash.as_deref().and_then(|hash| {
+            store
+                .accounts
+                .keys()
+                .find(|id| cursor_cache_owner_hash(id) == hash)
+        });
+        let verified = owner_id.is_some_and(|id| {
+            (name == "usage.json" && id == &store.active_account_id)
+                || name == format!("usage.{}.json", cursor_account_cache_stem(id))
+        });
+        if !verified {
+            archive_cache_file_in_dir(cache_dir, &path, "unverified").with_context(|| {
+                format!(
+                    "Failed to preserve unverified Cursor cache {}",
+                    path.display()
+                )
+            })?;
+            preserved += 1;
+        }
+    }
+
+    // An interrupted switch may leave the active account under its stable name.
+    // Only a verified file may be promoted; duplicate copies are backed up.
+    let active = cache_dir.join("usage.json");
+    let named = cache_dir.join(format!(
+        "usage.{}.json",
+        cursor_account_cache_stem(&store.active_account_id)
+    ));
+    if named.exists() {
+        if active.exists() {
+            // The verified canonical cache remains usable if the refresh fails.
+            archive_cache_file_in_dir(cache_dir, &named, "named-copy")?;
+            preserved += 1;
+        } else {
+            fs::rename(named, active)?;
+        }
+    }
+    if preserved > 0 {
+        eprintln!(
+            "Cursor: preserved {preserved} cache file(s) in {}",
+            cache_dir.join("archive").display()
+        );
+    }
+    Ok(())
 }
 
 pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
@@ -637,10 +1180,6 @@ fn load_credentials_store_from_home(home_dir: &Path) -> Option<CursorCredentials
     }
 
     None
-}
-
-pub fn save_credentials_store(store: &CursorCredentialsStore) -> Result<()> {
-    save_credentials_store_in_home(&home_dir()?, store)
 }
 
 fn save_credentials_store_in_home(home_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
@@ -733,36 +1272,48 @@ pub fn save_credentials(token: &str, label: Option<&str>) -> Result<String> {
 }
 
 pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
+    remove_account_in_home(&home_dir()?, name_or_id, purge_cache)
+}
+
+fn remove_account_in_home(home: &Path, name_or_id: &str, purge_cache: bool) -> Result<()> {
+    let mut store = load_credentials_store_from_home(home)
+        .ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
 
     let resolved = resolve_account_id(&store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Account not found: {}", name_or_id))?;
 
     let was_active = resolved == store.active_account_id;
 
-    let cache_dir = get_cursor_cache_dir()?;
+    let cache_dir = cursor_cache_dir(home);
+    prepare_cursor_cache_layout(&cache_dir, &store)?;
     if cache_dir.exists() {
         for ext in CURSOR_CACHE_EXTENSIONS {
             let per_account = cache_dir.join(format!(
                 "usage.{}.{ext}",
-                sanitize_account_id_for_filename(&resolved)
+                cursor_account_cache_stem(&resolved)
             ));
             if per_account.exists() {
                 if purge_cache {
-                    let _ = fs::remove_file(&per_account);
+                    fs::remove_file(&per_account)?;
                 } else {
-                    let _ = archive_cache_file(&per_account, &format!("usage.{}", resolved));
+                    archive_cache_file_in_dir(
+                        &cache_dir,
+                        &per_account,
+                        &format!("usage.{}", resolved),
+                    )?;
                 }
             }
             if was_active {
                 let active_file = cache_dir.join(format!("usage.{ext}"));
                 if active_file.exists() {
                     if purge_cache {
-                        let _ = fs::remove_file(&active_file);
+                        fs::remove_file(&active_file)?;
                     } else {
-                        let _ =
-                            archive_cache_file(&active_file, &format!("usage.active.{}", resolved));
+                        archive_cache_file_in_dir(
+                            &cache_dir,
+                            &active_file,
+                            &format!("usage.active.{}", resolved),
+                        )?;
                     }
                 }
             }
@@ -772,7 +1323,7 @@ pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
     store.accounts.remove(&resolved);
 
     if store.accounts.is_empty() {
-        let path = get_cursor_credentials_path()?;
+        let path = cursor_credentials_path(home);
         if path.exists() {
             fs::remove_file(path)?;
         }
@@ -784,53 +1335,82 @@ pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
             for ext in CURSOR_CACHE_EXTENSIONS {
                 let new_account_file = cache_dir.join(format!(
                     "usage.{}.{ext}",
-                    sanitize_account_id_for_filename(&first_id)
+                    cursor_account_cache_stem(&first_id)
                 ));
                 let active_file = cache_dir.join(format!("usage.{ext}"));
                 if new_account_file.exists() {
-                    let _ = fs::rename(&new_account_file, &active_file);
+                    fs::rename(&new_account_file, &active_file)?;
                 }
             }
             store.active_account_id = first_id;
         }
     }
 
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
     Ok(())
 }
 
 pub fn remove_all_accounts(purge_cache: bool) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
-    if cache_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&cache_dir) {
-            for entry in entries.flatten() {
+    remove_all_accounts_in_home(&home_dir()?, purge_cache)
+}
+
+fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
+    let cache_dir = cursor_cache_dir(home);
+    if purge_cache {
+        // `--all --purge-cache` is an explicit deletion request. Remove both
+        // application-owned cache locations, including legacy files and earlier
+        // archives whose ownership can no longer be proved.
+        for dir in [cache_dir.clone(), old_cursor_cache_dir(home)] {
+            if dir.exists() {
+                fs::remove_dir_all(dir)?;
+            }
+        }
+    } else {
+        let store =
+            load_credentials_store_from_home(home).unwrap_or_else(|| CursorCredentialsStore {
+                version: 1,
+                active_account_id: String::new(),
+                accounts: HashMap::new(),
+            });
+        prepare_cursor_cache_layout(&cache_dir, &store)?;
+        if cache_dir.exists() {
+            for entry in fs::read_dir(&cache_dir)? {
+                let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("usage") && (name.ends_with(".json") || name.ends_with(".csv"))
-                {
-                    if purge_cache {
-                        let _ = fs::remove_file(entry.path());
-                    } else {
-                        let _ = archive_cache_file(&entry.path(), &format!("usage.all.{}", name));
-                    }
+                if is_cursor_usage_cache_filename(&name) {
+                    archive_cache_file_in_dir(
+                        &cache_dir,
+                        &entry.path(),
+                        &format!("usage.all.{name}"),
+                    )?;
                 }
             }
         }
     }
 
-    let path = get_cursor_credentials_path()?;
-    if path.exists() {
-        fs::remove_file(path)?;
+    for path in [
+        cursor_credentials_path(home),
+        old_cursor_credentials_path(home),
+    ] {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
 
 pub fn set_active_account(name_or_id: &str) -> Result<()> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
+    set_active_account_in_home(&home_dir()?, name_or_id)
+}
+
+fn set_active_account_in_home(home: &Path, name_or_id: &str) -> Result<()> {
+    let mut store = load_credentials_store_from_home(home)
+        .ok_or_else(|| anyhow::anyhow!("No saved Cursor accounts"))?;
 
     let resolved = resolve_account_id(&store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Account not found: {}", name_or_id))?;
 
+    prepare_cursor_cache_layout(&cursor_cache_dir(home), &store)?;
     let old_active_id = store.active_account_id.clone();
 
     if resolved != old_active_id {
@@ -838,18 +1418,13 @@ pub fn set_active_account(name_or_id: &str) -> Result<()> {
         // `usage.*` would then belong to a different account than
         // `active_account_id` claims, and the next sync would file one account's
         // usage under the other.
-        reconcile_cache_files(&old_active_id, &resolved)?;
+        reconcile_cache_files_in_dir(&cursor_cache_dir(home), &old_active_id, &resolved)?;
     }
 
     store.active_account_id = resolved;
-    save_credentials_store(&store)?;
+    save_credentials_store_in_home(home, &store)?;
 
     Ok(())
-}
-
-fn reconcile_cache_files(old_account_id: &str, new_account_id: &str) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
-    reconcile_cache_files_in_dir(&cache_dir, old_account_id, new_account_id)
 }
 
 /// Moves `usage.<ext>` back under `old_account_id` and promotes
@@ -880,16 +1455,24 @@ fn reconcile_cache_files_in_dir(
         let active_file = cache_dir.join(format!("usage.{ext}"));
         let old_account_file = cache_dir.join(format!(
             "usage.{}.{ext}",
-            sanitize_account_id_for_filename(old_account_id)
+            cursor_account_cache_stem(old_account_id)
         ));
         let new_account_file = cache_dir.join(format!(
             "usage.{}.{ext}",
-            sanitize_account_id_for_filename(new_account_id)
+            cursor_account_cache_stem(new_account_id)
         ));
 
         if active_file.exists() {
             if old_account_file.exists() {
-                let _ = archive_cache_file_in_dir(cache_dir, &old_account_file, old_account_id);
+                if let Err(error) =
+                    archive_cache_file_in_dir(cache_dir, &old_account_file, old_account_id)
+                {
+                    failures.push(format!(
+                        "could not preserve {} before moving usage.{ext}: {error}",
+                        old_account_file.display()
+                    ));
+                    continue;
+                }
             }
             if let Err(err) = fs::rename(&active_file, &old_account_file) {
                 failures.push(format!(
@@ -905,7 +1488,15 @@ fn reconcile_cache_files_in_dir(
 
         if new_account_file.exists() {
             if active_file.exists() {
-                let _ = archive_cache_file_in_dir(cache_dir, &active_file, "usage.active");
+                if let Err(error) =
+                    archive_cache_file_in_dir(cache_dir, &active_file, "usage.active")
+                {
+                    failures.push(format!(
+                        "could not preserve {} before moving usage.{ext}: {error}",
+                        active_file.display()
+                    ));
+                    continue;
+                }
             }
             if let Err(err) = fs::rename(&new_account_file, &active_file) {
                 failures.push(format!(
@@ -996,7 +1587,7 @@ fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
                     } else {
                         cache_dir.join(format!(
                             "usage.{}.json",
-                            sanitize_account_id_for_filename(account_id)
+                            cursor_account_cache_stem(account_id)
                         ))
                     }
                 })
@@ -1037,6 +1628,31 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
     if !cursor_usage_cache_file_is_fresh(&active_path, max_age) {
         return false;
     }
+    let store = load_credentials_store_from_home(home_dir);
+    let expected_paths = expected_cursor_usage_cache_paths_in(home_dir);
+    if let Some(store) = &store {
+        // Legacy aliases or interrupted-switch duplicates must be preserved
+        // before reporting, even when all expected files and the marker are fresh.
+        let Ok(entries) = fs::read_dir(&cache_dir) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_cursor_usage_cache_filename)
+                && !expected_paths.contains(&entry.path())
+            {
+                return false;
+            }
+        }
+        let owner_hash = cursor_cache_owner_hash_from_file(&active_path);
+        let expected_hash = cursor_cache_owner_hash(&store.active_account_id);
+        if owner_hash.as_deref() != Some(expected_hash.as_str()) {
+            return false;
+        }
+    }
 
     // For secondaries, a fresh sync-attempt marker is sufficient. This avoids
     // forcing a sync on every invocation when a secondary account is
@@ -1045,10 +1661,32 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
     let marker_fresh =
         cursor_usage_cache_file_is_fresh(&cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), max_age);
 
-    expected_cursor_usage_cache_paths_in(home_dir)
+    expected_paths
         .iter()
         .filter(|p| *p != &active_path)
-        .all(|p| cursor_usage_cache_file_is_fresh(p, max_age) || marker_fresh)
+        .all(|path| {
+            // A recent attempt may excuse a missing or stale secondary, but
+            // never a live file whose ownership is unknown or disagrees.
+            if path.exists() {
+                let owner_hash = cursor_cache_owner_hash_from_file(path);
+                let verified = owner_hash.as_deref().is_some_and(|hash| {
+                    store.as_ref().is_some_and(|store| {
+                        store.accounts.keys().any(|id| {
+                            cursor_cache_owner_hash(id) == hash
+                                && *path
+                                    == cache_dir.join(format!(
+                                        "usage.{}.json",
+                                        cursor_account_cache_stem(id)
+                                    ))
+                        })
+                    })
+                });
+                if !verified {
+                    return false;
+                }
+            }
+            cursor_usage_cache_file_is_fresh(path, max_age) || marker_fresh
+        })
 }
 
 /// True when the active cursor usage cache (`usage.json`) was refreshed within
@@ -1172,36 +1810,80 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
 pub async fn fetch_cursor_usage_events_json(
     session_token: &str,
     timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
+    existing_cache: Option<&str>,
 ) -> Result<String> {
-    fetch_cursor_usage_events_json_from(
+    fetch_cursor_usage_events_json_merging(
         USAGE_EVENTS_JSON_ENDPOINT,
         session_token,
         timeout_override,
+        is_custom_timeout,
         CURSOR_MAX_JSON_BYTES,
         CURSOR_JSON_PAGE_SIZE,
+        existing_cache,
     )
     .await
 }
 
 /// Body of [`fetch_cursor_usage_events_json`] with the endpoint, byte ceiling,
 /// and page size injected so tests can drive the real paginating path against a
-/// local server.
-///
-/// Walks pages of `get-filtered-usage-events` (a POST endpoint carrying an
-/// `Origin` header for its CSRF check) until it has collected every event, then
-/// returns the dashboard response shape with all pages' `usageEventsDisplay`
-/// aggregated into one array. `max_body_bytes` is a cumulative ceiling spanning
-/// every page, and a page that omits the `usageEventsDisplay` array is an error
-/// so a malformed 200 never masquerades as an empty result.
+/// local server. No cached history is merged in.
+#[cfg(test)]
 async fn fetch_cursor_usage_events_json_from(
     url: &str,
     session_token: &str,
     timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
     max_body_bytes: usize,
     page_size: usize,
 ) -> Result<String> {
+    fetch_cursor_usage_events_json_merging(
+        url,
+        session_token,
+        timeout_override,
+        is_custom_timeout,
+        max_body_bytes,
+        page_size,
+        None,
+    )
+    .await
+}
+
+/// Walks pages of `get-filtered-usage-events` (a POST endpoint carrying an
+/// `Origin` header for its CSRF check).
+///
+/// With no cached history this collects every event. With a cache, the request
+/// sends `startDate` one hour before the newest stored timestamp and stops
+/// when a page crosses that lower bound. This bounded overlap refreshes recent
+/// billing corrections, including rows older than the newest cached event.
+/// Corrections outside that hour are not re-fetched. The dashboard lists events
+/// newest-first, so the overlap avoids re-downloading the full account.
+/// Returned JSON is the cache with that delta merged in, not the delta alone,
+/// so a caught-up account still rewrites a non-empty cache.
+///
+/// `max_body_bytes` is a cumulative ceiling spanning every page, and a page that
+/// omits the `usageEventsDisplay` array is an error so a malformed 200 never
+/// masquerades as an empty result. A timed-out walk returns an error and does
+/// not merge a partial delta: the newest cached timestamp would otherwise skip
+/// the gap on the next sync.
+async fn fetch_cursor_usage_events_json_merging(
+    url: &str,
+    session_token: &str,
+    timeout_override: Option<Duration>,
+    is_custom_timeout: bool,
+    max_body_bytes: usize,
+    page_size: usize,
+    existing_cache: Option<&str>,
+) -> Result<String> {
+    let existing_events = cached_usage_events(existing_cache);
+    let max_timestamp = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_add(CURSOR_USAGE_CLOCK_SKEW_MS);
+    let watermark = usage_events_watermark_ms(&existing_events, max_timestamp);
+    let sync_start =
+        watermark.map(|ms| ms.saturating_sub(CURSOR_USAGE_CORRECTION_WINDOW_MS).max(0));
     let client = build_cursor_http_client()?;
-    let mut all_events: Vec<serde_json::Value> = Vec::new();
+    let mut fresh_events: Vec<serde_json::Value> = Vec::new();
     let mut total_count: Option<u64> = None;
     let mut bytes_read: usize = 0;
 
@@ -1210,31 +1892,74 @@ async fn fetch_cursor_usage_events_json_from(
     // stall report startup (auto-sync runs first) for that timeout times the page
     // count. Each page's timeout is clamped to what remains of this budget below,
     // and the walk aborts once it is spent.
-    let per_page_timeout = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
-    let fetch_deadline = Instant::now() + per_page_timeout;
+    let start_time = Instant::now();
+    let initial_budget = timeout_override.unwrap_or(CURSOR_HTTP_TIMEOUT);
+    let mut overall_budget = initial_budget;
+    let mut fetch_deadline = deadline_after(start_time, overall_budget);
 
     let mut completed = false;
-    for page in 1..=CURSOR_MAX_JSON_PAGES {
+    let mut page_limit = CURSOR_MAX_JSON_PAGES;
+    let mut largest_page_yield = 0usize;
+    let mut page = 0usize;
+    while page < page_limit {
+        page += 1;
         let remaining_budget = fetch_deadline.saturating_duration_since(Instant::now());
         if remaining_budget.is_zero() {
             anyhow::bail!(
-                "Cursor usage events fetch exceeded its overall time budget before the full history was collected"
+                "{}",
+                cursor_budget_exhausted_message(
+                    overall_budget,
+                    page - 1,
+                    fresh_events.len(),
+                    total_count,
+                    "",
+                )
             );
         }
 
-        let body = serde_json::json!({
-            "teamId": 0,
-            "page": page,
-            "pageSize": page_size,
-        });
+        let body = usage_events_request_body(page, page_size, sync_start);
 
+        let page_timeout = initial_budget.min(remaining_budget);
         let req = client
             .post(url)
             .headers(build_cursor_json_headers(session_token))
             .json(&body)
-            .timeout(per_page_timeout.min(remaining_budget));
+            .timeout(page_timeout);
 
-        let response = req.send().await?;
+        let response = match req.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                let cause = tokscale_core::pricing::describe_error(&err);
+                if fetch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero()
+                {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_budget_exhausted_message(
+                            overall_budget,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
+                        )
+                    );
+                }
+                if err.is_timeout() {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_request_timeout_message(
+                            page_timeout,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
+                        )
+                    );
+                }
+                anyhow::bail!("{cause}");
+            }
+        };
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -1257,16 +1982,52 @@ async fn fetch_cursor_usage_events_json_from(
                 "Cursor usage events JSON exceeded the {max_body_bytes} byte limit across pages"
             ),
         };
-        let text = read_cursor_body_with_cap(response, remaining, "usage events JSON").await?;
+        let text = match read_cursor_body_with_cap(response, remaining, "usage events JSON").await {
+            Ok(text) => text,
+            Err(err) => {
+                let cause = cursor_sync_error_text(&err);
+                if fetch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero()
+                {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_budget_exhausted_message(
+                            overall_budget,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
+                        )
+                    );
+                }
+                if error_is_reqwest_timeout(&err) {
+                    anyhow::bail!(
+                        "{}",
+                        cursor_request_timeout_message(
+                            page_timeout,
+                            page - 1,
+                            fresh_events.len(),
+                            total_count,
+                            &cause,
+                        )
+                    );
+                }
+                return Err(err);
+            }
+        };
         bytes_read += text.len();
 
         let page_value: serde_json::Value = serde_json::from_str(&text)
             .context("Invalid response from Cursor API - expected usage events JSON")?;
 
         if total_count.is_none() {
-            total_count = page_value
+            if let Some(total) = page_value
                 .get("totalUsageEventsCount")
-                .and_then(|value| value.as_u64());
+                .and_then(|value| value.as_u64())
+            {
+                total_count = Some(total);
+            }
         }
 
         // A well-formed page always carries a `usageEventsDisplay` array. A 200
@@ -1283,7 +2044,35 @@ async fn fetch_cursor_usage_events_json_from(
             }
         };
         let received = page_events.len();
-        all_events.extend(page_events);
+        // Stop at the correction window even when the server ignores startDate
+        // and advertises the full account total. Older cached rows survive the
+        // merge; only the recent overlap is re-fetched for billing corrections.
+        let (fresh, crossed) = filter_cursor_usage_page(&page_events, sync_start, max_timestamp);
+        fresh_events.extend(fresh.into_iter().cloned());
+        if crossed {
+            completed = true;
+            break;
+        }
+        largest_page_yield = largest_page_yield.max(received);
+        page_limit = cursor_page_limit(largest_page_yield);
+
+        // When running an explicit sync with the default budget (no custom
+        // override specified via flag or environment variable), dynamically
+        // scale the wall-clock budget with the advertised total events so
+        // accounts with tens of thousands of rows don't abort prematurely.
+        // Base the page estimate on observed page yield so server-side page
+        // clamping (e.g. Cursor clamping a 500-event request to 100) doesn't
+        // underestimate pages and time out.
+        if !is_custom_timeout && timeout_override.is_some() {
+            if let Some(total) = total_count {
+                let effective_page = if received > 0 { received } else { page_size };
+                let expanded = compute_dynamic_cursor_budget(total, effective_page, initial_budget);
+                if expanded > overall_budget {
+                    fetch_deadline = deadline_after(start_time, expanded);
+                    overall_budget = expanded;
+                }
+            }
+        }
 
         // Once the advertised total is known, keep paging until it is reached so
         // a server that clamps `pageSize` (a short page while more events remain)
@@ -1293,7 +2082,7 @@ async fn fetch_cursor_usage_events_json_from(
         // heuristic only when no total was reported.
         let done = match total_count {
             Some(total) => {
-                if all_events.len() as u64 >= total {
+                if fresh_events.len() as u64 >= total {
                     true
                 } else if received == 0 {
                     anyhow::bail!(
@@ -1315,13 +2104,19 @@ async fn fetch_cursor_usage_events_json_from(
     // was collected; caching it would masquerade as a full sync, so fail instead.
     if !completed {
         anyhow::bail!(
-            "Cursor usage events exceeded the {CURSOR_MAX_JSON_PAGES}-page fetch limit before the full history was collected; refusing to cache a partial history"
+            "Cursor usage events exceeded the {page_limit}-page fetch limit ({} events collected) before the full history was collected; refusing to cache a partial history",
+            fresh_events.len()
         );
     }
 
+    let events = if !existing_events.is_empty() {
+        merge_cursor_usage_events(existing_events, fresh_events)
+    } else {
+        fresh_events
+    };
     let aggregated = serde_json::json!({
-        "totalUsageEventsCount": all_events.len(),
-        "usageEventsDisplay": all_events,
+        "totalUsageEventsCount": events.len(),
+        "usageEventsDisplay": events,
     });
     serde_json::to_string(&aggregated).context("Failed to serialize Cursor usage events cache")
 }
@@ -1373,9 +2168,16 @@ async fn read_cursor_body_with_cap(
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// One account's usage download. `existing_cache` is the aggregated JSON already
+/// on disk, when there is one, so the fetcher can request only newer events.
+struct CursorUsageFetch {
+    session_token: String,
+    existing_cache: Option<String>,
+}
+
 async fn sync_cursor_cache_with_fetcher<F, Fut>(fetch_usage_json: F) -> SyncCursorResult
 where
-    F: Fn(String) -> Fut,
+    F: Fn(CursorUsageFetch) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
 {
     let home_dir = match home_dir() {
@@ -1397,7 +2199,7 @@ async fn sync_cursor_cache_with_fetcher_in_home<F, Fut>(
     fetch_usage_json: F,
 ) -> SyncCursorResult
 where
-    F: Fn(String) -> Fut,
+    F: Fn(CursorUsageFetch) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
 {
     migrate_cache_dir_from_old_path_in_home(home_dir);
@@ -1435,24 +2237,44 @@ where
         let _ = fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700));
     }
 
+    if let Err(error) = prepare_cursor_cache_layout(&cache_dir, &store) {
+        return SyncCursorResult {
+            synced: false,
+            rows: 0,
+            error: Some(cursor_sync_error_text(&error)),
+        };
+    }
+
     let mut total_rows = 0;
     let mut success_count = 0;
     let mut errors: Vec<String> = Vec::new();
 
     for (account_id, credentials) in &store.accounts {
         let is_active = account_id == &store.active_account_id;
+        let file_path = if is_active {
+            cache_dir.join("usage.json")
+        } else {
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem(account_id)
+            ))
+        };
+        let existing_cache = fs::read_to_string(&file_path).ok();
 
-        match fetch_usage_json(credentials.session_token.clone()).await {
+        match fetch_usage_json(CursorUsageFetch {
+            session_token: credentials.session_token.clone(),
+            existing_cache,
+        })
+        .await
+        {
             Ok(json_text) => {
-                let file_path = if is_active {
-                    cache_dir.join("usage.json")
-                } else {
-                    cache_dir.join(format!(
-                        "usage.{}.json",
-                        sanitize_account_id_for_filename(account_id)
-                    ))
+                let json_text = match owned_cursor_cache(&json_text, account_id) {
+                    Ok(contents) => contents,
+                    Err(error) => {
+                        errors.push(format!("{account_id}: invalid usage response: {error}"));
+                        continue;
+                    }
                 };
-
                 let event_count = count_cursor_json_events(&json_text);
                 let legacy_csv = file_path.with_extension("csv");
 
@@ -1486,34 +2308,8 @@ where
                 }
             }
             Err(e) => {
-                errors.push(format!("{}: {}", account_id, e));
+                errors.push(format!("{account_id}: {}", cursor_sync_error_text(&e)));
             }
-        }
-    }
-
-    // Reconcile the active account's leftover per-account duplicate. The active
-    // account is cached as `usage.json`; a `usage.<active_id>.json` copy left
-    // over from when it was a secondary is only safe to drop once `usage.json`
-    // actually exists on disk — whether this run just wrote it or a prior run
-    // did. Gating on that existence keeps the duplicate when a failed first-time
-    // fetch leaves no `usage.json` (it is then the only data we have), while a
-    // failed fetch that still has a good `usage.json` clears the duplicate so the
-    // scanner never reads both JSON caches and double-counts the active account.
-    // The JSON dup is a stale copy (removed); the legacy CSV dup is archived so
-    // pre-migration history survives.
-    if cache_dir.join("usage.json").exists() {
-        let active_sanitized = sanitize_account_id_for_filename(&store.active_account_id);
-        let dup_json = cache_dir.join(format!("usage.{active_sanitized}.json"));
-        if dup_json.exists() {
-            let _ = fs::remove_file(&dup_json);
-        }
-        let dup_csv = cache_dir.join(format!("usage.{active_sanitized}.csv"));
-        if dup_csv.exists() {
-            let label = dup_csv
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("usage");
-            let _ = archive_cache_file_in_dir(&cache_dir, &dup_csv, label);
         }
     }
 
@@ -1557,30 +2353,145 @@ where
     }
 }
 
+fn max_sync_timeout() -> Duration {
+    Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)
+}
+
+fn is_valid_sync_timeout_secs(secs: u64) -> bool {
+    (1..=CURSOR_MAX_SYNC_TIMEOUT_SECS).contains(&secs)
+}
+
+/// The explicit sync budget and whether the user chose it.
+///
+/// Precedence: the `--timeout` flag, then `cursor.syncTimeoutSeconds` from
+/// settings.json, then the default budget, which the walk scales with the
+/// advertised event count. A user-chosen budget is used as-is, without
+/// scaling. Out-of-range settings are dropped by the caller (with a warning)
+/// before they get here, and a flag value is clamped as a last line of
+/// defence even though clap already rejects anything above the maximum.
+fn configured_explicit_sync_timeout(
+    explicit_timeout: Option<Duration>,
+    configured_secs: Option<u64>,
+) -> (Duration, bool) {
+    if let Some(timeout) = explicit_timeout.filter(|timeout| !timeout.is_zero()) {
+        return (timeout.min(max_sync_timeout()), true);
+    }
+
+    if let Some(secs) = configured_secs.filter(|secs| is_valid_sync_timeout_secs(*secs)) {
+        return (Duration::from_secs(secs), true);
+    }
+
+    (CURSOR_EXPLICIT_SYNC_TIMEOUT, false)
+}
+
 /// Timeout override for the usage download: explicit syncs get the longer
-/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`]; implicit syncs keep the client default.
-fn sync_timeout_override(explicit: bool) -> Option<Duration> {
-    explicit.then_some(CURSOR_EXPLICIT_SYNC_TIMEOUT)
+/// [`CURSOR_EXPLICIT_SYNC_TIMEOUT`] (or the user's flag/setting); implicit
+/// syncs keep the client default.
+fn sync_timeout_override(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+    configured_secs: Option<u64>,
+) -> (Option<Duration>, bool) {
+    if explicit {
+        let (duration, is_custom) =
+            configured_explicit_sync_timeout(explicit_timeout, configured_secs);
+        (Some(duration), is_custom)
+    } else {
+        (None, false)
+    }
+}
+
+/// A `cursor.syncTimeoutSeconds` value the sync can use: a whole number of
+/// seconds in `1..=CURSOR_MAX_SYNC_TIMEOUT_SECS`, written as `600` or `600.0`.
+/// Strings, fractions, negative and out-of-range numbers are not.
+fn usable_sync_timeout_setting(raw: &serde_json::Value) -> Option<u64> {
+    let secs = raw.as_u64().or_else(|| {
+        raw.as_f64()
+            .filter(|secs| {
+                secs.fract() == 0.0 && (0.0..=CURSOR_MAX_SYNC_TIMEOUT_SECS as f64).contains(secs)
+            })
+            .map(|secs| secs as u64)
+    })?;
+    is_valid_sync_timeout_secs(secs).then_some(secs)
+}
+
+/// `cursor.syncTimeoutSeconds` from settings.json, if it is set and usable.
+///
+/// Only an explicit `tokscale cursor sync` reads this (never the TUI), so an
+/// unusable value is reported on stderr - which leaves `--json` stdout
+/// intact - and the default budget is used instead. The file keeps the value
+/// as written.
+fn configured_sync_timeout_secs() -> Option<u64> {
+    let raw = crate::tui::settings::Settings::load()
+        .cursor
+        .sync_timeout_seconds?;
+    let secs = usable_sync_timeout_setting(&raw);
+    if secs.is_none() {
+        eprintln!(
+            "Warning: ignoring cursor.syncTimeoutSeconds = {raw} in settings.json \
+             (expected a whole number of seconds, 1-{CURSOR_MAX_SYNC_TIMEOUT_SECS}); \
+             using the default sync budget."
+        );
+    }
+    secs
+}
+
+/// The persisted budget to consult for this sync, if any. Only an explicit
+/// sync without `--timeout` reads the setting: the flag wins outright, and
+/// reading the setting anyway could warn about a value this run never uses.
+fn setting_budget_for(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+    load_setting: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    let flag_given = explicit_timeout.is_some_and(|timeout| !timeout.is_zero());
+    if explicit && !flag_given {
+        load_setting()
+    } else {
+        None
+    }
+}
+
+/// `start + budget` without the panic `Instant + Duration` raises on
+/// overflow. Budgets are bounded by [`CURSOR_MAX_SYNC_TIMEOUT_SECS`], so the
+/// fallback never triggers in practice; it keeps any future caller from
+/// reintroducing the overflow panic.
+fn deadline_after(start: Instant, budget: Duration) -> Instant {
+    start
+        .checked_add(budget)
+        .or_else(|| start.checked_add(max_sync_timeout()))
+        .unwrap_or(start)
 }
 
 pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
+    sync_cursor_cache_with_explicit_timeout(explicit, None).await
+}
+
+pub async fn sync_cursor_cache_with_explicit_timeout(
+    explicit: bool,
+    explicit_timeout: Option<Duration>,
+) -> SyncCursorResult {
     // Prefer a fresh token from the local Cursor desktop login when available.
     // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
     let _ = ensure_credentials_from_local_cursor();
 
-    sync_cursor_cache_with_fetcher(move |session_token| async move {
-        fetch_cursor_usage_events_json(&session_token, sync_timeout_override(explicit)).await
+    let configured_secs =
+        setting_budget_for(explicit, explicit_timeout, configured_sync_timeout_secs);
+    let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout, configured_secs);
+    sync_cursor_cache_with_fetcher(move |fetch| async move {
+        fetch_cursor_usage_events_json(
+            &fetch.session_token,
+            timeout,
+            is_custom,
+            fetch.existing_cache.as_deref(),
+        )
+        .await
     })
     .await
 }
 
-fn archive_cache_file(file_path: &std::path::Path, label: &str) -> Result<()> {
-    let cache_dir = get_cursor_cache_dir()?;
-    archive_cache_file_in_dir(&cache_dir, file_path, label)
-}
-
-/// Moves `file_path` into `<cache_dir>/archive/` under a timestamped, sanitized
-/// name so a legacy cache is preserved rather than deleted during migration.
+/// Moves `file_path` into a newly created private directory under archive/.
+/// Keep its original filename and bytes, and never overwrite an earlier backup.
 ///
 /// Kept `cache_dir`-relative (rather than resolving the real cache dir itself)
 /// so callers inside a synced-home flow archive into the same directory they are
@@ -1601,13 +2512,20 @@ fn archive_cache_file_in_dir(
     }
 
     let safe_label = sanitize_account_id_for_filename(label);
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-    let ext = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("csv");
-    let dest = archive_dir.join(format!("{}-{}.{}", safe_label, ts, ext));
-    fs::rename(file_path, dest)?;
+    // Keep the parent short for Windows path limits; the original filename
+    // remains intact, and create_dir reserves a destination that cannot exist.
+    let short_label = &safe_label[..safe_label.len().min(12)];
+    let destination_dir = archive_dir.join(format!("{short_label}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&destination_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&destination_dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let name = file_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Cursor cache has no filename"))?;
+    fs::rename(file_path, destination_dir.join(name))?;
     Ok(())
 }
 
@@ -1706,13 +2624,18 @@ pub fn run_cursor_logout(name: Option<String>, all: bool, purge_cache: bool) -> 
 
     if all {
         let accounts = list_accounts();
-        if accounts.is_empty() {
+        if accounts.is_empty() && !purge_cache {
             println!("\n  {}\n", "No saved Cursor accounts.".yellow());
             return Ok(());
         }
 
         remove_all_accounts(purge_cache)?;
-        println!("\n  {}\n", "Logged out from all Cursor accounts.".green());
+        let message = if accounts.is_empty() {
+            "Purged all Cursor cache data."
+        } else {
+            "Logged out from all Cursor accounts."
+        };
+        println!("\n  {}\n", message.green());
         return Ok(());
     }
 
@@ -1844,12 +2767,16 @@ pub fn run_cursor_accounts(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn run_cursor_sync(json: bool) -> Result<()> {
+pub fn run_cursor_sync(json: bool, timeout_secs: Option<u64>) -> Result<()> {
     use colored::Colorize;
     use tokio::runtime::Runtime;
 
+    let timeout_override = timeout_secs.map(Duration::from_secs);
     let rt = Runtime::new()?;
-    let result = rt.block_on(sync_cursor_cache(true));
+    let result = rt.block_on(sync_cursor_cache_with_explicit_timeout(
+        true,
+        timeout_override,
+    ));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1890,8 +2817,37 @@ pub fn run_cursor_switch(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(name);
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    std::env::set_var(self.name, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.name);
+                },
+            }
+        }
+    }
 
     /// #1250: cursor.com serves a bot-protection challenge instead of the API
     /// response when the ClientHello comes from rustls, so this one client has
@@ -2092,8 +3048,152 @@ mod tests {
 
     #[test]
     fn test_sync_timeout_override_only_for_explicit_sync() {
-        assert_eq!(sync_timeout_override(true), Some(Duration::from_secs(120)));
-        assert_eq!(sync_timeout_override(false), None);
+        assert_eq!(
+            sync_timeout_override(true, None, None),
+            (Some(Duration::from_secs(120)), false)
+        );
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(300)), None),
+            (Some(Duration::from_secs(300)), true)
+        );
+        assert_eq!(sync_timeout_override(false, None, None), (None, false));
+        assert_eq!(
+            sync_timeout_override(false, Some(Duration::from_secs(300)), Some(600)),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn test_sync_timeout_override_prefers_flag_then_setting_then_default() {
+        // The flag wins over the persisted setting for one run.
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(300)), Some(600)),
+            (Some(Duration::from_secs(300)), true)
+        );
+        // Without a flag, `cursor.syncTimeoutSeconds` is the whole budget.
+        assert_eq!(
+            sync_timeout_override(true, None, Some(600)),
+            (Some(Duration::from_secs(600)), true)
+        );
+        assert_eq!(
+            sync_timeout_override(true, None, Some(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+        // Neither: the default budget, which the walk may scale.
+        assert_eq!(
+            sync_timeout_override(true, None, None),
+            (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false)
+        );
+    }
+
+    #[test]
+    fn test_sync_timeout_override_ignores_out_of_range_settings() {
+        for secs in [0, CURSOR_MAX_SYNC_TIMEOUT_SECS + 1, u64::MAX] {
+            assert_eq!(
+                sync_timeout_override(true, None, Some(secs)),
+                (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false),
+                "cursor.syncTimeoutSeconds = {secs} must fall back to the default budget"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sync_timeout_setting_must_be_whole_seconds_in_range() {
+        use serde_json::json;
+        assert_eq!(usable_sync_timeout_setting(&json!(600)), Some(600));
+        assert_eq!(usable_sync_timeout_setting(&json!(1)), Some(1));
+        assert_eq!(
+            usable_sync_timeout_setting(&json!(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+            Some(CURSOR_MAX_SYNC_TIMEOUT_SECS)
+        );
+        // `600.0` is a whole number too.
+        assert_eq!(usable_sync_timeout_setting(&json!(600.0)), Some(600));
+        assert_eq!(usable_sync_timeout_setting(&json!(86400.0)), Some(86_400));
+        for unusable in [
+            json!(0),
+            json!(0.0),
+            json!(CURSOR_MAX_SYNC_TIMEOUT_SECS + 1),
+            json!(86401.0),
+            json!(-5),
+            json!(-5.0),
+            json!(1.5),
+            json!(600.5),
+            json!(1e300),
+            json!("600"),
+            json!(true),
+            json!([600]),
+            json!({ "seconds": 600 }),
+        ] {
+            assert_eq!(usable_sync_timeout_setting(&unusable), None, "{unusable}");
+        }
+    }
+
+    #[test]
+    fn test_the_timeout_setting_is_read_only_without_the_flag() {
+        let unreachable = || -> Option<u64> { panic!("the setting must not be read") };
+        // `--timeout` wins outright, so the settings file is never consulted.
+        assert_eq!(
+            setting_budget_for(true, Some(Duration::from_secs(300)), unreachable),
+            None
+        );
+        // Implicit (pre-report) syncs never use the explicit budget.
+        assert_eq!(setting_budget_for(false, None, unreachable), None);
+        // An explicit sync without the flag reads it.
+        assert_eq!(setting_budget_for(true, None, || Some(600)), Some(600));
+        // A zero duration is not a flag value (clap rejects 0).
+        assert_eq!(
+            setting_budget_for(true, Some(Duration::ZERO), || Some(600)),
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn test_explicit_timeout_is_clamped_to_the_maximum() {
+        // clap rejects these, but the budget must stay bounded for any caller.
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::from_secs(u64::MAX)), None),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+        assert_eq!(
+            sync_timeout_override(true, Some(Duration::MAX), None),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_timeout_override_ignores_retired_env_vars() {
+        // The budget is a persisted setting (`cursor.syncTimeoutSeconds`), not
+        // an environment variable; these names must not change it.
+        let _g_ms = EnvVarGuard::set("TOKSCALE_CURSOR_SYNC_TIMEOUT_MS", "180000");
+        let _g_secs = EnvVarGuard::set("TOKSCALE_CURSOR_SYNC_TIMEOUT_SECS", "240");
+        assert_eq!(
+            sync_timeout_override(true, None, None),
+            (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false)
+        );
+    }
+
+    #[test]
+    fn test_deadline_after_never_panics_on_huge_budgets() {
+        let start = Instant::now();
+        assert_eq!(
+            deadline_after(start, Duration::from_secs(5)),
+            start + Duration::from_secs(5)
+        );
+        // `start + Duration::MAX` panics; the helper must not.
+        let saturated = deadline_after(start, Duration::MAX);
+        assert!(saturated >= start);
+        let from_u64_max = deadline_after(start, Duration::from_secs(u64::MAX));
+        assert!(from_u64_max >= start);
     }
 
     #[test]
@@ -2185,6 +3285,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 TEST_JSON_CAP,
                 500,
             ))
@@ -2224,6 +3325,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 TEST_JSON_CAP,
                 500,
             ))
@@ -2255,7 +3357,8 @@ mod tests {
             .block_on(fetch_cursor_usage_events_json_from(
                 &url,
                 "session-token",
-                sync_timeout_override(true),
+                sync_timeout_override(true, None, None).0,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2309,6 +3412,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 2,
             ))
@@ -2321,6 +3425,67 @@ mod tests {
         assert!(captured[0].contains("\"page\":1"));
         assert!(captured[1].contains("\"page\":2"));
         assert!(captured[2].contains("\"page\":3"));
+    }
+
+    #[test]
+    fn test_cursor_page_limit_follows_the_page_size_the_server_honours() {
+        // Nothing observed yet, or the requested size honoured: today's ceiling.
+        assert_eq!(cursor_page_limit(0), CURSOR_MAX_JSON_PAGES);
+        assert_eq!(
+            cursor_page_limit(CURSOR_JSON_PAGE_SIZE),
+            CURSOR_MAX_JSON_PAGES
+        );
+        // Cursor clamping 500 -> 100 keeps the same 250,000-event budget.
+        assert_eq!(cursor_page_limit(100), 2_500);
+        assert_eq!(cursor_page_limit(100) * 100, CURSOR_MAX_JSON_EVENTS);
+        // Harder clamps are bounded by the minimum-yield floor.
+        assert_eq!(cursor_page_limit(1), 5_000);
+        assert_eq!(cursor_page_limit(49), 5_000);
+        // Oversized pages never lower the ceiling below today's.
+        assert_eq!(cursor_page_limit(1_000), CURSOR_MAX_JSON_PAGES);
+        assert_eq!(cursor_page_limit(usize::MAX), CURSOR_MAX_JSON_PAGES);
+        // A 60,000-event history clamped to 100 per page now fits.
+        assert!(cursor_page_limit(100) >= 600);
+    }
+
+    #[test]
+    fn test_usage_events_json_clamped_pages_can_exceed_the_original_page_limit() {
+        // A first sync still needs the full history. Server-side page clamping
+        // must expand the page cap even in the incremental fetcher's cold path.
+        let total = CURSOR_MAX_JSON_PAGES + 1;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for page in 1..=total {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let body = json_page(
+                    total as u64,
+                    &[&json_event(&format!("c{page}"), "1788171994001")],
+                );
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &format!("http://{addr}/api/dashboard/get-filtered-usage-events"),
+                "session-token",
+                Some(Duration::from_secs(30)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                CURSOR_JSON_PAGE_SIZE,
+            ))
+            .expect("a clamped first sync must finish beyond the original page cap");
+        assert_eq!(count_cursor_json_events(&text), total);
+        server.join().unwrap();
     }
 
     #[test]
@@ -2351,6 +3516,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 5,
             ))
@@ -2376,6 +3542,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2411,6 +3578,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 5,
             ))
@@ -2444,6 +3612,7 @@ mod tests {
                 &url,
                 "session-token",
                 None,
+                false,
                 CURSOR_MAX_JSON_BYTES,
                 500,
             ))
@@ -2451,6 +3620,1458 @@ mod tests {
         assert!(
             format!("{err:#}").contains("cursor login"),
             "the error should tell the user to re-authenticate: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_timeout_reports_clear_diagnostics() {
+        // When the wall-clock budget is exceeded mid-walk, the error must clearly
+        // state the budget in seconds and how many pages/events were collected
+        // rather than failing with an opaque request error.
+        let (url, _requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    10,
+                    &[
+                        &json_event("c1", "1788171994001"),
+                        &json_event("c2", "1788171994002"),
+                    ],
+                ),
+            ),
+            (
+                String::new(),
+                json_page(10, &[&json_event("c3", "1788171994003")]),
+            ),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // Give a tiny 0-second budget so it expires immediately after or during page 1.
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_millis(0)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+            ))
+            .expect_err("a 0ms budget must expire");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("time budget"),
+            "error must report budget exhaustion: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compute_dynamic_cursor_budget_scaling() {
+        let default_budget = Duration::from_secs(120);
+
+        // Zero page size returns initial budget
+        assert_eq!(
+            compute_dynamic_cursor_budget(10_000, 0, default_budget),
+            default_budget
+        );
+
+        // Small count inside default budget remains initial budget
+        assert_eq!(
+            compute_dynamic_cursor_budget(500, 500, default_budget),
+            default_budget
+        );
+        assert_eq!(
+            compute_dynamic_cursor_budget(40 * 500, 500, default_budget),
+            default_budget
+        ); // 40 pages * 3s = 120s
+
+        // 40,000 events with 500 page size = 80 pages * 3s = 240s
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 500, default_budget),
+            Duration::from_secs(240)
+        );
+
+        // 40,000 events with 100 clamped page size = 400 pages * 3s = 1200s
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 100, default_budget),
+            Duration::from_secs(1200)
+        );
+
+        // Extremely large count caps at 1800s (30m)
+        assert_eq!(
+            compute_dynamic_cursor_budget(1_000_000, 100, default_budget),
+            Duration::from_secs(1800)
+        );
+
+        // Custom higher initial budget is preserved if needed is smaller
+        let high_budget = Duration::from_secs(300);
+        assert_eq!(
+            compute_dynamic_cursor_budget(40_000, 500, high_budget),
+            high_budget
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_dynamically_scales_budget_for_large_history() {
+        // When an explicit sync runs without custom override and encounters an
+        // advertised total of 40k events (80 pages), the budget must dynamically scale
+        // past the initial 120s up to total_pages * 3s (240s).
+        let (url, _requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    40_000,
+                    &[
+                        &json_event("c1", "1788171994001"),
+                        &json_event("c2", "1788171994002"),
+                    ],
+                ),
+            ),
+            // End early by empty page
+            (String::new(), json_page(40_000, &[])),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // With default 120s budget (is_custom_timeout: false), total_count: 40000 scales budget.
+        // It will fail because the 2nd page is empty before the 40k advertised total,
+        // proving it processed the first page and recognized the advertised total.
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(120)),
+                false,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("empty page before 40000 total must fail");
+        assert!(
+            format!("{err:#}").contains("40000 events"),
+            "must process advertised total of 40000: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_merges_only_events_in_the_correction_window() {
+        // A warm cache must not walk the rest of the account. Page 1 is a full
+        // page (so the unfiltered total would demand another request) and it
+        // already crosses the correction window, including a new event that
+        // shares a cached event's millisecond.
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("boundary", "3600200"),
+            json_event("old", "150"),
+        );
+        let body = json_page(
+            10_000,
+            &[
+                &json_event("new", "3600300"),
+                &json_event("same-ms", "3600200"),
+                &json_event("boundary", "3600200"),
+                &json_event("older", "100"),
+            ],
+        );
+        let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                4,
+                Some(&cached),
+            ))
+            .expect("an overlapping page must finish the sync");
+
+        assert_eq!(count_cursor_json_events(&text), 4);
+        assert!(text.contains("\"conversationId\":\"new\""));
+        assert!(text.contains("\"conversationId\":\"same-ms\""));
+        assert!(text.contains("\"conversationId\":\"old\""));
+        assert_eq!(text.matches("\"conversationId\":\"boundary\"").count(), 1);
+        assert!(
+            !text.contains("\"conversationId\":\"older\""),
+            "events older than the correction window are already represented by the cache: {text}"
+        );
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "the walk must stop on the overlapping page"
+        );
+        assert!(
+            captured[0].contains("\"startDate\":200"),
+            "the correction window must bound the dashboard query: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_keeps_paging_until_the_correction_window() {
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("base", "3600100"),
+            json_event("cached-old", "80"),
+        );
+        let (url, requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[&json_event("a", "3600400"), &json_event("b", "3600300")],
+                ),
+            ),
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[&json_event("c", "3600200"), &json_event("ancient", "50")],
+                ),
+            ),
+        ]);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+                Some(&cached),
+            ))
+            .expect("pages newer than the cache must be collected");
+
+        assert_eq!(count_cursor_json_events(&text), 5);
+        for id in ["a", "b", "c", "base", "cached-old"] {
+            assert!(
+                text.contains(&format!("\"conversationId\":\"{id}\"")),
+                "{id} must be in the merged cache: {text}"
+            );
+        }
+        assert!(!text.contains("\"conversationId\":\"ancient\""));
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "must walk the fresh page and the overlap"
+        );
+        assert!(captured[0].contains("\"page\":1"));
+        assert!(captured[1].contains("\"page\":2"));
+    }
+
+    fn parser_timestamp_for_watermark_fixture(event: &serde_json::Value) -> Option<i64> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(parsed.len() <= 1);
+        parsed.first().map(|row| row.timestamp)
+    }
+
+    #[test]
+    fn test_watermark_parser_row_semantics() {
+        let base: serde_json::Value =
+            serde_json::from_str(&json_event("valid", "7200000")).unwrap();
+        let cases = [
+            ("model", None, None),
+            ("model", Some(serde_json::Value::Null), None),
+            ("model", Some(serde_json::json!("  ")), None),
+            ("model", Some(serde_json::json!(42)), None),
+            ("model", Some(serde_json::json!(" gpt-5 ")), Some(7_200_000)),
+            (
+                "conversationId",
+                Some(serde_json::Value::Null),
+                Some(7_200_000),
+            ),
+            ("conversationId", Some(serde_json::json!(42)), None),
+            ("tokenUsage", None, Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::Value::Null), Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::json!([])), Some(7_200_000)),
+            ("tokenUsage", Some(serde_json::json!("0")), None),
+            (
+                "tokenUsage",
+                Some(serde_json::json!({"inputTokens":"bad"})),
+                Some(7_200_000),
+            ),
+            (
+                "chargedCents",
+                Some(serde_json::json!({"bad":true})),
+                Some(7_200_000),
+            ),
+            ("timestamp", None, None),
+            ("timestamp", Some(serde_json::json!(0)), None),
+            ("timestamp", Some(serde_json::json!(-1)), Some(-1)),
+            ("timestamp", Some(serde_json::json!(true)), None),
+            ("timestamp", Some(serde_json::json!("not-a-time")), None),
+            (
+                "timestamp",
+                Some(serde_json::json!("1970-01-01T02:00:00Z")),
+                Some(7_200_000),
+            ),
+            (
+                "timestamp",
+                Some(serde_json::json!(7_200_000.5)),
+                Some(7_200_000),
+            ),
+            (
+                "timestamp",
+                Some(serde_json::json!(i64::MAX)),
+                Some(i64::MAX),
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut event = base.clone();
+            if let Some(value) = value {
+                event[field] = value;
+            } else {
+                event.as_object_mut().unwrap().remove(field);
+            }
+            assert_eq!(
+                parser_timestamp_for_watermark_fixture(&event),
+                expected,
+                "real parser row: {event}"
+            );
+            assert_eq!(
+                tokscale_core::sessions::cursor::parse_cursor_usage_event_timestamp(&event),
+                expected,
+                "shared row projection: {event}"
+            );
+            assert_eq!(
+                usable_cursor_event_timestamp_ms(&event, 7_500_000),
+                expected.filter(|timestamp| *timestamp > 0 && *timestamp <= 7_500_000),
+                "sync-state eligibility: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_watermark_clock_skew_boundaries() {
+        let now = 7_200_000;
+        let max_timestamp = now + CURSOR_USAGE_CLOCK_SKEW_MS;
+        const { assert!(CURSOR_USAGE_CLOCK_SKEW_MS < CURSOR_USAGE_CORRECTION_WINDOW_MS) };
+        for (timestamp, expected) in [
+            (1, Some(1)),
+            (now, Some(now)),
+            (max_timestamp, Some(max_timestamp)),
+            (max_timestamp + 1, None),
+            (0, None),
+            (-1, None),
+        ] {
+            let event: serde_json::Value =
+                serde_json::from_str(&json_event("valid", &timestamp.to_string())).unwrap();
+            assert_eq!(
+                usage_events_watermark_ms(std::slice::from_ref(&event), max_timestamp),
+                expected
+            );
+            let (fresh, crossed) =
+                filter_cursor_usage_page(std::slice::from_ref(&event), Some(now), max_timestamp);
+            assert_eq!(crossed, expected.is_some_and(|timestamp| timestamp < now));
+            assert_eq!(fresh.is_empty(), crossed);
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(&json_event("all-history", "1")).unwrap();
+        let (fresh, crossed) =
+            filter_cursor_usage_page(std::slice::from_ref(&event), None, max_timestamp);
+        assert_eq!(fresh, [&event]);
+        assert!(!crossed);
+    }
+
+    #[test]
+    fn test_watermark_regression_valid_far_future_cannot_outrank_history() {
+        let valid: serde_json::Value =
+            serde_json::from_str(&json_event("valid", "7200000")).unwrap();
+        let future: serde_json::Value =
+            serde_json::from_str(&json_event("future", &i64::MAX.to_string())).unwrap();
+        assert_eq!(
+            parser_timestamp_for_watermark_fixture(&future),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            usage_events_watermark_ms(&[valid, future], 7_500_000),
+            Some(7_200_000),
+            "report acceptance alone must not promote an implausible future timestamp"
+        );
+    }
+
+    #[test]
+    fn test_watermark_regression_invalid_future_row_does_not_stall_later_syncs() {
+        let latest: serde_json::Value =
+            serde_json::from_str(&json_event("latest", "7200000")).unwrap();
+        let old: serde_json::Value = serde_json::from_str(&json_event("keep-old", "1000")).unwrap();
+        let bad =
+            serde_json::json!({"conversationId":"bad-future","timestamp":i64::MAX,"model":" "});
+        let valid_future: serde_json::Value =
+            serde_json::from_str(&json_event("future-raw", &i64::MAX.to_string())).unwrap();
+        assert_eq!(parser_timestamp_for_watermark_fixture(&bad), None);
+        let initial = vec![latest, old, bad.clone(), valid_future.clone()];
+        let mut cached = serde_json::json!({"usageEventsDisplay":initial}).to_string();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (id, timestamp, start) in [
+            ("first-new", 7_201_000_i64, 3_600_000),
+            ("second-new", 7_202_000, 3_601_000),
+        ] {
+            let body = json_page(
+                10_000,
+                &[
+                    &json_event(id, &timestamp.to_string()),
+                    &json_event("outside-window", "3599999"),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            cached = runtime
+                .block_on(fetch_cursor_usage_events_json_merging(
+                    &url,
+                    "session-token",
+                    Some(Duration::from_secs(2)),
+                    true,
+                    CURSOR_MAX_JSON_BYTES,
+                    2,
+                    Some(&cached),
+                ))
+                .expect("normal usage must still advance the cached history");
+            let rows = cached_usage_events(Some(&cached));
+            assert!(
+                rows.iter().any(|row| row["conversationId"] == id),
+                "future cache rows must not hide {id}"
+            );
+            assert!(
+                rows.contains(&bad) && rows.contains(&valid_future),
+                "keep raw history without using it as a watermark"
+            );
+            assert!(rows.iter().any(|row| row["conversationId"] == "keep-old"));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert!(
+                captured[0].contains(&format!("\"startDate\":{start}")),
+                "query must use the latest usable event: {}",
+                captured[0]
+            );
+        }
+        assert!(cached.contains("first-new") && cached.contains("second-new"));
+    }
+
+    #[test]
+    fn test_watermark_regression_all_invalid_cache_uses_full_fallback() {
+        let invalid = vec![
+            serde_json::json!({"conversationId":"bad-model","timestamp":i64::MAX,"model":null}),
+            serde_json::json!({"conversationId":"bad-shape","timestamp":"7200000","model":"gpt-5","tokenUsage":"bad"}),
+            serde_json::json!({"conversationId":"bad-time","timestamp":"invalid","model":"gpt-5"}),
+        ];
+        for row in &invalid {
+            assert_eq!(parser_timestamp_for_watermark_fixture(row), None);
+        }
+        let cached = serde_json::json!({"usageEventsDisplay":invalid}).to_string();
+        let (url, requests) = serve_json_pages(vec![(
+            String::new(),
+            json_page(1, &[&json_event("recovered", "7200000")]),
+        )]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+                Some(&cached),
+            ))
+            .expect("an unusable cache must fall back to a complete fetch");
+        let rows = cached_usage_events(Some(&text));
+        assert!(rows.iter().any(|row| row["conversationId"] == "recovered"));
+        for row in invalid {
+            assert!(
+                rows.contains(&row),
+                "watermark fallback must not discard cached rows"
+            );
+        }
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            !captured[0].contains("\"startDate\""),
+            "no usable watermark means a full-history request: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn test_watermark_regression_invalid_old_row_cannot_stop_pagination() {
+        let cached = format!(
+            r#"{{"usageEventsDisplay":[{},{}]}}"#,
+            json_event("latest", "7200000"),
+            json_event("keep-old", "1000")
+        );
+        let invalid =
+            serde_json::json!({"conversationId":"unusable-old","timestamp":"1","model":""});
+        assert_eq!(parser_timestamp_for_watermark_fixture(&invalid), None);
+        let (url, requests) = serve_json_pages(vec![
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[&json_event("new-a", "7201000"), &invalid.to_string()],
+                ),
+            ),
+            (
+                String::new(),
+                json_page(
+                    10_000,
+                    &[
+                        &json_event("new-b", "7202000"),
+                        &json_event("old-boundary", "3599999"),
+                    ],
+                ),
+            ),
+        ]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                2,
+                Some(&cached),
+            ))
+            .expect("an unusable row must not hide the next valid page");
+        let rows = cached_usage_events(Some(&text));
+        assert!(
+            rows.iter().any(|row| row["conversationId"] == "new-b"),
+            "invalid ordering evidence must not stop paging"
+        );
+        assert!(rows.contains(&invalid), "unknown/unusable rows stay raw");
+        assert!(rows.iter().any(|row| row["conversationId"] == "keep-old"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    fn cursor_identity_token_fields() -> [&'static str; 4] {
+        [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+        ]
+    }
+
+    fn cursor_identity_count_cases() -> Vec<(&'static str, Option<serde_json::Value>, i64)> {
+        vec![
+            ("omitted", None, 0),
+            ("null", Some(serde_json::Value::Null), 0),
+            ("zero", Some(serde_json::json!(0)), 0),
+            ("negative", Some(serde_json::json!(-7)), 0),
+            ("negative-float", Some(serde_json::json!(-7.75)), 0),
+            ("negative-string", Some(serde_json::json!("-7.75")), 0),
+            ("fraction", Some(serde_json::json!(0.75)), 0),
+            ("integer", Some(serde_json::json!(10)), 10),
+            ("float", Some(serde_json::json!(10.75)), 10),
+            ("string", Some(serde_json::json!(" 10.75 ")), 10),
+            (
+                "malformed-string",
+                Some(serde_json::json!("not-a-number")),
+                0,
+            ),
+            ("boolean", Some(serde_json::json!(true)), 0),
+            ("array", Some(serde_json::json!([99])), 0),
+            ("object", Some(serde_json::json!({"not-a-count":99})), 0),
+            (
+                "max-minus-one",
+                Some(serde_json::json!(i64::MAX - 1)),
+                i64::MAX - 1,
+            ),
+            ("max", Some(serde_json::json!(i64::MAX)), i64::MAX),
+            (
+                "unsigned-overflow",
+                Some(serde_json::json!(u64::MAX)),
+                i64::MAX,
+            ),
+            ("float-overflow", Some(serde_json::json!(1e300)), i64::MAX),
+            (
+                "string-overflow",
+                Some(serde_json::json!("9223372036854775808")),
+                i64::MAX,
+            ),
+            ("infinity", Some(serde_json::json!("inf")), i64::MAX),
+            ("huge-exponent", Some(serde_json::json!("1e1000")), i64::MAX),
+            ("negative-infinity", Some(serde_json::json!("-inf")), 0),
+            ("negative-overflow", Some(serde_json::json!("-1e1000")), 0),
+            ("nan", Some(serde_json::json!("NaN")), 0),
+        ]
+    }
+
+    type CursorIdentityContainerCase = (&'static str, Option<serde_json::Value>, Option<[i64; 4]>);
+
+    fn cursor_identity_container_cases() -> Vec<CursorIdentityContainerCase> {
+        vec![
+            ("omitted", None, Some([0; 4])),
+            ("null", Some(serde_json::Value::Null), Some([0; 4])),
+            ("empty-map", Some(serde_json::json!({})), Some([0; 4])),
+            ("empty-sequence", Some(serde_json::json!([])), Some([0; 4])),
+            (
+                "short-sequence",
+                Some(serde_json::json!([1])),
+                Some([1, 0, 0, 0]),
+            ),
+            (
+                "full-sequence",
+                Some(serde_json::json!([1, 2, 3, 4, 5])),
+                Some([1, 2, 3, 4]),
+            ),
+            (
+                "null-sequence",
+                Some(serde_json::json!([null, null, null, null, null])),
+                Some([0; 4]),
+            ),
+            (
+                "long-sequence",
+                Some(serde_json::json!([1, 2, 3, 4, 5, 6])),
+                None,
+            ),
+            ("string", Some(serde_json::json!("0")), None),
+            ("number", Some(serde_json::json!(0)), None),
+            ("boolean", Some(serde_json::json!(false)), None),
+        ]
+    }
+
+    fn cursor_identity_fixture(usage: Option<serde_json::Value>) -> serde_json::Value {
+        let mut event = serde_json::json!({"conversationId":"same-request","timestamp":"7200000","model":"gpt-5","chargedCents":9});
+        if let Some(usage) = usage {
+            event["tokenUsage"] = usage;
+        }
+        event
+    }
+
+    fn cursor_identity_canonical_fixture(counts: [i64; 4]) -> serde_json::Value {
+        let usage = cursor_identity_token_fields()
+            .into_iter()
+            .zip(counts)
+            .map(|(key, value)| (key.to_string(), serde_json::json!(value)))
+            .collect::<serde_json::Map<_, _>>();
+        cursor_identity_fixture(Some(serde_json::Value::Object(usage)))
+    }
+
+    fn parser_counts_for_identity_fixture(event: &serde_json::Value) -> Option<[i64; 4]> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(parsed.len() <= 1);
+        parsed.first().map(|row| {
+            [
+                row.tokens.input,
+                row.tokens.output,
+                row.tokens.cache_read,
+                row.tokens.cache_write,
+            ]
+        })
+    }
+
+    #[test]
+    fn test_cursor_parser_count_edge_semantics() {
+        for (index, field) in cursor_identity_token_fields().into_iter().enumerate() {
+            for (name, value, expected) in cursor_identity_count_cases() {
+                let mut event = cursor_identity_canonical_fixture([0; 4]);
+                if let Some(value) = value {
+                    event["tokenUsage"][field] = value;
+                } else {
+                    event["tokenUsage"].as_object_mut().unwrap().remove(field);
+                }
+                let mut counts = [0; 4];
+                counts[index] = expected;
+                assert_eq!(
+                    parser_counts_for_identity_fixture(&event),
+                    Some(counts),
+                    "real parser: {field}/{name}"
+                );
+            }
+        }
+        for (name, value, expected) in cursor_identity_container_cases() {
+            let actual = parser_counts_for_identity_fixture(&cursor_identity_fixture(value));
+            eprintln!("real parser tokenUsage {name}: {actual:?}");
+            assert_eq!(actual, expected, "real parser container: {name}");
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_identities_match_full_parser_semantics() {
+        for (index, field) in cursor_identity_token_fields().into_iter().enumerate() {
+            let mut seen = Vec::new();
+            for (name, value, expected) in cursor_identity_count_cases() {
+                let mut event = cursor_identity_canonical_fixture([0; 4]);
+                if let Some(value) = value {
+                    event["tokenUsage"][field] = value;
+                } else {
+                    event["tokenUsage"].as_object_mut().unwrap().remove(field);
+                }
+                let mut counts = [0; 4];
+                counts[index] = expected;
+                assert_eq!(parser_counts_for_identity_fixture(&event), Some(counts));
+                let canonical = cursor_identity_canonical_fixture(counts);
+                let merged = merge_cursor_usage_events(vec![canonical], vec![event.clone()]);
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "equivalent parser counts must merge: {field}/{name}"
+                );
+                assert_eq!(
+                    merged[0], event,
+                    "keep the raw incoming row: {field}/{name}"
+                );
+                let identity = cursor_usage_event_identity(&event);
+                for (previous_count, previous_identity) in &seen {
+                    assert_eq!(
+                        identity == *previous_identity,
+                        expected == *previous_count,
+                        "only equivalent counts may merge: {field}/{name}"
+                    );
+                }
+                seen.push((expected, identity));
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_container_identities_match_parser_acceptance() {
+        for (name, value, expected) in cursor_identity_container_cases() {
+            let event = cursor_identity_fixture(value);
+            assert_eq!(parser_counts_for_identity_fixture(&event), expected);
+            if let Some(counts) = expected {
+                let merged = merge_cursor_usage_events(
+                    vec![cursor_identity_canonical_fixture(counts)],
+                    vec![event.clone()],
+                );
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "accepted equivalent tokenUsage must merge: {name}"
+                );
+                assert_eq!(merged[0], event, "raw tokenUsage must survive: {name}");
+            } else {
+                assert_eq!(
+                    merge_cursor_usage_events(
+                        vec![cursor_identity_canonical_fixture([0; 4])],
+                        vec![event]
+                    )
+                    .len(),
+                    2,
+                    "rejected tokenUsage must not become valid zeros: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_count_defaults_preserve_unknown_fields_and_rejected_rows() {
+        let zero = cursor_identity_canonical_fixture([0; 4]);
+        let mut future_null =
+            cursor_identity_fixture(Some(serde_json::json!({"futureCount":null})));
+        let mut future_zero = future_null.clone();
+        future_zero["tokenUsage"]["futureCount"] = serde_json::json!(0);
+        let mut nested_null = cursor_identity_fixture(None);
+        nested_null["metadata"] = serde_json::json!({"inputTokens":null});
+        let mut nested_zero = nested_null.clone();
+        nested_zero["metadata"]["inputTokens"] = serde_json::json!(0);
+        let mut other_session = cursor_identity_fixture(None);
+        other_session["conversationId"] = serde_json::json!("other-request");
+        future_null["chargedCents"] = serde_json::json!(11);
+        let valid = vec![
+            zero,
+            future_null,
+            future_zero,
+            nested_null,
+            nested_zero,
+            other_session,
+        ];
+        for row in &valid {
+            assert_eq!(parser_counts_for_identity_fixture(row), Some([0; 4]));
+        }
+        let rejected: Vec<_> = cursor_identity_container_cases()
+            .into_iter()
+            .filter(|(_, _, counts)| counts.is_none())
+            .map(|(_, value, _)| cursor_identity_fixture(value))
+            .collect();
+        for row in &rejected {
+            assert_eq!(parser_counts_for_identity_fixture(row), None);
+        }
+        let expected = valid.len() + rejected.len();
+        let merged = merge_cursor_usage_events(valid.clone(), rejected.clone());
+        assert_eq!(
+            merged.len(),
+            expected,
+            "unknown fields and rejected shapes must not be erased"
+        );
+        for row in valid.iter().chain(rejected.iter()) {
+            assert!(merged.contains(row), "stored rows must remain raw");
+        }
+    }
+
+    fn parser_key_for_identity_contract(event: &serde_json::Value) -> Option<serde_json::Value> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        fs::write(
+            &path,
+            serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
+        )
+        .unwrap();
+        let rows = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        assert!(rows.len() <= 1);
+        rows.first().map(|row| serde_json::json!({
+            "session":row.session_id,"model":row.model_id,"provider":row.provider_id,
+            "timestamp":row.timestamp,"tokens":[row.tokens.input,row.tokens.output,row.tokens.cache_read,row.tokens.cache_write]
+        }))
+    }
+
+    fn assert_cursor_identity_contract_group(name: &str, rows: &[serde_json::Value]) {
+        let expected = parser_key_for_identity_contract(&rows[0]).expect("accepted fixture");
+        for row in rows {
+            assert_eq!(
+                parser_key_for_identity_contract(row),
+                Some(expected.clone()),
+                "parser: {name}: {row}"
+            );
+            for previous in rows {
+                let merged = merge_cursor_usage_events(vec![previous.clone()], vec![row.clone()]);
+                assert_eq!(
+                    merged.len(),
+                    1,
+                    "equivalent {name} must merge: {previous} / {row}"
+                );
+                assert_eq!(merged[0], *row, "incoming {name} row must stay raw");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_identity_regression_session_encodings() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut fallback = Vec::new();
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" \t\u{2003}")),
+        ] {
+            let mut row = base.clone();
+            if let Some(value) = value {
+                row["conversationId"] = value;
+            } else {
+                row.as_object_mut().unwrap().remove("conversationId");
+            }
+            fallback.push(row);
+        }
+        assert_cursor_identity_contract_group("synthetic session defaults", &fallback);
+        // An explicit real id remains distinct even if it spells the synthetic
+        // session label that reporting derives for this account and day.
+        let mut explicit = fallback[0].clone();
+        explicit["conversationId"] =
+            parser_key_for_identity_contract(&fallback[0]).unwrap()["session"].clone();
+        assert_eq!(
+            parser_key_for_identity_contract(&explicit),
+            parser_key_for_identity_contract(&fallback[0])
+        );
+        assert_eq!(
+            merge_cursor_usage_events(vec![fallback[0].clone()], vec![explicit]).len(),
+            2
+        );
+        let mut numeric = base.clone();
+        numeric["conversationId"] = serde_json::json!(42);
+        let mut textual = numeric.clone();
+        textual["conversationId"] = serde_json::json!("42");
+        assert_eq!(parser_key_for_identity_contract(&numeric), None);
+        assert!(parser_key_for_identity_contract(&textual).is_some());
+        assert_eq!(
+            merge_cursor_usage_events(vec![numeric], vec![textual]).len(),
+            2
+        );
+        let mut padded = base.clone();
+        padded["conversationId"] = serde_json::json!(" \tsame-request\u{2003}");
+        assert_cursor_identity_contract_group("trimmed explicit session", &[base, padded]);
+    }
+
+    #[test]
+    fn test_cursor_identity_regression_trimmed_model() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut padded = base.clone();
+        padded["model"] = serde_json::json!("\u{2003}gpt-5 \n");
+        assert_cursor_identity_contract_group("trimmed model", &[base, padded]);
+    }
+
+    #[test]
+    fn test_cursor_identity_known_field_contract_matrix() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut equivalents = vec![base.clone()];
+        for timestamp in [
+            serde_json::json!(7_200_000),
+            serde_json::json!(7_200_000.75),
+            serde_json::json!(" 7200000 "),
+            serde_json::json!("1970-01-01T03:00:00+01:00"),
+        ] {
+            let mut row = base.clone();
+            row["timestamp"] = timestamp;
+            equivalents.push(row);
+        }
+        let mut numeric = base.clone();
+        numeric["tokenUsage"] = serde_json::json!({"inputTokens":" 10.75 ","outputTokens":20.5,"cacheReadTokens":"3e1","cacheWriteTokens":40,"totalCents":"$1,234.50"});
+        equivalents.push(numeric);
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("$1,234.50")),
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!("inf")),
+            Some(serde_json::json!({"bad":true})),
+        ] {
+            for field in ["chargedCents", "cursorTokenFee", "totalCents"] {
+                let mut row = base.clone();
+                let object = if field == "totalCents" {
+                    row["tokenUsage"].as_object_mut().unwrap()
+                } else {
+                    row.as_object_mut().unwrap()
+                };
+                if let Some(value) = &value {
+                    object.insert(field.to_string(), value.clone());
+                } else {
+                    object.remove(field);
+                }
+                equivalents.push(row);
+            }
+        }
+        let mut token_sequence = base.clone();
+        token_sequence["tokenUsage"] = serde_json::json!([10, 20, 30, 40, 99]);
+        equivalents.push(token_sequence);
+        equivalents.push(serde_json::json!([
+            "same-request",
+            7200000,
+            "gpt-5",
+            99,
+            [10, 20, 30, 40, 99]
+        ]));
+        assert_cursor_identity_contract_group(
+            "recognized fields including mutable billing",
+            &equivalents,
+        );
+
+        for timestamp in [-1, i64::MAX] {
+            let mut number = base.clone();
+            number["timestamp"] = serde_json::json!(timestamp);
+            let mut text = number.clone();
+            text["timestamp"] = serde_json::json!(timestamp.to_string());
+            assert_cursor_identity_contract_group("accepted timestamp extremes", &[number, text]);
+        }
+
+        let zero = cursor_identity_canonical_fixture([0; 4]);
+        let mut defaults = vec![
+            zero.clone(),
+            serde_json::json!(["same-request", 7200000, "gpt-5"]),
+        ];
+        for (_, usage, counts) in cursor_identity_container_cases() {
+            if counts == Some([0; 4]) {
+                defaults.push(cursor_identity_fixture(usage));
+            }
+        }
+        let mut malformed_counts = zero.clone();
+        malformed_counts["tokenUsage"] = serde_json::json!({"inputTokens":null,"outputTokens":-1,"cacheReadTokens":"bad","cacheWriteTokens":true});
+        defaults.push(malformed_counts);
+        assert_cursor_identity_contract_group("token defaults and coercion", &defaults);
+
+        let mut distinct = vec![base.clone()];
+        for (field, value) in [
+            ("conversationId", serde_json::json!("other-request")),
+            ("model", serde_json::json!("gpt-5-mini")),
+            ("model", serde_json::json!("GPT-5")),
+            ("model", serde_json::json!("gpt- 5")),
+            ("timestamp", serde_json::json!(7200001)),
+        ] {
+            let mut row = base.clone();
+            row[field] = value;
+            distinct.push(row);
+        }
+        for field in cursor_identity_token_fields() {
+            let mut row = base.clone();
+            row["tokenUsage"][field] = serde_json::json!(99);
+            distinct.push(row);
+        }
+        for (i, row) in distinct.iter().enumerate() {
+            let parsed = parser_key_for_identity_contract(row).unwrap();
+            for previous in &distinct[..i] {
+                assert_ne!(
+                    Some(parsed.clone()),
+                    parser_key_for_identity_contract(previous)
+                );
+                assert_eq!(
+                    merge_cursor_usage_events(vec![previous.clone()], vec![row.clone()]).len(),
+                    2,
+                    "distinct event must survive: {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_merge_preserves_unknown_fields_and_rejected_rows() {
+        let base = cursor_identity_canonical_fixture([10, 20, 30, 40]);
+        let mut unknown = vec![base.clone()];
+        for (nested, key, value) in [
+            (false, "metadata", serde_json::json!({"model":" gpt-5 "})),
+            (false, "metadata", serde_json::json!({"model":"gpt-5"})),
+            (true, "futureCount", serde_json::Value::Null),
+            (true, "futureCount", serde_json::json!(0)),
+            (true, "nested", serde_json::json!({"totalCents":1})),
+            (true, "nested", serde_json::json!({"totalCents":2})),
+        ] {
+            let mut row = base.clone();
+            if nested {
+                row["tokenUsage"][key] = value;
+            } else {
+                row[key] = value;
+            }
+            assert_eq!(
+                parser_key_for_identity_contract(&row),
+                parser_key_for_identity_contract(&base)
+            );
+            if nested {
+                let sequence =
+                    serde_json::json!(["same-request", 7200000, "gpt-5", 9, row["tokenUsage"]]);
+                assert_cursor_identity_contract_group(
+                    "positional token extensions",
+                    &[row.clone(), sequence],
+                );
+            }
+            unknown.push(row);
+        }
+        let mut rejected = vec![
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!("row"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(["same-request", 7200000, "gpt-5", 1, {}, "extra"]),
+        ];
+        for (field, values) in [
+            (
+                "model",
+                vec![
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::json!(" ")),
+                    Some(serde_json::json!(42)),
+                ],
+            ),
+            (
+                "conversationId",
+                vec![
+                    Some(serde_json::json!(42)),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!([])),
+                ],
+            ),
+            (
+                "timestamp",
+                vec![
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::json!(0)),
+                    Some(serde_json::json!("0")),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!("bad")),
+                ],
+            ),
+            (
+                "tokenUsage",
+                vec![
+                    Some(serde_json::json!("0")),
+                    Some(serde_json::json!(0)),
+                    Some(serde_json::json!(true)),
+                    Some(serde_json::json!([1, 2, 3, 4, 5, 6])),
+                ],
+            ),
+        ] {
+            for value in values {
+                let mut row = base.clone();
+                if let Some(value) = value {
+                    row[field] = value;
+                } else {
+                    row.as_object_mut().unwrap().remove(field);
+                }
+                assert_eq!(
+                    parser_key_for_identity_contract(&row),
+                    None,
+                    "rejected row: {row}"
+                );
+                rejected.push(row);
+            }
+        }
+        let mut invalid_numeric_timestamp = base.clone();
+        invalid_numeric_timestamp["model"] = serde_json::json!(42);
+        invalid_numeric_timestamp["timestamp"] = serde_json::json!(7200000);
+        rejected.push(invalid_numeric_timestamp);
+        let expected = unknown.len() + rejected.len();
+        let all = unknown.into_iter().chain(rejected).collect::<Vec<_>>();
+        let merged = merge_cursor_usage_events(all.clone(), Vec::new());
+        assert_eq!(
+            merged.len(),
+            expected,
+            "unknown fields, rejected representations, and raw multiplicity must survive"
+        );
+        for row in all {
+            assert!(merged.contains(&row), "raw row retained: {row}");
+        }
+    }
+
+    #[test]
+    fn test_regression_cursor_identity_coerces_parser_accepted_token_counts() {
+        let integer = serde_json::json!({
+            "conversationId":"boundary", "timestamp":"7200000", "model":"gpt-5",
+            "chargedCents":1,
+            "tokenUsage":{"inputTokens":10,"outputTokens":20,"cacheReadTokens":30,"cacheWriteTokens":40,"totalCents":1}
+        });
+        let mut floats = integer.clone();
+        floats["tokenUsage"] = serde_json::json!({"inputTokens":10.0,"outputTokens":20.5,"cacheReadTokens":30.0,"cacheWriteTokens":40.75,"totalCents":2});
+        let mut strings = integer.clone();
+        strings["tokenUsage"] = serde_json::json!({"inputTokens":" 10 ","outputTokens":"20.5","cacheReadTokens":"3e1","cacheWriteTokens":"40.75","totalCents":9});
+        strings["chargedCents"] = serde_json::json!(9);
+        let parsed_cache = tempfile::tempdir().unwrap();
+        let parsed_path = parsed_cache.path().join("usage.json");
+        for variant in [&integer, &floats, &strings] {
+            fs::write(
+                &parsed_path,
+                serde_json::json!({"usageEventsDisplay":[variant]}).to_string(),
+            )
+            .unwrap();
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&parsed_path);
+            assert_eq!(messages.len(), 1);
+            let tokens = &messages[0].tokens;
+            assert_eq!(
+                (
+                    tokens.input,
+                    tokens.output,
+                    tokens.cache_read,
+                    tokens.cache_write
+                ),
+                (10, 20, 30, 40)
+            );
+        }
+        assert_eq!(
+            cursor_usage_event_identity(&integer),
+            cursor_usage_event_identity(&floats)
+        );
+        let merged = merge_cursor_usage_events(vec![integer.clone()], vec![strings.clone()]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "equivalent token encodings must not duplicate usage"
+        );
+        assert_eq!(
+            merged[0], strings,
+            "the raw incoming row must remain intact"
+        );
+
+        let mut distinct_count = integer.clone();
+        distinct_count["tokenUsage"]["inputTokens"] = serde_json::json!(11);
+        let mut distinct_session = integer.clone();
+        distinct_session["conversationId"] = serde_json::json!("other-session");
+        let mut unknown_a = integer.clone();
+        unknown_a["extra"] = serde_json::json!({"chargedCents":1,"timestamp":"7200000"});
+        let mut unknown_b = unknown_a.clone();
+        unknown_b["extra"]["chargedCents"] = serde_json::json!(2);
+        let mut unknown_token = integer.clone();
+        unknown_token["tokenUsage"]["futureCount"] = serde_json::json!("10");
+        let mut unknown_token_number = unknown_token.clone();
+        unknown_token_number["tokenUsage"]["futureCount"] = serde_json::json!(10);
+        assert_eq!(
+            merge_cursor_usage_events(
+                vec![
+                    integer,
+                    distinct_count,
+                    distinct_session,
+                    unknown_a,
+                    unknown_token
+                ],
+                vec![unknown_b, unknown_token_number],
+            )
+            .len(),
+            4,
+            "the complete overlap must replace cached variants and keep incoming multiplicity"
+        );
+    }
+
+    #[test]
+    fn test_regression_cursor_refreshes_billing_older_than_the_newest_cached_event() {
+        let newest = json_event("latest", "7200000");
+        let corrected = json_event("corrected", "5400000");
+        let archived = json_event("archived", "1000");
+        let cached = format!(r#"{{"usageEventsDisplay":[{newest},{corrected},{archived}]}}"#);
+        let mut updated: serde_json::Value = serde_json::from_str(&corrected).unwrap();
+        updated["chargedCents"] = serde_json::json!(9);
+        updated["tokenUsage"]["totalCents"] = serde_json::json!(9);
+        let updated = updated.to_string();
+        let body = json_page(
+            10_000,
+            &[
+                &json_event("new", "7201000"),
+                &newest,
+                &updated,
+                &json_event("outside-window", "3599999"),
+            ],
+        );
+        let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let text = runtime
+            .block_on(fetch_cursor_usage_events_json_merging(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                4,
+                Some(&cached),
+            ))
+            .expect("the bounded correction overlap must complete");
+        let stored = cached_usage_events(Some(&text));
+        let revised: Vec<_> = stored
+            .iter()
+            .filter(|e| e["conversationId"] == "corrected")
+            .collect();
+        assert_eq!(revised.len(), 1);
+        assert_eq!(
+            revised[0]["chargedCents"],
+            serde_json::json!(9),
+            "a correction thirty minutes behind the newest row must replace its billing"
+        );
+        assert_eq!(revised[0]["tokenUsage"]["totalCents"], serde_json::json!(9));
+        assert_eq!(stored.len(), 4);
+        assert!(
+            stored.iter().any(|e| e["conversationId"] == "archived"),
+            "old cached history must survive"
+        );
+        assert!(!stored
+            .iter()
+            .any(|e| e["conversationId"] == "outside-window"));
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "stop at the overlap rather than walking all history"
+        );
+        assert!(
+            captured[0].contains("\"startDate\":3600000"),
+            "request only the hour before the newest cached event: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_replaces_boundary_row_when_billing_changes() {
+        let stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        let mut updated = stored.clone();
+        updated["chargedCents"] = serde_json::json!(9);
+        updated["tokenUsage"]["totalCents"] = serde_json::json!(9);
+
+        let merged = merge_cursor_usage_events(vec![stored], vec![updated]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["chargedCents"], serde_json::json!(9));
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_preserves_identical_event_multiplicity() {
+        let stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("duplicate", "200")).unwrap();
+        let mut corrected = stored.clone();
+        corrected["chargedCents"] = serde_json::json!(9);
+
+        let merged = merge_cursor_usage_events(
+            vec![stored.clone(), stored.clone()],
+            vec![corrected.clone(), corrected.clone()],
+        );
+        assert_eq!(merged, vec![corrected.clone(), corrected.clone()]);
+
+        let corrected_snapshot =
+            merge_cursor_usage_events(vec![stored.clone(), stored], vec![corrected.clone()]);
+        assert_eq!(corrected_snapshot, vec![corrected]);
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_ignores_mutable_unknown_billing_fields() {
+        let mut stored =
+            serde_json::from_str::<serde_json::Value>(&json_event("corrected", "200")).unwrap();
+        stored["isChargeable"] = serde_json::json!(false);
+        stored["usageBasedCosts"] = serde_json::json!({"totalCents": 1});
+        let mut corrected = stored.clone();
+        corrected["chargedCents"] = serde_json::json!(9);
+        corrected["isChargeable"] = serde_json::json!(true);
+        corrected["usageBasedCosts"] = serde_json::json!({"totalCents": 9});
+
+        let merged = merge_cursor_usage_events(vec![stored], vec![corrected.clone()]);
+        assert_eq!(merged, vec![corrected]);
+    }
+
+    #[test]
+    fn test_merge_cursor_usage_events_collapses_equivalent_timestamps() {
+        let string_ts =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        let mut number_ts = string_ts.clone();
+        number_ts["timestamp"] = serde_json::json!(200);
+        let mut rfc3339 = string_ts.clone();
+        rfc3339["timestamp"] = serde_json::json!("1970-01-01T00:00:00.200Z");
+        rfc3339["chargedCents"] = serde_json::json!(4);
+
+        assert_eq!(
+            cursor_usage_event_identity(&string_ts),
+            cursor_usage_event_identity(&number_ts)
+        );
+        assert_eq!(
+            cursor_usage_event_identity(&string_ts),
+            cursor_usage_event_identity(&rfc3339)
+        );
+        let merged = merge_cursor_usage_events(vec![number_ts], vec![rfc3339]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["chargedCents"], serde_json::json!(4));
+
+        let mut unread_a =
+            serde_json::from_str::<serde_json::Value>(&json_event("boundary", "200")).unwrap();
+        unread_a["timestamp"] = serde_json::json!("not-a-time");
+        let mut unread_b = unread_a.clone();
+        unread_b["timestamp"] = serde_json::json!("also-not");
+        assert_eq!(
+            merge_cursor_usage_events(vec![unread_a], vec![unread_b]).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_timeout_names_the_budget() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = stream;
+            }
+        });
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(1)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("a stalled page must hit the time budget");
+        let message = format!("{err}");
+        assert!(
+            message.contains("1s time budget"),
+            "a timeout must name the budget, not only the transport error: {message}"
+        );
+        assert!(
+            message.contains("0 pages"),
+            "the first page timing out has not collected a page: {message}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_page_timeout_names_the_request_budget() {
+        // Page 1 advertises a huge history so the default explicit budget scales
+        // toward 30 minutes. Page 2 then stalls. The failure is the 1s request
+        // timeout, and the message must not claim the scaled overall budget ran out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let body = json_page(40_000, &[&json_event("c1", "1788171994001")]);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 8192];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = stream;
+            }
+        });
+        let url = format!("http://{addr}/api/dashboard/get-filtered-usage-events");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                &url,
+                "session-token",
+                Some(Duration::from_secs(1)),
+                false,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("a stalled later page must time out");
+        let message = format!("{err}");
+        assert!(
+            message.contains("timed out after its 1s time budget"),
+            "the stalled request must name its own timeout: {message}"
+        );
+        assert!(
+            !message.contains("1800s"),
+            "a single stalled page must not be reported as the scaled overall budget: {message}"
+        );
+        assert!(
+            message.contains("1 page"),
+            "page 1 was collected before the stall: {message}"
+        );
+    }
+
+    #[test]
+    fn test_usage_events_json_invalid_url_includes_the_cause() {
+        // A closed localhost port can exhaust the 2s budget on Windows before
+        // its TCP stack reports refusal. URL parsing fails before any network
+        // I/O, but still exercises reqwest's source chain through the fetcher.
+        let url = "http://[not-an-ipv6-address]/api/dashboard/get-filtered-usage-events";
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(fetch_cursor_usage_events_json_from(
+                url,
+                "session-token",
+                Some(Duration::from_secs(2)),
+                true,
+                CURSOR_MAX_JSON_BYTES,
+                500,
+            ))
+            .expect_err("an invalid URL must fail before connecting");
+        let message = cursor_sync_error_text(&err);
+        assert!(
+            message.contains("builder error"),
+            "reqwest's outer error must survive: {message}"
+        );
+        assert!(
+            message.contains("invalid IPv6 address"),
+            "the source chain must name the URL parser's cause: {message}"
+        );
+        assert!(
+            !message.contains("time budget"),
+            "a parser error is not a timeout: {message}"
         );
     }
 
@@ -2586,14 +5207,23 @@ mod tests {
 
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
         assert!(!cursor_usage_cache_is_fresh_in(
             temp_dir.path(),
             Duration::from_secs(300)
         ));
 
-        fs::write(cache_dir.join("usage.team-account.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account")
+            )),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         assert!(cursor_usage_cache_is_fresh_in(
             temp_dir.path(),
             Duration::from_secs(300)
@@ -2603,7 +5233,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_expected_cache_paths_dedupes_sanitized_account_collisions() {
+    fn test_cursor_expected_cache_paths_keep_sanitized_account_collisions_separate() {
         let temp_dir = TempDir::new().unwrap();
         let mut accounts = HashMap::new();
         accounts.insert(
@@ -2648,10 +5278,18 @@ mod tests {
 
         let paths = expected_cursor_usage_cache_paths_in(temp_dir.path());
         let cache_dir = cursor_cache_dir(temp_dir.path());
-        let expected = vec![
+        let mut expected = vec![
             cache_dir.join("usage.json"),
-            cache_dir.join("usage.team-account-a.json"),
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account-a")
+            )),
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team@account-a")
+            )),
         ];
+        expected.sort_unstable();
         assert_eq!(paths, expected);
     }
 
@@ -2702,8 +5340,8 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |session_token| {
-                let json = match session_token.as_str() {
+            |fetch| {
+                let json = match fetch.session_token.as_str() {
                     "token-active" => {
                         r#"{"usageEventsDisplay":[{"conversationId":"s1","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#
                     }
@@ -2721,16 +5359,27 @@ mod tests {
         assert_eq!(result.rows, 3);
         assert_eq!(result.error, None);
 
-        // JSON caches are written for each account and key by conversationId.
+        // JSON caches and their bounded owner indexes are written together.
+        let active_path = cache_dir.join("usage.json");
+        let secondary_path = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
         assert_eq!(
-            count_cursor_json_events(&fs::read_to_string(cache_dir.join("usage.json"))?),
+            count_cursor_json_events(&fs::read_to_string(&active_path)?),
             1
         );
         assert_eq!(
-            count_cursor_json_events(&fs::read_to_string(
-                cache_dir.join("usage.team-account.json")
-            )?),
+            count_cursor_json_events(&fs::read_to_string(&secondary_path)?),
             2
+        );
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&active_path).as_deref(),
+            Some(cursor_cache_owner_hash("active-account").as_str())
+        );
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&secondary_path).as_deref(),
+            Some(cursor_cache_owner_hash("team/account").as_str())
         );
         // The active account is never duplicated as a per-account file.
         assert!(!cache_dir.join("usage.active-account.json").exists());
@@ -2740,6 +5389,8 @@ mod tests {
         assert!(!cache_dir.join("usage.team-account.csv").exists());
         let archived: Vec<_> = fs::read_dir(cache_dir.join("archive"))?
             .filter_map(|entry| entry.ok())
+            .flat_map(|entry| fs::read_dir(entry.path()).unwrap())
+            .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "csv"))
             .collect();
         assert_eq!(
@@ -2748,6 +5399,208 @@ mod tests {
             "both legacy CSVs must be archived, not deleted"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_cleanup_keeps_refreshed_secondary_with_colliding_active_id() -> Result<()> {
+        for active_fails in [false, true] {
+            let temp = TempDir::new()?;
+            let active_id = "team/account-a";
+            let secondary_id = "team@account-a";
+            let accounts = [active_id, secondary_id]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        CursorCredentials {
+                            session_token: id.to_string(),
+                            user_id: Some(id.to_string()),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            expires_at: None,
+                            label: None,
+                        },
+                    )
+                })
+                .collect();
+            save_credentials_store_in_home(
+                temp.path(),
+                &CursorCredentialsStore {
+                    version: 1,
+                    active_account_id: active_id.to_string(),
+                    accounts,
+                },
+            )?;
+            let credentials_before = fs::read(cursor_credentials_path(temp.path()))?;
+            let cache_dir = cursor_cache_dir(temp.path());
+            fs::create_dir_all(&cache_dir)?;
+            let active_json =
+                String::from_utf8(json_page(1, &[&json_event("active-history", "7200000")]))?;
+            let active_json = owned_cursor_cache(&active_json, active_id)?;
+            fs::write(cache_dir.join("usage.json"), &active_json)?;
+            let secondary_json =
+                String::from_utf8(json_page(1, &[&json_event("secondary-history", "7200000")]))?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+                temp.path(),
+                |fetch| {
+                    let response = if fetch.session_token == active_id {
+                        if active_fails {
+                            Err(anyhow::anyhow!("active unavailable"))
+                        } else {
+                            Ok(active_json.clone())
+                        }
+                    } else {
+                        Ok(secondary_json.clone())
+                    };
+                    async move { response }
+                },
+            ));
+            assert!(result.synced, "secondary sync must succeed: {result:?}");
+            assert_eq!(result.error.is_some(), active_fails);
+            let active_path = cache_dir.join("usage.json");
+            assert_eq!(
+                cursor_cache_owner_hash_from_file(&active_path).as_deref(),
+                Some(cursor_cache_owner_hash(active_id).as_str())
+            );
+            assert!(
+                cached_usage_events(fs::read_to_string(&active_path).ok().as_deref())
+                    .iter()
+                    .any(|row| row["conversationId"] == "active-history")
+            );
+            assert_eq!(
+                fs::read(cursor_credentials_path(temp.path()))?,
+                credentials_before
+            );
+            let secondary_path = cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem(secondary_id)
+            ));
+            assert_eq!(
+                cursor_cache_owner_hash_from_file(&secondary_path).as_deref(),
+                Some(cursor_cache_owner_hash(secondary_id).as_str()),
+                "cleanup must retain the freshly written secondary; active_fails={active_fails}"
+            );
+            let rows = tokscale_core::sessions::cursor::parse_cursor_file(&secondary_path);
+            assert_eq!(rows.len(), 1, "secondary history must remain reportable");
+            assert_eq!(rows[0].session_id, "secondary-history");
+            assert_eq!(rows[0].tokens.input, 10);
+            assert_eq!(rows[0].tokens.output, 5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_correction_windows_and_cached_history_are_account_local() -> Result<()> {
+        let temp = TempDir::new()?;
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir)?;
+        let mut accounts = HashMap::new();
+        let mut endpoints = HashMap::new();
+        let mut captured = Vec::new();
+        for (id, newest) in [("active", 7_200_000_i64), ("secondary", 14_400_000)] {
+            accounts.insert(
+                id.to_string(),
+                CursorCredentials {
+                    session_token: id.to_string(),
+                    user_id: Some(id.to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    label: None,
+                },
+            );
+            let latest = json_event(&format!("{id}-latest"), &newest.to_string());
+            let previous = json_event(
+                &format!("{id}-corrected"),
+                &(newest - 1_800_000).to_string(),
+            );
+            let old = json_event(&format!("{id}-old"), "1");
+            let path = if id == "active" {
+                cache_dir.join("usage.json")
+            } else {
+                cache_dir.join(format!(
+                    "usage.{}.json",
+                    cursor_account_cache_stem("secondary")
+                ))
+            };
+            fs::write(
+                path,
+                owned_cursor_cache(
+                    &format!(r#"{{"usageEventsDisplay":[{latest},{previous},{old}]}}"#),
+                    id,
+                )?,
+            )?;
+            let mut update: serde_json::Value = serde_json::from_str(&previous)?;
+            update["chargedCents"] = serde_json::json!(9);
+            let body = json_page(
+                10_000,
+                &[
+                    &update.to_string(),
+                    &json_event(&format!("{id}-outside"), &(newest - 3_600_001).to_string()),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            endpoints.insert(id.to_string(), url);
+            captured.push((id, newest, requests));
+        }
+        save_credentials_store_in_home(
+            temp.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active".to_string(),
+                accounts,
+            },
+        )?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp.path(),
+            |fetch| {
+                let url = endpoints[&fetch.session_token].clone();
+                async move {
+                    fetch_cursor_usage_events_json_merging(
+                        &url,
+                        &fetch.session_token,
+                        Some(Duration::from_secs(2)),
+                        true,
+                        CURSOR_MAX_JSON_BYTES,
+                        2,
+                        fetch.existing_cache.as_deref(),
+                    )
+                    .await
+                }
+            },
+        ));
+        assert!(result.synced, "{result:?}");
+        assert_eq!(result.rows, 6);
+        for (id, newest, requests) in captured {
+            let path = if id == "active" {
+                cache_dir.join("usage.json")
+            } else {
+                cache_dir.join(format!(
+                    "usage.{}.json",
+                    cursor_account_cache_stem("secondary")
+                ))
+            };
+            let stored = cached_usage_events(Some(&fs::read_to_string(path)?));
+            assert_eq!(stored.len(), 3, "unreturned cached history must survive");
+            assert!(
+                stored
+                    .iter()
+                    .all(|e| e["conversationId"].as_str().unwrap().starts_with(id)),
+                "account histories must not mix"
+            );
+            let revised = stored
+                .iter()
+                .find(|e| e["conversationId"] == format!("{id}-corrected"))
+                .unwrap();
+            assert_eq!(revised["chargedCents"], serde_json::json!(9));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0].contains(&format!("\"startDate\":{}", newest - 3_600_000)),
+                "each query must use its own account's overlap"
+            );
+        }
         Ok(())
     }
 
@@ -2779,13 +5632,16 @@ mod tests {
         // must not overwrite it with nothing.
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        let seeded = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
-        fs::write(cache_dir.join("usage.json"), seeded)?;
+        let seeded = owned_cursor_cache(
+            r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#,
+            "active-account",
+        )?;
+        fs::write(cache_dir.join("usage.json"), &seeded)?;
 
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |_session_token| async move { Ok(r#"{"usageEventsDisplay":[]}"#.to_string()) },
+            |_fetch| async move { Ok(r#"{"usageEventsDisplay":[]}"#.to_string()) },
         ));
 
         // The empty result is refused; the seeded cache is left untouched.
@@ -2829,14 +5685,17 @@ mod tests {
         // would double-count the active account.
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
-        let good = r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#;
-        fs::write(cache_dir.join("usage.json"), good)?;
-        fs::write(cache_dir.join("usage.active-account.json"), good)?;
+        let good = owned_cursor_cache(
+            r#"{"usageEventsDisplay":[{"conversationId":"keep","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#,
+            "active-account",
+        )?;
+        fs::write(cache_dir.join("usage.json"), &good)?;
+        fs::write(cache_dir.join("usage.active-account.json"), &good)?;
 
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |_session_token| async move { Err(anyhow::anyhow!("network down")) },
+            |_fetch| async move { Err(anyhow::anyhow!("network down")) },
         ));
 
         // The fetch failed, but the good cache survives and the duplicate is
@@ -3072,11 +5931,20 @@ mod tests {
         fs::create_dir_all(&cache_dir)?;
 
         // Fresh active cache.
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
         // Stale secondary cache.
-        let secondary = cache_dir.join("usage.team-account.json");
-        fs::write(&secondary, "Date,Model\n")?;
+        let secondary = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
+        fs::write(
+            &secondary,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         if !backdate_file(&secondary, 3600) {
             return Ok(()); // platform can't set mtime — skip
         }
@@ -3102,10 +5970,19 @@ mod tests {
         let cache_dir = cursor_cache_dir(temp_dir.path());
         fs::create_dir_all(&cache_dir)?;
 
-        fs::write(cache_dir.join("usage.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "active-account")?,
+        )?;
 
-        let secondary = cache_dir.join("usage.team-account.json");
-        fs::write(&secondary, "Date,Model\n")?;
+        let secondary = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
+        fs::write(
+            &secondary,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         if !backdate_file(&secondary, 3600) {
             return Ok(());
         }
@@ -3138,7 +6015,13 @@ mod tests {
         }
 
         // Fresh secondary and fresh marker.
-        fs::write(cache_dir.join("usage.team-account.json"), "Date,Model\n")?;
+        fs::write(
+            cache_dir.join(format!(
+                "usage.{}.json",
+                cursor_account_cache_stem("team/account")
+            )),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "team/account")?,
+        )?;
         fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
 
         assert!(
@@ -3158,9 +6041,9 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let _result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |session_token| {
+            |fetch| {
                 // Secondary deliberately fails to simulate a broken account.
-                let result: Result<String> = match session_token.as_str() {
+                let result: Result<String> = match fetch.session_token.as_str() {
                     "token-active" => Ok("Date,Model,Tokens\n2026-01-01,gpt-5,10\n".to_string()),
                     _ => Err(anyhow::anyhow!("simulated fetch failure")),
                 };
@@ -3187,8 +6070,8 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
-        let new_stem = sanitize_account_id_for_filename(new_id);
+        let old_stem = cursor_account_cache_stem(old_id);
+        let new_stem = cursor_account_cache_stem(new_id);
 
         for ext in CURSOR_CACHE_EXTENSIONS {
             fs::write(cache_dir.join(format!("usage.{ext}")), format!("old-{ext}"))?;
@@ -3231,7 +6114,7 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
+        let old_stem = cursor_account_cache_stem(old_id);
 
         // A regular file named `archive` makes `archive_cache_file_in_dir` fail,
         // so the blocking entries below are not archived out of the way first.
@@ -3277,8 +6160,8 @@ mod tests {
 
         let old_id = "old-account";
         let new_id = "new-account";
-        let old_stem = sanitize_account_id_for_filename(old_id);
-        let new_stem = sanitize_account_id_for_filename(new_id);
+        let old_stem = cursor_account_cache_stem(old_id);
+        let new_stem = cursor_account_cache_stem(new_id);
 
         fs::write(cache_dir.join("archive"), b"not a directory")?;
         fs::write(cache_dir.join("usage.json"), b"old-account-data")?;
@@ -3302,6 +6185,707 @@ mod tests {
             fs::read(&incoming)?,
             b"new-account-data",
             "the incoming cache must stay under its own account id"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_layout_preserves_unverified_json_and_csv_before_switch() -> Result<()> {
+        let temp = TempDir::new()?;
+        setup_two_account_store(temp.path())?;
+        let store = load_credentials_store_from_home(temp.path()).unwrap();
+        let dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&dir)?;
+        let files = [
+            "usage.json",
+            "usage.csv",
+            "usage.team-account.json",
+            "usage.team-account.csv",
+        ];
+        for name in files {
+            fs::write(dir.join(name), format!("unverified-{name}"))?;
+        }
+        prepare_cursor_cache_layout(&dir, &store)?;
+        for name in files {
+            assert!(!dir.join(name).exists());
+        }
+        let mut saved = Vec::new();
+        for entry in fs::read_dir(dir.join("archive"))? {
+            for file in fs::read_dir(entry?.path())? {
+                let path = file?.path();
+                saved.push((
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    fs::read_to_string(path)?,
+                ));
+            }
+        }
+        assert_eq!(saved.len(), files.len());
+        for name in files {
+            assert!(saved.contains(&(name.to_string(), format!("unverified-{name}"))));
+        }
+        set_active_account_in_home(temp.path(), "team/account")?;
+        assert_eq!(
+            load_credentials_store_from_home(temp.path())
+                .unwrap()
+                .active_account_id,
+            "team/account"
+        );
+        assert!(
+            !dir.join("usage.json").exists(),
+            "unknown history must not be assigned to the selected account"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconcile_colliding_ids_without_relevant_history() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.path().join("missing");
+        reconcile_cache_files_in_dir(&missing, "team/account-a", "team@account-a")?;
+        assert!(!missing.exists());
+        reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")?;
+        fs::write(
+            temp.path().join("usage.unrelated.json"),
+            "unrelated history",
+        )?;
+        reconcile_cache_files_in_dir(temp.path(), "team/account-a", "team@account-a")?;
+        assert_eq!(
+            fs::read_to_string(temp.path().join("usage.unrelated.json"))?,
+            "unrelated history"
+        );
+        assert_eq!(fs::read_dir(temp.path())?.count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn test_colliding_expected_paths_keep_every_distinct_account() -> Result<()> {
+        let prefix = "x".repeat(80);
+        let cases = [
+            (
+                "punctuation",
+                "team/account-a".to_string(),
+                "team@account-a".to_string(),
+            ),
+            ("case", "Team_A".to_string(), "team_a".to_string()),
+            ("whitespace", " team-a ".to_string(), "team-a".to_string()),
+            ("truncation", format!("{prefix}-a"), format!("{prefix}-b")),
+            ("empty fallback", "/".to_string(), "@".to_string()),
+        ];
+        let mut failures = Vec::new();
+        for (kind, first, second) in cases {
+            let temp = TempDir::new()?;
+            let accounts = ["unrelated-active".to_string(), first, second]
+                .into_iter()
+                .map(|id| {
+                    let credentials = CursorCredentials {
+                        session_token: format!("fixture-{id}"),
+                        user_id: Some(id.clone()),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        expires_at: None,
+                        label: None,
+                    };
+                    (id, credentials)
+                })
+                .collect();
+            save_credentials_store_in_home(
+                temp.path(),
+                &CursorCredentialsStore {
+                    version: 1,
+                    active_account_id: "unrelated-active".to_string(),
+                    accounts,
+                },
+            )?;
+            let paths = expected_cursor_usage_cache_paths_in(temp.path());
+            if paths.len() != 3 {
+                failures.push(format!("{kind}: {paths:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "freshness checks must retain an independent path for every account: {}",
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_colliding_secondary_accounts_never_share_fetch_history_or_saved_rows() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        let mut endpoints = HashMap::new();
+        let mut captured = Vec::new();
+        for (id, token) in [
+            ("active", "active"),
+            ("team/account-a", "team-a"),
+            ("team@account-a", "team-b"),
+        ] {
+            accounts.insert(
+                id.to_string(),
+                CursorCredentials {
+                    session_token: token.to_string(),
+                    user_id: Some(id.to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    label: None,
+                },
+            );
+            let body = json_page(
+                2,
+                &[
+                    &json_event(&format!("{token}-new"), "7200000"),
+                    &json_event(&format!("{token}-old"), "1"),
+                ],
+            );
+            let (url, requests) = serve_json_pages(vec![(String::new(), body)]);
+            endpoints.insert(token.to_string(), url);
+            captured.push((token, requests));
+        }
+        save_credentials_store_in_home(
+            temp.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active".to_string(),
+                accounts,
+            },
+        )?;
+        let inputs = std::sync::Mutex::new(HashMap::new());
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp.path(),
+            |fetch| {
+                inputs
+                    .lock()
+                    .unwrap()
+                    .insert(fetch.session_token.clone(), fetch.existing_cache.clone());
+                let url = endpoints[&fetch.session_token].clone();
+                async move {
+                    fetch_cursor_usage_events_json_merging(
+                        &url,
+                        &fetch.session_token,
+                        Some(Duration::from_secs(2)),
+                        true,
+                        CURSOR_MAX_JSON_BYTES,
+                        2,
+                        fetch.existing_cache.as_deref(),
+                    )
+                    .await
+                }
+            },
+        ));
+        let inputs = inputs.into_inner().unwrap();
+        eprintln!("actual fetch inputs: {}", serde_json::to_string(&inputs)?);
+        let mut saved = Vec::new();
+        for entry in fs::read_dir(cursor_cache_dir(temp.path()))? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let rows = cached_usage_events(Some(&fs::read_to_string(&path)?));
+                eprintln!(
+                    "saved {}: {}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    serde_json::to_string(&rows)?
+                );
+                saved.push(rows);
+            }
+        }
+        for (token, requests) in &captured {
+            eprintln!("actual HTTP for {token}: {:?}", requests.lock().unwrap());
+        }
+        assert!(result.synced, "{result:?}");
+        assert!(
+            inputs.values().all(Option::is_none),
+            "cold accounts must never receive another account's just-written cache"
+        );
+        assert_eq!(saved.len(), 3, "each account must retain its own cache");
+        for (token, requests) in captured {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                !requests[0].contains("\"startDate\""),
+                "cold {token} must request full history"
+            );
+            let rows = saved
+                .iter()
+                .find(|rows| {
+                    rows.iter()
+                        .any(|row| row["conversationId"] == format!("{token}-new"))
+                })
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                2,
+                "only {token}'s new and old history belongs in this file"
+            );
+            assert!(rows
+                .iter()
+                .all(|row| row["conversationId"].as_str().unwrap().starts_with(token)));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_handles_long_and_escaped_account_ids() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        let account_id = format!(
+            "team/\"{}é",
+            "x".repeat(CURSOR_CACHE_OWNER_ENVELOPE_BYTES * 2)
+        );
+        let owned = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &account_id)?;
+        assert!(owned.starts_with(r#"{"_owner":"#));
+        assert!(owned.contains(r#","zzTokscaleOwner":"#));
+        fs::write(&path, owned)?;
+
+        let expected_hash = cursor_cache_owner_hash(&account_id);
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(expected_hash.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_rejects_truncation_and_foreign_owner() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        let owned_a = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "account-a")?;
+        let owned_b = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "account-b")?;
+        assert_eq!(owned_a.len(), owned_b.len());
+
+        fs::write(&path, &owned_a)?;
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(cursor_cache_owner_hash("account-a").as_str())
+        );
+        fs::write(&path, &owned_b)?;
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(cursor_cache_owner_hash("account-b").as_str())
+        );
+
+        let mut mismatched: serde_json::Value = serde_json::from_str(&owned_a)?;
+        mismatched["zzTokscaleOwner"]["generation"] =
+            serde_json::json!("00000000-0000-0000-0000-000000000000");
+        fs::write(&path, serde_json::to_string(&mismatched)?)?;
+        assert!(cursor_cache_advertises_owner_envelope(&path));
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(
+            cursor_cache_owner_hash_from_file(&path),
+            None,
+            "a cache advertising a broken envelope must not downgrade to legacy trust"
+        );
+
+        fs::write(&path, &owned_a.as_bytes()[..owned_a.len() - 1])?;
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(cursor_cache_owner_hash_from_file(&path), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_falls_back_for_valid_legacy_cache() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        fs::write(
+            &path,
+            r#"{"_tokscale":{"version":1,"accountId":"legacy"},"usageEventsDisplay":[]}"#,
+        )?;
+        assert!(!cursor_cache_advertises_owner_envelope(&path));
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(
+            cursor_cache_owner_hash_from_file(&path).as_deref(),
+            Some(cursor_cache_owner_hash("legacy").as_str())
+        );
+        Ok(())
+    }
+
+    fn collision_fixture_store(home: &Path) -> Result<CursorCredentialsStore> {
+        let ids = ["team/account-a", "team@account-a", "TEAM_ACCOUNT_A"];
+        let store = CursorCredentialsStore {
+            version: 1,
+            active_account_id: ids[0].to_string(),
+            accounts: ids
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        CursorCredentials {
+                            session_token: format!("{id}::fixture"),
+                            user_id: Some(id.to_string()),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            expires_at: None,
+                            label: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        save_credentials_store_in_home(home, &store)?;
+        Ok(store)
+    }
+
+    fn preserved_cursor_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut files = Vec::new();
+        if !dir.join("archive").exists() {
+            return Ok(files);
+        }
+        for entry in fs::read_dir(dir.join("archive"))? {
+            for file in fs::read_dir(entry?.path())? {
+                let path = file?.path();
+                files.push((
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    fs::read(path)?,
+                ));
+            }
+        }
+        Ok(files)
+    }
+
+    #[test]
+    fn test_legacy_collision_recovery_refetches_without_assigning_ownership() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        let old = String::from_utf8(json_page(1, &[&json_event("unknown-owner", "9999999")]))?;
+        let legacy = [
+            "usage.json",
+            "usage.team-account-a.json",
+            "usage.team-account-a.csv",
+        ];
+        for name in legacy {
+            fs::write(dir.join(name), old.as_bytes())?;
+        }
+        // Even a new-looking filename is unsafe when the ownership disagrees.
+        let wrong = format!("usage.{}.json", cursor_account_cache_stem("team@account-a"));
+        let wrong_contents = owned_cursor_cache(&old, "team/account-a")?;
+        fs::write(dir.join(&wrong), &wrong_contents)?;
+        let failed = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert!(fetch.existing_cache.is_none());
+                std::future::ready(Err(anyhow::anyhow!("network unavailable")))
+            }),
+        );
+        assert!(!failed.synced);
+        assert!(failed.error.unwrap().contains("network unavailable"));
+        assert!(!dir.join("usage.json").exists());
+        assert_eq!(preserved_cursor_files(&dir)?.len(), 4);
+        // A retry still fetches from the beginning and leaves every backup intact.
+        let seen = std::sync::Mutex::new(Vec::new());
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert!(
+                    fetch.existing_cache.is_none(),
+                    "legacy or foreign history must never seed a watermark"
+                );
+                let id = extract_user_id_from_session_token(&fetch.session_token).unwrap();
+                seen.lock().unwrap().push(id.clone());
+                std::future::ready(
+                    String::from_utf8(json_page(1, &[&json_event(&id, "1")])).map_err(Into::into),
+                )
+            }),
+        );
+        assert!(result.synced, "{result:?}");
+        assert_eq!(result.rows, 3);
+        assert_eq!(result.error, None);
+        assert_eq!(seen.lock().unwrap().len(), store.accounts.len());
+        let saved = preserved_cursor_files(&dir)?;
+        assert_eq!(saved.len(), 4);
+        for name in legacy {
+            assert!(saved.contains(&(name.to_string(), old.as_bytes().to_vec())));
+        }
+        assert!(saved.contains(&(wrong, wrong_contents.into_bytes())));
+        let discovered =
+            tokscale_core::scanner::scan_directory(dir.to_str().unwrap(), "usage*.json|usage*.csv");
+        assert_eq!(
+            discovered.len(),
+            3,
+            "preserved history must stay outside the live report scan"
+        );
+        for id in store.accounts.keys() {
+            let path = if *id == store.active_account_id {
+                dir.join("usage.json")
+            } else {
+                dir.join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+            };
+            let text = fs::read_to_string(&path)?;
+            assert_eq!(cursor_cache_owner(&text).as_deref(), Some(id.as_str()));
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, *id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_owned_colliding_accounts_survive_switch_refresh_remove_and_logout() -> Result<()> {
+        for purge in [false, true] {
+            let home = TempDir::new()?;
+            let store = collision_fixture_store(home.path())?;
+            let dir = cursor_cache_dir(home.path());
+            fs::create_dir_all(&dir)?;
+            for id in store.accounts.keys() {
+                let path = if *id == store.active_account_id {
+                    dir.join("usage.json")
+                } else {
+                    dir.join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+                };
+                let json = String::from_utf8(json_page(1, &[&json_event(id, "1")]))?;
+                fs::write(path, owned_cursor_cache(&json, id)?)?;
+            }
+            let first = "team/account-a";
+            let second = "team@account-a";
+            let third = "TEAM_ACCOUNT_A";
+            let third_path = dir.join(format!("usage.{}.json", cursor_account_cache_stem(third)));
+            let third_before = fs::read(&third_path)?;
+            set_active_account_in_home(home.path(), second)?;
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(dir.join("usage.json"))?).as_deref(),
+                Some(second)
+            );
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(
+                    dir.join(format!("usage.{}.json", cursor_account_cache_stem(first)))
+                )?)
+                .as_deref(),
+                Some(first)
+            );
+            assert_eq!(fs::read(&third_path)?, third_before);
+            assert_eq!(
+                upsert_credentials_in_home(home.path(), &format!("{first}::fresh-token"), None)?,
+                first
+            );
+            assert_eq!(
+                cursor_cache_owner(&fs::read_to_string(dir.join("usage.json"))?).as_deref(),
+                Some(first)
+            );
+            remove_account_in_home(home.path(), second, purge)?;
+            assert_eq!(fs::read(&third_path)?, third_before);
+            assert!(!dir
+                .join(format!("usage.{}.json", cursor_account_cache_stem(second)))
+                .exists());
+            remove_account_in_home(home.path(), first, purge)?;
+            assert_eq!(
+                load_credentials_store_from_home(home.path())
+                    .unwrap()
+                    .active_account_id,
+                third
+            );
+            assert_eq!(fs::read(dir.join("usage.json"))?, third_before);
+            // An unknown legacy alias remains recoverable even when purging known accounts.
+            fs::write(
+                dir.join("usage.team-account-a.csv"),
+                b"unknown legacy owner",
+            )?;
+            remove_all_accounts_in_home(home.path(), purge)?;
+            assert!(!cursor_credentials_path(home.path()).exists());
+            assert!(!dir.join("usage.json").exists());
+            let legacy_preserved = preserved_cursor_files(&dir)?.contains(&(
+                "usage.team-account-a.csv".to_string(),
+                b"unknown legacy owner".to_vec(),
+            ));
+            assert_eq!(legacy_preserved, !purge);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_all_purge_deletes_unverified_caches_without_archiving() -> Result<()> {
+        let home = TempDir::new()?;
+        collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), b"unverified json history")?;
+        fs::write(dir.join("usage.legacy.csv"), b"unverified csv history")?;
+        let old_archive = dir.join("archive/old-backup");
+        fs::create_dir_all(&old_archive)?;
+        fs::write(old_archive.join("usage.json"), b"earlier archived history")?;
+        let legacy_dir = old_cursor_cache_dir(home.path());
+        fs::create_dir_all(&legacy_dir)?;
+        fs::write(legacy_dir.join("usage.json"), b"legacy-location history")?;
+        fs::create_dir_all(old_cursor_credentials_path(home.path()).parent().unwrap())?;
+        fs::write(
+            old_cursor_credentials_path(home.path()),
+            b"legacy credentials",
+        )?;
+
+        remove_all_accounts_in_home(home.path(), true)?;
+
+        assert!(!cursor_credentials_path(home.path()).exists());
+        assert!(!old_cursor_credentials_path(home.path()).exists());
+        assert!(
+            !dir.exists() && !legacy_dir.exists(),
+            "purge-all must remove live, archived, and legacy-location usage"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_failed_legacy_preservation_blocks_fetch_switch_and_removal() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), b"unverified history")?;
+        fs::write(dir.join("archive"), b"blocks archival")?;
+        let credentials = fs::read(cursor_credentials_path(home.path()))?;
+        assert!(set_active_account_in_home(home.path(), "team@account-a").is_err());
+        assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
+        assert!(remove_account_in_home(home.path(), &store.active_account_id, true).is_err());
+        assert!(remove_all_accounts_in_home(home.path(), false).is_err());
+        assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
+        let fetched = std::sync::atomic::AtomicBool::new(false);
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |_| {
+                fetched.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Err(anyhow::anyhow!("fetch must not start")))
+            }),
+        );
+        assert!(!fetched.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!result.synced);
+        assert!(result.error.unwrap().contains("preserve unverified"));
+        assert!(
+            upsert_credentials_in_home(home.path(), "team@account-a::refreshed", None).is_err()
+        );
+        let after = load_credentials_store_from_home(home.path()).unwrap();
+        assert_eq!(after.active_account_id, store.active_account_id);
+        assert_eq!(
+            after.accounts["team@account-a"].session_token,
+            "team@account-a::refreshed"
+        );
+        assert_eq!(fs::read(dir.join("usage.json"))?, b"unverified history");
+        Ok(())
+    }
+
+    #[test]
+    fn test_repeated_legacy_backups_keep_each_original_copy() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        for contents in [b"first copy", b"other copy"] {
+            fs::write(dir.join("usage.json"), contents)?;
+            prepare_cursor_cache_layout(&dir, &store)?;
+        }
+        let files = preserved_cursor_files(&dir)?;
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&("usage.json".to_string(), b"first copy".to_vec())));
+        assert!(files.contains(&("usage.json".to_string(), b"other copy".to_vec())));
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_requires_owned_active_cache_after_upgrade() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("usage.json"), r#"{"usageEventsDisplay":[]}"#)?;
+        fs::write(dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+        assert!(!cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        fs::write(
+            dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &store.active_account_id)?,
+        )?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        Ok(())
+    }
+    #[test]
+    fn test_freshness_keeps_colliding_secondaries_independent_and_verified() -> Result<()> {
+        let home = TempDir::new()?;
+        let store = collision_fixture_store(home.path())?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("usage.json"),
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &store.active_account_id)?,
+        )?;
+        let a = "team@account-a";
+        let b = "TEAM_ACCOUNT_A";
+        let path_a = dir.join(format!("usage.{}.json", cursor_account_cache_stem(a)));
+        let path_b = dir.join(format!("usage.{}.json", cursor_account_cache_stem(b)));
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, a)?,
+        )?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "one fresh secondary cannot stand in for another"
+        );
+        fs::write(
+            &path_b,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, b)?,
+        )?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            home.path(),
+            Duration::from_secs(300)
+        ));
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, b)?,
+        )?;
+        fs::write(dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "a fresh attempt cannot bless foreign ownership"
+        );
+        fs::write(
+            &path_a,
+            owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, a)?,
+        )?;
+        fs::write(
+            dir.join("usage.team-account-a.csv"),
+            "unverified legacy alias",
+        )?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in(home.path(), Duration::from_secs(300)),
+            "unexpected legacy files must trigger preservation even with a fresh marker"
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_verified_active_cache_survives_duplicate_cleanup_and_failed_fetch() -> Result<()> {
+        let home = TempDir::new()?;
+        let mut store = collision_fixture_store(home.path())?;
+        let id = store.active_account_id.clone();
+        store.accounts.retain(|key, _| key == &id);
+        save_credentials_store_in_home(home.path(), &store)?;
+        let dir = cursor_cache_dir(home.path());
+        fs::create_dir_all(&dir)?;
+        let active = owned_cursor_cache(
+            &String::from_utf8(json_page(1, &[&json_event("canonical-history", "7200000")]))?,
+            &id,
+        )?;
+        let duplicate = owned_cursor_cache(
+            &String::from_utf8(json_page(1, &[&json_event("duplicate-history", "1")]))?,
+            &id,
+        )?;
+        let named = dir.join(format!("usage.{}.json", cursor_account_cache_stem(&id)));
+        fs::write(dir.join("usage.json"), &active)?;
+        fs::write(&named, &duplicate)?;
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+                assert_eq!(
+                    fetch.existing_cache.as_deref(),
+                    Some(active.as_str()),
+                    "a verified canonical cache must remain available to the fetcher"
+                );
+                std::future::ready(Err(anyhow::anyhow!("network unavailable")))
+            }),
+        );
+        assert!(!result.synced);
+        assert!(result.error.unwrap().contains("network unavailable"));
+        assert_eq!(fs::read_to_string(dir.join("usage.json"))?, active);
+        assert!(!named.exists());
+        assert_eq!(
+            preserved_cursor_files(&dir)?,
+            vec![(
+                named.file_name().unwrap().to_string_lossy().to_string(),
+                duplicate.into_bytes()
+            )]
         );
         Ok(())
     }

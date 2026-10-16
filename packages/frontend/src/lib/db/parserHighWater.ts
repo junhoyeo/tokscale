@@ -31,6 +31,11 @@ import { createSafeRecord, ownValue } from "../safeRecord";
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
   droid: 1,
+  // v2 moves exported Amp messages from the synthesized thread-created day to
+  // their server-provided usage timestamp. This is a pure re-attribution, so
+  // the receiver must replace the daily layout instead of applying its normal
+  // non-decreasing per-day merge guard.
+  amp: 2,
   // Membership and accepted generations for the atomic Antigravity family
   // transition; the submit route deliberately skips independent client plans.
   "antigravity-cli": 1,
@@ -49,7 +54,7 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
  * snapshot cannot replace anything and the bounded-growth plan applies, which
  * keeps every stored row.
  */
-const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid"]);
+const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid", "amp"]);
 
 const TOKEN_FIELDS = [
   "input",
@@ -696,6 +701,16 @@ function validState(
  * drops the cells of days the snapshot no longer dates. A snapshot that does
  * not cover it falls back to the bounded-growth plan and keeps every row.
  */
+export function scanScopeCoversFullHistory(
+  scope: { fullHistory: boolean; fullHistoryClients?: readonly string[] } | undefined,
+  clients: readonly string[],
+): boolean {
+  if (scope == null) return false;
+  if (scope.fullHistoryClients == null) return scope.fullHistory;
+  const complete = new Set(scope.fullHistoryClients);
+  return clients.every((client) => complete.has(client));
+}
+
 export function planParserHighWaterSubmission(args: {
   client: string;
   incomingVersion?: number;
@@ -719,6 +734,12 @@ export function planParserHighWaterSubmission(args: {
     return { mode: "freeze", increments: {} };
   }
   if (args.incomingVersion == null) {
+    return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
+  }
+  // Amp v1 is the already-released created-time parser. Keep accepting it for
+  // devices that have not transitioned yet, but never let an older CLI rewrite
+  // a v2 timestamp-attributed device after the receiver has established v2.
+  if (args.client === "amp" && args.incomingVersion === 1) {
     return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
   }
   if (args.incomingVersion !== supportedVersion) {

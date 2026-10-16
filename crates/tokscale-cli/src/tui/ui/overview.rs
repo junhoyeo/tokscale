@@ -3,8 +3,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use super::widgets::{
-    ambient_stable_scrollbar, fit_workspace_label_to_width, format_tokens, truncate_to_width,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    fit_workspace_label_to_width_with_marker, format_tokens,
+    truncate_ellipsis_to_width_with_marker, truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ChartGranularity};
 use crate::tui::i18n::{tr, MessageKey};
@@ -170,13 +170,20 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans: Vec<Span> = Vec::new();
     for (i, (model_name, color)) in top_models.iter().enumerate() {
-        let name = truncate_string(model_name, max_name_width);
+        let name =
+            truncate_ellipsis_to_width_with_marker(model_name, max_name_width, app.glyphs.ellipsis);
 
-        spans.push(Span::styled("●", Style::default().fg(*color)));
+        spans.push(Span::styled(
+            app.glyphs.legend_dot,
+            Style::default().fg(*color),
+        ));
         spans.push(Span::raw(format!(" {}", name)));
 
         if i < top_models.len() - 1 {
-            spans.push(Span::styled("  ·", Style::default().fg(muted_color)));
+            spans.push(Span::styled(
+                format!("  {}", app.glyphs.compact_separator),
+                Style::default().fg(muted_color),
+            ));
         }
     }
 
@@ -243,7 +250,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(theme_border))
         .title(Span::styled(
             format!(" {} ", title),
@@ -321,7 +328,11 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             // `workspace / model` is identified by both ends, so a head cut on a
             // narrow panel leaves the shared path prefix and drops the model
             // entirely. Same reasoning as the Workspace column in the table.
-            fit_workspace_label_to_width(&display_name, max_name_width)
+            fit_workspace_label_to_width_with_marker(
+                &display_name,
+                max_name_width,
+                app.glyphs.ellipsis,
+            )
         } else {
             truncate_to_width(&display_name, max_name_width)
         };
@@ -335,7 +346,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         frame.render_widget(Paragraph::new("").style(row_style), line1_area);
 
         let line1_spans = vec![
-            Span::styled("●", Style::default().fg(model_color)),
+            Span::styled(app.glyphs.legend_dot, Style::default().fg(model_color)),
             Span::styled(
                 format!(" {}", name),
                 Style::default()
@@ -381,11 +392,20 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             vec![
                 Span::styled("  In: ", subtle_text_style),
                 Span::styled(format_tokens(model.tokens_input), secondary_text_style),
-                Span::styled(" · Out: ", subtle_text_style),
+                Span::styled(
+                    format!(" {} Out: ", app.glyphs.compact_separator),
+                    subtle_text_style,
+                ),
                 Span::styled(format_tokens(model.tokens_output), secondary_text_style),
-                Span::styled(" · CR: ", subtle_text_style),
+                Span::styled(
+                    format!(" {} CR: ", app.glyphs.compact_separator),
+                    subtle_text_style,
+                ),
                 Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
-                Span::styled(" · CW: ", subtle_text_style),
+                Span::styled(
+                    format!(" {} CW: ", app.glyphs.compact_separator),
+                    subtle_text_style,
+                ),
                 Span::styled(
                     format_tokens(model.tokens_cache_write),
                     secondary_text_style,
@@ -401,7 +421,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     }
 
     if models_len > items_per_page {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(models_len, scroll_offset, items_per_page);
@@ -414,20 +434,5 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate_string(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        "…".to_string()
-    } else {
-        let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{}…", head)
     }
 }

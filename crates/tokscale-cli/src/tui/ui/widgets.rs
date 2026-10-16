@@ -1,6 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::symbols::border::Set as BorderSet;
-use ratatui::widgets::{Cell, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::sessions::WORKTREE_SEPARATOR;
 use tokscale_core::ClientId;
 use unicode_segmentation::UnicodeSegmentation;
@@ -9,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
 use crate::tui::themes::Theme;
+use crate::ui_glyphs::Glyphs;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000_000 {
@@ -54,10 +54,10 @@ pub fn format_cost(cost: f64) -> String {
 }
 
 /// Cost per million tokens: useful for comparing model efficiency across sessions.
-/// Returns "—" when there are no tokens to avoid division by zero.
-pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
+/// Returns the active missing-value marker when there are no tokens.
+pub fn format_cost_per_million(cost: f64, total_tokens: u64, glyphs: Glyphs) -> String {
     if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
-        return "\u{2014}".to_string(); // —
+        return glyphs.missing.to_string();
     }
     let per_m = cost / (total_tokens as f64) * 1_000_000.0;
     if cost > 0.0 && per_m < 0.01 {
@@ -70,48 +70,35 @@ pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
 /// Cache reuse multiplier: cached reads per full-price input token.
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).
-pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> String {
+pub fn format_cache_hit_rate(
+    cache_read: u64,
+    input: u64,
+    cache_write: u64,
+    glyphs: Glyphs,
+) -> String {
     let paid = input.saturating_add(cache_write);
     if paid == 0 {
         return if cache_read > 0 {
-            "∞".to_string()
+            glyphs.infinity.to_string()
         } else {
-            "—".to_string()
+            glyphs.missing.to_string()
         };
     }
     let ratio = cache_read as f64 / paid as f64;
     format!("{:.1}x", ratio)
 }
 
-pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
+pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>, glyphs: Glyphs) -> String {
     let Some(value) = ms_per_1k_tokens else {
-        return "—".to_string();
+        return glyphs.missing.to_string();
     };
     if !value.is_finite() || value <= 0.0 {
-        "—".to_string()
+        glyphs.missing.to_string()
     } else if value >= 1000.0 {
         format!("{:.1}s", value / 1000.0)
     } else {
         format!("{:.0}ms", value)
     }
-}
-
-/// Vertical scrollbar drawn only from width-stable glyphs, for the same
-/// reason as [`AMBIENT_STABLE_BORDER_SET`]: ratatui's defaults — `║` track,
-/// `█` thumb, `▲`/`▼` endpoints — are all East-Asian-Ambiguous, and the
-/// scrollbar overlays the frame's outermost right column, exactly where a
-/// glyph that streams two cells wide in a CJK locale wraps into the next row
-/// (or scrolls the screen from the bottom row). The endpoints and thumb are
-/// East-Asian-Neutral (U+25B4/U+25BE/U+25AE) — one cell under both `width`
-/// and `width_cjk`, the same class as the U+22EF truncation marker — and the
-/// track is ASCII. Every scrollbar goes through here so no caller
-/// reintroduces a default symbol.
-pub fn ambient_stable_scrollbar() -> Scrollbar<'static> {
-    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some("\u{25B4}")) // ▴
-        .end_symbol(Some("\u{25BE}")) // ▾
-        .track_symbol(Some("|"))
-        .thumb_symbol("\u{25AE}") // ▮
 }
 
 pub fn viewport_scrollbar_state(
@@ -156,36 +143,6 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
 pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
-
-/// Box-drawing border for every framed block, built entirely from ASCII.
-///
-/// Every code point in ratatui's default sets (PLAIN, ROUNDED, DOUBLE, …) is
-/// East-Asian-Ambiguous: one cell to `unicode-width` — and to ratatui's own
-/// cell math — but two cells in a terminal running a CJK locale. Ratatui's
-/// crossterm backend streams adjacent buffer cells without repositioning
-/// between them, so every ambiguous glyph makes the emitted row one physical
-/// cell wider than the buffer believes; the overflow pushes the rest of the
-/// row past the terminal edge, wrapping onto — or, on the last row, scrolling
-/// — the line below while the diff buffer still thinks nothing moved. `│` `─`
-/// `┌` are exactly the same class of bug as the U+2026 ellipsis fixed in
-/// #1304, just drawn by the frame instead of the content. That includes the
-/// horizontals: a top or bottom edge drawn with `─` emits at roughly twice
-/// the row width, and the footer's bottom border sits on the terminal's last
-/// row where the wrap becomes a scroll. Unicode assigns no unambiguous light
-/// horizontal — the dashes U+2010..U+2015 are all Ambiguous as well — so the
-/// horizontal is ASCII `-` like every other member: one cell in every
-/// terminal, so a frame measures the same in both ambients and the table's
-/// width budget holds.
-pub const AMBIENT_STABLE_BORDER_SET: BorderSet = BorderSet {
-    vertical_left: "|",
-    vertical_right: "|",
-    horizontal_top: "-",
-    horizontal_bottom: "-",
-    top_left: "+",
-    top_right: "+",
-    bottom_left: "+",
-    bottom_right: "+",
-};
 
 /// Longest prefix of `s` that fits in `max_cells` terminal cells. Never splits
 /// a grapheme, so the result can come in one cell short of the budget rather
@@ -250,7 +207,8 @@ pub fn suffix_to_width(s: &str, max_cells: usize) -> &str {
 /// pushed the rest of the table sideways. U+22EF is Neutral, so it is one cell
 /// in both ambients and the budget this module computes is the width the
 /// terminal actually uses.
-pub(crate) const MIDDLE_ELLIPSIS: &str = "⋯";
+#[cfg(test)]
+pub(crate) const MIDDLE_ELLIPSIS: &str = Glyphs::ascii_safe().ellipsis;
 
 /// Fit `s` into `max_cells` by dropping its MIDDLE instead of its tail.
 ///
@@ -261,7 +219,12 @@ pub(crate) const MIDDLE_ELLIPSIS: &str = "⋯";
 /// that turned six distinct worktrees into six identical `tokscale ⑃ wo...`
 /// rows. Keeping both ends keeps the discriminating segment on screen whichever
 /// end of the label it sits at.
+#[cfg(test)]
 pub fn elide_middle_to_width(s: &str, max_cells: usize) -> String {
+    elide_middle_to_width_with_marker(s, max_cells, Glyphs::ascii_safe().ellipsis)
+}
+
+pub fn elide_middle_to_width_with_marker(s: &str, max_cells: usize, marker: &str) -> String {
     if max_cells == 0 {
         return String::new();
     }
@@ -285,7 +248,7 @@ pub fn elide_middle_to_width(s: &str, max_cells: usize) -> String {
     if head.len() + tail.len() >= s.len() {
         return truncate_to_width(s, max_cells);
     }
-    format!("{head}{MIDDLE_ELLIPSIS}{tail}")
+    format!("{head}{marker}{tail}")
 }
 
 /// Cells a path segment must be granted before showing it beats dropping it:
@@ -319,6 +282,14 @@ const MIN_SEGMENT_CELLS: usize = 4;
 /// not before. The column is a summary; the full key stays in `--json` and in
 /// the wider layouts this same function produces.
 pub fn fit_workspace_label_to_width(label: &str, max_cells: usize) -> String {
+    fit_workspace_label_to_width_with_marker(label, max_cells, Glyphs::ascii_safe().ellipsis)
+}
+
+pub fn fit_workspace_label_to_width_with_marker(
+    label: &str,
+    max_cells: usize,
+    marker: &str,
+) -> String {
     if display_width(label) <= max_cells {
         return label.to_string();
     }
@@ -327,8 +298,8 @@ pub fn fit_workspace_label_to_width(label: &str, max_cells: usize) -> String {
     }
 
     match split_qualifying_key(label) {
-        Some((name, key)) => fit_qualified_label(name, key, max_cells),
-        None => fit_path_label(label, max_cells),
+        Some((name, key)) => fit_qualified_label(name, key, max_cells, marker),
+        None => fit_path_label(label, max_cells, marker),
     }
 }
 
@@ -360,24 +331,24 @@ fn split_qualifying_key(label: &str) -> Option<(&str, &str)> {
 /// took half the row and then collapsed its own interior. The name is capped
 /// only by the floor every segment gets, so what is left for the key is enough
 /// to show where it starts and where it ends and nothing more.
-fn fit_qualified_label(name: &str, key: &str, max_cells: usize) -> String {
+fn fit_qualified_label(name: &str, key: &str, max_cells: usize, marker: &str) -> String {
     let budget = max_cells.saturating_sub(KEY_QUALIFIER_CELLS);
     if budget < MIN_SEGMENT_CELLS * 2 {
         // No room to say anything about both halves; the qualifier is dead
         // weight, so spend every cell on the name.
-        return elide_middle_to_width(&format!("{name} ({key})"), max_cells);
+        return elide_middle_to_width_with_marker(&format!("{name} ({key})"), max_cells, marker);
     }
 
     let name_cells = display_width(name).min(budget - MIN_SEGMENT_CELLS);
     format!(
         "{} ({})",
-        fit_path_label(name, name_cells),
-        elide_middle_to_width(key, budget - name_cells)
+        fit_path_label(name, name_cells, marker),
+        elide_middle_to_width_with_marker(key, budget - name_cells, marker)
     )
 }
 
 /// [`fit_workspace_label_to_width`] for a label that is only a path.
-fn fit_path_label(label: &str, max_cells: usize) -> String {
+fn fit_path_label(label: &str, max_cells: usize, marker: &str) -> String {
     if display_width(label) <= max_cells {
         return label.to_string();
     }
@@ -387,7 +358,7 @@ fn fit_path_label(label: &str, max_cells: usize) -> String {
 
     let (mut segments, mut separators) = split_label_parts(label);
     if segments.len() < 2 {
-        return elide_middle_to_width(label, max_cells);
+        return elide_middle_to_width_with_marker(label, max_cells, marker);
     }
 
     // The separators are not negotiable: they are what makes the result read as
@@ -408,7 +379,7 @@ fn fit_path_label(label: &str, max_cells: usize) -> String {
         budget = max_cells.saturating_sub(separator_cells(&separators) + 1);
     }
     if budget < MIN_SEGMENT_CELLS * segments.len() {
-        return elide_middle_to_width(label, max_cells);
+        return elide_middle_to_width_with_marker(label, max_cells, marker);
     }
 
     let widths: Vec<usize> = segments.iter().map(|s| display_width(s)).collect();
@@ -416,12 +387,12 @@ fn fit_path_label(label: &str, max_cells: usize) -> String {
     let parts: Vec<String> = segments
         .iter()
         .zip(&allocation)
-        .map(|(segment, cells)| elide_middle_to_width(segment, *cells))
+        .map(|(segment, cells)| elide_middle_to_width_with_marker(segment, *cells, marker))
         .collect();
 
     if collapsed_interior {
         return format!(
-            "{}{}{MIDDLE_ELLIPSIS}{}{}",
+            "{}{}{marker}{}{}",
             parts[0], separators[0], separators[1], parts[1]
         );
     }
@@ -526,6 +497,7 @@ pub(crate) fn light_ratio_bar_spans(
     width: usize,
     fill_style: Style,
     empty_style: Style,
+    glyphs: Glyphs,
 ) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
@@ -542,19 +514,30 @@ pub(crate) fn light_ratio_bar_spans(
     let empty = width.saturating_sub(filled + usize::from(trace));
 
     let mut spans = Vec::with_capacity(3);
+    let fill_style = match glyphs.chart_fill {
+        crate::ui_glyphs::ChartFill::Foreground => fill_style,
+        crate::ui_glyphs::ChartFill::Background => {
+            fill_style.bg(fill_style.fg.unwrap_or(Color::Reset))
+        }
+    };
     if filled > 0 {
-        spans.push(Span::styled("█".repeat(filled), fill_style));
+        spans.push(Span::styled(glyphs.ratio_full.repeat(filled), fill_style));
     }
     if trace {
-        spans.push(Span::styled("▏", fill_style));
+        spans.push(Span::styled(glyphs.ratio_trace, fill_style));
     }
     if empty > 0 {
-        spans.push(Span::styled("·".repeat(empty), empty_style));
+        spans.push(Span::styled(glyphs.ratio_empty.repeat(empty), empty_style));
     }
     spans
 }
 
+#[cfg(test)]
 pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
+    truncate_ellipsis_with_marker(s, max_chars, Glyphs::ascii_safe().ellipsis)
+}
+
+pub(crate) fn truncate_ellipsis_with_marker(s: &str, max_chars: usize, marker: &str) -> String {
     if max_chars == 0 {
         return String::new();
     }
@@ -562,14 +545,14 @@ pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
     if char_count <= max_chars {
         s.to_string()
     } else if max_chars == 1 {
-        "…".to_string()
+        marker.to_string()
     } else {
         let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{head}…")
+        format!("{head}{marker}")
     }
 }
 
-/// [`truncate_ellipsis`] measured in terminal cells instead of code points.
+/// [`truncate_ellipsis_with_marker`] measured in terminal cells instead of code points.
 ///
 /// A string holding full-width graphemes is cut against the width ratatui will
 /// actually draw it at. A code-point budget lets `활성 · 한도부족` (9 code
@@ -577,11 +560,20 @@ pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
 /// it at the panel edge with no marker at all, which is the failure this exists
 /// to prevent.
 ///
-/// The marker is [`MIDDLE_ELLIPSIS`], not U+2026 `…`: U+2026 is
+/// In safe mode the marker is U+22EF, not U+2026 `…`: U+2026 is
 /// East-Asian-Ambiguous and draws two cells in a CJK-locale terminal, which is
 /// exactly where the translated text this helper fits is read. A one-cell
 /// budget has to stay one cell there too.
+#[cfg(test)]
 pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
+    truncate_ellipsis_to_width_with_marker(s, max_cells, Glyphs::ascii_safe().ellipsis)
+}
+
+pub(crate) fn truncate_ellipsis_to_width_with_marker(
+    s: &str,
+    max_cells: usize,
+    marker: &str,
+) -> String {
     if max_cells == 0 {
         return String::new();
     }
@@ -589,9 +581,9 @@ pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
         return s.to_string();
     }
     if max_cells == 1 {
-        return MIDDLE_ELLIPSIS.to_string();
+        return marker.to_string();
     }
-    format!("{}{MIDDLE_ELLIPSIS}", prefix_to_width(s, max_cells - 1))
+    format!("{}{marker}", prefix_to_width(s, max_cells - 1))
 }
 
 /// Pad `s` with trailing spaces until it occupies `cells` terminal cells.
@@ -1055,6 +1047,24 @@ mod tests {
     /// On pure ASCII the cell version cuts at the same place as the code-point
     /// version and differs only in its marker: `⋯` instead of the
     /// East-Asian-Ambiguous `…`, so the marker is one cell in every terminal.
+    #[test]
+    fn safe_numeric_fallbacks_are_ambient_width_invariant() {
+        let glyphs = Glyphs::ascii_safe();
+        let values = [
+            format_cost_per_million(1.0, 0, glyphs),
+            format_cache_hit_rate(0, 0, 0, glyphs),
+            format_cache_hit_rate(1, 0, 0, glyphs),
+            format_ms_per_1k(None, glyphs),
+        ];
+        assert_eq!(values, ["-", "-", "inf", "-"]);
+        for value in values {
+            assert_eq!(
+                UnicodeWidthStr::width(value.as_str()),
+                UnicodeWidthStr::width_cjk(value.as_str())
+            );
+        }
+    }
+
     #[test]
     fn truncate_ellipsis_to_width_cuts_ascii_where_the_char_version_does() {
         for budget in 0..=24 {

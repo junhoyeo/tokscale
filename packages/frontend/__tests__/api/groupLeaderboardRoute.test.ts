@@ -50,12 +50,22 @@ beforeEach(() => {
 });
 
 describe("GET /api/groups/[slug]/leaderboard", () => {
+  it.each(["last-month", "last-week"])("accepts %s using the stored group calendar", async (period) => {
+    mockState.getGroupBySlug.mockResolvedValue({ id: "group-1", slug: "team", isPublic: true, timeZone: "Pacific/Auckland", weekStartsOn: 6 });
+    mockState.getGroupLeaderboardData.mockResolvedValue({ period });
+    const response = await GET(new Request(`http://localhost:3000/api/groups/team/leaderboard?period=${period}`), { params: Promise.resolve({ slug: "team" }) });
+    expect(response.status).toBe(200);
+    expect(mockState.getGroupLeaderboardData).toHaveBeenCalledWith("group-1", period, 1, 50, "tokens", "", "Pacific/Auckland", 6);
+  });
+
   it("hides private group leaderboard data from non-members", async () => {
     mockState.getGroupBySlug.mockResolvedValue({
       id: "group-1",
       slug: "team",
       name: "Team",
       isPublic: false,
+      timeZone: "Asia/Seoul",
+      weekStartsOn: 0,
     });
     mockState.getSessionFromRequest.mockResolvedValue({
       id: "user-outsider",
@@ -80,6 +90,8 @@ describe("GET /api/groups/[slug]/leaderboard", () => {
       slug: "team",
       name: "Team",
       isPublic: false,
+      timeZone: "Asia/Seoul",
+      weekStartsOn: 0,
     });
     mockState.getSessionFromRequest.mockResolvedValue({
       id: "user-member",
@@ -108,7 +120,9 @@ describe("GET /api/groups/[slug]/leaderboard", () => {
       2,
       25,
       "cost",
-      "mem"
+      "mem",
+      "Asia/Seoul",
+      0,
     );
   });
 });

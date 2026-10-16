@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{layout::Rect, Frame};
 
 use crate::tui::themes::Theme;
+use crate::ui_glyphs::Glyphs;
 
 use super::{overlay, DialogContent, DialogResult};
 
@@ -66,7 +67,7 @@ impl DialogStack {
     }
 
     /// Render the dialog stack (backdrop + topmost dialog)
-    pub fn render(&mut self, frame: &mut Frame, viewport: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, viewport: Rect, glyphs: Glyphs) {
         let Some(top) = self.stack.last() else {
             self.top_rect = None;
             return;
@@ -82,7 +83,7 @@ impl DialogStack {
 
         // Render dialog surface and content
         overlay::render_dialog_surface(frame, area, &self.theme);
-        top.render(frame, area, &self.theme);
+        top.render(frame, area, &self.theme, glyphs);
     }
 
     /// Handle a key event, returns true if the event was consumed
