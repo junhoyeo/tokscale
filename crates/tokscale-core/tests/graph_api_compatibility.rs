@@ -27,6 +27,7 @@ fn legacy_message() -> UnifiedMessage {
         parent_session_id: None,
         is_turn_start: false,
         model_attribution_conflicted: false,
+        copilot_context: None,
     }
 }
 

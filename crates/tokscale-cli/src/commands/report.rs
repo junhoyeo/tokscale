@@ -2,7 +2,6 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use colored::Colorize;
 use std::collections::HashMap;
-use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use unicode_normalization::UnicodeNormalization;
 
@@ -35,7 +34,16 @@ pub struct ReportOptions {
     pub full: bool,
 }
 
+fn should_auto_sync_amp_for_report(home_dir: &Option<String>, client: &Option<String>) -> bool {
+    home_dir.is_none() && client.as_deref().is_none_or(|client| client == "amp")
+}
+
 pub fn run_report(opts: ReportOptions) -> Result<()> {
+    if should_auto_sync_amp_for_report(&opts.home_dir, &opts.client) {
+        if let Some(warning) = crate::amp::auto_sync() {
+            eprintln!("{warning}");
+        }
+    }
     let wiki_path = WikiDb::default_path();
     let db =
         WikiDb::open(&wiki_path).map_err(|e| anyhow::anyhow!("Failed to open wiki DB: {}", e))?;
@@ -1037,87 +1045,153 @@ fn run_minimax_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_js
 /// `tokscale report` can never block forever.
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
-/// `timeout` for it to finish.
-///
-/// Mirrors the pure-std spawn + reader-thread + `try_wait()` deadline + kill
-/// approach used by `run_capture_command` in `main.rs` (no extra dependency).
-/// Both stdout and stderr are drained on dedicated threads so a chatty backend
-/// cannot deadlock on a full pipe buffer while we poll for exit.
-///
-/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
-/// returned, which callers treat as a recoverable "skip this backend" signal.
-fn run_command_with_timeout(
-    mut cmd: Command,
-    timeout: Duration,
-    stdin_bytes: Option<&[u8]>,
-) -> std::io::Result<Output> {
-    use std::io::Read;
-    use std::thread;
-    use std::time::Instant;
+const MAX_CAPTURED_SUBPROCESS_BYTES: usize = 16 * 1024 * 1024;
 
+async fn drain_subprocess_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = pipe.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(read) > MAX_CAPTURED_SUBPROCESS_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("subprocess output exceeded {MAX_CAPTURED_SUBPROCESS_BYTES} byte limit"),
+            ));
+        }
+        output.extend_from_slice(&chunk[..read]);
+    }
+}
+
+async fn terminate_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+async fn run_command_async(
+    mut cmd: Command,
+    stdin_bytes: Option<Vec<u8>>,
+    timeout: Duration,
+) -> std::io::Result<Output> {
+    use tokio::io::AsyncWriteExt;
+
+    let deadline = tokio::time::Instant::now() + timeout;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
     }
-
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
-
-    // Write to stdin (if requested) before draining output, then drop the
-    // handle so the child sees EOF.
     if let Some(bytes) = stdin_bytes {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(bytes)?;
+            match tokio::time::timeout_at(deadline, stdin.write_all(&bytes)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    terminate_and_reap(&mut child).await;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "subprocess stdin write timed out",
+                    ));
+                }
+            }
         }
     }
-
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| std::io::Error::other("failed to capture subprocess stdout"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
+    let mut stdout_drain = Box::pin(drain_subprocess_pipe(stdout));
+    let mut stderr_drain = Box::pin(drain_subprocess_pipe(stderr));
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
 
-    let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf)?;
-        Ok(buf)
-    });
-    let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        stderr.read_to_end(&mut buf)?;
-        Ok(buf)
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    loop {
+        tokio::select! {
+            result = child.wait(), if status.is_none() => {
+                match result {
+                    Ok(value) => status = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            result = &mut stdout_drain, if stdout.is_none() => {
+                match result {
+                    Ok(value) => stdout = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            result = &mut stderr_drain, if stderr.is_none() => {
+                match result {
+                    Ok(value) => stderr = Some(value),
+                    Err(error) => {
+                        terminate_and_reap(&mut child).await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                if status.is_none() {
+                    terminate_and_reap(&mut child).await;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "subprocess or output drain timed out",
+                ));
+            }
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "summarizer backend timed out",
-            ));
+
+        if let (Some(status), Some(stdout), Some(stderr)) = (&status, &stdout, &stderr) {
+            return Ok(Output {
+                status: *status,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            });
         }
-        thread::sleep(Duration::from_millis(25));
-    };
+    }
+}
 
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| std::io::Error::other("subprocess stdout reader thread panicked"))??;
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| std::io::Error::other("subprocess stderr reader thread panicked"))??;
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
+/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
+/// `timeout` for the direct child and both bounded output drains to finish.
+///
+/// The async drains are owned by the invocation. Timing out drops and closes
+/// them before the dedicated runtime thread returns, so a descendant retaining
+/// a pipe cannot leak a blocked reader across repeated commands.
+///
+/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
+/// returned, which callers treat as a recoverable "skip this backend" signal.
+pub(crate) fn run_command_with_timeout(
+    cmd: Command,
+    timeout: Duration,
+    stdin_bytes: Option<&[u8]>,
+) -> std::io::Result<Output> {
+    let stdin_bytes = stdin_bytes.map(<[u8]>::to_vec);
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(run_command_async(cmd, stdin_bytes, timeout))
+            })
+            .join()
+            .map_err(|_| std::io::Error::other("subprocess runtime thread panicked"))?
     })
 }
 
@@ -2446,5 +2520,67 @@ mod tests {
     fn parse_openai_content_returns_none_without_choices() {
         assert_eq!(parse_openai_content(r#"{"error":"nope"}"#), None);
         assert_eq!(parse_openai_content("not json"), None);
+    }
+
+    #[test]
+    fn bounded_subprocess_drain_rejects_oversized_output() {
+        let bytes = vec![0_u8; MAX_CAPTURED_SUBPROCESS_BYTES + 1];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(drain_subprocess_pipe(&bytes[..]))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_and_reaps_the_direct_child() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let pid_path = temp.path().join("pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!("echo $$ > {}; exec sleep 30", pid_path.display()),
+        ]);
+
+        let error =
+            run_command_with_timeout(command, Duration::from_millis(200), None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "timed-out direct child {pid} still exists");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_capture_cancels_descendant_owned_output_drains() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "(sleep 2) & printf done"]);
+
+        let error =
+            run_command_with_timeout(command, Duration::from_millis(200), None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn report_amp_auto_sync_respects_client_filter_and_home_isolation() {
+        assert!(should_auto_sync_amp_for_report(&None, &None));
+        assert!(should_auto_sync_amp_for_report(&None, &Some("amp".into())));
+        assert!(!should_auto_sync_amp_for_report(
+            &None,
+            &Some("codex".into())
+        ));
+        assert!(!should_auto_sync_amp_for_report(
+            &Some("/tmp/profile".into()),
+            &Some("amp".into())
+        ));
     }
 }

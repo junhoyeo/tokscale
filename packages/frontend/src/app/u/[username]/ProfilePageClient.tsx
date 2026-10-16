@@ -32,7 +32,7 @@ import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
 import type { ModerationNotice } from "@/lib/moderation/notice";
 
-type ProfilePeriod = "all" | "week" | "month";
+import { PROFILE_PERIODS, PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 export interface ProfileData {
   user: {
@@ -358,7 +358,9 @@ export default function ProfilePageClient({
                               : `Daily contribution density across ${selectedContributionRange?.label ?? "the selected year"}.`
                             : period === "month"
                               ? "Daily contribution density across the last 30 days."
-                              : "Daily contribution density across the last 7 days."
+                              : period === "week"
+                                ? "Daily contribution density across the last 7 days."
+                                : `Daily contribution density for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC).`
                         }
                       />
                     </ContributionArea>
@@ -384,7 +386,9 @@ export default function ProfilePageClient({
                             ? "Model activity for the latest 12 months, grouped by provider."
                             : period === "month"
                               ? "Model activity for the last 30 days, grouped by provider."
-                              : "Model activity for the last 7 days, grouped by provider."
+                              : period === "week"
+                                ? "Model activity for the last 7 days, grouped by provider."
+                                : `Model activity for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC), grouped by provider.`
                         }
                       />
                     </UsageArea>
@@ -453,7 +457,7 @@ function ProfileInsights({
   period: ProfilePeriod;
 }) {
   const rangeLabel =
-    period === "all" ? "1y" : period === "month" ? "30d" : "7d";
+    period === "all" ? "1y" : PROFILE_PERIOD_LABELS[period];
   const insights = [
     {
       label: `Favorite model (${rangeLabel})`,
@@ -468,7 +472,7 @@ function ProfileInsights({
         }
       : {
           label: "Selected range",
-          value: period === "month" ? "Last 30 days" : "Last 7 days",
+          value: period === "month" ? "Last 30 days" : period === "week" ? "Last 7 days" : `${rangeLabel} (UTC)`,
         },
     {
       label: period === "all" ? "Models (latest)" : `Models (${rangeLabel})`,
@@ -526,11 +530,7 @@ function MetadataList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
-const PERIOD_OPTIONS: Array<{ value: ProfilePeriod; label: string }> = [
-  { value: "all", label: "Lifetime" },
-  { value: "month", label: "30d" },
-  { value: "week", label: "7d" },
-];
+const PERIOD_OPTIONS = PROFILE_PERIODS.map((value) => ({ value, label: PROFILE_PERIOD_LABELS[value] }));
 
 function buildProfilePeriodHref(
   username: string,
@@ -658,6 +658,8 @@ const TabsScroller = styled.div`
 
 const PeriodSelectorContainer = styled.nav`
   display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
@@ -683,6 +685,7 @@ const PeriodLink = styled(Link)<{ $active: boolean }>`
   font-size: 13px;
   font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
 
   &:hover {
     color: var(--service-text);

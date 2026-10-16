@@ -313,12 +313,11 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         DEFAULT_CONTEXT_WINDOW
     };
 
-    // Sum the credit-unit metering entries across every turn: the conversation
-    // credit is provider-reported and gets assigned to the first turn actually
-    // emitted (skipped zero-token turns are not "emitted").
-    let credit_sum: f64 = turns.iter().map(KiroTurnMetadata::credit_sum).sum();
+    // CLI metering is per turn. Preserve its index even when a zero-token
+    // turn is skipped, so its credits can reach the nearest emitted turn.
+    let turn_credits: Vec<f64> = turns.iter().map(KiroTurnMetadata::credit_sum).collect();
 
-    let mut messages: Vec<UnifiedMessage> = turns
+    let (emitted_indices, mut messages): (Vec<usize>, Vec<UnifiedMessage>) = turns
         .into_iter()
         .enumerate()
         .filter_map(|(index, turn)| {
@@ -445,20 +444,32 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
             message.duration_ms = duration_ms;
             message.is_turn_start = true;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
-            Some(message)
+            Some((index, message))
         })
-        .collect();
+        .unzip();
 
-    // Credit-based provider-reported cost (design Property 6): when the
-    // conversation's `metering_usage` credit sum is > 0, assign
-    // `credit_sum * CREDIT_TO_USD` to the FIRST emitted turn and mark it
-    // provider-reported so the pricing dispatch does not override it. When no
-    // credit is present, turns stay at cost 0.0 / CostSource::Unknown.
-    if credit_sum > 0.0 {
-        if let Some(message) = messages.first_mut() {
-            message.cost = credit_sum * CREDIT_TO_USD;
-            message.mark_provider_reported_cost();
+    if messages.is_empty() {
+        return messages;
+    }
+
+    // Keep each emitted turn's credits authoritative. A skipped turn's
+    // credits go to the closest emitted turn by metadata index (ties go to
+    // the earlier turn). Both index lists are ordered, so this is linear.
+    // Unmetered turns remain Unknown for downstream token-based pricing.
+    let mut recipient = 0;
+    for (index, credits) in turn_credits.into_iter().enumerate() {
+        if !credits.is_finite() || credits <= 0.0 {
+            continue;
         }
+        while recipient + 1 < emitted_indices.len()
+            && emitted_indices[recipient + 1].abs_diff(index)
+                < emitted_indices[recipient].abs_diff(index)
+        {
+            recipient += 1;
+        }
+        let message = &mut messages[recipient];
+        message.cost += credits * CREDIT_TO_USD;
+        message.mark_provider_reported_cost();
     }
 
     messages
@@ -5291,11 +5302,10 @@ not valid json at all
         assert_eq!(m.message_count, 3);
     }
 
-    // Unit: metering_usage credit sum → credit_sum * CREDIT_TO_USD assigned to
-    // the FIRST emitted turn and marked provider-reported. A skipped
-    // (zero-token) first turn does not consume the credit.
+    // A metered turn keeps its own credits when earlier zero-token turns
+    // are skipped.
     #[test]
-    fn test_parse_kiro_cli_metering_credit_on_first_emitted_turn() {
+    fn test_parse_kiro_cli_metering_credit_on_its_emitted_turn() {
         let dir = TempDir::new().unwrap();
         let credit = 0.03132_f64;
         // Two turns: turn 0 is zero-token (skipped), turn 1 emits and carries
@@ -5333,6 +5343,207 @@ not valid json at all
         let m = &messages[0];
         assert_cost_approx(m.cost, credit * CREDIT_TO_USD, "first emitted turn");
         assert_eq!(m.cost_source, CostSource::ProviderReported);
+    }
+
+    // Replay the synthetic CLI fixture from #1388 through the real pricing
+    // dispatch: credits must not be charged again from the same turn's tokens.
+    fn cli_credit_repro_session(dir: &TempDir, stem: &str, credited: bool) -> PathBuf {
+        let ids = ["missing", "a-1", "a-2", "a-3", "missing-too"];
+        let turns: Vec<Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut turn = serde_json::json!({
+                    "input_token_count": 0,
+                    "output_token_count": 0,
+                    "message_ids": [id]
+                });
+                if index == 1 {
+                    turn["total_request_count"] = serde_json::json!(3);
+                    turn["context_usage_percentage"] = serde_json::json!(10.0);
+                }
+                if credited && matches!(index, 0 | 3 | 4) {
+                    turn["metering_usage"] = serde_json::json!([{"value": 0.25, "unit": "credit"}]);
+                }
+                turn
+            })
+            .collect();
+        let json = serde_json::json!({
+            "session_id": stem,
+            "cwd": "/tmp/project",
+            "session_state": {
+                "rts_model_state": {"model_info": {
+                    "model_id": "claude-sonnet-4-5", "context_window_tokens": 1000
+                }},
+                "conversation_metadata": {"user_turn_metadatas": turns}
+            }
+        });
+        let jsonl = [
+            (1, "hello world", "response text", 1770983426.0),
+            (2, "next", "done", 1770983500.0),
+            (3, "third", "last answer", 1771070000.0),
+        ]
+        .into_iter()
+        .map(|(index, prompt, answer, timestamp)| {
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"version": "v1", "kind": "Prompt", "data": {
+                    "message_id": format!("p-{index}"),
+                    "content": [{"kind": "text", "data": prompt}],
+                    "meta": {"timestamp": timestamp}
+                }}),
+                serde_json::json!({"version": "v1", "kind": "AssistantMessage", "data": {
+                    "message_id": format!("a-{index}"),
+                    "content": [{"kind": "text", "data": answer}]
+                }})
+            )
+        })
+        .collect::<String>();
+        create_session_files(dir, stem, &json.to_string(), &jsonl)
+    }
+
+    #[test]
+    fn test_kiro_cli_credits_do_not_double_count_token_pricing() {
+        let dir = TempDir::new().unwrap();
+        let pricing = crate::pricing::PricingService::new(
+            HashMap::from([(
+                "claude-sonnet-4-5".to_string(),
+                crate::pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    output_cost_per_token: Some(0.002),
+                    cache_read_input_token_cost: Some(0.0001),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        let mut variants = Vec::new();
+        for (stem, credited) in [("control", false), ("credited", true)] {
+            let path = cli_credit_repro_session(&dir, stem, credited);
+            let mut messages = parse_kiro_file(&path);
+            for message in &mut messages {
+                crate::apply_pricing_if_available(message, Some(&pricing));
+                println!(
+                    "REPRO {stem} key={:?} in={} out={} cr={} cost={:.6} authoritative={}",
+                    message.dedup_key,
+                    message.tokens.input,
+                    message.tokens.output,
+                    message.tokens.cache_read,
+                    message.cost,
+                    message.has_authoritative_cost()
+                );
+            }
+            println!(
+                "REPRO {stem} total={:.6}",
+                messages.iter().map(|message| message.cost).sum::<f64>()
+            );
+            variants.push(messages);
+        }
+        let control = &variants[0];
+        let credited = &variants[1];
+        assert_eq!(control.len(), 3);
+        assert_eq!(credited.len(), 3);
+        assert_cost_approx(
+            control.iter().map(|message| message.cost).sum(),
+            0.0317,
+            "unmetered control total",
+        );
+        assert_cost_approx(
+            credited.iter().map(|message| message.cost).sum(),
+            0.033,
+            "credited total with only the unmetered turn token-priced",
+        );
+        for (index, expected_cost) in [0.010, 0.003, 0.020].into_iter().enumerate() {
+            let message = &credited[index];
+            assert_cost_approx(message.cost, expected_cost, "per-turn cost");
+            assert_eq!(message.has_authoritative_cost(), index != 1);
+            assert_eq!(message.tokens, control[index].tokens);
+            assert_eq!(message.timestamp, control[index].timestamp);
+            assert_eq!(message.duration_ms, control[index].duration_ms);
+            assert_eq!(message.message_count, control[index].message_count);
+            assert_eq!(message.workspace_key, control[index].workspace_key);
+            assert_eq!(message.dedup_key, Some(format!("credited:{}", index + 1)));
+        }
+    }
+
+    #[test]
+    fn test_kiro_cli_skipped_credits_use_nearest_emitted_turn() {
+        for (emitted, expected) in [
+            ([true, false, false, false, true], vec![0.03, 0.02]),
+            ([false, true, false, true, false], vec![0.03, 0.02]),
+            ([false, false, false, true, false], vec![0.05]),
+            ([true; 5], vec![0.01; 5]),
+            ([false; 5], vec![]),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let turns: Vec<Value> = emitted
+                .iter()
+                .map(|emit| {
+                    serde_json::json!({
+                        "input_token_count": i64::from(*emit),
+                        "output_token_count": i64::from(*emit) * 2,
+                        "metering_usage": [{"value": 0.25, "unit": "credit"}]
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({"session_id": "nearest", "session_state": {
+                "conversation_metadata": {"user_turn_metadatas": turns}
+            }});
+            let path = create_session_files(&dir, "nearest", &json.to_string(), "");
+            let messages = parse_kiro_file(&path);
+            assert_eq!(messages.len(), expected.len());
+            let indices: Vec<usize> = emitted
+                .iter()
+                .enumerate()
+                .filter_map(|(index, emit)| emit.then_some(index))
+                .collect();
+            for ((message, cost), index) in messages.iter().zip(expected).zip(indices) {
+                assert_cost_approx(message.cost, cost, "nearest emitted turn, ties go earlier");
+                assert_eq!(message.cost_source, CostSource::ProviderReported);
+                assert_eq!(message.tokens.input, 1);
+                assert_eq!(message.tokens.output, 2);
+                assert_eq!(message.dedup_key, Some(format!("nearest:{index}")));
+            }
+        }
+    }
+
+    #[test]
+    fn test_kiro_cli_nonpositive_or_absent_credits_remain_unknown() {
+        let dir = TempDir::new().unwrap();
+        let metering = [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{"value": 1.0, "unit": "token"}]),
+            serde_json::json!([{"unit": "credit"}]),
+            serde_json::json!([{"value": 0.0, "unit": "credit"}]),
+            serde_json::json!([{"value": -0.25, "unit": "credit"}]),
+            serde_json::json!([{"value": 1e308, "unit": "credit"}, {"value": 1e308, "unit": "credit"}]),
+            serde_json::json!([{"value": 0.1, "unit": "credit"}, {"value": 0.2, "unit": "credit"}, {"value": 5.0, "unit": "token"}]),
+        ];
+        let turns: Vec<Value> = metering
+            .into_iter()
+            .map(|usage| {
+                serde_json::json!({
+                    "input_token_count": 1, "output_token_count": 1, "metering_usage": usage
+                })
+            })
+            .collect();
+        let json = serde_json::json!({"session_id": "invalid-credits", "session_state": {
+            "conversation_metadata": {"user_turn_metadatas": turns}
+        }});
+        let path = create_session_files(&dir, "invalid-credits", &json.to_string(), "");
+        let messages = parse_kiro_file(&path);
+        assert_eq!(messages.len(), 8);
+        for message in &messages[..7] {
+            assert_eq!(message.cost, 0.0);
+            assert_eq!(message.cost_source, CostSource::Unknown);
+        }
+        assert_cost_approx(
+            messages[7].cost,
+            0.012,
+            "only credit-unit values contribute",
+        );
+        assert_eq!(messages[7].cost_source, CostSource::ProviderReported);
     }
 
     // Unit: empty / absent metering_usage leaves cost 0.0 / Unknown so the

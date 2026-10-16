@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::tui::client_ui;
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::Glyphs;
 use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
@@ -133,12 +133,12 @@ impl DialogContent for ClientPickerDialog {
         (width, height)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        use crate::tui::i18n::{tr, MessageKey};
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
+        use crate::tui::i18n::{tr, tr_with_glyphs, MessageKey};
         let block = Block::default()
             .title(tr(self.lang, MessageKey::ClientDialogTitle))
             .borders(Borders::ALL)
-            .border_set(AMBIENT_STABLE_BORDER_SET)
+            .border_set(glyphs.border)
             .border_style(Style::default().fg(theme.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -195,7 +195,11 @@ impl DialogContent for ClientPickerDialog {
             let is_selected = flat_idx == self.selected;
             let is_enabled = self.enabled.borrow().contains(&source);
 
-            let checkbox = if is_enabled { "[●]" } else { "[ ]" };
+            let checkbox = if is_enabled {
+                glyphs.selected_checkbox
+            } else {
+                "[ ]"
+            };
             let key_hint = format!("[{}]", hotkey(source));
             let name = display_name(source);
 
@@ -229,9 +233,13 @@ impl DialogContent for ClientPickerDialog {
 
         frame.render_widget(List::new(items), list_area);
 
-        let hint = Paragraph::new(tr(self.lang, MessageKey::ClientDialogHint))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.muted));
+        let hint = Paragraph::new(tr_with_glyphs(
+            self.lang,
+            MessageKey::ClientDialogHint,
+            glyphs,
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.muted));
         frame.render_widget(hint, rows[3]);
     }
 

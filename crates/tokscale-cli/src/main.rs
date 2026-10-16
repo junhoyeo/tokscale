@@ -1,3 +1,4 @@
+mod amp;
 mod antigravity;
 mod auth;
 mod claude_diagnostics;
@@ -9,9 +10,11 @@ mod paths;
 mod process_liveness;
 mod trae;
 mod tui;
+mod ui_glyphs;
 mod warp;
 
 use crate::tui::client_ui;
+use crate::ui_glyphs::Glyphs;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -346,6 +349,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CodexSubcommand,
     },
+    #[command(about = "Amp thread sync commands (exports threads via the amp CLI)")]
+    Amp {
+        #[command(subcommand)]
+        subcommand: AmpSubcommand,
+    },
     #[command(about = "Cursor API cache integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -453,6 +461,17 @@ enum ConfigSubcommand {
 }
 
 #[derive(Subcommand)]
+enum AmpSubcommand {
+    #[command(about = "Export Amp threads into the local cache via the amp CLI")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Total sync timeout in seconds (default: 60)")]
+        timeout: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CursorSubcommand {
     #[command(about = "Login to Cursor (auto-detect desktop session, or paste browser token)")]
     Login {
@@ -478,10 +497,17 @@ enum CursorSubcommand {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
-    #[command(about = "Sync Cursor API usage into cursor-cache/usage*.csv")]
+    #[command(about = "Sync Cursor API usage into cursor-cache/usage*.json")]
     Sync {
         #[arg(long, help = "Output as JSON")]
         json: bool,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            value_parser = clap::value_parser!(u64).range(1..=cursor::CURSOR_MAX_SYNC_TIMEOUT_SECS),
+            help = "Overall sync timeout in seconds, 1-86400 (overrides cursor.syncTimeoutSeconds in settings.json and the default dynamic budget)"
+        )]
+        timeout: Option<u64>,
     },
     #[command(about = "Switch active Cursor account")]
     Switch {
@@ -917,6 +943,12 @@ fn main() -> Result<()> {
                 show_clients,
                 disable_pinned,
             )
+        }
+        Some(Commands::Amp { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "amp")?;
+            match subcommand {
+                AmpSubcommand::Sync { json, timeout } => amp::run_amp_sync(json, timeout),
+            }
         }
         Some(Commands::Cursor { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "cursor")?;
@@ -1498,6 +1530,12 @@ fn client_filter_includes_cursor(clients: &Option<Vec<String>>) -> bool {
         .is_none_or(|sources| sources.iter().any(|source| source == "cursor"))
 }
 
+fn client_filter_includes_amp(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_none_or(|sources| sources.iter().any(|source| source == "amp"))
+}
+
 fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<String>>) -> bool {
     clients
         .as_ref()
@@ -1720,6 +1758,23 @@ fn should_auto_sync_cursor_for_local_report(
     clients: &Option<Vec<String>>,
 ) -> bool {
     home_dir.is_none() && client_filter_includes_cursor(clients)
+}
+
+fn auto_sync_amp_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Option<amp::AutoSyncAmpResult> {
+    if home_dir.is_some() || !client_filter_includes_amp(clients) {
+        return None;
+    }
+    Some(amp::auto_sync_status())
+}
+
+fn emit_amp_sync_warning(warning: Option<&str>) {
+    if let Some(warning) = warning {
+        use colored::Colorize;
+        eprintln!("{}", warning.yellow());
+    }
 }
 
 fn auto_sync_cursor_for_local_report(
@@ -2053,9 +2108,17 @@ impl LightSpinner {
 
             if distance < Self::TRAIL_LENGTH {
                 let color = Self::TRAIL_COLORS[distance.min(Self::TRAIL_COLORS.len() - 1)];
-                out.push_str(&format!("\x1b[38;5;{}m■\x1b[0m", color));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    color,
+                    Glyphs::ascii_safe().scanner_active
+                ));
             } else {
-                out.push_str(&format!("\x1b[38;5;{}m⬝\x1b[0m", Self::INACTIVE_COLOR));
+                out.push_str(&format!(
+                    "\x1b[38;5;{}m{}\x1b[0m",
+                    Self::INACTIVE_COLOR,
+                    Glyphs::ascii_safe().scanner_inactive
+                ));
             }
         }
 
@@ -2252,7 +2315,7 @@ fn run_models_report(
     hide_zero: bool,
 ) -> Result<()> {
     use tokio::runtime::Runtime;
-    use tokscale_core::{get_model_report, GroupBy};
+    use tokscale_core::{get_model_report_v2, GroupBy};
 
     let mut context = LocalReportContext::new(
         home_dir,
@@ -2263,11 +2326,17 @@ fn run_models_report(
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
-            get_model_report(context.report_options_with_rollup(group_by.clone(), worktree_rollup))
-                .await
+            get_model_report_v2(
+                context.report_options_with_rollup(group_by.clone(), worktree_rollup),
+            )
+            .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut report = report;
+    let tokscale_core::ModelReportV2 {
+        mut report,
+        undated_tokens,
+        claude_desktop_cache,
+    } = report;
     if hide_zero {
         // Display-only filter: totals were computed in core over the full
         // entry set and intentionally still include the hidden rows.
@@ -2309,6 +2378,8 @@ fn run_models_report(
         })
         .unwrap_or_default();
 
+    let desktop_cache = claude_desktop_cache;
+
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -2345,6 +2416,9 @@ fn run_models_report(
             total_messages: i32,
             total_cost: f64,
             processing_time_ms: u32,
+            undated_tokens: ModelTokenBreakdownJson,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            claude_desktop_cache: Option<tokscale_core::claude_desktop::Coverage>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2397,6 +2471,8 @@ fn run_models_report(
             total_messages: report.total_messages,
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
+            undated_tokens: undated_tokens.into(),
+            claude_desktop_cache: desktop_cache,
             warnings: context.cursor_setup_warnings,
             diagnostics,
         };
@@ -2404,6 +2480,18 @@ fn run_models_report(
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
         emit_client_diagnostics(&diagnostics);
+
+        if undated_tokens.total() > 0 {
+            eprintln!("  Claude Desktop: {} tokens included in all-time totals have no known usage date. They are excluded from dated reports and submissions.", undated_tokens.total());
+        }
+        if let Some(coverage) = desktop_cache {
+            if coverage.decode_errors > 0 {
+                eprintln!(
+                    "  Claude Desktop: {} cache read/decode errors; cached totals are incomplete.",
+                    coverage.decode_errors
+                );
+            }
+        }
 
         emit_cursor_setup_warnings(&context.cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -4770,6 +4858,30 @@ fn format_number(n: i32) -> String {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ModelTokenBreakdownJson {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+    reasoning: i64,
+}
+
+impl From<tokscale_core::TokenBreakdown> for ModelTokenBreakdownJson {
+    fn from(tokens: tokscale_core::TokenBreakdown) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            cache_write_1h: tokens.cache_write_1h,
+            reasoning: tokens.reasoning,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TsTokenBreakdown {
     input: i64,
     output: i64,
@@ -4877,6 +4989,10 @@ struct TsTimeMetrics {
 
 const SUBMISSION_PARSER_VERSION: u32 = 1;
 const COPILOT_SUBMISSION_PARSER_VERSION: u32 = 2;
+// Amp v2 moves existing exported messages from synthesized creation-time dates
+// to the server-provided usage timestamp. The receiver replaces the complete
+// Amp daily layout at this generation, preserving lifetime totals.
+const AMP_SUBMISSION_PARSER_VERSION: u32 = 2;
 // The receiver admits the MiMo CLI/desktop split atomically only when both
 // selected surfaces declare this generation and cover the credited history.
 // This is a submission contract, independent of the on-disk parser cache version.
@@ -4887,6 +5003,7 @@ const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
 struct TsScanScope {
     parser_versions: std::collections::BTreeMap<String, u32>,
     full_history: bool,
+    full_history_clients: Vec<String>,
 }
 
 /// Submission-level provenance (#888): history recovered from an aggregate
@@ -5033,11 +5150,17 @@ fn to_ts_token_contribution_data(
 /// Parser identity is declared for every scanned client, even for a partial
 /// date range. `full_history` is a separate capability bit: only an unbounded
 /// scan can establish or advance a cumulative rollout high-water.
-fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<TsScanScope> {
-    let parser_versions = clients?
+fn submit_scan_scope(
+    clients: Option<&[String]>,
+    full_history: bool,
+    amp_full_history_safe: bool,
+) -> Option<TsScanScope> {
+    let clients = clients?;
+    let parser_versions = clients
         .iter()
         .map(|client| {
             let version = match client.as_str() {
+                "amp" => AMP_SUBMISSION_PARSER_VERSION,
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
                 "micode" | "micode-desktop" => MICODE_SUBMISSION_PARSER_VERSION,
                 _ => SUBMISSION_PARSER_VERSION,
@@ -5045,9 +5168,21 @@ fn submit_scan_scope(clients: Option<&[String]>, full_history: bool) -> Option<T
             (client.clone(), version)
         })
         .collect();
+    let full_history_clients = if full_history {
+        clients
+            .iter()
+            .filter(|client| client.as_str() != "amp" || amp_full_history_safe)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let every_client_complete = full_history_clients.len() == clients.len();
     Some(TsScanScope {
         parser_versions,
-        full_history,
+        // Fail closed for receivers predating `fullHistoryClients`.
+        full_history: full_history && every_client_complete,
+        full_history_clients,
     })
 }
 
@@ -6429,7 +6564,6 @@ fn run_submit_command(
     let full_history_scan = since.is_none() && until.is_none() && year.is_none();
     let explicit_client_filter = clients.is_some();
     let clients = clients.or_else(|| Some(default_submit_clients()));
-    let scan_scope = submit_scan_scope(clients.as_deref(), full_history_scan);
 
     let include_cursor = clients
         .as_ref()
@@ -6454,6 +6588,90 @@ fn run_submit_command(
             }
         }
     }
+
+    let include_antigravity = clients
+        .as_ref()
+        .is_none_or(|s| s.iter().any(|src| src == "antigravity"));
+    let has_antigravity_cache = antigravity::has_antigravity_cache();
+    if include_antigravity {
+        match antigravity::detect_antigravity_connections() {
+            Ok(active_connections) if !active_connections.is_empty() => {
+                println!("{}", "  Syncing Antigravity usage data...".bright_black());
+                let sync_result = antigravity::sync_antigravity_cache_with_connections(
+                    &active_connections,
+                    false,
+                );
+                if sync_result.synced {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity: {} session{} synced from {} active connection{}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.connections,
+                            if sync_result.connections == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                        .bright_black()
+                    );
+                } else if sync_result.partial {
+                    println!(
+                        "{}",
+                        format!(
+                            "  Antigravity sync was partial: {} session{} refreshed, {} retained from cache, {} failed: {}",
+                            sync_result.sessions,
+                            if sync_result.sessions == 1 { "" } else { "s" },
+                            sync_result.retained_sessions,
+                            sync_result.failed_sessions,
+                            sync_result.error.as_deref().unwrap_or("unknown sync error")
+                        )
+                        .yellow()
+                    );
+                } else if let Some(err) = sync_result.error {
+                    if has_antigravity_cache {
+                        println!(
+                            "{}",
+                            format!("  Antigravity sync failed; using cached data: {}", err)
+                                .yellow()
+                        );
+                    } else {
+                        println!("{}", format!("  Antigravity sync failed: {}", err).yellow());
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                if has_antigravity_cache {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed; using cached data: {}", err)
+                            .yellow()
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        format!("  Antigravity discovery failed: {}", err).yellow()
+                    );
+                }
+            }
+        }
+    }
+    let amp_sync = auto_sync_amp_for_local_report(&report_home, &clients);
+    emit_amp_sync_warning(
+        amp_sync
+            .as_ref()
+            .and_then(|result| result.warning.as_deref()),
+    );
+    let scan_scope = submit_scan_scope(
+        clients.as_deref(),
+        full_history_scan,
+        amp_sync
+            .as_ref()
+            .is_none_or(amp::AutoSyncAmpResult::allows_full_history),
+    );
     if explicit_cursor_filter || explicit_warp_filter || explicit_hindsight_filter {
         let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
         emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -6831,6 +7049,13 @@ fn resolve_light_cache_filter_set(
     }
 }
 
+fn light_cache_group_by(_report_group_by: &tokscale_core::GroupBy) -> tokscale_core::GroupBy {
+    // The light report may use a caller-selected grouping, but this file is the
+    // startup cache for the TUI, whose initial grouping key is always `model`.
+    // Writing the report grouping makes the next TUI launch miss its cache.
+    crate::tui::TUI_DEFAULT_GROUP_BY
+}
+
 fn write_light_cache(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
@@ -6866,8 +7091,9 @@ fn write_light_cache(
     // pattern in `run_warm_tui_cache` below.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    if let Ok(data) = loader.load(&scan_clients, group_by, include_synthetic) {
-        save_cached_data(&data, &enabled_set, group_by, &report_scope);
+    let cache_group_by = light_cache_group_by(group_by);
+    if let Ok(data) = loader.load(&scan_clients, &cache_group_by, include_synthetic) {
+        save_cached_data(&data, &enabled_set, &cache_group_by, &report_scope);
     }
 }
 
@@ -6918,7 +7144,7 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         } => cursor::run_cursor_logout(name, all, purge_cache),
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
-        CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
+        CursorSubcommand::Sync { json, timeout } => cursor::run_cursor_sync(json, timeout),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
     }
 }
@@ -7420,6 +7646,26 @@ mod tests {
         calculate_summary_v2, calculate_years_v2, ClientContributionV2, DailyContributionV2,
         DailyTotalsV2, GraphMeta, GraphResultV2, TokenBreakdown,
     };
+
+    #[test]
+    fn model_token_breakdown_json_preserves_all_buckets_in_camel_case() {
+        let tokens = TokenBreakdown {
+            input: 11,
+            output: 22,
+            cache_read: 33,
+            cache_write: 44,
+            cache_write_1h: 15,
+            reasoning: 66,
+        };
+        let json = serde_json::to_value(ModelTokenBreakdownJson::from(tokens)).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "input":11, "output":22, "cacheRead":33, "cacheWrite":44,
+                "cacheWrite1h":15, "reasoning":66,
+            })
+        );
+    }
 
     /// The overwhelming majority of the pricing sheet is at or above a cent
     /// per 1M tokens, and that output must not move.
@@ -8952,22 +9198,22 @@ mod tests {
     #[test]
     fn test_light_spinner_frame_0() {
         let frame = LightSpinner::frame(0);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]
     fn test_light_spinner_frame_1() {
         let frame = LightSpinner::frame(1);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]
     fn test_light_spinner_frame_2() {
         let frame = LightSpinner::frame(2);
-        assert!(frame.contains("■"));
-        assert!(frame.contains("⬝"));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]
@@ -9472,8 +9718,8 @@ mod tests {
     #[test]
     fn submit_scan_scope_separates_parser_identity_from_full_history() {
         let clients = vec!["codex".to_string(), "copilot".to_string()];
-        let full = submit_scan_scope(Some(&clients), true).expect("full scope");
-        let partial = submit_scan_scope(Some(&clients), false).expect("partial scope");
+        let full = submit_scan_scope(Some(&clients), true, true).expect("full scope");
+        let partial = submit_scan_scope(Some(&clients), false, true).expect("partial scope");
 
         assert!(full.full_history);
         assert!(!partial.full_history);
@@ -9487,9 +9733,28 @@ mod tests {
     }
 
     #[test]
+    fn submit_scan_scope_gates_amp_full_history_on_cache_completeness() {
+        let clients = vec!["amp".to_string(), "codex".to_string()];
+        let incomplete = submit_scan_scope(Some(&clients), true, false).expect("scope");
+        let complete = submit_scan_scope(Some(&clients), true, true).expect("scope");
+
+        assert_eq!(
+            incomplete.parser_versions.get("amp"),
+            Some(&AMP_SUBMISSION_PARSER_VERSION)
+        );
+        assert!(!incomplete.full_history);
+        assert!(!incomplete.full_history_clients.contains(&"amp".to_string()));
+        assert!(incomplete
+            .full_history_clients
+            .contains(&"codex".to_string()));
+        assert!(complete.full_history);
+        assert!(complete.full_history_clients.contains(&"amp".to_string()));
+    }
+
+    #[test]
     fn submit_scan_scope_keeps_a_partial_client_filter_narrow() {
         let clients = vec!["codex".to_string()];
-        let scope = submit_scan_scope(Some(&clients), true).expect("codex scope");
+        let scope = submit_scan_scope(Some(&clients), true, true).expect("codex scope");
 
         assert_eq!(
             scope.parser_versions,
@@ -9501,7 +9766,7 @@ mod tests {
     fn submit_scan_scope_declares_micode_family_without_expanding_selection() {
         let clients = vec!["micode".to_string(), "micode-desktop".to_string()];
         for full_history in [true, false] {
-            let scope = submit_scan_scope(Some(&clients), full_history).unwrap();
+            let scope = submit_scan_scope(Some(&clients), full_history, true).unwrap();
             let json = serde_json::to_value(&scope).unwrap();
             assert_eq!(json["parserVersions"]["micode"], 2);
             assert_eq!(json["parserVersions"]["micode-desktop"], 2);
@@ -9510,7 +9775,7 @@ mod tests {
         }
 
         for selected in ["micode", "micode-desktop"] {
-            let scope = submit_scan_scope(Some(&[selected.to_string()]), true).unwrap();
+            let scope = submit_scan_scope(Some(&[selected.to_string()]), true, true).unwrap();
             assert_eq!(
                 scope.parser_versions,
                 std::collections::BTreeMap::from([(
@@ -9531,7 +9796,7 @@ mod tests {
     #[test]
     fn submit_scan_scope_declares_the_droid_generation_the_server_registers() {
         let clients = vec!["droid".to_string()];
-        let scope = submit_scan_scope(Some(&clients), true).expect("droid scope");
+        let scope = submit_scan_scope(Some(&clients), true, true).expect("droid scope");
 
         assert_eq!(scope.parser_versions.get("droid"), Some(&1));
     }
@@ -9735,6 +10000,19 @@ mod tests {
     fn clap_accepts_cursor_sync_command() {
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "300"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "0"]).is_err());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "86400"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--timeout", "86401"]).is_err());
+        // A 19-digit value used to parse and then panic on `Instant` overflow.
+        assert!(Cli::try_parse_from([
+            "tokscale",
+            "cursor",
+            "sync",
+            "--timeout",
+            "18446744073709551615"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -9888,6 +10166,86 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("runtime unavailable")));
+    }
+
+    #[test]
+    fn light_cache_uses_the_tui_grouping_key() {
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::default()),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+        assert_eq!(
+            light_cache_group_by(&tokscale_core::GroupBy::WorkspaceModel),
+            tui::TUI_DEFAULT_GROUP_BY
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn light_cache_writer_round_trips_through_the_tui_key() {
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..).rev() {
+                    unsafe {
+                        match previous {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let values = vec![
+            ("HOME", home.path().as_os_str().to_owned()),
+            ("TOKSCALE_CONFIG_DIR", config.path().as_os_str().to_owned()),
+            (
+                "CLAUDE_CONFIG_DIR",
+                home.path().join(".claude").into_os_string(),
+            ),
+            ("CODEX_HOME", home.path().join(".codex").into_os_string()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", "1".into()),
+            ("TOKSCALE_EXTRA_DIRS", "".into()),
+            ("TOKSCALE_HEADLESS_DIR", "".into()),
+        ];
+        let _restore = EnvRestore(
+            values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        for (key, value) in values {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let clients = Some(vec!["claude".to_string(), "codex".to_string()]);
+        write_light_cache(
+            &None,
+            &clients,
+            &None,
+            &None,
+            &None,
+            &tokscale_core::GroupBy::default(),
+        );
+
+        let enabled = resolve_light_cache_filter_set(&clients);
+        let result = tui::load_cache(
+            &enabled,
+            &tui::TUI_DEFAULT_GROUP_BY,
+            &tui::CacheReportScope::default(),
+        );
+        assert!(matches!(result, tui::CacheResult::Fresh(_)));
+        assert!(matches!(
+            tui::load_cache(
+                &enabled,
+                &tokscale_core::GroupBy::default(),
+                &tui::CacheReportScope::default(),
+            ),
+            tui::CacheResult::Miss
+        ));
     }
 
     #[test]

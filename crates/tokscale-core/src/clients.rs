@@ -138,23 +138,13 @@ impl PathRoot {
             }
             PathRoot::Config => {
                 if use_env_roots {
-                    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
-                        if !custom.is_empty() {
-                            return custom.to_string_lossy().into_owned();
-                        }
-                    }
-
-                    #[cfg(target_os = "linux")]
-                    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
-                        return format!("{xdg_config_home}/tokscale");
-                    }
-
-                    // Match paths::get_config_dir() so default Windows scans
-                    // read the same %APPDATA% root used by cache writers.
-                    #[cfg(target_os = "windows")]
-                    if let Some(dir) = dirs::config_dir() {
-                        return dir.join("tokscale").to_string_lossy().into_owned();
-                    }
+                    // The cache writer uses this resolver. In particular, it
+                    // rejects empty config overrides and lets `dirs` ignore an
+                    // invalid XDG_CONFIG_HOME rather than scanning a different
+                    // relative/root path.
+                    return crate::paths::get_config_dir()
+                        .to_string_lossy()
+                        .into_owned();
                 }
 
                 #[cfg(target_os = "windows")]
@@ -432,7 +422,7 @@ define_clients!(
             fallback_relative: ".codex",
         },
         relative: "sessions",
-        pattern: "*.jsonl",
+        pattern: "*.jsonl*",
         headless: true,
         parse_local: true,
         submit_default: true
@@ -463,8 +453,8 @@ define_clients!(
     Amp = 5 => {
         id: "amp",
         display: "Amp",
-        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::XdgData,
-        relative: "amp/threads",
+        logo: Some("https://tokscale.ai/assets/logos/amp.png"),root: PathRoot::Config,
+        relative: "amp-cache/threads",
         pattern: "T-*.json",
         headless: false,
         parse_local: true,
@@ -2033,6 +2023,26 @@ mod tests {
 
         let resolved = PathRoot::Config.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/xdg-config-home/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[serial]
+    fn test_path_root_config_matches_writer_for_empty_xdg_config_home() {
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+
+        assert_eq!(
+            PathRoot::Config.resolve("/tmp/home"),
+            crate::paths::get_config_dir().to_string_lossy()
+        );
 
         restore_env("TOKSCALE_CONFIG_DIR", previous_override);
         restore_env("XDG_CONFIG_HOME", previous_xdg);

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
+import { GroupManagement } from "@/components/leaderboard/GroupManagement";
 import { CheckIcon, CopyIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
 import {
   CompactBadge,
@@ -21,7 +22,9 @@ import {
 import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import type { GroupLeaderboardData, GroupLeaderboardUser } from "@/lib/groups/getGroupLeaderboard";
-import type { Period, SortBy } from "@/lib/leaderboard/types";
+import type { SortBy } from "@/lib/leaderboard/types";
+import type { GroupPeriod } from "@/lib/reportingPeriods";
+import { GroupReportingSettings } from "@/components/leaderboard/GroupReportingSettings";
 
 type GroupRole = "owner" | "admin" | "member";
 
@@ -39,6 +42,8 @@ interface GroupDetail {
   description: string | null;
   avatarUrl: string | null;
   isPublic: boolean;
+  timeZone: string;
+  weekStartsOn: number;
   memberCount: number;
   membership: { role: GroupRole } | null;
 }
@@ -471,13 +476,14 @@ function GroupMobileRow({
 }
 
 export default function GroupDetailClient({
-  group,
+  group: initialGroup,
   currentUser,
   initialData,
 }: GroupDetailClientProps) {
   const router = useRouter();
+  const [group, setGroup] = useState(initialGroup);
   const [data, setData] = useState(initialData);
-  const [period, setPeriod] = useState<Period>(initialData.period);
+  const [period, setPeriod] = useState<GroupPeriod>(initialData.period);
   const [sortBy, setSortBy] = useState<SortBy>(initialData.sortBy);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -490,6 +496,7 @@ export default function GroupDetailClient({
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const didMountLeaderboard = useRef(false);
+  const leaderboardRequestId = useRef(0);
 
   const canInvite = isAdminRole(group.membership?.role);
 
@@ -502,6 +509,7 @@ export default function GroupDetailClient({
   }, [search]);
 
   const loadLeaderboard = useCallback((signal?: AbortSignal) => {
+    const requestId = ++leaderboardRequestId.current;
     const params = new URLSearchParams({
       period,
       sortBy,
@@ -515,27 +523,29 @@ export default function GroupDetailClient({
     setIsLoading(true);
     setError(null);
 
-    fetch(`/api/groups/${group.slug}/leaderboard?${params}`, { signal })
+    return fetch(`/api/groups/${group.slug}/leaderboard?${params}`, { signal, cache: "no-store" })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then((payload) => {
-        setData(payload);
+        if (requestId === leaderboardRequestId.current && !signal?.aborted) setData(payload);
       })
       .catch((err) => {
-        if (err.name !== "AbortError") {
+        if (requestId === leaderboardRequestId.current && err.name !== "AbortError") {
           setError(err.message || "Failed to load leaderboard");
         }
       })
       .finally(() => {
-        if (!signal?.aborted) {
+        if (requestId === leaderboardRequestId.current && !signal?.aborted) {
           setIsLoading(false);
         }
       });
   }, [debouncedSearch, group.slug, page, period, sortBy]);
+  const currentLeaderboardLoader = useRef(loadLeaderboard);
 
   useEffect(() => {
+    currentLeaderboardLoader.current = loadLeaderboard;
     if (!didMountLeaderboard.current) {
       didMountLeaderboard.current = true;
       return;
@@ -546,6 +556,14 @@ export default function GroupDetailClient({
     return () => abortController.abort();
   }, [loadLeaderboard]);
 
+  async function refreshGroup() {
+    const response = await fetch(`/api/groups/${group.slug}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Failed to refresh group");
+    setGroup(payload);
+    await currentLeaderboardLoader.current();
+  }
+
   async function createInvite() {
     setInviteError(null);
     setInviteUrl(null);
@@ -555,7 +573,7 @@ export default function GroupDetailClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          role: inviteRole,
+          role: group.membership?.role === "owner" ? inviteRole : "member",
           invitedUsername: inviteUsername.trim() || null,
         }),
       });
@@ -626,8 +644,8 @@ export default function GroupDetailClient({
           </MetricItem>
           <MetricItem>
             <MetricLabel>Members</MetricLabel>
-            <MetricValue aria-label={formatGroupMemberCount(data.stats.totalMembers || group.memberCount)}>
-              {(data.stats.totalMembers || group.memberCount).toLocaleString("en-US")}
+            <MetricValue aria-label={formatGroupMemberCount(group.memberCount)}>
+              {group.memberCount.toLocaleString("en-US")}
             </MetricValue>
           </MetricItem>
           <MetricItem>
@@ -646,9 +664,11 @@ export default function GroupDetailClient({
           label="Group leaderboard period"
           value={period}
           options={[
-            { value: "all" as Period, label: "All time" },
-            { value: "month" as Period, label: "This month" },
-            { value: "week" as Period, label: "This week" },
+            { value: "all" as GroupPeriod, label: "All time" },
+            { value: "month" as GroupPeriod, label: "This month" },
+            { value: "last-month" as GroupPeriod, label: "Last month" },
+            { value: "week" as GroupPeriod, label: "This week" },
+            { value: "last-week" as GroupPeriod, label: "Last week" },
           ]}
           onChange={(value) => {
             setPeriod(value);
@@ -687,6 +707,11 @@ export default function GroupDetailClient({
           />
         </Actions>
       </Toolbar>
+
+      <Description aria-label="Group reporting period">
+        {data.dateRange ? `${data.dateRange.start} – ${data.dateRange.end}` : "All submitted dates"}
+        {` · ${data.timeZone} · Week starts ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][data.weekStartsOn]}`}
+      </Description>
 
       <TableContainer>
         {error ? (
@@ -757,6 +782,14 @@ export default function GroupDetailClient({
       </TableContainer>
 
       {canInvite && (
+        <GroupReportingSettings
+          slug={group.slug}
+          timeZone={group.timeZone}
+          weekStartsOn={group.weekStartsOn}
+          onChanged={refreshGroup}
+        />
+      )}
+      {canInvite && (
         <InvitePanel>
           <InviteHeading>
             <InviteTitle>Invite members</InviteTitle>
@@ -776,11 +809,11 @@ export default function GroupDetailClient({
             <Select
               name="invite-role"
               aria-label="Invite role"
-              value={inviteRole}
+              value={group.membership?.role === "owner" ? inviteRole : "member"}
               onChange={(event) => setInviteRole(event.target.value as Exclude<GroupRole, "owner">)}
             >
               <option value="member">Member</option>
-              <option value="admin">Admin</option>
+              {group.membership?.role === "owner" && <option value="admin">Admin</option>}
             </Select>
             <Button type="button" onClick={createInvite}>Create invite</Button>
           </InviteForm>
@@ -795,6 +828,14 @@ export default function GroupDetailClient({
             </LinkBox>
           )}
         </InvitePanel>
+      )}
+      {canInvite && currentUser && group.membership && (
+        <GroupManagement
+          slug={group.slug}
+          userId={currentUser.id}
+          role={group.membership.role}
+          onChanged={refreshGroup}
+        />
       )}
     </>
   );

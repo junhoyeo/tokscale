@@ -101,6 +101,7 @@ fn aggregate_by_date_parallel(
 
     let estimated_days = (message_count / 10).clamp(30, 400);
     let daily_map: HashMap<String, DayAccumulator> = messages
+        .filter(|(msg, _)| !crate::claude_desktop::is_undated_balance(msg))
         .fold(
             || HashMap::with_capacity(estimated_days),
             |mut acc: HashMap<String, DayAccumulator>, (message, source)| {
@@ -148,6 +149,11 @@ impl DailyFoldV2 {
         message: &UnifiedMessage,
         estimate_source: Option<EstimateSource>,
     ) {
+        // Cumulative Desktop balances have no day attribution; they belong in
+        // all-time local totals, never daily graphs or submissions.
+        if crate::claude_desktop::is_undated_balance(message) {
+            return;
+        }
         self.days
             .entry(message.date.clone())
             .or_default()
@@ -981,6 +987,7 @@ mod tests {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            copilot_context: None,
         }
     }
 
@@ -1651,6 +1658,7 @@ mod tests {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            copilot_context: None,
             duration_ms: None,
         }
     }

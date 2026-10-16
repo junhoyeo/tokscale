@@ -726,7 +726,7 @@ impl PricingService {
     ) -> bool {
         self.resolve_for_usage_with_provider(model_id, provider_id, usage)
             .is_some_and(|result| {
-                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
+                result.evidence.is_submission_safe() && result.covers_usage(usage)
             })
     }
 
@@ -785,6 +785,22 @@ mod tests {
         ModelPricing {
             input_cost_per_token: Some(input),
             output_cost_per_token: Some(output),
+            ..Default::default()
+        }
+    }
+
+    fn haiku_55_pricing() -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: Some(1e-7),
+            input_cost_per_token_above_100k_tokens: Some(5e-7),
+            output_cost_per_token: Some(5e-7),
+            output_cost_per_token_above_100k_tokens: Some(2.5e-6),
+            cache_read_input_token_cost: Some(1e-8),
+            cache_read_input_token_cost_above_100k_tokens: Some(5e-8),
+            cache_creation_input_token_cost: Some(1.25e-7),
+            cache_creation_input_token_cost_above_100k_tokens: Some(6.25e-7),
+            cache_creation_input_token_cost_above_1hr: Some(2e-7),
+            cache_creation_input_token_cost_above_1hr_above_100k_tokens: Some(1e-6),
             ..Default::default()
         }
     }
@@ -920,6 +936,75 @@ mod tests {
             service.calculate_cost_detailed_with_provider("free-model", None, &usage);
         assert_eq!(cost, 0.0);
         assert_eq!(source, Some(crate::EstimateSource::Catalog));
+    }
+
+    #[test]
+    fn haiku_55_long_context_submission_coverage_rejects_flat_source_rows() {
+        let at_boundary = TokenBreakdown {
+            input: 100_000,
+            output: 1,
+            ..Default::default()
+        };
+        let above_boundary = TokenBreakdown {
+            input: 100_001,
+            output: 1,
+            ..Default::default()
+        };
+
+        let litellm = PricingService::new(
+            HashMap::from([("claude-haiku-5-5".into(), haiku_55_pricing())]),
+            HashMap::new(),
+        );
+        for alias in ["claude-haiku-5-5-high", "claude-haiku-5.5-low"] {
+            assert!(litellm.covers_usage_with_provider(alias, Some("anthropic"), &above_boundary,));
+        }
+
+        let mut flat = haiku_55_pricing();
+        flat.input_cost_per_token_above_100k_tokens = None;
+        flat.output_cost_per_token_above_100k_tokens = None;
+        flat.cache_read_input_token_cost_above_100k_tokens = None;
+        flat.cache_creation_input_token_cost_above_100k_tokens = None;
+        flat.cache_creation_input_token_cost_above_1hr_above_100k_tokens = None;
+        let openrouter = PricingService::new(
+            HashMap::new(),
+            HashMap::from([("anthropic/claude-haiku-5-5".into(), flat)]),
+        );
+        assert!(openrouter.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &at_boundary,
+        ));
+        assert!(!openrouter.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &above_boundary,
+        ));
+
+        let mut models_dev_pricing = haiku_55_pricing();
+        models_dev_pricing.cache_creation_input_token_cost_above_1hr = None;
+        models_dev_pricing.cache_creation_input_token_cost_above_1hr_above_100k_tokens = None;
+        let models_dev = PricingService::new_with_custom_and_models_dev(
+            CustomPricing::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([("anthropic/claude-haiku-5-5".into(), models_dev_pricing)]),
+        );
+        assert!(models_dev.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &above_boundary,
+        ));
+        let hourly = TokenBreakdown {
+            input: 100_000,
+            cache_write: 1,
+            cache_write_1h: 1,
+            ..Default::default()
+        };
+        assert!(!models_dev.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &hourly,
+        ));
     }
 
     fn custom_service(

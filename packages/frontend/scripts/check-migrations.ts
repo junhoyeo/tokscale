@@ -235,10 +235,19 @@ try {
       AND (
         (table_name = 'submissions' AND column_name IN ('reasoning_tokens', 'schema_version', 'submit_count'))
         OR (table_name = 'daily_breakdown' AND column_name IN ('submitted_device_id', 'active_time_ms'))
+        OR (table_name = 'groups' AND column_name IN ('time_zone', 'week_starts_on'))
       )
   `;
   const columns = new Map(
     columnRows.map((row) => [`${row.table_name}.${row.column_name}`, row])
+  );
+
+  expect(
+    "group reporting calendar has required defaults",
+    columns.get("groups.time_zone")?.is_nullable === "NO" &&
+      columns.get("groups.time_zone")?.column_default?.includes("'UTC'") === true &&
+      columns.get("groups.week_starts_on")?.is_nullable === "NO" &&
+      columns.get("groups.week_starts_on")?.column_default === "1"
   );
 
   expect(
@@ -359,10 +368,27 @@ try {
       )
       VALUES (${submission.id}, ${device.id}, '2026-05-25', 42, 0.4200, 20, 22)
     `;
-    await sql`
+    const [group] = await sql<{ id: string }[]>`
       INSERT INTO "groups" ("name", "slug", "created_by")
       VALUES ('CI Group', 'ci-group', ${user.id})
+      RETURNING "id"
     `;
+    for (let day = 0; day <= 6; day++) {
+      await sql`UPDATE groups SET week_starts_on = ${day} WHERE id = ${group.id}`;
+    }
+    for (const day of [-1, 7]) {
+      await sql`SAVEPOINT invalid_week_start`;
+      let rejected = false;
+      try {
+        await sql`UPDATE groups SET week_starts_on = ${day} WHERE id = ${group.id}`;
+      } catch (err) {
+        const failure = err as { code?: string; constraint_name?: string };
+        rejected = failure.code === "23514" && failure.constraint_name === "groups_week_starts_on_check";
+      } finally {
+        await sql`ROLLBACK TO SAVEPOINT invalid_week_start`;
+      }
+      expect(`database rejects week start ${day}`, rejected);
+    }
   } finally {
     await sql`ROLLBACK`;
   }

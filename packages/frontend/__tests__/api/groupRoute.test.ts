@@ -152,6 +152,44 @@ function mockBrowserSessionOnly() {
 }
 
 describe("/api/groups/[slug]", () => {
+  it.each(["owner", "admin"])("saves a reporting calendar for an %s", async (role) => {
+    mockState.getSessionFromRequest.mockResolvedValue(session());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role });
+    mockState.setUpdatedRows([group({ timeZone: "Asia/Seoul", weekStartsOn: 0 })]);
+    const response = await PATCH(new Request("http://localhost:3000/api/groups/team", {
+      method: "PATCH", body: JSON.stringify({ timeZone: "Asia/Seoul", weekStartsOn: 0 }),
+    }), { params: Promise.resolve({ slug: "team" }) });
+    expect(response.status).toBe(200);
+    expect(mockState.set).toHaveBeenCalledWith(expect.objectContaining({ timeZone: "Asia/Seoul", weekStartsOn: 0 }));
+    expect(mockState.revalidateGroupCaches).toHaveBeenCalledWith("group-1", "team");
+  });
+
+  it.each([
+    { timeZone: "Invalid/Zone" }, { timeZone: null }, { timeZone: 9 },
+    { weekStartsOn: -1 }, { weekStartsOn: 7 }, { weekStartsOn: 1.5 }, { weekStartsOn: "1" },
+  ])("rejects invalid reporting settings: %j", async (body) => {
+    mockState.getSessionFromRequest.mockResolvedValue(session());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role: "owner" });
+    const response = await PATCH(new Request("http://localhost:3000/api/groups/team", {
+      method: "PATCH", body: JSON.stringify(body),
+    }), { params: Promise.resolve({ slug: "team" }) });
+    expect(response.status).toBe(400);
+    expect(mockState.db.update).not.toHaveBeenCalled();
+  });
+
+  it("does not let a member change the reporting calendar", async () => {
+    mockState.getSessionFromRequest.mockResolvedValue(session());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role: "member" });
+    const response = await PATCH(new Request("http://localhost:3000/api/groups/team", {
+      method: "PATCH", body: JSON.stringify({ timeZone: "Asia/Seoul", weekStartsOn: 0 }),
+    }), { params: Promise.resolve({ slug: "team" }) });
+    expect(response.status).toBe(403);
+    expect(mockState.db.update).not.toHaveBeenCalled();
+  });
+
   it("returns the same 404 response for missing groups and private groups without membership", async () => {
     mockState.getGroupBySlug.mockResolvedValueOnce(null);
 

@@ -3,9 +3,9 @@ import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { getGroupLeaderboardData } from "@/lib/groups/getGroupLeaderboard";
 import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug } from "@/lib/groups/queries";
-import type { Period, SortBy } from "@/lib/leaderboard/types";
+import type { SortBy } from "@/lib/leaderboard/types";
+import { GROUP_PERIODS, type GroupPeriod } from "@/lib/reportingPeriods";
 
-const VALID_PERIODS: Period[] = ["all", "month", "week"];
 const VALID_SORT_BY: SortBy[] = ["tokens", "cost"];
 
 function parseIntSafe(value: string | null, defaultValue: number): number {
@@ -41,8 +41,8 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const periodParam = searchParams.get("period") || "all";
     const sortByParam = searchParams.get("sortBy") || "tokens";
-    const period: Period = VALID_PERIODS.includes(periodParam as Period)
-      ? (periodParam as Period)
+    const period: GroupPeriod = GROUP_PERIODS.includes(periodParam as GroupPeriod)
+      ? (periodParam as GroupPeriod)
       : "all";
     const sortBy: SortBy = VALID_SORT_BY.includes(sortByParam as SortBy)
       ? (sortByParam as SortBy)
@@ -57,7 +57,9 @@ export async function GET(
       page,
       limit,
       sortBy,
-      search
+      search,
+      group.timeZone,
+      group.weekStartsOn,
     );
 
     return NextResponse.json(data);

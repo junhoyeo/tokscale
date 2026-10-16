@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { unstable_cache } from "next/cache";
 
 import { expectNoNarrowedCostCast } from "../support/costCastWidths";
 
@@ -149,7 +150,7 @@ const mockState = vi.hoisted(() => {
 });
 
 vi.mock("next/cache", () => ({
-  unstable_cache: (fn: () => unknown) => fn,
+  unstable_cache: vi.fn((fn: () => unknown) => fn),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -217,6 +218,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockState.reset();
+  vi.mocked(unstable_cache).mockClear();
 });
 
 afterEach(() => {
@@ -224,6 +226,36 @@ afterEach(() => {
 });
 
 describe("group leaderboard data", () => {
+  it("uses a new cache key when the group's local calendar crosses midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T07:59:00Z"));
+    const before = await getGroupLeaderboardData("group-1", "month", 1, 50, "tokens", "", "America/Los_Angeles");
+    const beforeKey = vi.mocked(unstable_cache).mock.calls.at(-1)?.[1];
+    vi.setSystemTime(new Date("2026-03-01T08:01:00Z"));
+    const after = await getGroupLeaderboardData("group-1", "month", 1, 50, "tokens", "", "America/Los_Angeles");
+    const afterKey = vi.mocked(unstable_cache).mock.calls.at(-1)?.[1];
+    expect(before.dateRange).toEqual({ start: "2026-02-01", end: "2026-02-28" });
+    expect(after.dateRange).toEqual({ start: "2026-03-01", end: "2026-03-01" });
+    expect(afterKey).not.toEqual(beforeKey);
+  });
+
+  it.each([
+    ["month", "2026-02-01", "2026-02-28"],
+    ["last-month", "2026-01-01", "2026-01-31"],
+    ["week", "2026-02-22", "2026-02-28"],
+    ["last-week", "2026-02-15", "2026-02-21"],
+  ] as const)("queries and caches %s using the group's local calendar", async (period, start, end) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T00:30:00Z"));
+    const leaderboard = await getGroupLeaderboardData("group-1", period, 1, 50, "tokens", "", "America/Los_Angeles", 0);
+    expect(mockState.gte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, start);
+    expect(mockState.lte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, end);
+    expect(leaderboard).toMatchObject({ dateRange: { start, end }, timeZone: "America/Los_Angeles", weekStartsOn: 0 });
+    expect(unstable_cache).toHaveBeenCalledWith(expect.any(Function), [
+      `group-leaderboard:group-1:${period}:1:50:tokens::America/Los_Angeles:0:${start}:${end}`,
+    ], expect.objectContaining({ revalidate: 60 }));
+  });
+
   const rows = [
     {
       userId: "user-alice",
@@ -255,7 +287,7 @@ describe("group leaderboard data", () => {
     expect(mockState.fromCalls).toContain(mockState.tables.dailyBreakdown);
     expect(mockState.gte).toHaveBeenCalledWith(
       mockState.tables.dailyBreakdown.date,
-      "2026-03-01"
+      "2026-03-02"
     );
     expect(mockState.lte).toHaveBeenCalledWith(
       mockState.tables.dailyBreakdown.date,
