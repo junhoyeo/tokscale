@@ -4200,6 +4200,10 @@ fn format_currency(n: f64) -> String {
     format!("${:.2}", n)
 }
 
+/// Blended cost per 1M tokens for a report row. A positive rate that `{:.2}`
+/// would round to `$0.00` renders as `<$0.01/M` instead: the report tables are
+/// fixed-width, so the honest alternative to a lost digit is a bound, not the
+/// escalating decimals [`format_per_million`] uses for published sheet prices.
 fn format_cost_per_million(cost: f64, total_tokens: i64) -> String {
     if total_tokens <= 0 || !cost.is_finite() || cost < 0.0 {
         return "—".to_string();
@@ -7708,10 +7712,15 @@ mod tests {
         }
     }
 
+    /// A report row priced below half a cent per 1M rounded to `$0.00/M` under
+    /// `{:.2}`, which read as free. Negative cost is the missing-value marker
+    /// rather than a bound: a refund is not a cheap rate.
     #[test]
     fn format_cost_per_million_renders_sub_cent_and_zero_cleanly() {
         assert_eq!(format_cost_per_million(0.0, 0), "—");
         assert_eq!(format_cost_per_million(-1.0, 100), "—");
+        assert_eq!(format_cost_per_million(f64::NAN, 100), "—");
+        assert_eq!(format_cost_per_million(f64::INFINITY, 100), "—");
         assert_eq!(format_cost_per_million(0.0, 1000), "$0.00/M");
         assert_eq!(format_cost_per_million(0.000004, 1000), "<$0.01/M");
         assert_eq!(format_cost_per_million(0.003625, 1_000_000), "<$0.01/M");
