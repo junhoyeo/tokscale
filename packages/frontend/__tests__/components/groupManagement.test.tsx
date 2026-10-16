@@ -49,6 +49,8 @@ const ownerGroup = {
   description: null,
   avatarUrl: null,
   isPublic: false,
+  timeZone: "UTC",
+  weekStartsOn: 1,
   memberCount: 2,
   membership: { role: "owner" as const },
 };
@@ -59,6 +61,9 @@ const initialData = {
   stats: { totalTokens: 10, totalCost: 1, activeUsers: 1, totalMembers: 2 },
   period: "all" as const,
   sortBy: "tokens" as const,
+  dateRange: null,
+  timeZone: "UTC",
+  weekStartsOn: 1,
 };
 
 const owner = {
