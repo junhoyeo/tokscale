@@ -5018,6 +5018,8 @@ struct TsScanScope {
     parser_versions: std::collections::BTreeMap<String, u32>,
     full_history: bool,
     full_history_clients: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_floors: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Submission-level provenance (#888): history recovered from an aggregate
@@ -5055,6 +5057,32 @@ fn to_ts_token_contribution_data(
     device: Option<&device::SubmitDevice>,
     scan_scope: Option<TsScanScope>,
 ) -> TsTokenContributionData {
+    let scan_scope = scan_scope.map(|mut scope| {
+        if scope.full_history || !scope.full_history_clients.is_empty() {
+            let mut floors = std::collections::BTreeMap::new();
+            for d in &graph.contributions {
+                for s in &d.clients {
+                    if !scope.full_history
+                        && !scope.full_history_clients.iter().any(|c| c == &s.client)
+                    {
+                        continue;
+                    }
+                    floors
+                        .entry(s.client.clone())
+                        .and_modify(|earliest: &mut String| {
+                            if d.date < *earliest {
+                                *earliest = d.date.clone();
+                            }
+                        })
+                        .or_insert_with(|| d.date.clone());
+                }
+            }
+            if !floors.is_empty() {
+                scope.retention_floors = Some(floors);
+            }
+        }
+        scope
+    });
     TsTokenContributionData {
         meta: TsExportMeta {
             generated_at: graph.meta.generated_at.clone(),
@@ -5197,6 +5225,7 @@ fn submit_scan_scope(
         // Fail closed for receivers predating `fullHistoryClients`.
         full_history: full_history && every_client_complete,
         full_history_clients,
+        retention_floors: None,
     })
 }
 
@@ -6198,9 +6227,69 @@ struct SubmitResponse {
     details: Option<Vec<String>>,
 }
 
+fn deserialize_optional_i64_from_any<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalI64Visitor;
+    impl<'de> serde::de::Visitor<'de> for OptionalI64Visitor {
+        type Value = Option<i64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer, a string representing an integer, or null")
+        }
+
+        fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+            i64::try_from(v).map(Some).map_err(E::custom)
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<Self::Value, E> {
+            if v.is_finite()
+                && v.fract() == 0.0
+                && v >= i64::MIN as f64
+                && v < 9223372036854775808.0
+            {
+                Ok(Some(v as i64))
+            } else {
+                Err(E::custom(format!("invalid integer value: {v}")))
+            }
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            v.parse::<i64>().map(Some).map_err(E::custom)
+        }
+
+        fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<Self::Value, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+    deserializer.deserialize_option(OptionalI64Visitor)
+}
+
 #[derive(serde::Deserialize)]
 struct SubmitMetrics {
-    #[serde(rename = "totalTokens")]
+    #[serde(
+        rename = "totalTokens",
+        default,
+        deserialize_with = "deserialize_optional_i64_from_any"
+    )]
     total_tokens: Option<i64>,
     #[serde(rename = "totalCost")]
     total_cost: Option<f64>,
@@ -10333,5 +10422,100 @@ mod tests {
             &None,
             &group_by,
         );
+    }
+
+    #[test]
+    fn submit_payload_populates_retention_floors_for_full_history_clients() {
+        let graph = graph_result_with_contributions(vec![
+            day_with_clients(
+                "2026-08-07",
+                200,
+                vec![
+                    client_contribution("antigravity-cli", "gemini-3-pro", "google", 100, 0.1, 1),
+                    client_contribution("amp", "claude-sonnet-4", "anthropic", 100, 0.1, 1),
+                ],
+            ),
+            day_with_clients(
+                "2026-08-05",
+                100,
+                vec![client_contribution(
+                    "antigravity-cli",
+                    "gemini-3-pro",
+                    "google",
+                    100,
+                    0.1,
+                    1,
+                )],
+            ),
+        ]);
+        let clients = vec!["antigravity-cli".to_string(), "amp".to_string()];
+
+        let full_scope = submit_scan_scope(Some(&clients), true, true);
+        let full_payload = to_ts_token_contribution_data(&graph, None, full_scope);
+        let floors = full_payload
+            .scan_scope
+            .as_ref()
+            .and_then(|s| s.retention_floors.as_ref())
+            .expect("retention floors populated for full history");
+        assert_eq!(
+            floors.get("antigravity-cli").map(String::as_str),
+            Some("2026-08-05")
+        );
+        assert_eq!(floors.get("amp").map(String::as_str), Some("2026-08-07"));
+
+        let partial_amp_scope = submit_scan_scope(Some(&clients), true, false);
+        let partial_amp_payload = to_ts_token_contribution_data(&graph, None, partial_amp_scope);
+        let partial_floors = partial_amp_payload
+            .scan_scope
+            .as_ref()
+            .and_then(|s| s.retention_floors.as_ref())
+            .expect("retention floors populated for full_history_clients");
+        assert_eq!(
+            partial_floors.get("antigravity-cli").map(String::as_str),
+            Some("2026-08-05")
+        );
+        assert!(!partial_floors.contains_key("amp"));
+
+        let bounded_scope = submit_scan_scope(Some(&clients), false, true);
+        let bounded_payload = to_ts_token_contribution_data(&graph, None, bounded_scope);
+        assert!(bounded_payload
+            .scan_scope
+            .as_ref()
+            .and_then(|s| s.retention_floors.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn submit_metrics_deserializes_total_tokens_and_rejects_overflow() {
+        let from_int: SubmitMetrics =
+            serde_json::from_str(r#"{"totalTokens":240000,"totalCost":1.5}"#).unwrap();
+        assert_eq!(from_int.total_tokens, Some(240_000));
+
+        let from_str: SubmitMetrics =
+            serde_json::from_str(r#"{"totalTokens":"240000","totalCost":1.5}"#).unwrap();
+        assert_eq!(from_str.total_tokens, Some(240_000));
+
+        let from_float: SubmitMetrics =
+            serde_json::from_str(r#"{"totalTokens":240000.0,"totalCost":1.5}"#).unwrap();
+        assert_eq!(from_float.total_tokens, Some(240_000));
+
+        let from_null: SubmitMetrics =
+            serde_json::from_str(r#"{"totalTokens":null,"totalCost":1.5}"#).unwrap();
+        assert_eq!(from_null.total_tokens, None);
+
+        let from_omitted: SubmitMetrics = serde_json::from_str(r#"{"totalCost":1.5}"#).unwrap();
+        assert_eq!(from_omitted.total_tokens, None);
+
+        // u64::MAX must not silently wrap to -1
+        assert!(serde_json::from_str::<SubmitMetrics>(
+            r#"{"totalTokens":18446744073709551615,"totalCost":1.5}"#
+        )
+        .is_err());
+
+        // Non-integral floats must be rejected
+        assert!(serde_json::from_str::<SubmitMetrics>(
+            r#"{"totalTokens":240000.5,"totalCost":1.5}"#
+        )
+        .is_err());
     }
 }

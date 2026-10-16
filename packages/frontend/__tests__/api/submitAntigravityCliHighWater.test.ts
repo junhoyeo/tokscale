@@ -792,6 +792,304 @@ describe("POST /api/submit Antigravity family high-water", () => {
     }
   });
 
+  it("does not inflate or compound stored tokens when pruned history re-dates forward across adjacent or anchored days", async () => {
+    // 1. Adjacent-day walk under deficit: 240,000 on 08-07 followed by a
+    // pruned 150,000 block walking across 08-08, 08-09, 08-10 must hold 240,000.
+    const adjacentStore = newStore();
+    installTx(adjacentStore);
+    const firstAdjacent = submissionBody("antigravity-cli", [
+      { date: "2026-08-07", tokens: 240_000, messages: 10 },
+    ]);
+    mockSubmit(firstAdjacent);
+    expect((await post(firstAdjacent)).status).toBe(200);
+    expect(storedTokens(adjacentStore)).toBe(240_000);
+
+    for (const date of ["2026-08-08", "2026-08-09", "2026-08-10"]) {
+      installTx(adjacentStore);
+      const step = submissionBody(
+        "antigravity-cli",
+        [{ date, tokens: 150_000, messages: 6 }],
+        date,
+      );
+      mockSubmit(step);
+      const response = await post(step);
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.metrics.totalTokens).toBe(240_000);
+      expect(storedTokens(adjacentStore)).toBe(240_000);
+      expect(adjacentStore.days.map((d) => d.date)).toEqual(["2026-08-07"]);
+      expect(
+        adjacentStore.days[0].sourceBreakdown["antigravity-cli"].tokens,
+      ).toBe(240_000);
+    }
+
+    // 2. Retained-anchor walk under deficit: keeping 08-05 retained while a
+    // 50,000 block walks forward across 08-08, 08-09, 08-10 must hold 240,000.
+    const anchoredStore = newStore();
+    installTx(anchoredStore);
+    const firstAnchored = submissionBody("antigravity-cli", [
+      { date: "2026-08-05", tokens: 100_000, messages: 5 },
+      { date: "2026-08-07", tokens: 140_000, messages: 7 },
+    ]);
+    mockSubmit(firstAnchored);
+    expect((await post(firstAnchored)).status).toBe(200);
+    expect(storedTokens(anchoredStore)).toBe(240_000);
+
+    for (const date of ["2026-08-08", "2026-08-09", "2026-08-10"]) {
+      installTx(anchoredStore);
+      const step = submissionBody(
+        "antigravity-cli",
+        [
+          { date: "2026-08-05", tokens: 80_000, messages: 4 },
+          { date, tokens: 50_000, messages: 2 },
+        ],
+        "2026-08-05",
+      );
+      mockSubmit(step);
+      const response = await post(step);
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.metrics.totalTokens).toBe(240_000);
+      expect(storedTokens(anchoredStore)).toBe(240_000);
+      expect(anchoredStore.days.map((d) => d.date).sort()).toEqual([
+        "2026-08-05",
+        "2026-08-07",
+      ]);
+      expect(
+        anchoredStore.days.find((d) => d.date === "2026-08-05")
+          ?.sourceBreakdown["antigravity-cli"].tokens,
+      ).toBe(100_000);
+      expect(
+        anchoredStore.days.find((d) => d.date === "2026-08-07")
+          ?.sourceBreakdown["antigravity-cli"].tokens,
+      ).toBe(140_000);
+    }
+  });
+
+  it("separately preserves and credits distinct Antigravity family sources (CLI and Extension)", async () => {
+    const store = newStore();
+    installTx(store);
+    const first = {
+      device: { id: "dev_1", name: "Device one" },
+      meta: {
+        generatedAt: "2026-08-10T00:00:00Z",
+        version: "4.13.0",
+        dateRange: { start: "2026-08-07", end: "2026-08-07" },
+      },
+      scanScope: {
+        parserVersions: Object.fromEntries(ANTIGRAVITY_FAMILY.map((c) => [c, 1])),
+        fullHistory: true,
+      },
+      summary: { clients: ["antigravity-cli", "antigravity-extension"] },
+      years: [],
+      contributions: [
+        {
+          date: "2026-08-07",
+          clients: [
+            {
+              client: "antigravity-cli",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 60_000,
+                output: 15_000,
+                cacheRead: 10_000,
+                cacheWrite: 5_000,
+                reasoning: 10_000,
+              },
+              cost: 100,
+              messages: 5,
+            },
+            {
+              client: "antigravity-extension",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 80_000,
+                output: 25_000,
+                cacheRead: 15_000,
+                cacheWrite: 10_000,
+                reasoning: 10_000,
+              },
+              cost: 140,
+              messages: 7,
+            },
+          ],
+        },
+      ],
+    };
+    mockSubmit(first);
+    expect((await post(first)).status).toBe(200);
+    expect(storedTokens(store)).toBe(240_000);
+
+    // 1. Deficit snapshot across total and all token fields
+    // (150k on 08-07 + 80k on 09-01 = 230k < 240k):
+    // freezes both family sources together without crediting the deficit day.
+    installTx(store);
+    const deficit = {
+      device: { id: "dev_1", name: "Device one" },
+      meta: {
+        generatedAt: "2026-09-02T00:00:00Z",
+        version: "4.13.0",
+        dateRange: { start: "2026-08-07", end: "2026-09-01" },
+      },
+      scanScope: {
+        parserVersions: Object.fromEntries(ANTIGRAVITY_FAMILY.map((c) => [c, 1])),
+        fullHistory: true,
+      },
+      summary: { clients: ["antigravity-cli", "antigravity-extension"] },
+      years: [],
+      contributions: [
+        {
+          date: "2026-08-07",
+          clients: [
+            {
+              client: "antigravity-cli",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 35_000,
+                output: 10_000,
+                cacheRead: 5_000,
+                cacheWrite: 5_000,
+                reasoning: 5_000,
+              },
+              cost: 60,
+              messages: 3,
+            },
+            {
+              client: "antigravity-extension",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 50_000,
+                output: 15_000,
+                cacheRead: 10_000,
+                cacheWrite: 5_000,
+                reasoning: 10_000,
+              },
+              cost: 90,
+              messages: 4,
+            },
+          ],
+        },
+        {
+          date: "2026-09-01",
+          clients: [
+            {
+              client: "antigravity-cli",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 30_000,
+                output: 10_000,
+                cacheRead: 5_000,
+                cacheWrite: 2_000,
+                reasoning: 3_000,
+              },
+              cost: 50,
+              messages: 2,
+            },
+            {
+              client: "antigravity-extension",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 15_000,
+                output: 5_000,
+                cacheRead: 5_000,
+                cacheWrite: 2_000,
+                reasoning: 3_000,
+              },
+              cost: 30,
+              messages: 2,
+            },
+          ],
+        },
+      ],
+    };
+    mockSubmit(deficit);
+    const deficitRes = await post(deficit);
+    expect(deficitRes.status).toBe(200);
+    const deficitJson = await deficitRes.json();
+    expect(deficitJson.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days.map((d) => d.date)).toEqual(["2026-08-07"]);
+    expect(store.days[0].sourceBreakdown["antigravity-cli"].tokens).toBe(100_000);
+    expect(store.days[0].sourceBreakdown["antigravity-extension"].tokens).toBe(140_000);
+
+    // 2. Field-isolated deficit: total tokens exceed baseline (250k >= 240k),
+    // but a specific coverage field (reasoning 5k < 20k, output 25k < 40k) falls below.
+    // The seven-field family check must refuse the replacement and freeze.
+    installTx(store);
+    const fieldDeficit = {
+      ...deficit,
+      contributions: [
+        {
+          date: "2026-08-07",
+          clients: [
+            {
+              client: "antigravity-cli",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 85_000,
+                output: 10_000,
+                cacheRead: 10_000,
+                cacheWrite: 5_000,
+                reasoning: 5_000,
+              },
+              cost: 115,
+              messages: 5,
+            },
+            {
+              client: "antigravity-extension",
+              modelId: "gemini-3-pro",
+              tokens: {
+                input: 95_000,
+                output: 15_000,
+                cacheRead: 15_000,
+                cacheWrite: 10_000,
+                reasoning: 0,
+              },
+              cost: 135,
+              messages: 7,
+            },
+          ],
+        },
+      ],
+    };
+    mockSubmit(fieldDeficit);
+    const fieldDeficitRes = await post(fieldDeficit);
+    expect(fieldDeficitRes.status).toBe(200);
+    const fieldDeficitJson = await fieldDeficitRes.json();
+    expect(fieldDeficitJson.metrics.totalTokens).toBe(240_000);
+    expect(storedTokens(store)).toBe(240_000);
+    expect(store.days.map((d) => d.date)).toEqual(["2026-08-07"]);
+
+    // 3. Covering snapshot (240k on 08-07 + 80k on 09-01 = 320k) where all
+    // seven coverage fields cover or exceed their credited baseline:
+    // credits CLI and Extension separately and holds per-day breakdown on replay.
+    const covering = {
+      ...deficit,
+      contributions: [
+        first.contributions[0],
+        deficit.contributions[1],
+      ],
+    };
+    for (let replay = 0; replay < 2; replay++) {
+      installTx(store);
+      mockSubmit(covering);
+      const response = await post(covering);
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.metrics.totalTokens).toBe(320_000);
+      expect(storedTokens(store)).toBe(320_000);
+      expect(store.days.map((d) => d.date).sort()).toEqual(["2026-08-07", "2026-09-01"]);
+
+      const day0807 = store.days.find((d) => d.date === "2026-08-07")!;
+      expect(day0807.sourceBreakdown["antigravity-cli"].tokens).toBe(100_000);
+      expect(day0807.sourceBreakdown["antigravity-extension"].tokens).toBe(140_000);
+
+      const day0901 = store.days.find((d) => d.date === "2026-09-01")!;
+      expect(day0901.sourceBreakdown["antigravity-cli"].tokens).toBe(50_000);
+      expect(day0901.sourceBreakdown["antigravity-extension"].tokens).toBe(30_000);
+    }
+  });
+
   it("still inflates for a client that is legitimately not registered", async () => {
     // Claude's parser does not re-attribute submitted history, so it is not in
     // SUPPORTED_VERSIONED_PARSERS and takes the plain day-by-day merge path.
