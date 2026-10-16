@@ -471,3 +471,100 @@ fn aside_discovers_only_session_transcripts() {
     let expected: Vec<_> = allowed.iter().map(|path| home.path().join(path)).collect();
     assert_eq!(actual, expected);
 }
+
+/// Real Aside transcripts never put a vendor in `provider`: the field records
+/// the ROUTE. On a read-only snapshot of a live `~/.aside` tree the only three
+/// values present were `ai-gateway` (865 rows), `aside` (613) and
+/// `claude-code` (57) — so 60% of records carried a proxy id where pricing and
+/// the public per-provider breakdown expect a vendor.
+///
+/// Passing `ai-gateway` through also denies the row `ResolutionKind::ProviderScoped`:
+/// the resolver only grants it when the hint names the vendor owning the
+/// matched key, and `prepare_submission_pricing` zeroes anything it demotes as
+/// `UNVERIFIED_PROVIDER_IDENTITY_REASON`.
+#[test]
+fn aside_route_providers_resolve_to_vendors_not_proxies() {
+    // Given the three provider values a real Aside tree actually writes.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [
+        // A gateway route names no vendor, so the model id has to decide.
+        ("ai-gateway", "claude-fable-5", "anthropic"),
+        ("ai-gateway", "gpt-5.6-luna", "openai"),
+        // A Claude Code subscription is an Anthropic route.
+        ("claude-code", "claude-opus-4-8", "anthropic"),
+        // Aside's own gateway was already treated as nameless.
+        ("aside", "gpt-5.6-terra", "openai"),
+        // An unrecognized route with an unrecognizable model stays unknown
+        // rather than inventing a vendor.
+        ("ai-gateway", "mystery-model", "unknown"),
+    ];
+    let body = rows
+        .iter()
+        .map(|(provider, model, _)| {
+            serde_json::json!({
+                "role": "assistant", "provider": provider, "model": model,
+                "usage": {"input": 1}
+            })
+            .to_string()
+                + "\n"
+        })
+        .collect::<String>();
+    write_session(home.path(), &body);
+
+    // When the parser resolves provider identity.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    // Then no proxy id survives into the reported provider.
+    assert_eq!(messages.len(), rows.len());
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        rows.iter().map(|(_, _, want)| *want).collect::<Vec<_>>(),
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.provider_id != "ai-gateway" && m.provider_id != "claude-code"),
+        "a routing id must never be published as a provider"
+    );
+}
+
+/// A vendor id Aside may start writing is a stronger claim than inference from
+/// a model name, so the route mapping must not become an allowlist that drops
+/// ids it has not heard of.
+#[test]
+fn aside_keeps_explicit_non_route_providers() {
+    let home = tempfile::tempdir().unwrap();
+    let body = [("openai-codex", "gpt-4o"), ("custom-provider", "gpt-4o")]
+        .iter()
+        .map(|(provider, model)| {
+            serde_json::json!({
+                "role": "assistant", "provider": provider, "model": model,
+                "usage": {"input": 1}
+            })
+            .to_string()
+                + "\n"
+        })
+        .collect::<String>();
+    write_session(home.path(), &body);
+
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        ["openai-codex", "custom-provider"],
+    );
+}

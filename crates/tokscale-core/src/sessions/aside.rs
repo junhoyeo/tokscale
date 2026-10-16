@@ -36,6 +36,33 @@ struct Cost {
     total: Option<f64>,
 }
 
+/// The vendor an Aside `provider` names, or `None` when it names a route.
+///
+/// `provider` records the ROUTE Aside took, not always the vendor that served
+/// the call. Real transcripts hold `ai-gateway` for a user-configured gateway,
+/// `claude-code` for a Claude Code subscription, and `aside` for Aside's own
+/// gateway — none of which is a provider the pricing datasets key on. The
+/// public format reference this parser was written against maps the same ids
+/// and blanks the rest for exactly that reason.
+///
+/// Only the route ids above are rewritten; any other value is left to the
+/// caller to pass through. A vendor id Aside starts writing later is a
+/// stronger claim than inference from a model name, so it must not be
+/// discarded by an allowlist that has not heard of it yet.
+///
+/// `claude-code` resolves to `anthropic` because a Claude Code subscription is
+/// an Anthropic route — the vendor is known, only the billing relationship
+/// differs. `ai-gateway` resolves to nothing: it is a generic proxy whose
+/// upstream is configured per user, so the model id is the only evidence left.
+fn route_provider_vendor(raw: &str) -> Option<Option<&'static str>> {
+    match raw.to_ascii_lowercase().as_str() {
+        "claude-code" => Some(Some("anthropic")),
+        // Aside's own gateway and an unqualified routing label name no vendor.
+        "ai-gateway" | "aside" | "unknown" => Some(None),
+        _ => None,
+    }
+}
+
 /// Parse usage metadata only; message content and account credentials are ignored.
 pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
@@ -91,16 +118,20 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("unknown");
+        // Explicit vendor ids stay authoritative; only the route ids Aside is
+        // known to write are rewritten, and a route that names no vendor falls
+        // back to the delimiter-aware model-family inference.
         let provider = record
             .provider
             .as_deref()
             .map(str::trim)
-            .filter(|s| {
-                !s.is_empty()
-                    && !s.eq_ignore_ascii_case("aside")
-                    && !s.eq_ignore_ascii_case("unknown")
+            .filter(|s| !s.is_empty())
+            .map_or(Some(None), |raw| {
+                route_provider_vendor(raw).or(Some(Some(raw)))
             })
-            .unwrap_or_else(|| inferred_provider_from_model_delimited(model).unwrap_or("unknown"));
+            .flatten()
+            .or_else(|| inferred_provider_from_model_delimited(model))
+            .unwrap_or("unknown");
         let timestamp = record
             .timestamp
             .as_ref()
