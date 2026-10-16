@@ -634,16 +634,32 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                             .unwrap_or(false)
                 }
                 "sessions.json" => file_name == "sessions.json",
-                // Mistral Vibe (CLI): session directories contain `meta.json` with
-                // cumulative token counts and session metadata. Legacy Vibe 1.x
-                // stored flat `session_*.json` files.
+                // Mistral Vibe (CLI): session directories contain `meta.json`
+                // with cumulative token counts and session metadata. Legacy
+                // Vibe 1.x stored one flat `<prefix>_*.json` per session, where
+                // the prefix is configurable (`session_logging.session_prefix`,
+                // default `session`) and is the agent name for a subagent, so
+                // the suffix rather than the prefix is what identifies these.
+                //
+                // Two sibling files share the directory and must not be parsed
+                // as sessions: the shared index `.session_index.json` and the
+                // atomic-write temporaries, which `NamedTemporaryFile` names
+                // `tmp<random>.json.tmp` / `.session_index.<random>.tmp`. Both
+                // are excluded by leading dot and by suffix rather than by a
+                // `session_` prefix they never carry.
                 "vibe-session" => {
                     if file_name == "meta.json" {
                         true
-                    } else if file_name.starts_with("session_") && file_name.ends_with(".json") {
-                        !file_name.starts_with(".session_index") && !file_name.ends_with(".tmp")
                     } else {
-                        false
+                        // Upstream's own migration globs the save directory
+                        // non-recursively (`Path(save_dir).glob("<prefix>_*.json")`),
+                        // so a legacy session is a direct child of the root and
+                        // never nested. Requiring that keeps per-session
+                        // `attachments/` snapshots out of the scan.
+                        file_name.ends_with(".json")
+                            && !file_name.starts_with('.')
+                            && !file_name.ends_with(".json.tmp")
+                            && path.parent() == Some(Path::new(root))
                     }
                 }
                 // DeepSeek Harness: one JSONL transcript per session at any
