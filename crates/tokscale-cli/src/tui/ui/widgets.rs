@@ -877,6 +877,7 @@ pub fn get_client_color(client: &str) -> Color {
         "prime-agent" => Color::Rgb(108, 99, 255), // #6C63FF Prime violet
         "unsloth" => Color::Rgb(88, 204, 2), // #58CC02 Unsloth green
         "muse" => Color::Rgb(0, 100, 224),   // #0064E0 Muse brand blue
+        "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
         _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }
