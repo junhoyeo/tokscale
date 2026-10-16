@@ -27,6 +27,10 @@ struct Usage {
     output: Option<i64>,
     cache_read: Option<i64>,
     cache_write: Option<i64>,
+    /// Subset of `cache_write` billed at the 1-hour cache TTL rate (2x input)
+    /// rather than the 5-minute rate (1.25x input). Aside writes this key on
+    /// Anthropic-API responses.
+    cache_write_1h: Option<i64>,
     reasoning: Option<i64>,
     cost: Option<Cost>,
 }
@@ -96,13 +100,18 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
         let output = usage.output.unwrap_or(0).max(0);
         // Aside output includes reasoning; Tokscale's buckets are disjoint.
         let reasoning = usage.reasoning.unwrap_or(0).clamp(0, output);
+        let cache_write = usage.cache_write.unwrap_or(0).max(0);
         let tokens = TokenBreakdown {
             input: usage.input.unwrap_or(0).max(0),
             output: output - reasoning,
             cache_read: usage.cache_read.unwrap_or(0).max(0),
-            cache_write: usage.cache_write.unwrap_or(0).max(0),
+            cache_write,
+            // `cache_write_1h` is a subset of `cache_write`, never an extra
+            // bucket: `TokenBreakdown::total()` does not add it, and pricing
+            // bills it at 2x input instead of 1.25x. Clamping to `cache_write`
+            // restores that invariant on a source that contradicts itself.
+            cache_write_1h: usage.cache_write_1h.unwrap_or(0).clamp(0, cache_write),
             reasoning,
-            ..Default::default()
         };
         let cost = usage
             .cost

@@ -2055,7 +2055,7 @@ Tokscale deduplicates messages across forked sessions using a fingerprint of tim
 
 ### Aside
 
-Aside stores flat assistant usage at `~/.aside/u/<account>/sessions/<session>/messages.jsonl`. Tokscale preserves native timestamps, provider/model metadata and separate cached-input buckets. Reasoning is split out of output, so totals and estimated cost count it once. Repeated provider-scoped response IDs are counted once across sessions/accounts; calls without an ID remain separate. Positive recorded costs are retained; zero or absent costs use standard pricing. Use `tokscale --no-spinner --client aside` to filter usage. Validation uses synthetic fixtures on Linux; real Mac accounts and Windows execution have not been verified.
+Aside stores flat assistant usage at `~/.aside/u/<account>/sessions/<session>/messages.jsonl`. Tokscale preserves native timestamps, model metadata and separate cached-input buckets, including the 1-hour-TTL subset of cache writes. Reasoning is split out of output, so totals and estimated cost count it once. Aside's `provider` field records the route rather than the vendor, so a Claude Code route is reported as Anthropic and a generic gateway route defers to model-family inference; explicit vendor ids stay authoritative. Repeated provider-scoped response IDs are counted once across sessions/accounts; calls without an ID remain separate. Positive recorded costs are retained; zero or absent costs use standard pricing. Use `tokscale --no-spinner --client aside` to filter usage. Windows execution has not been verified.
 
 ### Muse Code
 

@@ -568,3 +568,80 @@ fn aside_keeps_explicit_non_route_providers() {
         ["openai-codex", "custom-provider"],
     );
 }
+
+/// Real Anthropic-API rows carry `usage.cacheWrite1h` (present on 921 of 1,535
+/// assistant rows in the read-only snapshot). It is the subset of `cacheWrite`
+/// billed at the 1-hour cache TTL — 2x input instead of 1.25x — so dropping it
+/// bills those tokens at the cheaper rate. `TokenBreakdown::total()` does not
+/// add the bucket, and the invariant is that it never exceeds `cache_write`.
+#[test]
+fn aside_reads_one_hour_cache_writes_and_clamps_them() {
+    // Given a faithful bucket, a self-contradicting one, and a negative one.
+    let home = tempfile::tempdir().unwrap();
+    let body = [
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 100, "cacheWrite1h": 40}}),
+        // A 1h subset larger than the write it belongs to cannot be trusted
+        // past the write itself.
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 10, "cacheWrite1h": 99}}),
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 10, "cacheWrite1h": -5}}),
+        // The key is absent on non-Anthropic routes.
+        serde_json::json!({"role": "assistant", "model": "gpt-5.6-luna",
+            "usage": {"input": 1, "cacheWrite": 10}}),
+    ]
+    .iter()
+    .map(|row| row.to_string() + "\n")
+    .collect::<String>();
+    write_session(home.path(), &body);
+
+    // When parsing the metadata-only rows.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    // Then the 1h subset is retained, clamped to its write, and never negative.
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| (m.tokens.cache_write, m.tokens.cache_write_1h))
+            .collect::<Vec<_>>(),
+        [(100, 40), (10, 10), (10, 0), (10, 0)],
+    );
+    // The subset is not an extra bucket: it must not inflate the total.
+    assert_eq!(messages[0].tokens.total(), 101);
+}
+
+/// The 1h bucket has to survive the cache, export and legacy lanes too, or the
+/// rate is correct on a cold scan and wrong on every later one.
+#[tokio::test]
+async fn aside_one_hour_cache_writes_survive_the_public_lane() {
+    let home = tempfile::tempdir().unwrap();
+    let row = serde_json::json!({
+        "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+        "model": "claude-fable-5", "provider": "ai-gateway",
+        "responseId": "one-hour",
+        "usage": {"input": 1, "cacheWrite": 100, "cacheWrite1h": 40}
+    });
+    write_session(home.path(), &(row.to_string() + "\n"));
+
+    let messages = parse_local_unified_messages_with_pricing_uncached(
+        LocalParseOptions {
+            home_dir: Some(home.path().to_string_lossy().into_owned()),
+            clients: Some(vec!["aside".into()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].tokens.cache_write, 100);
+    assert_eq!(messages[0].tokens.cache_write_1h, 40);
+    assert_eq!(messages[0].provider_id, "anthropic");
+}

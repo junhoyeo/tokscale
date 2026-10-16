@@ -1999,7 +1999,7 @@ Tokscale 使用时间戳、模型、provider、token 计数、成本和 agent �
 
 ### Aside
 
-Aside 的扁平 assistant 用量记录位于 `~/.aside/u/<account>/sessions/<session>/messages.jsonl`。Tokscale 保留原始时间戳、提供商和模型信息以及独立的缓存输入分项。reasoning 从 output 中拆分，因此总量和估算费用仅计算一次。同一提供商的重复 response ID 跨会话和账户去重，没有 ID 的调用分别保留。正数记录费用予以保留，费用为 0 或缺失时使用现有定价。可通过 `tokscale --no-spinner --client aside` 筛选。验证基于 Linux 合成 fixture，尚未验证真实 Mac 账户或 Windows 执行。
+Aside 的扁平 assistant 用量记录位于 `~/.aside/u/<account>/sessions/<session>/messages.jsonl`。Tokscale 保留原始时间戳、模型信息以及独立的缓存输入分项（含 1 小时 TTL 的缓存写入部分）。reasoning 从 output 中拆分，因此总量和估算费用仅计算一次。Aside 的 `provider` 字段记录的是路由而非供应商，因此 Claude Code 路由归为 Anthropic，通用网关路由则依据模型系列推断；显式的供应商 ID 仍然优先。同一提供商的重复 response ID 跨会话和账户去重，没有 ID 的调用分别保留。正数记录费用予以保留，费用为 0 或缺失时使用现有定价。可通过 `tokscale --no-spinner --client aside` 筛选。尚未验证 Windows 执行。
 
 ### Muse Code
 

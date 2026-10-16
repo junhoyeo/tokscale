@@ -1963,7 +1963,7 @@ Tokscale はタイムスタンプ、モデル、プロバイダ、トークン�
 
 ### Aside
 
-Aside のフラットな assistant 使用量は `~/.aside/u/<account>/sessions/<session>/messages.jsonl` に保存されます。元のタイムスタンプ、プロバイダー・モデル情報、キャッシュ入力の区分を保持します。reasoning は output から分離し、合計と推定費用に一度だけ計上します。同一プロバイダーの response ID の重複はセッション・アカウント間で除去し、ID のない呼び出しは個別に保持します。正の記録費用を保持し、0 または未記録の場合は既存の料金計算を使用します。`tokscale --no-spinner --client aside` で絞り込めます。Linux の合成 fixture で検証しており、実際の Mac アカウントと Windows 実行は未検証です。
+Aside のフラットな assistant 使用量は `~/.aside/u/<account>/sessions/<session>/messages.jsonl` に保存されます。元のタイムスタンプ、モデル情報、キャッシュ入力の区分（1時間 TTL のキャッシュ書き込み分を含む）を保持します。reasoning は output から分離し、合計と推定費用に一度だけ計上します。Aside の `provider` フィールドはベンダーではなく経路を記録するため、Claude Code 経路は Anthropic として集計し、汎用ゲートウェイ経路はモデルファミリー推論に従います。明示的なベンダー ID はそのまま優先されます。同一プロバイダーの response ID の重複はセッション・アカウント間で除去し、ID のない呼び出しは個別に保持します。正の記録費用を保持し、0 または未記録の場合は既存の料金計算を使用します。`tokscale --no-spinner --client aside` で絞り込めます。Windows 実行は未検証です。
 
 ### Muse Code
 

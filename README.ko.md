@@ -2000,7 +2000,7 @@ Tokscale은 타임스탬프, 모델, 프로바이더, 토큰 수, 비용, 에이
 
 ### Aside
 
-Aside의 평면 assistant 사용량 기록은 `~/.aside/u/<account>/sessions/<session>/messages.jsonl`에 저장됩니다. Tokscale은 원본 타임스탬프, 제공자·모델 정보와 캐시 입력 구간을 보존합니다. reasoning은 output에서 분리하여 토큰 합계와 추정 비용에 한 번만 반영합니다. 같은 제공자의 반복 response ID는 세션·계정 간 한 번만 집계하고, ID 없는 호출은 각각 유지합니다. 양수 기록 비용은 보존하며 0 또는 누락 비용에는 기존 가격 계산을 적용합니다. `tokscale --no-spinner --client aside`로 필터링할 수 있습니다. 검증은 Linux 합성 fixture 기반이며 실제 Mac 계정과 Windows 실행은 검증하지 않았습니다.
+Aside의 평면 assistant 사용량 기록은 `~/.aside/u/<account>/sessions/<session>/messages.jsonl`에 저장됩니다. Tokscale은 원본 타임스탬프, 모델 정보, 캐시 입력 구간(1시간 TTL 캐시 쓰기 부분 포함)을 보존합니다. reasoning은 output에서 분리하여 토큰 합계와 추정 비용에 한 번만 반영합니다. Aside의 `provider` 필드는 공급자가 아니라 경로를 기록하므로, Claude Code 경로는 Anthropic으로 집계하고 범용 게이트웨이 경로는 모델 계열 추론을 따릅니다. 명시적인 공급자 ID는 그대로 우선합니다. 같은 제공자의 반복 response ID는 세션·계정 간 한 번만 집계하고, ID 없는 호출은 각각 유지합니다. 양수 기록 비용은 보존하며 0 또는 누락 비용에는 기존 가격 계산을 적용합니다. `tokscale --no-spinner --client aside`로 필터링할 수 있습니다. Windows 실행은 검증하지 않았습니다.
 
 ### Muse Code
 
