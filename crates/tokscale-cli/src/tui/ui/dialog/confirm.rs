@@ -6,7 +6,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::{truncate_ellipsis as truncate, AMBIENT_STABLE_BORDER_SET};
+use crate::tui::ui::widgets::truncate_ellipsis_with_marker as truncate;
+use crate::ui_glyphs::Glyphs;
 
 use super::{DialogContent, DialogResult};
 
@@ -203,12 +204,12 @@ impl DialogContent for ConfirmDialog {
         )
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
         let tone = self.tone_color(theme);
         let block = Block::default()
             .title(self.title)
             .borders(Borders::ALL)
-            .border_set(AMBIENT_STABLE_BORDER_SET)
+            .border_set(glyphs.border)
             .border_style(Style::default().fg(tone));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -229,6 +230,7 @@ impl DialogContent for ConfirmDialog {
                 Style::default().fg(tone).add_modifier(Modifier::BOLD),
                 inner.width,
                 theme,
+                glyphs.ellipsis,
             ),
             labeled_line(
                 "Effect",
@@ -236,6 +238,7 @@ impl DialogContent for ConfirmDialog {
                 theme.secondary_text_style(),
                 inner.width,
                 theme,
+                glyphs.ellipsis,
             ),
         ];
 
@@ -305,20 +308,21 @@ fn labeled_line(
     value_style: Style,
     width: u16,
     theme: &Theme,
+    ellipsis: &str,
 ) -> Line<'static> {
     let width = width as usize;
     let label_text = format!("{label:<8}");
     let label_width = label_text.chars().count();
     if width <= label_width {
         return Line::from(Span::styled(
-            truncate(&label_text, width),
+            truncate(&label_text, width, ellipsis),
             Style::default().fg(theme.muted),
         ));
     }
 
     Line::from(vec![
         Span::styled(label_text, Style::default().fg(theme.muted)),
-        Span::styled(truncate(value, width - label_width), value_style),
+        Span::styled(truncate(value, width - label_width, ellipsis), value_style),
     ])
 }
 
@@ -339,7 +343,14 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| dialog.render(frame, Rect::new(0, 0, width, height), &theme))
+            .draw(|frame| {
+                dialog.render(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    &theme,
+                    Glyphs::unicode(),
+                )
+            })
             .unwrap();
 
         terminal

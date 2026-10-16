@@ -11,8 +11,9 @@ use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     display_width, get_provider_shade, light_ratio_bar_spans, pad_start_to_width, pad_to_width,
-    truncate_ellipsis_to_width as truncate_string, AMBIENT_STABLE_BORDER_SET,
+    truncate_ellipsis_to_width_with_marker as truncate_string,
 };
+use crate::ui_glyphs::Glyphs;
 
 struct ButtonSpec {
     label: String,
@@ -57,7 +58,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabUsage)),
@@ -99,6 +100,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn status_label(app: &App) -> String {
+    let separator = app.glyphs.compact_separator;
     let lang = app.settings.tui_language;
     if app.is_fetching_usage() {
         return tr(lang, MessageKey::StatusSyncingUsage).to_string();
@@ -136,15 +138,15 @@ fn status_label(app: &App) -> String {
         };
         if app.usage_fetch_diagnostics.is_empty() {
             format!(
-                "{} · {}",
+                "{} {separator} {}",
                 providers_str,
-                identity_count_label(lang, inventory.saved, inventory.managed)
+                identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs)
             )
         } else {
             format!(
-                "{} · {} · {}",
+                "{} {separator} {} {separator} {}",
                 providers_str,
-                identity_count_label(lang, inventory.saved, inventory.managed),
+                identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
                 usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
             )
         }
@@ -168,7 +170,8 @@ fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
     }
 }
 
-fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> String {
+fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize, glyphs: Glyphs) -> String {
+    let separator = glyphs.compact_separator;
     let saved_label = if saved == 1 {
         tr(lang, MessageKey::StatusSavedSingular)
     } else {
@@ -191,7 +194,7 @@ fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> Stri
         (saved, 0) => format_count(saved, saved_label),
         (0, managed) => format_count(managed, managed_label),
         (saved, managed) => format!(
-            "{} · {}",
+            "{} {separator} {}",
             format_count(saved, saved_label),
             format_count(managed, managed_label)
         ),
@@ -585,7 +588,7 @@ fn push_click_buttons(
         let share = (text_budget / count).max(1) as usize;
         compact
             .into_iter()
-            .map(|label| truncate_string(&label, share))
+            .map(|label| truncate_string(&label, share, app.glyphs.ellipsis))
             .collect()
     };
 
@@ -691,8 +694,12 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
         // status pushes the action past the edge while its click area stays at
         // the edge, so the visible button and the clickable one disagree.
         let budget = area_width.saturating_sub(action_width + 1);
-        let title = truncate_string(&title, budget);
-        let status = truncate_string(status, budget.saturating_sub(display_width(&title)));
+        let title = truncate_string(&title, budget, app.glyphs.ellipsis);
+        let status = truncate_string(
+            status,
+            budget.saturating_sub(display_width(&title)),
+            app.glyphs.ellipsis,
+        );
         header_spans.push(Span::styled(title, title_style));
         header_spans.push(Span::styled(status, app.theme.subtle_text_style()));
         let used_width = Line::from(header_spans.clone()).width();
@@ -729,7 +736,11 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
             lines.push(Line::from(Span::styled(
                 format!(
                     "  {}",
-                    truncate_string(&line, area.width.saturating_sub(4) as usize)
+                    truncate_string(
+                        &line,
+                        area.width.saturating_sub(4) as usize,
+                        app.glyphs.ellipsis
+                    )
                 ),
                 Style::default().fg(app.theme.muted),
             )));
@@ -751,7 +762,7 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
             }
         };
         lines.push(Line::from(Span::styled(
-            truncate_string(&label, area.width as usize),
+            truncate_string(&label, area.width as usize, app.glyphs.ellipsis),
             style,
         )));
     }
@@ -822,7 +833,11 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.muted),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    truncate_string(
+                        &diagnostic.display_name(),
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
                 )),
             ]
@@ -835,11 +850,19 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    truncate_string(
+                        &diagnostic.display_name(),
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.message, area.width as usize),
+                    truncate_string(
+                        &diagnostic.message,
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(app.theme.muted),
                 )),
             ]
@@ -926,7 +949,7 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
             .saturating_sub(summary_height)
             .saturating_sub(accounts_table_min_height)
             .max(base_selected_height);
-        medium_selected_account_preferred_height(selected).min(max_dynamic_height)
+        medium_selected_account_preferred_height(selected, app.glyphs).min(max_dynamic_height)
     } else {
         base_selected_height
     }
@@ -945,9 +968,9 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
     render_accounts_table(frame, app, chunks[2], outputs);
 }
 
-fn medium_selected_account_preferred_height(selected: &UsageOutput) -> u16 {
+fn medium_selected_account_preferred_height(selected: &UsageOutput, glyphs: Glyphs) -> u16 {
     let status_rows = 3
-        + usize::from(credits_status_line(selected).is_some())
+        + usize::from(credits_status_line(selected, glyphs).is_some())
         + reset_credit_detail_rows(selected);
     let limit_rows = 2 + selected.metrics.len().min(4);
     let action_rows = 3;
@@ -978,7 +1001,7 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleUsageSummary),
@@ -1046,6 +1069,7 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
                     app.settings.tui_language,
                     hidden_count,
                     inner.width as usize,
+                    app.glyphs,
                 ));
             }
         }
@@ -1069,6 +1093,7 @@ fn usage_status_summary_lines(
     width: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
+    let separator = app.glyphs.compact_separator;
     let lang = app.settings.tui_language;
     let ready_count = outputs
         .iter()
@@ -1096,7 +1121,7 @@ fn usage_status_summary_lines(
             let score = output_score(output);
             if score > 0.0 {
                 format!(
-                    "{} · {:.0}{}",
+                    "{} {separator} {:.0}{}",
                     account_name(app, output),
                     score,
                     tr(lang, MessageKey::UsagePercentLeft)
@@ -1110,13 +1135,13 @@ fn usage_status_summary_lines(
         .unwrap_or_else(|| tr(lang, MessageKey::UsageNoResetData).to_string());
     let action = overall_action(app, outputs);
     let capacity = format!(
-        "{} · {} · {}{}",
+        "{} {separator} {} {separator} {}{}",
         capacity_count(lang, ready_count, MessageKey::CapacityReady),
         capacity_count(lang, watch_count, MessageKey::CapacityWatch),
         capacity_count(lang, critical_count, MessageKey::CapacityCritical),
         if unknown_count > 0 {
             format!(
-                " · {}",
+                " {separator} {}",
                 capacity_count(lang, unknown_count, MessageKey::CapacityUnknown)
             )
         } else {
@@ -1275,7 +1300,7 @@ fn append_usage_diagnostic_lines(
         app.usage_fetch_diagnostics.len().min(available)
     };
     for diagnostic in visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count) {
-        lines.push(usage_diagnostic_line(diagnostic, width));
+        lines.push(usage_diagnostic_line(diagnostic, width, app.glyphs));
     }
 
     let hidden_count = app
@@ -1295,6 +1320,7 @@ fn append_usage_diagnostic_lines(
                     )
                 ),
                 width,
+                app.glyphs.ellipsis,
             ),
             app.theme.subtle_text_style(),
         )));
@@ -1328,11 +1354,15 @@ fn diagnostic_severity_rank(severity: UsageFetchDiagnosticSeverity) -> u8 {
     }
 }
 
-fn usage_diagnostic_line(diagnostic: &UsageFetchDiagnostic, width: usize) -> Line<'static> {
+fn usage_diagnostic_line(
+    diagnostic: &UsageFetchDiagnostic,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let label = diagnostic.display_name();
     let text = format!("  {label}: {}", diagnostic.message);
     Line::from(Span::styled(
-        truncate_string(&text, width),
+        truncate_string(&text, width, glyphs.ellipsis),
         Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
     ))
 }
@@ -1414,7 +1444,10 @@ fn push_kv_styled(
             format!("  {}{}", key, padding),
             app.theme.subtle_text_style(),
         ),
-        Span::styled(truncate_string(value, max_value), value_style),
+        Span::styled(
+            truncate_string(value, max_value, app.glyphs.ellipsis),
+            value_style,
+        ),
     ]));
 }
 
@@ -1454,6 +1487,7 @@ fn attention_action_rank(output: &UsageOutput) -> u8 {
 }
 
 fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static> {
+    let separator = app.glyphs.compact_separator;
     let status = readiness_status(output);
     let metric = display_metric(output);
     let detail = metric
@@ -1461,7 +1495,7 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
             let reset = metric
                 .resets_at
                 .as_ref()
-                .map(|reset| format!(" · {}", helpers::format_reset_time(reset)))
+                .map(|reset| format!(" {separator} {}", helpers::format_reset_time(reset)))
                 .unwrap_or_default();
             format!(
                 "{} {}{}",
@@ -1483,6 +1517,7 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
     let readiness = truncate_string(
         readiness_label(app.settings.tui_language, status),
         readiness_width,
+        app.glyphs.ellipsis,
     );
     Line::from(vec![
         Span::raw("  "),
@@ -1492,13 +1527,17 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
         ),
         Span::styled(
             pad_to_width(
-                &truncate_string(&account_name(app, output), account_width.saturating_sub(1)),
+                &truncate_string(
+                    &account_name(app, output),
+                    account_width.saturating_sub(1),
+                    app.glyphs.ellipsis,
+                ),
                 account_width,
             ),
             app.theme.secondary_text_style(),
         ),
         Span::styled(
-            truncate_string(&detail, width.saturating_sub(used + 1)),
+            truncate_string(&detail, width.saturating_sub(used + 1), app.glyphs.ellipsis),
             metric
                 .map(|metric| Style::default().fg(metric_color(app, metric)))
                 .unwrap_or_else(|| app.theme.subtle_text_style()),
@@ -1506,7 +1545,12 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
     ])
 }
 
-fn attention_more_line(lang: TuiLanguage, hidden_count: usize, width: usize) -> Line<'static> {
+fn attention_more_line(
+    lang: TuiLanguage,
+    hidden_count: usize,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let label = more_count_label(
         lang,
         hidden_count,
@@ -1514,7 +1558,10 @@ fn attention_more_line(lang: TuiLanguage, hidden_count: usize, width: usize) -> 
         MessageKey::UsageMoreAtRiskPlural,
     );
     Line::from(Span::styled(
-        format!("  {}", truncate_string(&label, width.saturating_sub(2))),
+        format!(
+            "  {}",
+            truncate_string(&label, width.saturating_sub(2), glyphs.ellipsis)
+        ),
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -1526,13 +1573,14 @@ fn provider_summary_line(
     group: &UsageProviderGroup<'_>,
     _width: usize,
 ) -> Line<'static> {
+    let separator = app.glyphs.compact_separator;
     let saved = group
         .outputs
         .iter()
         .filter(|(_, output)| output.account.is_some())
         .count();
     let managed = group.outputs.len().saturating_sub(saved);
-    let count_label = identity_count_label(app.settings.tui_language, saved, managed);
+    let count_label = identity_count_label(app.settings.tui_language, saved, managed, app.glyphs);
     let ready = group
         .outputs
         .iter()
@@ -1546,19 +1594,22 @@ fn provider_summary_line(
     let lang = app.settings.tui_language;
     let summary = if risk > 0 {
         format!(
-            "{count_label} · {} · {}",
+            "{count_label} {separator} {} {separator} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady),
             capacity_count(lang, risk, MessageKey::UsageAtRisk)
         )
     } else {
         format!(
-            "{count_label} · {}",
+            "{count_label} {separator} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady)
         )
     };
     Line::from(vec![
         Span::styled(
-            format!("  {}", truncate_string(group.provider, 18)),
+            format!(
+                "  {}",
+                truncate_string(group.provider, 18, app.glyphs.ellipsis)
+            ),
             Style::default()
                 .fg(app.theme.color(get_provider_shade(group.provider, 0)))
                 .add_modifier(Modifier::BOLD),
@@ -1580,10 +1631,14 @@ fn render_selected_account(
     let title = format!(" {}  {} ", title_prefix, output_display_name(app, selected));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            truncate_string(&title, area.width.saturating_sub(4) as usize),
+            truncate_string(
+                &title,
+                area.width.saturating_sub(4) as usize,
+                app.glyphs.ellipsis,
+            ),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1606,7 +1661,7 @@ fn render_selected_account(
             &mut lines,
             app,
             tr(lang, MessageKey::LabelStatus),
-            &selected_status_line(lang, selected),
+            &selected_status_line(lang, selected, app.glyphs),
             Style::default()
                 .fg(readiness_color(app, readiness))
                 .add_modifier(Modifier::BOLD),
@@ -1634,7 +1689,7 @@ fn render_selected_account(
         );
     }
     if lines.len() < detail_limit {
-        if let Some(label) = credits_status_line(selected) {
+        if let Some(label) = credits_status_line(selected, app.glyphs) {
             push_kv_styled(
                 &mut lines,
                 app,
@@ -1736,6 +1791,7 @@ fn append_selected_reset_credit_lines(
                 tr(app.settings.tui_language, MessageKey::CreditExpiryUnknown),
                 app.theme.subtle_text_style(),
                 width,
+                app.glyphs,
             ));
         }
         return;
@@ -1761,6 +1817,7 @@ fn append_selected_reset_credit_lines(
             &format_selected_reset_schedule_entry(app.settings.tui_language, bucket),
             app.theme.secondary_text_style(),
             width,
+            app.glyphs,
         ));
     }
 
@@ -1775,16 +1832,26 @@ fn append_selected_reset_credit_lines(
             ),
             app.theme.subtle_text_style(),
             width,
+            app.glyphs,
         ));
     }
 }
 
-fn selected_reset_schedule_line(value: &str, value_style: Style, width: usize) -> Line<'static> {
+fn selected_reset_schedule_line(
+    value: &str,
+    value_style: Style,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let prefix_width = 14usize;
     Line::from(vec![
         Span::raw(" ".repeat(prefix_width)),
         Span::styled(
-            truncate_string(value, width.saturating_sub(prefix_width + 2)),
+            truncate_string(
+                value,
+                width.saturating_sub(prefix_width + 2),
+                glyphs.ellipsis,
+            ),
             value_style,
         ),
     ])
@@ -1833,8 +1900,9 @@ fn append_credit_bank_summary_lines(
         ),
         Span::styled(
             truncate_string(
-                &reset_bank_summary(app.settings.tui_language, outputs),
+                &reset_bank_summary(app.settings.tui_language, outputs, app.glyphs),
                 width.saturating_sub(15),
+                app.glyphs.ellipsis,
             ),
             Style::default()
                 .fg(Color::Yellow)
@@ -1887,7 +1955,10 @@ fn reset_credit_account_line(
     // panel, where ratatui clipped it with no marker while en/fr got an
     // ellipsis. Measuring in cells is exactly `{:<width$}` for ASCII, so `en` is
     // unchanged for every possible count.
-    let count_cell = pad_to_width(&truncate_string(&count, count_width), count_width);
+    let count_cell = pad_to_width(
+        &truncate_string(&count, count_width, app.glyphs.ellipsis),
+        count_width,
+    );
     let used = 2 + label_width + count_width + 2;
     let expiry = credit_nearest_expiry_line(app.settings.tui_language, credits);
     let marker = if selected { "> " } else { "  " };
@@ -1895,7 +1966,7 @@ fn reset_credit_account_line(
         Span::raw(marker),
         Span::styled(
             pad_to_width(
-                &truncate_string(&account, label_width.saturating_sub(1)),
+                &truncate_string(&account, label_width.saturating_sub(1), app.glyphs.ellipsis),
                 label_width,
             ),
             Style::default()
@@ -1904,7 +1975,7 @@ fn reset_credit_account_line(
         ),
         Span::styled(count_cell, app.theme.secondary_text_style()),
         Span::styled(
-            truncate_string(&expiry, width.saturating_sub(used)),
+            truncate_string(&expiry, width.saturating_sub(used), app.glyphs.ellipsis),
             app.theme.secondary_text_style(),
         ),
     ])
@@ -1976,15 +2047,16 @@ fn format_credit_expiry_label(value: &str) -> String {
         .to_string()
 }
 
-fn selected_status_line(lang: TuiLanguage, output: &UsageOutput) -> String {
+fn selected_status_line(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
+    let separator = glyphs.compact_separator;
     let plan = output
         .plan
         .as_deref()
         .unwrap_or_else(|| tr(lang, MessageKey::LabelUnknown));
     format!(
-        "{} · {}",
+        "{} {separator} {}",
         plan,
-        account_readiness_label(lang, output, readiness_status(output))
+        account_readiness_label(lang, output, readiness_status(output), glyphs)
     )
 }
 
@@ -2068,17 +2140,20 @@ fn account_readiness_label(
     lang: TuiLanguage,
     output: &UsageOutput,
     readiness: UsageReadiness,
+    glyphs: Glyphs,
 ) -> String {
+    let separator = glyphs.compact_separator;
     let account_state = account_state_label(lang, output);
     let readiness = readiness_label(lang, readiness);
     if account_state.eq_ignore_ascii_case(readiness) {
         readiness.to_string()
     } else {
-        format!("{account_state} · {readiness}")
+        format!("{account_state} {separator} {readiness}")
     }
 }
 
 fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'static> {
+    let separator = app.glyphs.compact_separator;
     let ready = outputs
         .iter()
         .filter(|output| readiness_status(output) == UsageReadiness::Ready)
@@ -2090,19 +2165,19 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
     let inventory = usage_inventory(outputs);
     let lang = app.settings.tui_language;
     let summary = format!(
-        "  {}  {} · {} · {}{}",
+        "  {}  {} {separator} {} {separator} {}{}",
         tr(lang, MessageKey::UsageSnapshot),
         capacity_count(lang, ready, MessageKey::CapacityReady),
         capacity_count(lang, at_risk, MessageKey::UsageAtRisk),
-        identity_count_label(lang, inventory.saved, inventory.managed),
+        identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
         if app.hide_usage_emails {
-            format!(" · {}", tr(lang, MessageKey::UsageEmailsHidden))
+            format!(" {separator} {}", tr(lang, MessageKey::UsageEmailsHidden))
         } else {
             String::new()
         }
     );
     Line::from(Span::styled(
-        truncate_string(&summary, width),
+        truncate_string(&summary, width, app.glyphs.ellipsis),
         app.theme.subtle_text_style(),
     ))
 }
@@ -2131,6 +2206,7 @@ fn metric_detail_line(app: &App, metric: &UsageMetric, width: usize) -> Line<'st
                 &truncate_string(
                     &compact_metric_label(&metric.label),
                     label_width.saturating_sub(1),
+                    app.glyphs.ellipsis,
                 ),
                 label_width,
             )
@@ -2146,11 +2222,11 @@ fn metric_detail_line(app: &App, metric: &UsageMetric, width: usize) -> Line<'st
     spans.extend([
         Span::raw(" "),
         Span::styled(
-            pad_to_width(&truncate_string(&remaining, 11), 11),
+            pad_to_width(&truncate_string(&remaining, 11, app.glyphs.ellipsis), 11),
             Style::default().fg(color),
         ),
         Span::styled(
-            truncate_string(&reset, reset_width),
+            truncate_string(&reset, reset_width, app.glyphs.ellipsis),
             app.theme.subtle_text_style(),
         ),
     ]);
@@ -2171,7 +2247,7 @@ fn render_accounts_table(frame: &mut Frame, app: &mut App, area: Rect, outputs: 
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleAccounts),
@@ -2300,7 +2376,7 @@ fn narrow_table_header(app: &App, width: u16) -> Line<'static> {
     let lang = app.settings.tui_language;
     let label = format!(" #  {}", tr(lang, MessageKey::UsageAccountOrStatus));
     Line::from(Span::styled(
-        truncate_string(&label, width as usize),
+        truncate_string(&label, width as usize, app.glyphs.ellipsis),
         app.theme.subtle_text_style(),
     ))
 }
@@ -2332,12 +2408,13 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
 }
 
 fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rect) -> Row<'static> {
+    let separator = app.glyphs.compact_separator;
     let selected = app.selected_index == index;
     let width = area.width as usize;
     let row = usage_row_view(app, output);
     let lang = app.settings.tui_language;
     let state = if width >= 70 {
-        account_readiness_label(lang, output, row.readiness)
+        account_readiness_label(lang, output, row.readiness, app.glyphs)
     } else {
         readiness_label(lang, row.readiness).to_string()
     };
@@ -2359,7 +2436,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
         ),
         styled(
             pad_to_width(
-                &truncate_string(&left, left_width.saturating_sub(1)),
+                &truncate_string(&left, left_width.saturating_sub(1), app.glyphs.ellipsis),
                 left_width,
             ),
             app.theme.secondary_text_style(),
@@ -2368,12 +2445,15 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     ];
     if state_width > 0 {
         // Cells, not code points, in both the cut and the alignment.
-        // `활성 · 한도부족` is 9 code points and 15 cells, so a code-point
+        // `활성 ∙ 한도부족` is 9 code points and 15 cells, so a code-point
         // budget of 14 left it untruncated, unellipsised and one cell over its
         // column — and ratatui then clipped it at the panel edge with no
         // marker, the same failure mode as the Korean `메시지` header.
         first.push(styled(
-            pad_start_to_width(&truncate_string(&state, state_width), state_width),
+            pad_start_to_width(
+                &truncate_string(&state, state_width, app.glyphs.ellipsis),
+                state_width,
+            ),
             Style::default().fg(readiness_color(app, row.readiness)),
             selected,
         ));
@@ -2387,7 +2467,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     let detail = if row.reset.is_empty() {
         row.limit.clone()
     } else {
-        format!("{} · {}", row.limit, row.reset)
+        format!("{} {separator} {}", row.limit, row.reset)
     };
 
     let managed_label = if output.account.is_none() {
@@ -2411,7 +2491,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     let mut second = vec![
         styled("    ", Style::default(), selected),
         styled(
-            truncate_string(&detail, detail_width.saturating_sub(1)),
+            truncate_string(&detail, detail_width.saturating_sub(1), app.glyphs.ellipsis),
             detail_style,
             selected,
         ),
@@ -2443,7 +2523,7 @@ fn usage_row_view<'a>(app: &App, output: &'a UsageOutput) -> UsageRowView<'a> {
         .filter(|plan| !plan.is_empty())
         .unwrap_or_else(|| tr(app.settings.tui_language, MessageKey::LabelUnknown))
         .to_string();
-    let limit = metric_summary(app.settings.tui_language, output);
+    let limit = metric_summary(app.settings.tui_language, output, app.glyphs);
     let reset = metric.and_then(display_metric_reset).unwrap_or_default();
     let account_summary = account_plan_label(&account, output.plan.as_deref());
 
@@ -2458,7 +2538,8 @@ fn usage_row_view<'a>(app: &App, output: &'a UsageOutput) -> UsageRowView<'a> {
     }
 }
 
-fn metric_summary(lang: TuiLanguage, output: &UsageOutput) -> String {
+fn metric_summary(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
+    let spaced_separator = format!(" {} ", glyphs.compact_separator);
     if output.metrics.is_empty() {
         return tr(lang, MessageKey::UsageNoLimits).to_string();
     }
@@ -2468,11 +2549,11 @@ fn metric_summary(lang: TuiLanguage, output: &UsageOutput) -> String {
         .iter()
         .map(|metric| {
             let label = compact_metric_label(&metric.label);
-            let label = truncate_string(&label, 14);
+            let label = truncate_string(&label, 14, glyphs.ellipsis);
             format!("{label} {:.0}%", metric.remaining_percent)
         })
         .collect::<Vec<_>>();
-    parts.join(" · ")
+    parts.join(&spaced_separator)
 }
 
 fn compact_metric_label(label: &str) -> String {
@@ -2787,11 +2868,12 @@ fn next_reset_label(app: &App, outputs: &[UsageOutput]) -> Option<String> {
 }
 
 fn output_reset_label(app: &App, output: &UsageOutput) -> Option<String> {
+    let separator = app.glyphs.compact_separator;
     let metric = display_metric(output)?;
     let reset = metric.resets_at.as_ref()?;
     Some(format!(
-        "{} · {}",
-        truncate_string(&account_name(app, output), 22),
+        "{} {separator} {}",
+        truncate_string(&account_name(app, output), 22, app.glyphs.ellipsis),
         helpers::format_reset_time(reset)
     ))
 }
@@ -2945,7 +3027,8 @@ fn reset_credit_count_label(lang: TuiLanguage, count: u32) -> String {
     )
 }
 
-fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput]) -> String {
+fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput], glyphs: Glyphs) -> String {
+    let separator = glyphs.compact_separator;
     let available: u32 = outputs
         .iter()
         .filter(|output| output.provider == "Codex")
@@ -2975,12 +3058,13 @@ fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput]) -> String {
         )
     };
     match nearest_credit_expiry_label(lang, &expiries) {
-        Some(nearest) => format!("{count} · {nearest}"),
+        Some(nearest) => format!("{count} {separator} {nearest}"),
         None => count,
     }
 }
 
-fn credits_status_line(output: &UsageOutput) -> Option<String> {
+fn credits_status_line(output: &UsageOutput, glyphs: Glyphs) -> Option<String> {
+    let spaced_separator = format!(" {} ", glyphs.compact_separator);
     let mut parts = Vec::new();
     if let Some(credits) = &output.credit_status {
         if let Some(balance) = credits.balance.as_deref() {
@@ -3009,7 +3093,7 @@ fn credits_status_line(output: &UsageOutput) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" · "))
+        Some(parts.join(&spaced_separator))
     }
 }
 
@@ -3038,6 +3122,7 @@ fn quota_bar_spans(
         width,
         Style::default().fg(color),
         app.theme.subtle_text_style(),
+        app.glyphs,
     )
 }
 
@@ -3322,7 +3407,8 @@ mod tests {
 
     #[test]
     fn usage_quota_bar_uses_light_empty_track() {
-        let app = make_app();
+        let mut app = make_app();
+        app.glyphs = Glyphs::unicode();
         let metric = UsageMetric {
             label: "Session".to_string(),
             used_percent: 50.0,
@@ -3334,6 +3420,7 @@ mod tests {
         let line = metric_detail_line(&app, &metric, 72);
         let text = line_text(&line);
 
+        // The quota track stays with the block-visual exception tracked in #1445.
         assert!(text.contains("█"), "{text}");
         assert!(text.contains("·"), "{text}");
         assert!(!text.contains("░"), "{text}");
@@ -3341,7 +3428,8 @@ mod tests {
 
     #[test]
     fn usage_quota_bar_uses_trace_mark_for_sub_cell_remaining() {
-        let app = make_app();
+        let mut app = make_app();
+        app.glyphs = Glyphs::unicode();
         let spans = quota_bar_spans(0.1, 20, Color::Red, &app);
         let text = spans
             .iter()
@@ -3351,6 +3439,22 @@ mod tests {
         assert!(text.contains("▏"), "{text}");
         assert!(!text.contains("█"), "{text}");
         assert_eq!(text.chars().count(), 20);
+    }
+
+    #[test]
+    fn safe_quota_bar_uses_background_cells_without_ambiguous_blocks() {
+        let app = make_app();
+        let spans = quota_bar_spans(50.0, 20, Color::Red, &app);
+        assert!(spans.iter().any(|span| span.style.bg == Some(Color::Red)));
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!text.contains('█'));
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(text.as_str()),
+            unicode_width::UnicodeWidthStr::width_cjk(text.as_str()),
+        );
     }
 
     #[test]
@@ -3400,7 +3504,8 @@ mod tests {
             reached: Some(false),
         });
 
-        let label = credits_status_line(&output).expect("missing credit status");
+        let label =
+            credits_status_line(&output, Glyphs::ascii_safe()).expect("missing credit status");
 
         assert!(label.contains("API credits 0"), "{label}");
         assert!(label.contains("no API credits"), "{label}");
@@ -3736,11 +3841,21 @@ mod tests {
 
         let body = render_body(&mut app, 160, 28);
 
-        assert!(body.contains("2 providers · 1 saved · 1 managed"), "{body}");
+        assert!(body.contains("2 providers ∙ 1 saved ∙ 1 managed"), "{body}");
         assert!(
-            body.contains("Snapshot  2 ready · 0 at risk · 1 saved · 1 managed"),
+            body.contains("Snapshot  2 ready ∙ 0 at risk ∙ 1 saved ∙ 1 managed"),
             "{body}"
         );
+        for row in body
+            .lines()
+            .filter(|row| row.contains("providers") || row.contains("Snapshot"))
+        {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(row),
+                unicode_width::UnicodeWidthStr::width_cjk(row),
+                "usage chrome width changed in a CJK locale: {row:?}"
+            );
+        }
     }
 
     #[test]
@@ -3759,13 +3874,19 @@ mod tests {
             output("Copilot", None),
         ];
 
-        assert_eq!(status_label(&app), "2개 공급자 · 1개 저장됨 · 1개 관리됨");
+        assert_eq!(status_label(&app), "2개 공급자 ∙ 1개 저장됨 ∙ 1개 관리됨");
         assert_eq!(
-            identity_count_label(TuiLanguage::Ko, 1, 1),
-            "1개 저장됨 · 1개 관리됨"
+            identity_count_label(TuiLanguage::Ko, 1, 1, Glyphs::ascii_safe()),
+            "1개 저장됨 ∙ 1개 관리됨"
         );
-        assert_eq!(identity_count_label(TuiLanguage::Ko, 1, 0), "1개 저장됨");
-        assert_eq!(identity_count_label(TuiLanguage::Ko, 0, 2), "2개 관리됨");
+        assert_eq!(
+            identity_count_label(TuiLanguage::Ko, 1, 0, Glyphs::ascii_safe()),
+            "1개 저장됨"
+        );
+        assert_eq!(
+            identity_count_label(TuiLanguage::Ko, 0, 2, Glyphs::ascii_safe()),
+            "2개 관리됨"
+        );
     }
 
     #[test]
@@ -5000,7 +5121,7 @@ mod tests {
     }
 
     /// The narrow account row's state column is 14 cells and right-aligned.
-    /// `truncate_ellipsis` budgeted code points, so `활성 · 한도부족` (9 code
+    /// `truncate_ellipsis` budgeted code points, so `활성 ∙ 한도부족` (9 code
     /// points, 15 cells) was neither truncated nor marked, overran its column
     /// and was clipped at the panel edge — the same failure mode as the Korean
     /// `메시지` header, reintroduced in a body row.
@@ -5020,7 +5141,7 @@ mod tests {
                 for output in &app.subscription_usage {
                     let readiness = readiness_status(output);
                     let state = if area_width >= 70 {
-                        account_readiness_label(lang, output, readiness)
+                        account_readiness_label(lang, output, readiness, app.glyphs)
                     } else {
                         readiness_label(lang, readiness).to_string()
                     };
@@ -5032,7 +5153,8 @@ mod tests {
                         continue; // no state column at this width
                     };
 
-                    let fitted = truncate_string(&state, state_width);
+                    let fitted =
+                        truncate_string(&state, state_width, Glyphs::ascii_safe().ellipsis);
                     assert!(
                         display_width(&fitted) <= state_width,
                         "{} at {frame_width}: state {state:?} still needs {} cells in a \

@@ -3,9 +3,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, display_width, fit_workspace_label_to_width, format_cache_hit_rate,
-    format_cost, format_tokens, get_compact_client_display_name, prefix_to_width, truncate_text,
-    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
+    display_width, fit_workspace_label_to_width_with_marker, format_cache_hit_rate, format_cost,
+    format_tokens, get_compact_client_display_name, prefix_to_width, truncate_text,
+    truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -192,9 +192,10 @@ impl ProjectColumn {
             // of each of its segments, and cutting the tail leaves the prefix
             // every row shares. Fitted to the width admission resolved for this
             // column, never to the requested width.
-            Self::Project => Cell::from(fit_workspace_label_to_width(
+            Self::Project => Cell::from(fit_workspace_label_to_width_with_marker(
                 &p.label,
                 layout.project_width as usize,
+                app.glyphs.ellipsis,
             ))
             .style(
                 Style::default()
@@ -218,6 +219,7 @@ impl ProjectColumn {
                 p.tokens.cache_read,
                 p.tokens.input,
                 p.tokens.cache_write,
+                app.glyphs,
             )))
             .style(app.theme.count_style()),
             Self::Total => Cell::from(self.fit(format_tokens(p.tokens.total())))
@@ -229,7 +231,7 @@ impl ProjectColumn {
                 self.fit(
                     ms_to_local_naive(p.last_active_ms)
                         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .unwrap_or_else(|| app.glyphs.missing.to_string()),
                 ),
             )
             .style(Style::default().fg(app.theme.muted)),
@@ -306,7 +308,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabProjects)),
@@ -343,8 +345,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -454,7 +456,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if projects_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(projects_len, scroll_offset, visible_height);
@@ -475,7 +477,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// `", "` and truncated to `max_cells` in terminal cells. Mirrors the Sessions
 /// tab's model cell: a multi-model project always ends in an ellipsis when some
 /// of its models did not fit, so it never renders as a single-model one. The
-/// marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal locale;
+/// marker comes from the active glyph set; the safe marker is one cell in every terminal locale;
 /// U+2026 is East-Asian-Ambiguous and would be two cells under a CJK locale,
 /// overflowing the budget this cell promises to keep.
 fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
@@ -483,7 +485,8 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         return Cell::from("");
     }
     if models.is_empty() {
-        return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
+        return Cell::from(app.glyphs.missing.to_string())
+            .style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -493,7 +496,7 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         if i > 0 {
             if budget < 3 {
                 spans.push(Span::styled(
-                    MIDDLE_ELLIPSIS,
+                    app.glyphs.ellipsis,
                     Style::default().fg(app.theme.muted),
                 ));
                 break;
@@ -515,7 +518,7 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{head}{MIDDLE_ELLIPSIS}"),
+                format!("{head}{}", app.glyphs.ellipsis),
                 Style::default().fg(color),
             ));
             break;
@@ -543,6 +546,7 @@ mod tests {
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
     use crate::tui::ui::header_budget::{assert_header_fits, assert_headers_render_in_full};
+    use crate::tui::ui::widgets::fit_workspace_label_to_width;
     use ratatui::{backend::TestBackend, Terminal};
     use unicode_width::UnicodeWidthStr;
 

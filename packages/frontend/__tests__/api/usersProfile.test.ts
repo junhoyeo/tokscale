@@ -173,8 +173,10 @@ vi.mock("drizzle-orm", () => ({
 }));
 
 type ModuleExports = typeof import("../../src/app/api/users/[username]/route");
+type DataModuleExports = typeof import("../../src/lib/publicProfileData");
 
 let GET: ModuleExports["GET"];
+let loadPublicProfileForPage: DataModuleExports["loadPublicProfileForPage"];
 
 function serializeSqlCalls(): string[] {
   return mockState.sql.mock.calls.map((call) => {
@@ -195,16 +197,46 @@ function collapseSql(text: string | undefined): string {
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/users/[username]/route");
+  const dataModule = await import("../../src/lib/publicProfileData");
   GET = routeModule.GET;
+  loadPublicProfileForPage = dataModule.loadPublicProfileForPage;
 });
 
 beforeEach(() => {
   mockState.reset();
   unstableCacheMock.mockClear();
+  unstableCacheMock.mockImplementation((fn: () => unknown) => fn);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("public profile page cache", () => {
+  it("rolls finite-period keys over at UTC midnight", async () => {
+    unstableCacheMock.mockImplementation(
+      () => async () => ({ kind: "error", status: 599 }),
+    );
+    vi.useFakeTimers();
+
+    vi.setSystemTime(new Date("2026-01-31T23:59:59.000Z"));
+    await loadPublicProfileForPage("alice", "this-month");
+    vi.setSystemTime(new Date("2026-02-01T00:00:01.000Z"));
+    await loadPublicProfileForPage("alice", "this-month");
+
+    expect(unstableCacheMock).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Function),
+      ["public-profile-page", "alice", "this-month", "2026-01-31"],
+      expect.any(Object),
+    );
+    expect(unstableCacheMock).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Function),
+      ["public-profile-page", "alice", "this-month", "2026-02-01"],
+      expect.any(Object),
+    );
+  });
 });
 
 describe("GET /api/users/[username]", () => {
@@ -1090,15 +1122,23 @@ describe("GET /api/users/[username]", () => {
     expect(calendar.activeDays).toBe(body.stats.activeDays);
   });
 
-  async function assertRollingProfilePeriod({
+  async function assertProfilePeriod({
     period,
     start,
+    end,
+    latestDate = end,
+    now = "2026-06-28T12:00:00.000Z",
+    outsideDate,
   }: {
-    period: "week" | "month";
+    period: "week" | "month" | "this-month" | "last-month";
     start: string;
+    end: string;
+    latestDate?: string;
+    now?: string;
+    outsideDate?: string;
   }) {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
+    vi.setSystemTime(new Date(now));
 
     mockState.pushSelectResult([
       {
@@ -1120,7 +1160,7 @@ describe("GET /api/users/[username]", () => {
         reasoningTokens: 25,
         submissionCount: 3,
         earliestDate: "2026-01-01",
-        latestDate: "2026-06-28",
+        latestDate,
         sessionCount: 8,
       },
     ]);
@@ -1135,7 +1175,7 @@ describe("GET /api/users/[username]", () => {
     ]);
     mockState.pushSelectResult([
       {
-        date: "2026-06-22",
+        date: period === "last-month" ? "2026-05-22" : "2026-06-22",
         timestampMs: 100,
         tokens: 200,
         cost: "2.0000",
@@ -1167,7 +1207,7 @@ describe("GET /api/users/[username]", () => {
         },
       },
       {
-        date: "2026-06-28",
+        date: period === "last-month" ? "2026-05-28" : end,
         timestampMs: 200,
         tokens: 300,
         cost: "3.0000",
@@ -1198,6 +1238,7 @@ describe("GET /api/users/[username]", () => {
           },
         },
       },
+      ...(outsideDate ? [{ date: outsideDate, tokens: 999, cost: "9.9900", inputTokens: 999, outputTokens: 0, sourceBreakdown: {} }] : []),
     ]);
     mockState.pushExecuteResult([{ rank: 4 }]);
 
@@ -1213,11 +1254,11 @@ describe("GET /api/users/[username]", () => {
       mockState.tables.dailyBreakdown.date,
       start,
     );
-    // No upper bound in SQL: the window's end is the anchor, which is not known
-    // when the query is built, and no row can sit above it anyway.
+    // The final upper bound is resolved from the newest submitted date after fetching.
     expect(mockState.lte).not.toHaveBeenCalled();
     expect(body.period).toBe(period);
-    expect(body.dateRange).toEqual({ start, end: "2026-06-28" });
+    expect(body.dateRange).toEqual({ start, end });
+    expect(body.chartRange).toEqual({ start, end });
     expect(body.user.rank).toBe(4);
     expect(
       sqlTexts.some(
@@ -1225,12 +1266,12 @@ describe("GET /api/users/[username]", () => {
           text.includes("FROM daily_breakdown d") &&
           text.includes("ROW_NUMBER() OVER") &&
           text.includes(`d.date >= ${start}`) &&
-          text.includes("d.date <= 2026-06-28"),
+          text.includes(`d.date <= ${end}`),
       ),
     ).toBe(true);
     expect(unstableCacheMock).toHaveBeenCalledWith(
       expect.any(Function),
-      ["profile-period-rank", "user-1", start, "2026-06-28"],
+      ["profile-period-rank", "user-1", start, end],
       {
         revalidate: 60,
         tags: ["leaderboard", "user:alice"],
@@ -1251,14 +1292,21 @@ describe("GET /api/users/[username]", () => {
     );
     expect(body.clients).toEqual(["codex", "claude"]);
     expect(body.models).toEqual(["gpt-5.5", "claude-sonnet-4-5"]);
+    expect(body.contributions.map((day: { date: string }) => day.date)).toEqual([
+      period === "last-month" ? "2026-05-22" : "2026-06-22",
+      period === "last-month" ? "2026-05-28" : end,
+    ]);
   }
 
   it.each([
-    { period: "week", start: "2026-06-22" },
-    { period: "month", start: "2026-05-30" },
+    { period: "week", start: "2026-06-22", end: "2026-06-28" },
+    { period: "month", start: "2026-05-30", end: "2026-06-28" },
+    { period: "this-month", start: "2026-06-01", end: "2026-06-29" },
+    { period: "this-month", start: "2026-06-01", end: "2026-06-30", now: "2026-06-30T12:00:00Z", latestDate: "2026-07-01", outsideDate: "2026-07-01" },
+    { period: "last-month", start: "2026-05-01", end: "2026-05-31", latestDate: "2026-06-29" },
   ] as const)(
-    "recalculates profile overview stats and rank for the $period period",
-    assertRollingProfilePeriod,
+    "recalculates profile stats, rank and charts for $period ending on $end",
+    assertProfilePeriod,
   );
 
   it("ranks the profile period window the way the leaderboard's period tab does", async () => {

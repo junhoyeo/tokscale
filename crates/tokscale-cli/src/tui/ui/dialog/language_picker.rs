@@ -11,9 +11,9 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
+use crate::tui::i18n::{tr, tr_with_glyphs, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::Glyphs;
 
 use super::{DialogContent, DialogResult};
 
@@ -52,13 +52,13 @@ impl DialogContent for LanguagePickerDialog {
         (width, height)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
         let current_lang = *self.selected.borrow();
         let title = tr(current_lang, MessageKey::LanguageDialogTitle);
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_set(AMBIENT_STABLE_BORDER_SET)
+            .border_set(glyphs.border)
             .border_style(Style::default().fg(theme.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -96,7 +96,11 @@ impl DialogContent for LanguagePickerDialog {
             let is_cursor = i == self.cursor;
             let is_active = current_lang == lang;
 
-            let radio = if is_active { "(●)" } else { "( )" };
+            let radio = if is_active {
+                glyphs.selected_radio
+            } else {
+                "( )"
+            };
             let left = format!("{} {} [{}]", radio, lang.native_name(), lang.code());
             let usable = list_area.width.saturating_sub(4) as usize;
 
@@ -122,7 +126,7 @@ impl DialogContent for LanguagePickerDialog {
 
         frame.render_widget(List::new(items), list_area);
 
-        let hint_text = tr(current_lang, MessageKey::LanguageDialogHint);
+        let hint_text = tr_with_glyphs(current_lang, MessageKey::LanguageDialogHint, glyphs);
         let hint = Paragraph::new(hint_text)
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.muted));

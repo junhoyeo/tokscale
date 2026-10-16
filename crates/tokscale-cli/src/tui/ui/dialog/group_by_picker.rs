@@ -13,7 +13,7 @@ use ratatui::{
 use tokscale_core::GroupBy;
 
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::AMBIENT_STABLE_BORDER_SET;
+use crate::ui_glyphs::Glyphs;
 
 use super::{DialogContent, DialogResult};
 
@@ -104,13 +104,13 @@ impl DialogContent for GroupByPickerDialog {
         (width, height)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        use crate::tui::i18n::{tr, MessageKey};
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
+        use crate::tui::i18n::{tr, tr_with_glyphs, MessageKey};
         use unicode_width::UnicodeWidthStr;
         let block = Block::default()
             .title(tr(self.lang, MessageKey::GroupByDialogTitle))
             .borders(Borders::ALL)
-            .border_set(AMBIENT_STABLE_BORDER_SET)
+            .border_set(glyphs.border)
             .border_style(Style::default().fg(theme.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -152,7 +152,11 @@ impl DialogContent for GroupByPickerDialog {
             let is_cursor = i == self.cursor;
             let is_active = *current == opt.value;
 
-            let radio = if is_active { "(●)" } else { "( )" };
+            let radio = if is_active {
+                glyphs.selected_radio
+            } else {
+                "( )"
+            };
             let usable = list_area.width.saturating_sub(4) as usize;
             let left = format!("{} {}", radio, opt.label);
             let desc = format!("    {}", opt.description);
@@ -189,9 +193,13 @@ impl DialogContent for GroupByPickerDialog {
 
         frame.render_widget(List::new(items), list_area);
 
-        let hint = Paragraph::new(tr(self.lang, MessageKey::GroupByDialogHint))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.muted));
+        let hint = Paragraph::new(tr_with_glyphs(
+            self.lang,
+            MessageKey::GroupByDialogHint,
+            glyphs,
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.muted));
         frame.render_widget(hint, rows[3]);
     }
 

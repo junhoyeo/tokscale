@@ -3,8 +3,8 @@ import { eq } from "drizzle-orm";
 import { db, groupMembers } from "@/lib/db";
 
 export async function revalidateGroupCaches(groupId: string, slug?: string): Promise<void> {
-  revalidateTag(`group:${groupId}`, "max");
-  revalidateTag(`group-leaderboard:${groupId}`, "max");
+  revalidateTag(`group:${groupId}`, { expire: 0 });
+  revalidateTag(`group-leaderboard:${groupId}`, { expire: 0 });
   revalidatePath("/groups");
 
   if (slug) {

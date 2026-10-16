@@ -7,8 +7,9 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    model_name_for_grouping, normalize_model_for_grouping, parse_local_unified_messages, sessions,
-    ClientId, GroupBy, LocalParseOptions, ModelPerformance, WorktreeRollup,
+    model_name_for_grouping, normalize_model_for_grouping, parse_local_unified_messages,
+    parse_local_unified_messages_deferred, sessions, ClientId, GroupBy, LocalParseOptions,
+    ModelPerformance, PendingSourceCacheSave, WorktreeRollup,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -173,6 +174,12 @@ pub struct SessionUsage {
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title.
     pub title: Option<String>,
+    /// Canonical workspace / project directory path where the session ran.
+    pub workspace_key: Option<String>,
+    /// Friendly workspace / project name when available.
+    pub workspace_label: Option<String>,
+    /// Distinct agent roles observed in this session in first-seen order.
+    pub agents: Vec<String>,
     /// Distinct models used across messages in this session, in first-seen
     /// order. Most sessions use a single model; a few switch mid-conversation.
     pub models: Vec<SessionModel>,
@@ -197,6 +204,9 @@ impl SessionUsage {
             session_id: session_id.to_string(),
             client: client.to_string(),
             title: None,
+            workspace_key: None,
+            workspace_label: None,
+            agents: Vec::new(),
             models: Vec::new(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
@@ -239,6 +249,17 @@ impl SessionUsage {
         self.last_active_ms = self.last_active_ms.max(branch.last_active_ms);
         if self.title.is_none() {
             self.title = branch.title.clone();
+        }
+        if self.workspace_key.is_none() {
+            self.workspace_key = branch.workspace_key.clone();
+        }
+        if self.workspace_label.is_none() {
+            self.workspace_label = branch.workspace_label.clone();
+        }
+        for agent in &branch.agents {
+            if !self.agents.contains(agent) {
+                self.agents.push(agent.clone());
+            }
         }
         for model in &branch.models {
             if !self
@@ -314,6 +335,32 @@ fn accumulate_session_entry(
         let trimmed = title.trim();
         if !trimmed.is_empty() && (owner_msg || entry.title.is_none()) {
             entry.title = Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(ref wk) = msg.workspace_key {
+        let trimmed = wk.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_key.is_none()) {
+            entry.workspace_key = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref wl) = msg.workspace_label {
+        let trimmed = wl.trim();
+        if !trimmed.is_empty() && (owner_msg || entry.workspace_label.is_none()) {
+            entry.workspace_label = Some(trimmed.to_string());
+        }
+    }
+    if let Some(ref agent) = msg.agent {
+        let normalized = if msg.client == "opencode" {
+            sessions::normalize_opencode_agent_name(agent)
+        } else if msg.client == "copilot" {
+            sessions::normalize_copilot_agent_name(agent)
+        } else {
+            sessions::normalize_agent_name(agent)
+        };
+        let trimmed = normalized.trim();
+        if !trimmed.is_empty() && !entry.agents.iter().any(|a| a == trimmed) {
+            entry.agents.push(trimmed.to_string());
         }
     }
 
@@ -398,6 +445,7 @@ pub struct UsageData {
     pub sessions_rolled: Vec<SessionUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
+    pub undated_tokens: u64,
     pub total_cost: f64,
     pub loading: bool,
     pub error: Option<String>,
@@ -624,6 +672,63 @@ impl DataLoader {
         .map_err(anyhow::Error::msg)?;
 
         self.aggregate_messages(messages, group_by)
+    }
+
+    /// Build complete TUI data while leaving only the durable source-cache
+    /// write pending. The caller owns that write and must persist it on the
+    /// same background loader thread after publishing the aggregate data.
+    pub fn load_deferred(
+        &self,
+        enabled_clients: &[ClientId],
+        group_by: &GroupBy,
+        include_synthetic: bool,
+    ) -> Result<(UsageData, PendingSourceCacheSave)> {
+        let home = crate::paths::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut sources: Vec<String> = enabled_clients
+            .iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        if include_synthetic {
+            sources.push("synthetic".to_string());
+        }
+
+        let opts = LocalParseOptions {
+            home_dir: Some(home),
+            use_env_roots: true,
+            clients: Some(sources),
+            since: self.since.clone(),
+            until: self.until.clone(),
+            year: self.year.clone(),
+            scanner_settings: data_loader_scanner_settings(),
+        };
+
+        let (messages, pending_save) = if Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                    rt.block_on(parse_local_unified_messages_deferred(opts))
+                })
+                .join()
+                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+            })
+        } else {
+            Runtime::new()?.block_on(parse_local_unified_messages_deferred(opts))
+        }
+        .map_err(anyhow::Error::msg)?;
+
+        match self.aggregate_messages(messages, group_by) {
+            Ok(data) => Ok((data, pending_save)),
+            Err(error) => {
+                // Parsing has already mutated the owned source cache. Do not
+                // throw that work away merely because TUI aggregation failed.
+                pending_save.persist();
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1623,6 +1728,12 @@ impl DataLoader {
             sessions_rolled,
             graph: Some(graph),
             total_tokens,
+            undated_tokens: messages
+                .iter()
+                .filter(|m| tokscale_core::claude_desktop::is_undated_balance(m))
+                .fold(0u64, |total, m| {
+                    total.saturating_add(m.tokens.total().max(0) as u64)
+                }),
             total_cost,
             loading: false,
             error: None,
@@ -1985,6 +2096,42 @@ mod tests {
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
 
     #[test]
+    fn accumulate_session_entry_normalizes_and_deduplicates_agents() {
+        let mut entry = SessionUsage::new("opencode", "sess-test");
+        let mut msg = UnifiedMessage {
+            client: "opencode".to_string(),
+            model_id: "test-model".to_string(),
+            provider_id: "test-provider".to_string(),
+            session_id: "sess-test".to_string(),
+            workspace_key: Some("/path/to/project".to_string()),
+            workspace_label: Some("project".to_string()),
+            timestamp: 1_700_000_000,
+            date: "2023-11-14".to_string(),
+            tokens: tokscale_core::TokenBreakdown::default(),
+            cost: 0.0,
+            cost_source: tokscale_core::sessions::CostSource::default(),
+            service_tier: None,
+            duration_ms: None,
+            message_count: 1,
+            agent: Some("hephaestus".to_string()),
+            dedup_key: None,
+            session_title: None,
+            parent_session_id: None,
+            is_turn_start: false,
+            model_attribution_conflicted: false,
+            copilot_context: None,
+        };
+
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+
+        // Duplicate with variant formatting doesn't add duplicate
+        msg.agent = Some(" Hephaestus ".to_string());
+        accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
+        assert_eq!(entry.agents, vec!["Hephaestus".to_string()]);
+    }
+
+    #[test]
     fn find_peak_hour_breaks_token_ties_by_earliest_hour() {
         let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
         let hour = |h: u32, tokens: u64| HourlyUsage {
@@ -2008,6 +2155,35 @@ mod tests {
             find_peak_hour(&[hour(18, 50), hour(3, 80)]).map(|peak| peak.0),
             Some(3)
         );
+    }
+
+    #[test]
+    fn desktop_undated_balances_appear_in_models_but_not_calendar() {
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "claude-future",
+            "anthropic",
+            "s",
+            0,
+            CoreTokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        message.date = tokscale_core::claude_desktop::UNKNOWN_DATE.into();
+        message.message_count = 0;
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let data = loader
+            .aggregate_messages(vec![message], &GroupBy::Model)
+            .unwrap();
+        assert_eq!(data.total_tokens, 100);
+        assert_eq!(data.undated_tokens, 100);
+        assert_eq!(data.models.len(), 1);
+        assert!(data.daily.is_empty());
+        assert!(data.hourly.is_empty());
+        assert!(data.minutely.is_empty());
+        assert!(data.monthly.is_empty());
     }
 
     #[test]

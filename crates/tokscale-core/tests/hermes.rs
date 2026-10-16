@@ -1,7 +1,10 @@
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use tempfile::TempDir;
-use tokscale_core::sessions::hermes::parse_hermes_sqlite;
+use tokscale_core::bucket_tz::BucketTimezone;
+use tokscale_core::sessions::hermes::{
+    message_is_day_split, parse_hermes_sqlite, parse_hermes_sqlite_in,
+};
 
 #[test]
 fn test_parse_hermes_sqlite_returns_empty_for_missing_database() {
@@ -189,7 +192,9 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(msg.timestamp, 1_750_000_000_250_i64);
     assert_eq!(msg.message_count, 42);
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    // `output_tokens` is reasoning-inclusive in Hermes, so the additive output
+    // bucket keeps only the non-reasoning remainder.
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.cache_read, 50);
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
@@ -198,6 +203,128 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
         msg.dedup_key.as_deref(),
         Some("hermes:session-1:claude-sonnet-4:anthropic")
     );
+}
+
+/// Hermes records `completion_tokens_details.reasoning_tokens` inside
+/// `output_tokens`, but `TokenBreakdown` buckets are additive and `compute_cost`
+/// prices output and reasoning at the same output rate. Mapping both fields
+/// through unmodified would bill every reasoning token twice, so the reasoning
+/// overlap must be split out of the output bucket without changing the row's
+/// token total.
+#[test]
+fn test_parse_hermes_sqlite_bills_reasoning_once() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            "session-reasoning",
+            "cli",
+            "deepseek-flash",
+            1_775_002_000.0_f64,
+            1_i64,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, billing_base_url, billing_mode, task,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            "session-reasoning",
+            "deepseek-flash",
+            "deepseek",
+            "",
+            "",
+            "",
+            1_000_i64,
+            400_i64,
+            50_i64,
+            20_i64,
+            150_i64,
+            0.0_f64,
+            0.0_f64,
+        ],
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+
+    let msg = &messages[0];
+    assert_eq!(msg.tokens.output, 250);
+    assert_eq!(msg.tokens.reasoning, 150);
+    // The split must not lose tokens: additive buckets still sum to the raw
+    // input + reasoning-inclusive output + cache.
+    assert_eq!(msg.tokens.total(), 1_000 + 400 + 50 + 20);
+}
+
+/// A malformed row claiming more reasoning than output must not drive the
+/// additive output bucket negative.
+#[test]
+fn test_parse_hermes_sqlite_clamps_reasoning_to_output() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            "session-clamped",
+            "cli",
+            "deepseek-flash",
+            1_775_002_000.0_f64,
+            1_i64,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, billing_base_url, billing_mode, task,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            "session-clamped",
+            "deepseek-flash",
+            "deepseek",
+            "",
+            "",
+            "",
+            10_i64,
+            30_i64,
+            0_i64,
+            0_i64,
+            90_i64,
+            0.0_f64,
+            0.0_f64,
+        ],
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+
+    let msg = &messages[0];
+    assert_eq!(msg.tokens.output, 0);
+    assert_eq!(msg.tokens.reasoning, 30);
+    assert_eq!(msg.tokens.total(), 10 + 30);
 }
 
 #[test]
@@ -497,7 +624,8 @@ fn test_parse_hermes_sqlite_emits_per_model_rows_for_multi_model_session() {
     // glm-5.2: primary model, gets message_count
     let glm = messages.iter().find(|m| m.model_id == "glm-5.2").unwrap();
     assert_eq!(glm.tokens.input, 5000);
-    assert_eq!(glm.tokens.output, 800);
+    assert_eq!(glm.tokens.output, 600);
+    assert_eq!(glm.tokens.reasoning, 200);
     assert_eq!(glm.message_count, 15); // primary model
     assert_eq!(
         glm.dedup_key.as_deref(),
@@ -562,7 +690,7 @@ fn test_parse_hermes_sqlite_falls_back_to_session_totals_without_session_model_u
     assert_eq!(msg.timestamp, 1_750_000_000_250_i64);
     assert_eq!(msg.message_count, 42);
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.cache_read, 50);
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
@@ -881,7 +1009,7 @@ fn test_parse_hermes_sqlite_falls_back_to_session_totals_when_per_model_query_ca
     let msg = &messages[0];
     assert_eq!(msg.session_id, "drifted-session");
     assert_eq!(msg.tokens.input, 1200);
-    assert_eq!(msg.tokens.output, 300);
+    assert_eq!(msg.tokens.output, 290);
     assert_eq!(msg.tokens.reasoning, 10);
     assert_eq!(msg.cost, 0.34);
     assert_eq!(msg.message_count, 42);
@@ -1227,4 +1355,529 @@ fn test_parse_hermes_sqlite_separates_null_and_empty_billing_providers() {
         .collect();
     assert_eq!(keys.len(), 2, "NULL and '' must not share a dedup key");
     assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 3000);
+}
+
+// ── cross-day attribution via the agent log (junhoyeo/tokscale#993) ──────────
+
+/// A local wall-clock stamp `days_ago` days back at `hour:12:00.000`, the shape
+/// Hermes' logger writes.
+fn log_stamp(days_ago: i64, hour: u32) -> String {
+    let day = (chrono::Local::now() - chrono::Duration::days(days_ago)).date_naive();
+    let stamp = day
+        .and_hms_opt(hour, 12, 0)
+        .unwrap()
+        .format("%Y-%m-%d %H:%M:%S");
+    format!("{stamp},000")
+}
+
+/// One `API call #N` line for the fixed model/provider. `prompt` is the whole
+/// prompt; `cache` of it is cached, so the stored fresh-input share is
+/// `prompt - cache`.
+fn log_call(session: &str, call: i64, stamp: &str, prompt: i64, output: i64, cache: i64) -> String {
+    let (model, provider) = ("glm-5.2", "zai");
+    let total = prompt + output;
+    format!(
+        "{stamp} INFO [{session}] agent.conversation_loop: API call #{call}: model={model} provider={provider} in={prompt} out={output} total={total} latency=1.0s cache={cache}/{prompt} (50%) id=gen-{call}"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_call_with_provider_and_write(
+    session: &str,
+    call: i64,
+    stamp: &str,
+    provider: &str,
+    prompt: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+) -> String {
+    let model = "glm-5.2";
+    let total = prompt + output;
+    format!(
+        "{stamp} INFO [{session}] agent.conversation_loop: API call #{call}: model={model} provider={provider} in={prompt} out={output} total={total} latency=1.0s cache={cache_read}/{prompt} (50%) write={cache_write} id=gen-{call}"
+    )
+}
+
+fn write_agent_log(dir: &TempDir, lines: &[String]) {
+    let logs = dir.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(logs.join("agent.log"), lines.join("\n") + "\n").unwrap();
+}
+
+fn local_day_key(timestamp_ms: i64) -> String {
+    use chrono::TimeZone;
+
+    chrono::Local
+        .timestamp_millis_opt(timestamp_ms)
+        .unwrap()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// Insert one smu row with the fixed model/provider and the given totals.
+fn insert_usage_row(
+    conn: &Connection,
+    session: &str,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cost: f64,
+) {
+    insert_usage_row_with_route(conn, session, "zai", input, output, cache_read, 0, cost);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_usage_row_with_route(
+    conn: &Connection,
+    session: &str,
+    provider: &str,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost: f64,
+) {
+    let sql = r#"
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, billing_base_url, billing_mode, task,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#;
+    conn.execute(
+        sql,
+        params![
+            session,
+            "glm-5.2",
+            provider,
+            "",
+            "",
+            "",
+            input,
+            output,
+            cache_read,
+            cache_write,
+            0_i64,
+            0.0_f64,
+            cost
+        ],
+    )
+    .unwrap();
+}
+
+/// A session that started two days ago and was used again yesterday reports one
+/// message per active day, with each logged bucket kept on the day that
+/// produced it — the database totals stay authoritative.
+#[test]
+fn test_parse_hermes_sqlite_splits_cross_day_session_by_logged_calls() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    let day_a = log_stamp(2, 9);
+    let day_b = log_stamp(1, 15);
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-cross-day", "desktop", "glm-5.2", 1_775_100_000.0_f64, 12_i64],
+    )
+    .unwrap();
+    // Totals equal the log sums: fresh input 200+200+1000, output 100+100+300,
+    // cache read 800+800+2000.
+    insert_usage_row(&conn, "session-cross-day", 1400, 500, 3600, 1.0);
+    write_agent_log(
+        &dir,
+        &[
+            log_call("session-cross-day", 1, &day_a, 1000, 100, 800),
+            log_call("session-cross-day", 2, &day_a, 1000, 100, 800),
+            log_call("session-cross-day", 3, &day_b, 3000, 300, 2000),
+        ],
+    );
+
+    let mut messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 2, "one message per active day");
+    messages.sort_by_key(|m| m.timestamp);
+
+    // Each bucket stays on the day whose calls reported it. A shared overall
+    // weight would incorrectly move fresh-input and cache-read tokens between
+    // these differently shaped days.
+    let (a, b) = (&messages[0], &messages[1]);
+    assert_eq!(a.tokens.input, 400);
+    assert_eq!(a.tokens.output, 200);
+    assert_eq!(a.tokens.cache_read, 1600);
+    assert_eq!(b.tokens.input, 1000);
+    assert_eq!(b.tokens.output, 300);
+    assert_eq!(b.tokens.cache_read, 2000);
+    // Exact split: the parts sum back to the authoritative row.
+    assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1400);
+    assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 500);
+    assert_eq!(
+        messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(),
+        3600
+    );
+    assert!((a.cost - 0.4).abs() < 1e-9 && (b.cost - 0.6).abs() < 1e-9);
+
+    // Each message lands on the day its logged calls fall in, and the day is
+    // part of the dedup key so no day is dropped by the caller's dedup pass.
+    for msg in &messages {
+        let day_key = local_day_key(msg.timestamp);
+        let expected =
+            format!("hermes:session-cross-day:glm-5.2:zai:__hermes_logged_day_v1__:{day_key}");
+        assert_eq!(msg.dedup_key.as_deref(), Some(expected.as_str()));
+    }
+    assert_ne!(a.dedup_key, b.dedup_key);
+
+    // The session message_count is still credited exactly once.
+    assert_eq!(messages.iter().map(|m| m.message_count).sum::<i32>(), 12);
+}
+
+/// `in=` includes fresh, cache-read, and cache-write prompt tokens. Cache
+/// writes must be removed from fresh input as well as retained in their own
+/// bucket, or the over-report guard rejects every cache-write session.
+#[test]
+fn test_parse_hermes_sqlite_splits_cache_write_calls() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-cache-write", "desktop", "glm-5.2", 1_775_100_000.0_f64, 2_i64],
+    )
+    .unwrap();
+    insert_usage_row_with_route(
+        &conn,
+        "session-cache-write",
+        "zai",
+        300,
+        100,
+        400,
+        800,
+        0.75,
+    );
+    let day_a = log_stamp(2, 9);
+    let day_b = log_stamp(1, 9);
+    write_agent_log(
+        &dir,
+        &[
+            log_call_with_provider_and_write(
+                "session-cache-write",
+                1,
+                &day_a,
+                "zai",
+                1000,
+                40,
+                400,
+                500,
+            ),
+            log_call_with_provider_and_write(
+                "session-cache-write",
+                2,
+                &day_b,
+                "zai",
+                500,
+                60,
+                0,
+                300,
+            ),
+        ],
+    );
+
+    let mut messages = parse_hermes_sqlite(&db_path);
+    messages.sort_by_key(|message| message.timestamp);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].tokens.input, 100);
+    assert_eq!(messages[0].tokens.output, 40);
+    assert_eq!(messages[0].tokens.cache_read, 400);
+    assert_eq!(messages[0].tokens.cache_write, 500);
+    assert_eq!(messages[1].tokens.input, 200);
+    assert_eq!(messages[1].tokens.output, 60);
+    assert_eq!(messages[1].tokens.cache_read, 0);
+    assert_eq!(messages[1].tokens.cache_write, 300);
+}
+
+/// Current Hermes persists a missing provider as an empty string but logs it
+/// as `provider=unknown`. The lookup forms must meet without changing the
+/// output row's provider/dedup identity.
+#[test]
+fn test_parse_hermes_sqlite_matches_providerless_log_calls() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-providerless", "desktop", "glm-5.2", 1_775_100_000.0_f64, 2_i64],
+    )
+    .unwrap();
+    insert_usage_row_with_route(&conn, "session-providerless", "", 400, 40, 0, 0, 0.2);
+    let day_a = log_stamp(2, 9);
+    let day_b = log_stamp(1, 9);
+    write_agent_log(
+        &dir,
+        &[
+            log_call_with_provider_and_write(
+                "session-providerless",
+                1,
+                &day_a,
+                "unknown",
+                200,
+                20,
+                0,
+                0,
+            ),
+            log_call_with_provider_and_write(
+                "session-providerless",
+                2,
+                &day_b,
+                "unknown",
+                200,
+                20,
+                0,
+                0,
+            ),
+        ],
+    );
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 2, "both providerless log days must split");
+    assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 400);
+    assert!(messages.iter().all(message_is_day_split));
+}
+
+/// Hermes starts `session_api_calls` at zero for each agent process, including
+/// when an existing conversation is resumed. Distinct calls can therefore
+/// reuse the same number on different days. Exact rotated-log duplicates still
+/// count once, but the resumed call must survive and create its later day.
+#[test]
+fn test_parse_hermes_sqlite_keeps_reused_call_numbers_after_resume() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-resumed", "desktop", "glm-5.2", 1_775_100_000.0_f64, 4_i64],
+    )
+    .unwrap();
+    // Two valid calls each contribute 200 fresh input, 100 output, and 800
+    // cache-read tokens. The first line is repeated to simulate overlap from a
+    // rotated log and must not inflate the authoritative row.
+    insert_usage_row(&conn, "session-resumed", 400, 200, 1600, 0.5);
+    let day_a = log_stamp(2, 9);
+    let day_b = log_stamp(1, 9);
+    let first = log_call("session-resumed", 1, &day_a, 1000, 100, 800);
+    let resumed = log_call("session-resumed", 1, &day_b, 1000, 100, 800);
+    write_agent_log(&dir, &[first.clone(), first, resumed]);
+
+    let mut messages = parse_hermes_sqlite(&db_path);
+    messages.sort_by_key(|message| message.timestamp);
+    assert_eq!(messages.len(), 2, "both active days must survive");
+    assert_eq!(messages[0].tokens.input, 200);
+    assert_eq!(messages[1].tokens.input, 200);
+    assert_eq!(messages[0].tokens.output, 100);
+    assert_eq!(messages[1].tokens.output, 100);
+    assert_eq!(messages[0].tokens.cache_read, 800);
+    assert_eq!(messages[1].tokens.cache_read, 800);
+    assert!(messages[0]
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| key.ends_with(&day_a[..10])));
+    assert!(messages[1]
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| key.ends_with(&day_b[..10])));
+    assert_eq!(messages.iter().map(|m| m.message_count).sum::<i32>(), 4);
+}
+
+/// Logs that claim more than the authoritative row (rotated into a foreign
+/// session, or lines from a database that was rewritten) are not evidence: the
+/// row keeps its whole total on the session's start day.
+#[test]
+fn test_parse_hermes_sqlite_falls_back_when_logs_over_report() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-over", "cli", "glm-5.2", 1_775_100_000.0_f64, 3_i64],
+    )
+    .unwrap();
+    insert_usage_row(&conn, "session-over", 500, 100, 100, 0.25);
+    let stamp = log_stamp(1, 10);
+    write_agent_log(
+        &dir,
+        &[log_call("session-over", 1, &stamp, 9000, 900, 8000)],
+    );
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].timestamp, 1_775_100_000_000_i64);
+    assert_eq!(messages[0].tokens.input, 500);
+    assert_eq!(
+        messages[0].dedup_key.as_deref(),
+        Some("hermes:session-over:glm-5.2:zai")
+    );
+}
+
+/// Log lines for sessions the database never recorded have no row to allocate
+/// to and must not surface as usage; the usage-unavailable line variant carries
+/// no figures and is skipped.
+#[test]
+fn test_parse_hermes_sqlite_ignores_log_lines_for_unknown_sessions() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-known", "cli", "glm-5.2", 1_775_100_000.0_f64, 2_i64],
+    )
+    .unwrap();
+    insert_usage_row(&conn, "session-known", 200, 50, 0, 0.1);
+    let stamp = log_stamp(1, 10);
+    let unavailable = format!(
+        "{stamp} INFO [session-known] agent.conversation_loop: API call #2: model=glm-5.2 provider=zai in=? out=? total=? latency=1.0s usage=unavailable"
+    );
+    write_agent_log(
+        &dir,
+        &[
+            log_call("session-known", 1, &stamp, 200, 50, 0),
+            log_call("session-never-persisted", 1, &stamp, 9000, 900, 8000),
+            unavailable,
+        ],
+    );
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].session_id, "session-known");
+    assert_eq!(messages[0].tokens.input, 200);
+}
+
+/// Older `agent.log*` files rotated away leave the logs covering only part of
+/// a row. The covered part splits across the logged days; the rest stays on
+/// the session's start day, so one recent call can never book a whole lifetime
+/// row.
+#[test]
+fn test_parse_hermes_sqlite_leaves_unlogged_residual_on_start_day() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    // Started 2026-03-01, long before any day the surviving logs cover.
+    let started_at = 1_775_000_000.0_f64;
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-rotated", "desktop", "glm-5.2", started_at, 12_i64],
+    )
+    .unwrap();
+    // The logs account for only 400/200/1600 of the row's 3400/900/7600: the
+    // two surviving calls each contribute 1000-800 fresh input.
+    insert_usage_row(&conn, "session-rotated", 3400, 900, 7600, 2.0);
+    let day = log_stamp(2, 9);
+    write_agent_log(
+        &dir,
+        &[
+            log_call("session-rotated", 1, &day, 1000, 100, 800),
+            log_call("session-rotated", 2, &day, 1000, 100, 800),
+        ],
+    );
+
+    let mut messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(
+        messages.len(),
+        2,
+        "logged day plus the residual's start day"
+    );
+    messages.sort_by_key(|m| m.timestamp);
+    let (start, logged) = (&messages[0], &messages[1]);
+    // The logged day carries exactly what the logs account for.
+    assert_eq!(logged.tokens.input, 400);
+    assert_eq!(logged.tokens.output, 200);
+    assert_eq!(logged.tokens.cache_read, 1600);
+    // The unlogged remainder stays on the start day, at the start day's
+    // timestamp.
+    assert_eq!(start.timestamp, 1_775_000_000_000_i64);
+    assert_eq!(start.tokens.input, 3000);
+    assert_eq!(start.tokens.output, 700);
+    assert_eq!(start.tokens.cache_read, 6000);
+    // Totals still reconcile exactly with the authoritative row.
+    assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 3400);
+    assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 900);
+    assert_eq!(
+        messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(),
+        7600
+    );
+    // Cost rides the emitted tokens: 2200 of 11900 for the logged day.
+    assert!((logged.cost - 2.0 * 2200.0 / 11900.0).abs() < 1e-9);
+    assert!((start.cost - (2.0 - 2.0 * 2200.0 / 11900.0)).abs() < 1e-9);
+    assert!((messages.iter().map(|m| m.cost).sum::<f64>() - 2.0).abs() < 1e-9);
+    assert_eq!(messages.iter().map(|m| m.message_count).sum::<i32>(), 12);
+}
+
+/// The split groups the logged calls in the scan's bucket timezone, not the
+/// host zone: two calls two hours apart straddle local midnight but fall on a
+/// single day in Pacific/Kiritimati. The test skips on a host that is itself
+/// on the fixture's zone, where the two groupings coincide.
+#[test]
+fn test_parse_hermes_sqlite_groups_split_by_bucket_timezone() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, message_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params!["session-tz", "desktop", "glm-5.2", 1_700_000_000.0_f64, 4_i64],
+    )
+    .unwrap();
+    // Row totals equal the logs' fresh-input sums: (1000-800)*2 fresh input.
+    insert_usage_row(&conn, "session-tz", 400, 200, 1600, 0.5);
+    // 22:30 and 00:30 local: two host-local days, one Kiritimati day.
+    write_agent_log(
+        &dir,
+        &[
+            log_call("session-tz", 1, "2026-03-02 22:30:00,000", 1000, 100, 800),
+            log_call("session-tz", 2, "2026-03-03 00:30:00,000", 1000, 100, 800),
+        ],
+    );
+
+    let pinned = BucketTimezone::from_pinned_name(Some("Pacific/Kiritimati"));
+    // The fixture only distinguishes the two zones while the host is not
+    // itself on the fixture's zone. On such a host the parser reads the
+    // zone-less stamps as the fixture zone, both groupings coincide, and the
+    // assertions below would be vacuous — skip there.
+    use chrono::{Local, TimeZone};
+    let naive_a =
+        chrono::NaiveDateTime::parse_from_str("2026-03-02 22:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
+    let naive_b =
+        chrono::NaiveDateTime::parse_from_str("2026-03-03 00:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
+    let ms_a = Local.from_local_datetime(&naive_a).earliest().unwrap();
+    let ms_b = Local.from_local_datetime(&naive_b).earliest().unwrap();
+    if pinned.day_key(ms_a.timestamp_millis()) == local_day_key(ms_a.timestamp_millis())
+        && pinned.day_key(ms_b.timestamp_millis()) == local_day_key(ms_b.timestamp_millis())
+    {
+        return;
+    }
+    let pinned_messages = parse_hermes_sqlite_in(&db_path, &pinned);
+    assert_eq!(
+        pinned_messages.len(),
+        1,
+        "Kiritimati keeps both calls on one day"
+    );
+    assert_eq!(pinned_messages[0].tokens.input, 400);
+    assert_eq!(pinned_messages[0].tokens.output, 200);
+    assert_eq!(pinned_messages[0].tokens.cache_read, 1600);
+
+    // The host-zone parse still splits them, so the grouping really is the pin.
+    let local_messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(
+        local_messages.len(),
+        2,
+        "the host zone splits the same calls"
+    );
+    assert_eq!(
+        local_messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+        400
+    );
 }

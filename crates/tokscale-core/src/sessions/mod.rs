@@ -123,6 +123,10 @@ pub struct UnifiedMessage {
     /// Such rows must remain unpriced rather than accepting fallback attribution.
     #[serde(default)]
     pub model_attribution_conflicted: bool,
+    /// Copilot-only attribution provenance. Stored in its namespace-specific
+    /// cache envelope so adding this does not change other clients' wire layout.
+    #[serde(skip)]
+    pub copilot_context: Option<copilot::CopilotContextProvenance>,
 }
 
 const fn default_message_count() -> i32 {
@@ -403,6 +407,7 @@ impl UnifiedMessage {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            copilot_context: None,
         }
     }
 

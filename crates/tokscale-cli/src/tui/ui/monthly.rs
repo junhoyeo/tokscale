@@ -2,8 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, format_cache_hit_rate, format_cost, format_cost_per_million,
-    format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -185,7 +185,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleMonthlyUsage),
@@ -235,8 +235,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -299,7 +299,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if month.turn_count > 0 {
                         month.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -315,7 +315,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if month.turn_count > 0 {
                         month.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -331,12 +331,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         month.tokens.cache_read,
                         month.tokens.input,
                         month.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(month.tokens.total(), &app.theme),
                     Cell::from(format_cost(month.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(month.cost, month.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                    Cell::from(format_cost_per_million(
+                        month.cost,
+                        month.tokens.total(),
+                        app.glyphs,
+                    ))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]);
                 cells
             };
@@ -362,7 +367,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if monthly_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(monthly_len, scroll_offset, visible_height);
@@ -393,7 +398,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             title,
@@ -450,8 +455,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -514,7 +519,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if day.turn_count > 0 {
                         day.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -530,7 +535,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if day.turn_count > 0 {
                         day.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -545,12 +550,17 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.cache_read,
                         day.tokens.input,
                         day.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                    Cell::from(format_cost_per_million(
+                        day.cost,
+                        day.tokens.total(),
+                        app.glyphs,
+                    ))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]);
                 cells
             };
@@ -576,7 +586,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if days_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state = viewport_scrollbar_state(days_len, scroll_offset, visible_height);
 
