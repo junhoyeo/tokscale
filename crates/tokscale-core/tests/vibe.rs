@@ -45,6 +45,17 @@ fn make_pricing_service() -> PricingService {
             ..Default::default()
         },
     );
+    // Mistral's published Medium rate, so an unpinned session that resolves to
+    // the default alias has a row to price against.
+    litellm_data.insert(
+        "mistralai/mistral-medium-latest".to_string(),
+        ModelPricing {
+            input_cost_per_token: Some(0.0000015),
+            output_cost_per_token: Some(0.0000075),
+            cache_read_input_token_cost: Some(0.00000015),
+            ..Default::default()
+        },
+    );
     PricingService::new(litellm_data, HashMap::new())
 }
 
@@ -261,4 +272,164 @@ async fn test_vibe_deduplicates_duplicate_session_copies() {
 
     let parsed = parse_local_clients(vibe_options(home)).unwrap();
     assert_eq!(parsed.messages.len(), 1);
+}
+
+/// A session that was never pinned with `/model` records
+/// `config.active_model: ""` — upstream's `UNPINNED_ACTIVE_MODEL` sentinel for
+/// "follow the configured default", and the state every session starts in. The
+/// empty string must not survive as the model id: it blanks the Model column
+/// and matches no pricing row, so the session would be counted with tokens but
+/// priced at zero.
+#[tokio::test]
+async fn test_vibe_unpinned_session_resolves_configured_model_and_prices_it() {
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+
+    let meta_json = r#"{
+        "session_id": "sess-unpinned",
+        "start_time": "2026-10-16T08:11:55.873982+00:00",
+        "end_time": "2026-10-16T08:11:55.986988+00:00",
+        "config": {
+            "active_model": "",
+            "models": {
+                "mistral-medium-3.5": {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "display_name": "Mistral Medium 3.5",
+                    "input_price": 1.5,
+                    "output_price": 7.5,
+                    "cached_input_price": 0.15
+                }
+            }
+        },
+        "stats": {
+            "steps": 3,
+            "session_prompt_tokens": 10000,
+            "session_completion_tokens": 1000,
+            "session_cached_tokens": 2000
+        }
+    }"#;
+
+    let path = write_vibe_session(home, "session_20261016_081155_unpinne", meta_json);
+    let messages = parse_vibe_file(&path);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].model_id, "mistral-medium-3.5",
+        "an unpinned session must resolve to its configured model alias, not \"\""
+    );
+    assert_eq!(messages[0].tokens.input, 8000);
+    assert_eq!(messages[0].tokens.cache_read, 2000);
+
+    // An empty model id matches no pricing row at all, so the whole session
+    // would be reported free. A resolved alias reaches the lookup chain.
+    let pricing = make_pricing_service();
+    let priced =
+        parse_local_unified_messages_with_pricing_uncached(vibe_options(home), Some(&pricing))
+            .await
+            .unwrap();
+    assert_eq!(priced.len(), 1);
+    assert_eq!(priced[0].model_id, "mistral-medium-3.5");
+    assert!(
+        !priced[0].model_id.is_empty(),
+        "an empty model id prices the session at zero and blanks the Model column"
+    );
+}
+
+/// With nothing pinned and no `config.models` table to read, the published
+/// default alias stands in: a blank model id is never a valid attribution.
+#[test]
+fn test_vibe_unpinned_session_without_model_table_uses_default_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta_file = dir.path().join("meta.json");
+    fs::write(
+        &meta_file,
+        r#"{
+            "session_id": "sess-no-models",
+            "config": { "active_model": "   " },
+            "stats": {
+                "session_prompt_tokens": 500,
+                "session_completion_tokens": 50
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let messages = parse_vibe_file(&meta_file);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].model_id, "mistral-medium-latest");
+    assert_eq!(messages[0].provider_id, "mistralai");
+}
+
+/// The session directory holds two siblings that are not sessions: the shared
+/// index `.session_index.json` and the atomic-write temporaries upstream names
+/// `tmp<random>.json.tmp`. Neither carries the `session_` prefix the first
+/// implementation keyed its exclusions on, so both have to be refused by dot
+/// and suffix instead.
+#[test]
+fn test_vibe_scanner_skips_index_and_atomic_write_temporaries() {
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    let root = home.join(".vibe/logs/session");
+    fs::create_dir_all(&root).unwrap();
+
+    // Real sibling names from upstream: session_index.py:19 and the
+    // NamedTemporaryFile(suffix=".json.tmp") / prefix=".session_index." writes.
+    fs::write(root.join(".session_index.json"), "{}").unwrap();
+    fs::write(root.join(".session_index.abc123.tmp"), "{}").unwrap();
+    fs::write(root.join("tmpa1b2c3.json.tmp"), "{}").unwrap();
+
+    let session_meta = r#"{
+        "session_id": "sess-real",
+        "config": { "active_model": "mistral-small-latest" },
+        "stats": { "session_prompt_tokens": 10, "session_completion_tokens": 1 }
+    }"#;
+    write_vibe_session(home, "session_20261016_090000_real0001", session_meta);
+
+    // A legacy flat file keeps being discovered, including under a custom
+    // `session_logging.session_prefix` (upstream's default is `session`, but a
+    // subagent's prefix is its agent name).
+    fs::write(
+        root.join("explorer_20260101_010101.json"),
+        r#"{"metadata":{"session_id":"legacy-prefixed","active_model":"mistral-small-latest","stats":{"session_prompt_tokens":77,"session_completion_tokens":7}},"messages":[]}"#,
+    )
+    .unwrap();
+
+    let files = tokscale_core::scanner::scan_directory(root.to_str().unwrap(), "vibe-session");
+    let names: Vec<String> = files
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "meta.json"),
+        "real session meta.json must be scanned, got {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "explorer_20260101_010101.json"),
+        "legacy flat session under a custom prefix must be scanned, got {names:?}"
+    );
+    for refused in [
+        ".session_index.json",
+        ".session_index.abc123.tmp",
+        "tmpa1b2c3.json.tmp",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == refused),
+            "{refused} is not a session transcript, got {names:?}"
+        );
+    }
+
+    let parsed = parse_local_clients(vibe_options(home)).unwrap();
+    assert_eq!(
+        parsed
+            .messages
+            .iter()
+            .filter(|message| message.client == "vibe")
+            .count(),
+        2,
+        "one real session plus one legacy session"
+    );
 }
