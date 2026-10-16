@@ -83,6 +83,13 @@ function payloadForClient(client: string) {
 }
 
 describe("frontend client registry", () => {
+  it("accepts native Aside usage submissions", () => {
+    const result = validateSubmission(payloadForClient("aside"));
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts trae submissions", () => {
     const result = validateSubmission(payloadForClient("trae"));
 

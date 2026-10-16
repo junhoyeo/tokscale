@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod antigravity;
 pub mod antigravity_cli;
+pub mod aside;
 pub mod augment;
 pub mod cherrystudio;
 pub mod claudecode;
@@ -462,7 +463,7 @@ impl UnifiedMessage {
         self.cost_source = CostSource::ProviderReported;
     }
 
-    pub(crate) fn mark_estimated_cost(&mut self) {
+    pub fn mark_estimated_cost(&mut self) {
         self.cost_source = CostSource::Estimated;
     }
 

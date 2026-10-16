@@ -8,6 +8,7 @@ pub mod clients;
 pub mod content_extractor;
 pub mod fs_atomic;
 pub mod http;
+mod legacy_graph;
 pub mod mcp;
 mod message_cache;
 pub mod model_alias;
@@ -26,6 +27,7 @@ pub mod wiki;
 pub use aggregator::*;
 pub use bucket_tz::BucketTimezone;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
+pub use legacy_graph::*;
 pub use message_cache::parser_generation;
 pub use model_alias::ModelAliasMap;
 pub use parser::*;
@@ -464,30 +466,125 @@ pub struct LocalParseOptions {
     pub scanner_settings: scanner::ScannerSettings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostProvenance {
+    #[serde(default)]
+    pub kind: CostProvenanceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_source: Option<EstimateSource>,
+}
+
+impl CostProvenance {
+    pub const fn unknown() -> Self {
+        Self {
+            kind: CostProvenanceKind::Unknown,
+            estimate_source: None,
+        }
+    }
+
+    pub const fn provider_reported() -> Self {
+        Self {
+            kind: CostProvenanceKind::ProviderReported,
+            estimate_source: None,
+        }
+    }
+
+    pub const fn estimated(estimate_source: EstimateSource) -> Self {
+        Self {
+            kind: CostProvenanceKind::Estimated,
+            estimate_source: Some(estimate_source),
+        }
+    }
+
+    pub const fn mixed(estimate_source: Option<EstimateSource>) -> Self {
+        Self {
+            kind: CostProvenanceKind::Mixed,
+            estimate_source,
+        }
+    }
+}
+
+impl Default for CostProvenance {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostProvenanceKind {
+    #[default]
+    Unknown,
+    ProviderReported,
+    Estimated,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EstimateSource {
+    Catalog,
+    Custom,
+    Unknown,
+    Mixed,
+}
+
+const fn default_unknown_provenance_opt() -> Option<CostProvenance> {
+    Some(CostProvenance::unknown())
+}
+
+/// Daily totals with cost provenance. The original [`DailyTotals`] retains its field layout.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DailyTotals {
+pub struct DailyTotalsV2 {
     pub tokens: i64,
     pub cost: f64,
     pub messages: i32,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
 }
 
+impl DailyTotalsV2 {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
+}
+
+/// Client/model totals with cost provenance; opt in from [`ClientContribution`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ClientContribution {
+pub struct ClientContributionV2 {
     pub client: String,
     pub model_id: String,
     pub provider_id: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub messages: i32,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
 }
 
+impl ClientContributionV2 {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
+}
+
+/// Daily contribution whose totals and clients retain cost provenance.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct DailyContribution {
+pub struct DailyContributionV2 {
     pub date: String,
-    pub totals: DailyTotals,
+    pub totals: DailyTotalsV2,
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,
-    pub clients: Vec<ClientContribution>,
+    pub clients: Vec<ClientContributionV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_time_ms: Option<i64>,
 }
@@ -496,31 +593,45 @@ pub struct DailyContribution {
 /// `session_id` so downstream consumers can attribute cost to a specific
 /// agent-CLI session rather than just a date or model rollup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct SessionContribution {
+pub struct SessionContributionV2 {
     pub session_id: String,
     pub client: String,
     pub provider: String,
     pub model: String,
-    pub totals: DailyTotals,
+    pub totals: DailyTotalsV2,
     pub token_breakdown: TokenBreakdown,
-    pub clients: Vec<ClientContribution>,
+    pub clients: Vec<ClientContributionV2>,
     /// Earliest message timestamp (unix seconds) in the session.
     pub first_seen: i64,
     /// Latest message timestamp (unix seconds) in the session.
     pub last_seen: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct YearSummary {
+/// Year totals with cost provenance; opt in from [`YearSummary`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct YearSummaryV2 {
     pub year: String,
     pub total_tokens: i64,
     pub total_cost: f64,
     pub range_start: String,
     pub range_end: String,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DataSummary {
+impl YearSummaryV2 {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
+}
+
+/// Overall totals with cost provenance; opt in from [`DataSummary`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DataSummaryV2 {
     pub total_tokens: i64,
     pub total_cost: f64,
     pub total_days: i32,
@@ -529,6 +640,18 @@ pub struct DataSummary {
     pub max_cost_in_single_day: f64,
     pub clients: Vec<String>,
     pub models: Vec<String>,
+    #[serde(
+        default = "default_unknown_provenance_opt",
+        skip_serializing_if = "Option::is_none",
+        rename = "costProvenance"
+    )]
+    pub cost_provenance: Option<CostProvenance>,
+}
+
+impl DataSummaryV2 {
+    pub fn cost_provenance(&self) -> CostProvenance {
+        self.cost_provenance.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -540,12 +663,14 @@ pub struct GraphMeta {
     pub processing_time_ms: u32,
 }
 
+/// Graph with cost provenance, returned by [`generate_graph_v2`].
+/// Convert into [`GraphResult`] to discard provenance and retain the original shape.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct GraphResult {
+pub struct GraphResultV2 {
     pub meta: GraphMeta,
-    pub summary: DataSummary,
-    pub years: Vec<YearSummary>,
-    pub contributions: Vec<DailyContribution>,
+    pub summary: DataSummaryV2,
+    pub years: Vec<YearSummaryV2>,
+    pub contributions: Vec<DailyContributionV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
     #[serde(skip)]
@@ -554,7 +679,7 @@ pub struct GraphResult {
     /// token-bearing message could not be priced authoritatively.
     ///
     /// The CLI serializes these days as `totals.costIsComplete: false`. Kept
-    /// outside `DailyTotals` because it is submission-only protocol metadata,
+    /// outside `DailyTotalsV2` because it is submission-only protocol metadata,
     /// not part of local report aggregation or exported historical reports.
     #[serde(skip)]
     pub incomplete_cost_dates: BTreeSet<String>,
@@ -895,6 +1020,39 @@ fn opencode_json_superseded_by_sqlite(
 /// Callers that genuinely want the whole vector still get one: `Vec` is a sink.
 trait MessageSink {
     fn accept(&mut self, message: UnifiedMessage);
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        _source: Option<EstimateSource>,
+    ) {
+        self.accept(message);
+    }
+}
+
+/// Recovery already needs the collected native rows. Carry their captured
+/// origins separately through reconciliation without changing cached messages.
+#[derive(Default)]
+struct GraphMessageCollector {
+    messages: Vec<UnifiedMessage>,
+    cost_estimates: pricing::provenance::CostEstimateCapture,
+}
+
+impl MessageSink for GraphMessageCollector {
+    fn accept(&mut self, message: UnifiedMessage) {
+        self.messages.push(message);
+    }
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        source: Option<EstimateSource>,
+    ) {
+        if let Some(source) = source {
+            self.cost_estimates.record(&message, source);
+        }
+        self.accept(message);
+    }
 }
 
 impl MessageSink for Vec<UnifiedMessage> {
@@ -963,6 +1121,7 @@ impl RecordedCodexTurns {
 }
 
 struct FlushContext<'a> {
+    pricing: Option<&'a pricing::PricingService>,
     include_all: bool,
     requested: HashSet<&'a str>,
     include_synthetic: bool,
@@ -999,6 +1158,9 @@ fn flush_lane<S: MessageSink>(
     for message in buffer.drain(..) {
         flush_message(message, context, sink);
     }
+    if let Some(pricing) = context.pricing {
+        pricing.clear_cost_estimate_sources();
+    }
 }
 
 /// Apply the parse tail to one message and release it into the consumer.
@@ -1010,6 +1172,11 @@ fn flush_message<S: MessageSink>(
     context: &FlushContext<'_>,
     sink: &mut S,
 ) {
+    // Take the source before gateway normalization changes model/provider
+    // identity. Rebucketing and filtering never need another price lookup.
+    let estimate_source = context
+        .pricing
+        .and_then(|pricing| pricing.take_cost_estimate_source(&message));
     if !context.include_all
         && !retain_for_requested_clients(
             &message.client,
@@ -1032,7 +1199,7 @@ fn flush_message<S: MessageSink>(
         message.rebucket_date(timezone);
     }
 
-    sink.accept(message);
+    sink.accept_with_estimate_source(message, estimate_source);
 }
 
 fn parse_all_messages_with_pricing_with_cache_policy(
@@ -2419,6 +2586,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let flush_context = {
         let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
         FlushContext {
+            pricing,
             include_all,
             requested: clients.iter().map(String::as_str).collect(),
             include_synthetic,
@@ -3139,6 +3307,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
     }
+
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        ClientId::Aside,
+        sessions::aside::parse_aside_file,
+    );
 
     // Pi branch/fork copies prior assistant records into a new session file
     // (#1306). The parser stamps cross-session keys (`responseId` preferred);
@@ -4950,8 +5127,10 @@ async fn generate_graph_with_loaded_pricing(
     options: ReportOptions,
     pricing: Option<&pricing::PricingService>,
     pricing_requirement: GraphPricingRequirement,
-) -> Result<GraphResult, String> {
+) -> Result<GraphResultV2, String> {
     let start = Instant::now();
+    let captured_pricing = pricing.map(pricing::PricingService::with_cost_provenance_capture);
+    let pricing = captured_pricing.as_ref();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
 
@@ -4979,14 +5158,24 @@ async fn generate_graph_with_loaded_pricing(
         // always streams only the verifiable source messages, and so does
         // `LenientSourceOnly`, whose callers compare against what submission
         // sends and must not see the never-submitted overlay.
-        for message in parse_all_messages_with_pricing_with_env_strategy(
+        let mut collector = GraphMessageCollector::default();
+        parse_all_messages_streaming_with_env_strategy(
             &home_dir,
             &clients,
             pricing,
             options.use_env_roots,
             &options.scanner_settings,
-        ) {
-            sink.accept(message);
+            &mut collector,
+        );
+        recovery::apply(
+            &mut collector.messages,
+            &home_dir,
+            &clients,
+            bucket_timezone.is_pinned().then_some(&bucket_timezone),
+        );
+        for message in collector.messages {
+            let source = collector.cost_estimates.take(&message);
+            sink.accept_with_estimate_source(message, source);
         }
     } else {
         parse_all_messages_streaming_with_env_strategy(
@@ -5027,8 +5216,8 @@ struct GraphSink<'a> {
     filter: Option<&'a ReportOptions>,
     pricing: Option<&'a pricing::PricingService>,
     requirement: GraphPricingRequirement,
-    buffer: Vec<UnifiedMessage>,
-    daily: aggregator::DailyFold,
+    buffer: Vec<(UnifiedMessage, Option<EstimateSource>)>,
+    daily: aggregator::DailyFoldV2,
     interner: sessionize::SpanInterner,
     spans: Vec<sessionize::SessionSpan>,
     /// Merged across batches by (provider, model); counts and tokens add.
@@ -5050,7 +5239,7 @@ impl<'a> GraphSink<'a> {
             pricing,
             requirement,
             buffer: Vec::new(),
-            daily: aggregator::DailyFold::default(),
+            daily: aggregator::DailyFoldV2::default(),
             interner: sessionize::SpanInterner::default(),
             spans: Vec::new(),
             unpriced_usage: HashMap::new(),
@@ -5071,8 +5260,20 @@ impl<'a> GraphSink<'a> {
             // priced, so the two share this arm.
             GraphPricingRequirement::Lenient | GraphPricingRequirement::LenientSourceOnly => batch,
             GraphPricingRequirement::Submission => {
+                // Submission may reorder rows and zero unsafe estimates. Keep
+                // only metadata matching the amounts that survive preparation.
+                let sources = pricing::provenance::CostEstimateCapture::default();
+                let messages = batch
+                    .into_iter()
+                    .map(|(message, source)| {
+                        if let Some(source) = source {
+                            sources.record(&message, source);
+                        }
+                        message
+                    })
+                    .collect();
                 let (mut submitted, zeroed, unpriced_usage, incomplete_cost_dates) =
-                    prepare_submission_pricing(batch, self.pricing);
+                    prepare_submission_pricing(messages, self.pricing);
                 for usage in unpriced_usage {
                     let entry = self
                         .unpriced_usage
@@ -5093,11 +5294,18 @@ impl<'a> GraphSink<'a> {
                 }
                 submitted.extend(zeroed);
                 submitted
+                    .into_iter()
+                    .map(|message| {
+                        let source = sources.take(&message);
+                        (message, source)
+                    })
+                    .collect()
             }
         };
 
-        for message in &batch {
-            self.daily.add(message);
+        for (message, estimate_source) in &batch {
+            self.daily
+                .add_with_estimate_source(message, *estimate_source);
             if message.timestamp > 0 {
                 self.spans.push(sessionize::SessionSpan::from_message(
                     message,
@@ -5111,7 +5319,7 @@ impl<'a> GraphSink<'a> {
         mut self,
         start: Instant,
         bucket_timezone: &bucket_tz::BucketTimezone,
-    ) -> Result<GraphResult, String> {
+    ) -> Result<GraphResultV2, String> {
         self.drain_batch();
 
         let mut unpriced_submission_usage: Vec<UnpricedSubmissionUsage> = self
@@ -5155,7 +5363,7 @@ impl<'a> GraphSink<'a> {
         let contributions = self.daily.finish();
 
         let processing_time_ms = start.elapsed().as_millis() as u32;
-        let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
+        let mut result = aggregator::generate_graph_result_v2(contributions, processing_time_ms);
         result.time_metrics = Some(time_metrics);
         result.unpriced_submission_usage = unpriced_submission_usage;
         result.incomplete_cost_dates = self.incomplete_cost_dates;
@@ -5172,6 +5380,17 @@ impl<'a> GraphSink<'a> {
 
 impl MessageSink for GraphSink<'_> {
     fn accept(&mut self, message: UnifiedMessage) {
+        let source = self
+            .pricing
+            .and_then(|pricing| pricing.take_cost_estimate_source(&message));
+        self.accept_with_estimate_source(message, source);
+    }
+
+    fn accept_with_estimate_source(
+        &mut self,
+        message: UnifiedMessage,
+        source: Option<EstimateSource>,
+    ) {
         // Cumulative Desktop balances have no day attribution. They belong in
         // all-time local totals, never daily graphs or leaderboard submissions.
         if claude_desktop::is_undated_balance(&message) {
@@ -5182,7 +5401,7 @@ impl MessageSink for GraphSink<'_> {
                 return;
             }
         }
-        self.buffer.push(message);
+        self.buffer.push((message, source));
         if self.buffer.len() >= GRAPH_SINK_BATCH {
             self.drain_batch();
         }
@@ -5221,7 +5440,7 @@ fn build_graph_from_messages(
     pricing_requirement: GraphPricingRequirement,
     start: Instant,
     bucket_timezone: &bucket_tz::BucketTimezone,
-) -> Result<GraphResult, String> {
+) -> Result<GraphResultV2, String> {
     // `filtered` has already been through the report's date filters, so the
     // sink applies none of its own. Delegating rather than duplicating keeps
     // this path and the streaming one on identical aggregation code, and lets
@@ -5417,19 +5636,24 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
     })
 }
 
-pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+/// Version of [`generate_graph`] that retains cost provenance.
+pub async fn generate_graph_v2(options: ReportOptions) -> Result<GraphResultV2, String> {
     let pricing = pricing::PricingService::get_or_init().await?;
     generate_graph_with_loaded_pricing(options, Some(&pricing), GraphPricingRequirement::Lenient)
         .await
 }
 
-pub async fn generate_submission_graph(options: ReportOptions) -> Result<GraphResult, String> {
+/// Version of [`generate_submission_graph`] that retains cost provenance.
+pub async fn generate_submission_graph_v2(options: ReportOptions) -> Result<GraphResultV2, String> {
     let pricing = pricing::PricingService::get_or_init().await?;
     generate_graph_with_loaded_pricing(options, Some(&pricing), GraphPricingRequirement::Submission)
         .await
 }
 
-pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+/// Version of [`generate_local_graph_report`] that retains cost provenance.
+pub async fn generate_local_graph_report_v2(
+    options: ReportOptions,
+) -> Result<GraphResultV2, String> {
     let pricing = load_pricing_for_local_parse().await;
     generate_graph_with_loaded_pricing(
         options,
@@ -5441,14 +5665,17 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
 
 /// Local graph built from source messages only: exactly what submission reads.
 ///
-/// Identical to [`generate_local_graph_report`] — same optional pricing, same
+/// Identical to [`generate_local_graph_report_v2`] — same optional pricing, same
 /// lenient pricing rules — except that it never merges the local recovery
 /// overlay (`recovered-usage-v1.json`). That overlay is local-only and
 /// `tokscale submit` never sends it, so any caller that asks "does this machine
 /// already report this usage?" must not see it. Treating a recovery-only day as
 /// already reported drops the imported row for it while submission never
 /// uploads that day either, and the usage disappears (#1364).
-pub async fn generate_source_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+/// Version of [`generate_source_graph_report`] that retains cost provenance.
+pub async fn generate_source_graph_report_v2(
+    options: ReportOptions,
+) -> Result<GraphResultV2, String> {
     let pricing = load_pricing_for_local_parse().await;
     generate_graph_with_loaded_pricing(
         options,
@@ -5721,6 +5948,21 @@ pub fn calculate_cost_with_service_tier(
         * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
 }
 
+pub fn calculate_cost_detailed_with_service_tier(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+) -> (f64, Option<EstimateSource>) {
+    let (cost, source) =
+        pricing.calculate_cost_detailed_with_provider(model_id, provider_id, tokens);
+    (
+        cost * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier),
+        source,
+    )
+}
+
 /// Merge Copilot OTEL snapshots inside a shared lane buffer.
 ///
 /// [`sessions::copilot::merge_copilot_messages`] owns a whole vector: it sorts
@@ -5757,15 +5999,22 @@ fn apply_pricing_if_available(
         return;
     };
 
-    let calculated_cost = pricing.calculate_cost_with_provider(
+    let (calculated_cost, estimate_source) = pricing.calculate_cost_detailed_with_provider(
         &message.model_id,
         Some(&message.provider_id),
         &message.tokens,
-    ) * pricing_multiplier(message, pricing);
+    );
+    let calculated_cost = calculated_cost * pricing_multiplier(message, pricing);
 
-    if calculated_cost > 0.0 {
-        message.cost = calculated_cost;
-        message.mark_estimated_cost();
+    if let Some(source) = estimate_source {
+        // A covered zero rate may classify a message that carries no cost, but
+        // must never zero out a positive cost already on a non-authoritative
+        // message (e.g. after a cross-file merge).
+        if calculated_cost > 0.0 || message.cost <= 0.0 {
+            message.cost = calculated_cost;
+            message.mark_estimated_cost();
+            pricing.record_cost_estimate_source(message, source);
+        }
     }
 }
 
@@ -6528,6 +6777,23 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         inspected_codex_files,
         codex_archive_failures,
     );
+
+    let aside_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Aside)
+        .par_iter()
+        .flat_map(|path| sessions::aside::parse_aside_file(path))
+        .collect();
+    let mut aside_seen = HashSet::new();
+    let aside_msgs: Vec<ParsedMessage> = aside_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut aside_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    counts.set(
+        ClientId::Aside,
+        i32::try_from(aside_msgs.len()).unwrap_or(i32::MAX),
+    );
+    messages.extend(aside_msgs);
 
     // Pi branch/fork copies prior assistant records into a new session file
     // (#1306); the parser stamps cross-session keys, drop the copies here too
@@ -7557,7 +7823,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_by_date, aggregate_hourly_usage_entries, aggregate_model_usage_entries,
+        aggregate_by_date_v2, aggregate_hourly_usage_entries, aggregate_model_usage_entries,
         aggregate_monthly_usage_v2_entries, apply_pricing_if_available, build_graph_from_messages,
         calculate_cost_with_service_tier, dedupe_antigravity_family_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
@@ -7800,7 +8066,7 @@ mod tests {
 
         assert_eq!(unique.len(), 3);
         assert_eq!(unique[0].client, "antigravity-cli");
-        let daily = aggregate_by_date(unique);
+        let daily = aggregate_by_date_v2(unique);
         assert_eq!(daily.len(), 1);
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
@@ -17521,6 +17787,250 @@ mod tests {
     }
 
     #[test]
+    fn graph_sink_preserves_pricing_origin_without_changing_message_layout() {
+        use crate::{CostProvenance, EstimateSource};
+        use std::time::Instant;
+        let rate = pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            ..Default::default()
+        };
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(HashMap::from([
+                ("custom-model".into(), rate.clone()),
+                (
+                    "custom-free".into(),
+                    pricing::ModelPricing {
+                        input_cost_per_token: Some(0.0),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            HashMap::from([("catalog-model".into(), rate)]),
+            HashMap::new(),
+        )
+        .with_cost_provenance_capture();
+        let cases = [
+            ("custom-model", "test", "openai", EstimateSource::Custom),
+            ("custom-free", "test", "openai", EstimateSource::Custom),
+            ("catalog-model", "test", "openai", EstimateSource::Catalog),
+            (
+                "catalog-model",
+                "zed",
+                sessions::zed::ZED_HOSTED_PROVIDER,
+                EstimateSource::Catalog,
+            ),
+        ];
+        for (model, client, provider, source) in cases {
+            let mut message = UnifiedMessage::new(
+                client,
+                model,
+                provider,
+                "session",
+                1_736_510_400_000,
+                TokenBreakdown {
+                    input: 100,
+                    ..Default::default()
+                },
+                0.0,
+            );
+            apply_pricing_if_available(&mut message, Some(&pricing));
+            let expected_cost = message.cost;
+            let calculations = pricing.detailed_calculation_count();
+            let graph = build_graph_from_messages(
+                vec![message],
+                Some(&pricing),
+                GraphPricingRequirement::Lenient,
+                Instant::now(),
+                &crate::bucket_tz::BucketTimezone::Local,
+            )
+            .unwrap();
+            assert_eq!(
+                pricing.detailed_calculation_count(),
+                calculations,
+                "graph folding must reuse the original pricing result"
+            );
+            let expected = CostProvenance::estimated(source);
+            assert_eq!(graph.summary.total_cost, expected_cost);
+            assert_eq!(graph.summary.cost_provenance(), expected);
+            assert_eq!(graph.years[0].cost_provenance(), expected);
+            assert_eq!(graph.contributions[0].totals.cost_provenance(), expected);
+            assert_eq!(
+                graph.contributions[0].clients[0].cost_provenance(),
+                expected
+            );
+        }
+
+        // A historical estimate cannot be labeled with a rate source just
+        // because the current catalog can also resolve its model.
+        let mut retained = UnifiedMessage::new(
+            "test",
+            "catalog-model",
+            "openai",
+            "retained",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            2.0,
+        );
+        retained.mark_estimated_cost();
+        let graph = build_graph_from_messages(
+            vec![retained],
+            Some(&pricing),
+            GraphPricingRequirement::Lenient,
+            Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .unwrap();
+        assert_eq!(graph.summary.total_cost, 2.0);
+        assert_eq!(
+            graph.summary.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Unknown)
+        );
+    }
+
+    #[test]
+    fn captured_origins_survive_gateway_normalization_and_recovery() {
+        use super::{
+            flush_lane, recovery, CostProvenance, EstimateSource, FlushContext,
+            GraphMessageCollector,
+        };
+        use std::time::Instant;
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(HashMap::from([(
+                "hf:deepseek-ai/DeepSeek-V3-0324".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    ..Default::default()
+                },
+            )])),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let scan = pricing.with_cost_provenance_capture();
+        let other_scan = pricing.with_cost_provenance_capture();
+        let mut message = UnifiedMessage::new(
+            "opencode",
+            "hf:deepseek-ai/DeepSeek-V3-0324",
+            "unknown",
+            "native",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        apply_pricing_if_available(&mut message, Some(&scan));
+        assert_eq!(other_scan.take_cost_estimate_source(&message), None);
+        // A repeated pricing observation dropped by deduplication must not
+        // survive the lane boundary and classify a historical row later.
+        apply_pricing_if_available(&mut message, Some(&scan));
+        let mut collector = GraphMessageCollector::default();
+        let context = FlushContext {
+            pricing: Some(&scan),
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+        };
+        flush_lane(&mut vec![message.clone()], &context, &mut collector);
+        assert_eq!(scan.take_cost_estimate_source(&message), None);
+        assert_eq!(collector.messages[0].model_id, "deepseek-v3-0324");
+        assert_eq!(collector.messages[0].provider_id, "synthetic");
+        let mut recovered = collector.messages[0].clone();
+        recovered.session_id = "archived".into();
+        recovered.timestamp += 1;
+        recovered.dedup_key = Some("archived-request".into());
+        // Same amount as the current custom estimate, but no original rate
+        // metadata: equality must not invent a historical pricing origin.
+        recovery::merge(&mut collector.messages, vec![recovered], vec![], |_| true);
+        assert_eq!(collector.messages.len(), 2);
+        let calculations = scan.detailed_calculation_count();
+        let mut sink = GraphSink::new(None, Some(&scan), GraphPricingRequirement::Lenient);
+        for message in collector.messages {
+            let source = collector.cost_estimates.take(&message);
+            if message.session_id == "native" {
+                assert_eq!(source, Some(EstimateSource::Custom));
+            } else {
+                assert_eq!(source, None);
+            }
+            sink.accept_with_estimate_source(message, source);
+        }
+        let graph = sink
+            .finish(Instant::now(), &crate::bucket_tz::BucketTimezone::Local)
+            .unwrap();
+        assert_eq!(scan.detailed_calculation_count(), calculations);
+        assert_eq!(graph.summary.total_cost, 0.2);
+        assert_eq!(
+            graph.summary.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Mixed)
+        );
+    }
+
+    #[test]
+    fn captured_submission_origins_follow_retained_and_zeroed_costs() {
+        use super::{CostProvenance, EstimateSource};
+        use std::time::Instant;
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(HashMap::from([(
+                "model".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    ..Default::default()
+                },
+            )])),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_cost_provenance_capture();
+        let mut messages: Vec<_> = ["unsafe", "safe"]
+            .into_iter()
+            .map(|client| {
+                UnifiedMessage::new(
+                    client,
+                    "model",
+                    "provider",
+                    client,
+                    1_736_510_400_000,
+                    TokenBreakdown {
+                        input: 100,
+                        output: if client == "unsafe" { 10 } else { 0 },
+                        ..Default::default()
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+        for message in &mut messages {
+            apply_pricing_if_available(message, Some(&pricing));
+        }
+        let graph = build_graph_from_messages(
+            messages,
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
+        )
+        .unwrap();
+        let clients = &graph.contributions[0].clients;
+        let safe = clients.iter().find(|row| row.client == "safe").unwrap();
+        let unsafe_row = clients.iter().find(|row| row.client == "unsafe").unwrap();
+        assert_eq!(safe.cost, 0.1);
+        assert_eq!(
+            safe.cost_provenance(),
+            CostProvenance::estimated(EstimateSource::Custom)
+        );
+        assert_eq!(unsafe_row.cost, 0.0);
+        assert_eq!(unsafe_row.cost_provenance(), CostProvenance::unknown());
+        assert_eq!(
+            graph.summary.cost_provenance(),
+            CostProvenance::mixed(Some(EstimateSource::Custom))
+        );
+    }
+
+    #[test]
     fn submission_keeps_unpriced_tokens_and_marks_their_day_incomplete() {
         let message = UnifiedMessage::new(
             "opencode",
@@ -17667,7 +18177,7 @@ mod tests {
             0.0,
         );
 
-        // `None` is unreachable from `generate_submission_graph`, which always
+        // `None` is unreachable from `generate_submission_graph_v2`, which always
         // passes `Some(..)` because `PricingService::get_or_init` degrades every
         // failed source to an empty map rather than erroring. The reachable
         // shape of "no pricing dataset loaded" is a populated-with-nothing

@@ -1093,10 +1093,21 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
+    Aside = 56 => {
+        id: "aside",
+        display: "Aside",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-aside.png"),
+        root: PathRoot::Home,
+        relative: ".aside/u",
+        pattern: "messages.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
     // Mistral Vibe: terminal coding agent by Mistral AI.
     // Logs session metadata and message history under `~/.vibe/logs/session/`
     // (configurable via VIBE_HOME).
-    Vibe = 56 => {
+    Vibe = 57 => {
         id: "vibe",
         display: "Mistral Vibe",
         logo: None,
@@ -1224,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 57);
+        assert_eq!(ClientId::COUNT, 58);
     }
 
     #[test]

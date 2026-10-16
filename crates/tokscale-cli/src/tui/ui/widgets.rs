@@ -60,7 +60,11 @@ pub fn format_cost_per_million(cost: f64, total_tokens: u64, glyphs: Glyphs) -> 
         return glyphs.missing.to_string();
     }
     let per_m = cost / (total_tokens as f64) * 1_000_000.0;
-    format!("${:.2}", per_m)
+    if cost > 0.0 && per_m < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("${:.2}", per_m)
+    }
 }
 
 /// Cache reuse multiplier: cached reads per full-price input token.
@@ -847,6 +851,7 @@ pub fn get_client_color(client: &str) -> Color {
         return color;
     }
     match client.to_lowercase().as_str() {
+        "aside" => Color::Rgb(100, 116, 139),
         "opencode" => Color::Rgb(34, 197, 94),     // #22c55e
         "claude" => Color::Rgb(218, 119, 86),      // #DA7756 Claude brand coral
         "codex" => Color::Rgb(59, 130, 246),       // #3b82f6
@@ -1670,5 +1675,82 @@ mod tests {
         assert!(!provider_has_palette("openrouter"));
         assert!(!provider_has_palette("unknown"));
         assert!(!provider_has_palette(""));
+    }
+
+    /// The bug: a rate below half a cent per 1M rounded to `$0.00` under
+    /// `{:.2}`, so a priced session read as free. The bound is checked in both
+    /// glyph sets because only the missing-value marker differs between them —
+    /// `<$0.01` itself is ASCII and must be identical in Unicode and ASCII
+    /// mode, or the ambient-width sweeps would see two different cells.
+    #[test]
+    fn format_cost_per_million_renders_sub_cent_rather_than_free() {
+        for glyphs in [Glyphs::unicode(), Glyphs::ascii_safe()] {
+            // Zero tokens, negative cost, and non-finite cost stay the
+            // missing-value marker: no rate exists to bound.
+            assert_eq!(format_cost_per_million(0.0, 0, glyphs), glyphs.missing);
+            assert_eq!(format_cost_per_million(10.0, 0, glyphs), glyphs.missing);
+            assert_eq!(format_cost_per_million(-1.0, 100, glyphs), glyphs.missing);
+            assert_eq!(
+                format_cost_per_million(f64::NAN, 100, glyphs),
+                glyphs.missing
+            );
+            assert_eq!(
+                format_cost_per_million(f64::INFINITY, 100, glyphs),
+                glyphs.missing
+            );
+
+            // A genuinely free session is a different fact than a cheap one,
+            // and `$0.00` belongs to the first.
+            assert_eq!(format_cost_per_million(0.0, 1000, glyphs), "$0.00");
+
+            // Rates LiteLLM actually publishes below a cent per 1M: the
+            // fireworks_ai image models, and the tencent/deepseek-v4 cache
+            // reads whose input and output stay visible — so a zero here reads
+            // as a real price rather than a lost digit.
+            assert_eq!(format_cost_per_million(0.000004, 1000, glyphs), "<$0.01");
+            assert_eq!(
+                format_cost_per_million(0.003625, 1_000_000, glyphs),
+                "<$0.01"
+            );
+            assert_eq!(
+                format_cost_per_million(0.00013, 1_000_000, glyphs),
+                "<$0.01"
+            );
+            // Just under the boundary, including the value `{:.2}` would have
+            // rounded up to a cent that was never charged.
+            assert_eq!(format_cost_per_million(0.005, 1_000_000, glyphs), "<$0.01");
+            assert_eq!(format_cost_per_million(0.0099, 1_000_000, glyphs), "<$0.01");
+
+            // At or above a cent the real figure is wider than the bound, so
+            // the bound must not swallow it.
+            assert_eq!(format_cost_per_million(0.01, 1_000_000, glyphs), "$0.01");
+            assert_eq!(format_cost_per_million(0.06, 1_000_000, glyphs), "$0.06");
+            assert_eq!(format_cost_per_million(3.00, 1_000_000, glyphs), "$3.00");
+            assert_eq!(format_cost_per_million(15.50, 1_000_000, glyphs), "$15.50");
+        }
+    }
+
+    /// The bound rides in `Constraint::Length(10)` cells next to `$15.50`, and
+    /// the sessions table admits Cost/1M at a width computed from
+    /// `natural() == 10`. One cell wider than the widest ordinary rate and the
+    /// column would clip with no marker, so hold the measured budget here
+    /// rather than discovering it in a render sweep.
+    #[test]
+    fn sub_cent_bound_fits_the_cost_per_million_column() {
+        const COST_PER_MILLION_CELLS: usize = 10;
+        for glyphs in [Glyphs::unicode(), Glyphs::ascii_safe()] {
+            let bound = format_cost_per_million(0.003625, 1_000_000, glyphs);
+            assert_eq!(bound, "<$0.01");
+            assert!(
+                UnicodeWidthStr::width(bound.as_str()) <= COST_PER_MILLION_CELLS,
+                "{bound:?} overflows the {COST_PER_MILLION_CELLS}-cell column"
+            );
+            // Ambient-width invariant: ASCII, so narrow and wide East Asian
+            // policies measure it the same.
+            assert_eq!(
+                UnicodeWidthStr::width(bound.as_str()),
+                UnicodeWidthStr::width_cjk(bound.as_str())
+            );
+        }
     }
 }

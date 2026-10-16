@@ -41,17 +41,27 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy)]
 struct SyncDeadline {
     expires_at: Instant,
+    /// Clock this deadline is measured against, always [`Instant::now`] in
+    /// production. Tests substitute a clock they step by hand so that "the
+    /// budget ran out during RPC X" is an ordering fact rather than a race
+    /// between the runner and the wall clock.
+    now: fn() -> Instant,
 }
 
 impl SyncDeadline {
     fn new(budget: Duration) -> Self {
+        Self::with_clock(budget, Instant::now)
+    }
+
+    fn with_clock(budget: Duration, now: fn() -> Instant) -> Self {
         Self {
-            expires_at: Instant::now() + budget,
+            expires_at: now() + budget,
+            now,
         }
     }
 
     fn remaining_timeout(&self) -> Result<Duration> {
-        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        let remaining = self.expires_at.saturating_duration_since((self.now)());
         if remaining.is_zero() {
             anyhow::bail!("Antigravity implicit sync deadline expired")
         }
@@ -4515,7 +4525,7 @@ mod tests {
 
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc};
     use std::thread;
 
     fn serve_once(body: Vec<u8>, headers_extra: &str) -> u16 {
@@ -5969,11 +5979,71 @@ mod tests {
         );
     }
 
+    /// Virtual clock for the implicit sync deadline tests.
+    ///
+    /// The deadline is wall-clock state the test cannot steer. A loaded
+    /// runner that preempts the test thread used to let a small budget expire
+    /// before the first RPC was even issued, which is how
+    /// `implicit_sync_deadline_bounds_stalled_metadata_and_reports_partial_cache`
+    /// failed on Windows CI while the production path was healthy. Time here
+    /// advances per reading instead of with the wall clock, so "the budget ran
+    /// out during the metadata RPC" is an ordering fact rather than a race.
+    const DEADLINE_TEST_BUDGET: Duration = Duration::from_secs(5);
+    /// What is left of the budget when the metadata RPC is issued, which is
+    /// also what the stalled socket below really costs: the deadline hands
+    /// exactly this to the transport as its connect and read timeout.
+    const DEADLINE_TEST_METADATA_REMAINING: Duration = Duration::from_millis(300);
+    /// Deadline readings in the order the sync takes them: the `SyncDeadline`
+    /// constructor, the list RPC, the stalled metadata RPC, and that RPC's
+    /// HTTPS fallback. A reading past the end stays expired.
+    const DEADLINE_TEST_SCHEDULE: [Duration; 4] = [
+        Duration::ZERO,
+        Duration::ZERO,
+        DEADLINE_TEST_BUDGET.saturating_sub(DEADLINE_TEST_METADATA_REMAINING),
+        DEADLINE_TEST_BUDGET,
+    ];
+    /// Only ever reached by a sync that stopped bounding the stalled socket;
+    /// without it such a regression hangs the whole test binary instead of
+    /// failing this one test. A 30x margin over what the deadline allows the
+    /// stalled RPC is far too loose for a slow runner to trip, and still
+    /// nowhere near the 10s a transport timeout would cost if a regression
+    /// stopped handing the remaining budget to the transport.
+    const DEADLINE_TEST_WATCHDOG: Duration = DEADLINE_TEST_METADATA_REMAINING.saturating_mul(30);
+
+    static DEADLINE_TEST_CLOCK_START: OnceLock<Instant> = OnceLock::new();
+    static DEADLINE_TEST_CLOCK_READS: AtomicUsize = AtomicUsize::new(0);
+
+    fn deadline_test_clock() -> Instant {
+        let start = *DEADLINE_TEST_CLOCK_START.get_or_init(Instant::now);
+        let reading = DEADLINE_TEST_CLOCK_READS.fetch_add(1, Ordering::SeqCst);
+        start + DEADLINE_TEST_SCHEDULE[reading.min(DEADLINE_TEST_SCHEDULE.len() - 1)]
+    }
+
+    /// Wait for the server thread to have logged `target` methods.
+    ///
+    /// The client closes a stalled request as soon as its own deadline fires,
+    /// so on a loaded runner the server can still be between `accept` and its
+    /// log when the sync returns. The request bytes are already in the
+    /// server's receive buffer by then — a close with nothing left unread
+    /// sends FIN, not RST — so this only waits for the logging thread to be
+    /// scheduled rather than for anything that can be lost.
+    fn wait_for_logged_methods(seen: &Mutex<Vec<String>>, target: usize) -> Vec<String> {
+        for _ in 0..500 {
+            let methods = seen.lock().unwrap().clone();
+            if methods.len() >= target {
+                return methods;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        seen.lock().unwrap().clone()
+    }
+
     #[test]
     #[serial]
     fn implicit_sync_deadline_bounds_stalled_metadata_and_reports_partial_cache() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _guard = TestEnvGuard::redirect_to(temp_dir.path());
+        DEADLINE_TEST_CLOCK_READS.store(0, Ordering::SeqCst);
         let summaries = serde_json::json!({
             "cascadeTrajectories": [{
                 "cascadeId": "stalled-session",
@@ -5982,38 +6052,116 @@ mod tests {
             }]
         })
         .to_string();
+        let (release_metadata_tx, release_metadata_rx) = mpsc::channel::<()>();
         let (port, seen) = serve_rpc_methods(move |method| match method {
             "GetAllCascadeTrajectories" => Some(summaries.clone()),
             "GetCascadeTrajectoryGeneratorMetadata" => {
-                // The client-side deadline must win; the test server deliberately
-                // keeps this request open longer than the supplied sync deadline.
-                thread::sleep(Duration::from_secs(2));
+                // Stalled rather than refused: the request is never answered
+                // and the socket stays open until the test has its result, so
+                // only the client-side deadline can end this RPC.
+                let _ = release_metadata_rx.recv();
                 None
             }
             _ => None,
         });
         remember_rpc_transport(port, RpcTransport::PlainHttp);
         let connection = enrichment_test_connection(port);
-        let started = Instant::now();
-        let outcome = sync_antigravity_cache_impl_with_deadline(
-            &[connection],
-            false,
-            Some(SyncDeadline::new(Duration::from_millis(100))),
-        )
+        let deadline = SyncDeadline::with_clock(DEADLINE_TEST_BUDGET, deadline_test_clock);
+
+        let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
+        let outcome = thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = outcome_tx.send(sync_antigravity_cache_impl_with_deadline(
+                    &[connection],
+                    false,
+                    Some(deadline),
+                ));
+            });
+            let outcome = outcome_rx.recv_timeout(DEADLINE_TEST_WATCHDOG);
+            // Release the server before anything can panic, so the scope can
+            // always join its sync thread. Dropping the sender rather than
+            // sending once also unblocks a second handler call, which is what
+            // a regression that retries the stalled RPC would make.
+            drop(release_metadata_tx);
+            outcome.expect("the sync must return while the metadata RPC is still stalled")
+        })
         .expect("a recoverable RPC timeout must preserve and persist the cache");
 
+        let partial_error = outcome
+            .partial_error
+            .as_ref()
+            .expect("an expired deadline must be reported as a partial sync");
+        // Formatted with `{:#}` so the whole chain is searched: the bail
+        // currently happens before the HTTPS leg adds its context, and a
+        // refactor that wraps it must not silently pass this assertion.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "the implicit deadline must bound plaintext and HTTPS fallback work"
+            format!("{partial_error:#}").contains("Antigravity implicit sync deadline expired"),
+            "the stalled metadata RPC must be what spends the shared deadline, got: {partial_error:#}"
         );
-        assert!(outcome.partial_error.is_some());
         assert_eq!(outcome.synced_sessions, 0);
         assert_eq!(outcome.failed_sessions, 1);
-        assert!(seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|method| method == "GetAllCascadeTrajectories"));
+        assert_eq!(
+            wait_for_logged_methods(&seen, 2),
+            [
+                "GetAllCascadeTrajectories",
+                "GetCascadeTrajectoryGeneratorMetadata"
+            ],
+            "the budget must survive the list RPC and be spent on the metadata stall"
+        );
+        assert_eq!(
+            DEADLINE_TEST_CLOCK_READS.load(Ordering::SeqCst),
+            DEADLINE_TEST_SCHEDULE.len(),
+            "the schedule above describes every deadline reading this sync takes; update it when the sync changes which RPCs it bounds"
+        );
+        assert!(
+            get_antigravity_manifest_path().unwrap().exists(),
+            "a partial sync must still persist the cache manifest"
+        );
+    }
+
+    #[test]
+    fn sync_deadline_clamps_each_rpc_to_what_is_left_of_the_budget() {
+        // What the stalled-metadata test above cannot observe without timing
+        // the run: a long budget never extends a single RPC past the
+        // transport timeout, a short remainder shortens it, and an exhausted
+        // budget refuses the next RPC outright.
+        static CLAMP_CLOCK_START: OnceLock<Instant> = OnceLock::new();
+        static CLAMP_CLOCK_ELAPSED_MS: AtomicUsize = AtomicUsize::new(0);
+
+        fn clamp_test_clock() -> Instant {
+            *CLAMP_CLOCK_START.get_or_init(Instant::now)
+                + Duration::from_millis(CLAMP_CLOCK_ELAPSED_MS.load(Ordering::SeqCst) as u64)
+        }
+
+        let budget = DEFAULT_RPC_TIMEOUT * 3;
+        CLAMP_CLOCK_ELAPSED_MS.store(0, Ordering::SeqCst);
+        let deadline = SyncDeadline::with_clock(budget, clamp_test_clock);
+        assert_eq!(
+            deadline.remaining_timeout().unwrap(),
+            DEFAULT_RPC_TIMEOUT,
+            "a budget larger than the transport timeout must not lengthen one RPC"
+        );
+
+        CLAMP_CLOCK_ELAPSED_MS.store(
+            (budget - Duration::from_millis(250)).as_millis() as usize,
+            Ordering::SeqCst,
+        );
+        assert_eq!(
+            deadline.remaining_timeout().unwrap(),
+            Duration::from_millis(250),
+            "what is left of the budget must bound the next RPC"
+        );
+
+        CLAMP_CLOCK_ELAPSED_MS.store(budget.as_millis() as usize, Ordering::SeqCst);
+        let expired = deadline
+            .remaining_timeout()
+            .expect_err("an exhausted budget must refuse the next RPC");
+        assert!(
+            expired
+                .to_string()
+                .contains("Antigravity implicit sync deadline expired"),
+            "the refusal must name the deadline, got: {expired:#}"
+        );
     }
 
     #[test]

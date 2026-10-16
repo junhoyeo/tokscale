@@ -57,6 +57,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "hindsight",
   "micode-desktop",
   "muse",
+  "aside",
   "vibe",
 ] as const;
 
