@@ -16,12 +16,88 @@
 //! - `session_prompt_tokens`: overall prompt tokens (includes cached prompt tokens)
 //! - `session_completion_tokens`: completion / output tokens
 //! - `session_cached_tokens`: cached prompt tokens
+//!
+//! Cached tokens are a *subset* of the prompt tokens, not an addition to them —
+//! upstream types the field that way and its own cost function subtracts the
+//! cached count before charging the input rate — so the breakdown splits them
+//! out instead of summing. Usage is session-granular: a Vibe transcript carries
+//! no per-message model, timestamp, or token counts, so one message per session
+//! is the finest row the format supports.
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
+
+/// Alias of the model Vibe resolves an unpinned session to when the session
+/// snapshot does not carry a `config.models` table to read it from. Upstream's
+/// own default (`DEFAULT_ACTIVE_MODEL_CONFIG` in `vibe/core/config/vibe_schema.py`)
+/// publishes this alias; `name` on the same record is the CLI-routed wire id
+/// (`mistral-vibe-cli-latest`), which no pricing dataset carries.
+const DEFAULT_MODEL_ALIAS: &str = "mistral-medium-latest";
+
+/// Resolve the session's model from a Vibe metadata record.
+///
+/// `config.active_model` is the pinned alias, but it is **empty by default**:
+/// upstream documents `""` as `UNPINNED_ACTIVE_MODEL`, the sentinel for "follow
+/// the configured default" rather than missing data, and a session stays
+/// unpinned until the user runs `/model`. A blank value therefore has to fall
+/// through instead of being accepted as a model id — an empty `model_id` leaves
+/// the Model column blank and, because no pricing row can match it, prices the
+/// whole session at zero.
+///
+/// Resolution order mirrors upstream's `get_active_model`: the pinned alias,
+/// then the session's own `config.models` table (single-entry for a default
+/// install), then the published default alias.
+fn resolve_model(meta: &Value) -> String {
+    let pinned = meta
+        .pointer("/config/active_model")
+        .and_then(Value::as_str)
+        .or_else(|| meta.get("active_model").and_then(Value::as_str))
+        .or_else(|| meta.get("model").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if let Some(model) = pinned {
+        return model.to_string();
+    }
+
+    // An unpinned session still names the models it was configured with. Prefer
+    // the record's own `alias` over its map key: both identify the same model,
+    // but the alias is what the CLI displays and what upstream pins on `/model`.
+    if let Some(models) = meta.pointer("/config/models").and_then(Value::as_object) {
+        let mut aliases: Vec<&str> = models
+            .iter()
+            .map(|(key, entry)| {
+                entry
+                    .get("alias")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|alias| !alias.is_empty())
+                    .unwrap_or(key.as_str())
+            })
+            .filter(|alias| !alias.is_empty())
+            .collect();
+        if aliases.len() == 1 {
+            return aliases[0].to_string();
+        }
+        // More than one configured model and nothing pinned: the transcript
+        // cannot say which one ran, so pick deterministically rather than
+        // letting map iteration order decide.
+        if aliases.len() > 1 {
+            aliases.sort_unstable();
+            if let Some(default) = aliases
+                .iter()
+                .find(|alias| **alias == DEFAULT_MODEL_ALIAS)
+                .or_else(|| aliases.first())
+            {
+                return (*default).to_string();
+            }
+        }
+    }
+
+    DEFAULT_MODEL_ALIAS.to_string()
+}
 
 pub fn parse_vibe_file(path: &Path) -> Vec<UnifiedMessage> {
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -101,14 +177,8 @@ pub fn parse_vibe_file(path: &Path) -> Vec<UnifiedMessage> {
             }
         });
 
-    let raw_model = meta
-        .pointer("/config/active_model")
-        .and_then(Value::as_str)
-        .or_else(|| meta.get("active_model").and_then(Value::as_str))
-        .or_else(|| meta.get("model").and_then(Value::as_str))
-        .unwrap_or("mistral-large-latest");
-
-    let model = raw_model.trim();
+    let model = resolve_model(meta);
+    let model = model.as_str();
     let inferred = provider_identity::inferred_provider_from_model(model).unwrap_or("mistral");
     let canonical_prov = provider_identity::canonical_provider(inferred);
     let provider = canonical_prov.as_deref().unwrap_or(inferred);
