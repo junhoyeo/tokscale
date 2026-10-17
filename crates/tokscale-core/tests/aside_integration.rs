@@ -1,0 +1,750 @@
+use tokscale_core::scanner::scan_all_clients_with_env_strategy;
+use tokscale_core::{parse_local_unified_messages_with_pricing_uncached, LocalParseOptions};
+
+mod common;
+
+fn assert_aside_provider_fallback(model: &str, expected: &str) {
+    // Given absent/routing markers and an explicit provider that differs from inference.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [
+        None,
+        Some(""),
+        Some(" AsIdE "),
+        Some(" UNKNOWN "),
+        Some("custom-provider"),
+    ]
+    .map(|provider| {
+        serde_json::json!({
+            "role": "assistant", "model": model, "provider": provider,
+            "usage": {"input": 1}
+        })
+        .to_string()
+            + "\n"
+    })
+    .concat();
+    write_session(home.path(), &rows);
+    // When the real parser resolves provider identity.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then only routing markers use inference; explicit providers always win.
+    assert_eq!(messages.len(), 5);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        [expected, expected, expected, expected, "custom-provider"],
+        "{model}"
+    );
+}
+
+#[test]
+fn aside_customgptish_is_not_an_openai_family() {
+    assert_aside_provider_fallback("customgptish-solver", "unknown");
+}
+
+#[test]
+fn aside_notqwen_is_not_a_qwen_family() {
+    assert_aside_provider_fallback("notqwen-custom", "unknown");
+}
+
+#[test]
+fn aside_versioned_families_infer_without_overriding_explicit_providers() {
+    for model in [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-astra",
+        "gpt-5.4-mini",
+    ] {
+        assert_aside_provider_fallback(model, "openai");
+    }
+    assert_aside_provider_fallback("qwen3-coder", "qwen");
+}
+
+#[test]
+fn aside_cost_only_parser_preserves_cost_without_fabricating_tokens() {
+    use tokscale_core::sessions::{aside::parse_aside_file, CostSource};
+    // Given positive recorded cost with missing/zero output and standalone reasoning.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [serde_json::Value::Null, serde_json::json!(0)]
+        .map(|output| {
+            serde_json::json!({
+                "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+                "responseId": "cost-only", "provider": "openai-codex",
+                "usage": {"input": -1, "output": output, "reasoning": 99,
+                    "cost": {"total": 0.25}}
+            })
+            .to_string()
+                + "\n"
+        })
+        .concat();
+    write_session(home.path(), &rows);
+    // When parsing without aggregation or pricing.
+    let messages = parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then recorded cost and identity survive, while reasoning remains bounded by output.
+    assert_eq!(messages.len(), 2);
+    for message in messages {
+        assert_eq!(message.tokens, Default::default());
+        assert!((message.cost - 0.25).abs() < 1e-12);
+        assert_eq!(message.cost_source, CostSource::ProviderReported);
+        assert_eq!(message.timestamp, 1_788_609_600_000);
+        assert_eq!(message.provider_id, "openai-codex");
+        assert!(message.dedup_key.is_some());
+    }
+}
+
+#[test]
+fn aside_rejects_standalone_reasoning_without_eligible_cost() {
+    // Given no disjoint tokens and missing, zero, negative or non-finite recorded cost.
+    let home = tempfile::tempdir().unwrap();
+    let rows = ["null", "0", "-1", "1e999", "-1e999"]
+        .into_iter()
+        .flat_map(|cost| ["", "\"output\":0,"].map(move |output| format!(
+            "{{\"role\":\"assistant\",\"usage\":{{{output}\"reasoning\":99,\"cost\":{{\"total\":{cost}}}}}}}\n"
+        )))
+        .collect::<String>();
+    write_session(
+        home.path(),
+        &(rows + "{\"role\":\"assistant\",\"usage\":{\"reasoning\":99}}\n"),
+    );
+    // When parsing the metadata-only rows.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+    // Then neither reasoning nor ineligible costs create a billable record.
+    assert!(messages.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn aside_cost_only_cached_uncached_and_legacy_preserve_provider_scoped_ids() {
+    use tokscale_core::sessions::CostSource;
+    use tokscale_core::{parse_local_clients, parse_local_unified_messages_with_pricing, ClientId};
+    // Given cross-account duplicate IDs, provider reuse, and two ID-less cost-only calls.
+    let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let _env = common::EnvGuard::set(&[
+        ("TOKSCALE_CONFIG_DIR", cache.path().as_os_str()),
+        ("XDG_CACHE_HOME", cache.path().as_os_str()),
+    ]);
+    let row = serde_json::json!({
+        "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+        "model": "gpt-4o", "provider": "openai-codex", "responseId": "cost-only",
+        "usage": {"cost": {"total": 0.25}}
+    });
+    let mut reused = row.clone();
+    reused["provider"] = "anthropic".into();
+    let mut no_id = row.clone();
+    no_id.as_object_mut().unwrap().remove("responseId");
+    let rows = [&row, &row, &reused, &no_id, &no_id]
+        .map(|r| r.to_string() + "\n")
+        .concat();
+    let options = write_session(home.path(), &rows);
+    let duplicate = home.path().join(".aside/u/1/sessions/other/messages.jsonl");
+    std::fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+    std::fs::write(duplicate, row.to_string() + "\n").unwrap();
+    // When each public lane consumes the same native fixture.
+    let uncached = parse_local_unified_messages_with_pricing_uncached(options.clone(), None)
+        .await
+        .unwrap();
+    let cold = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let warm = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let legacy = parse_local_clients(options).unwrap();
+    // Then all lanes retain costs/counts without tokens and deduplicate only scoped IDs.
+    assert_eq!(
+        [
+            uncached.len(),
+            cold.len(),
+            warm.len(),
+            legacy.messages.len()
+        ],
+        [4; 4]
+    );
+    assert_eq!(cold, warm);
+    for messages in [&uncached, &cold, &warm] {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.provider_id == "anthropic")
+                .count(),
+            1
+        );
+        assert_eq!(messages.iter().filter(|m| m.dedup_key.is_none()).count(), 2);
+        assert!((messages.iter().map(|m| m.cost).sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(messages.iter().all(|m| m.tokens == Default::default()
+            && m.client == "aside"
+            && m.timestamp == 1_788_609_600_000
+            && m.cost_source == CostSource::ProviderReported));
+    }
+    assert_eq!(legacy.counts.get(ClientId::Aside), 4);
+    assert!((legacy.messages.iter().map(|m| m.cost).sum::<f64>() - 1.0).abs() < 1e-12);
+    assert!(legacy.messages.iter().all(|m| m.input == 0
+        && m.output == 0
+        && m.cache_read == 0
+        && m.cache_write == 0
+        && m.reasoning == 0
+        && m.client == "aside"
+        && m.timestamp == 1_788_609_600_000
+        && m.cost_source == CostSource::ProviderReported));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn aside_cold_warm_and_legacy_dispatch_agree() {
+    use tokscale_core::{parse_local_clients, parse_local_unified_messages_with_pricing, ClientId};
+    // Given a repeated response and two ID-less calls, with isolated persistent caches.
+    let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let _env = common::EnvGuard::set(&[
+        ("TOKSCALE_CONFIG_DIR", cache.path().as_os_str()),
+        ("XDG_CACHE_HOME", cache.path().as_os_str()),
+    ]);
+    let row = "{\"role\":\"assistant\",\"timestamp\":1788609600000,\"model\":\"gpt-4o\",\"provider\":\"openai-codex\",\"responseId\":\"repeat\",\"usage\":{\"input\":10,\"output\":20,\"cacheRead\":30,\"cacheWrite\":4,\"reasoning\":7,\"cost\":{\"total\":0.25}}}\n";
+    let no_id = row.replace("\"responseId\":\"repeat\",", "");
+    let options = write_session(home.path(), &(row.to_owned() + row + &no_id + &no_id));
+    // When both cached passes and the legacy export path consume the same source.
+    let cold = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let warm = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let legacy = parse_local_clients(options).unwrap();
+    // Then cache hits preserve keys, source cost provenance and disjoint buckets.
+    assert_eq!(cold.len(), 3);
+    assert_eq!(cold, warm);
+    assert_eq!(legacy.counts.get(ClientId::Aside), 3);
+    assert_eq!(legacy.messages.len(), 3);
+    assert_eq!(cold.iter().map(|m| m.tokens.total()).sum::<i64>(), 192);
+    assert!((cold.iter().map(|m| m.cost).sum::<f64>() - 0.75).abs() < 1e-12);
+    assert_eq!(legacy.messages.iter().map(|m| m.output).sum::<i64>(), 39);
+}
+
+#[test]
+fn aside_timestamp_fallback_and_partial_tail_are_recoverable() {
+    use tokscale_core::sessions::aside::parse_aside_file;
+    // Given a row without a timestamp followed by an unfinished write.
+    let home = tempfile::tempdir().unwrap();
+    write_session(
+        home.path(),
+        "{\"role\":\"assistant\",\"usage\":{\"input\":1}}\n{\"role\":\"assistant\",\"usage\":{",
+    );
+    let path = home
+        .path()
+        .join(".aside/u/0/sessions/synthetic/messages.jsonl");
+    let modified = i64::try_from(
+        std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    // When parsing a native transcript still being appended.
+    let messages = parse_aside_file(&path);
+    // Then the completed row survives with the file timestamp, without fabricated content.
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].timestamp, modified);
+    assert_eq!(messages[0].tokens.total(), 1);
+    assert_eq!(messages[0].model_id, "unknown");
+    assert!(messages[0].dedup_key.is_none());
+    assert!(messages[0].session_title.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn aside_discovery_does_not_follow_account_or_transcript_symlinks() {
+    use std::os::unix::fs::symlink;
+    // Given aliases into memory and a transcript alias to a password file.
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".aside/u");
+    let target = home.path().join("private/sessions/fake");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("messages.jsonl"), "{}").unwrap();
+    std::fs::create_dir_all(root.join("0/sessions/fake")).unwrap();
+    symlink(home.path().join("private"), root.join("linked-account")).unwrap();
+    symlink(
+        target.join("messages.jsonl"),
+        root.join("0/sessions/fake/messages.jsonl"),
+    )
+    .unwrap();
+    // When native discovery enumerates the account boundary.
+    let scan =
+        scan_all_clients_with_env_strategy(home.path().to_str().unwrap(), &["aside".into()], false);
+    // Then symlinks cannot widen the allowed transcript tree.
+    assert_eq!(scan.total_files(), 0);
+}
+
+fn write_session(home: &std::path::Path, content: &str) -> LocalParseOptions {
+    let path = home.join(".aside/u/0/sessions/synthetic/messages.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+    LocalParseOptions {
+        home_dir: Some(home.to_string_lossy().into_owned()),
+        clients: Some(vec!["aside".into()]),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn aside_skips_malformed_and_empty_usage_and_clamps_buckets() {
+    // Given malformed, non-assistant, empty, negative and valid flat records.
+    let home = tempfile::tempdir().unwrap();
+    let options = write_session(home.path(), concat!(
+        "not json\n",
+        "{\"role\":\"user\",\"usage\":{\"input\":900}}\n",
+        "{\"role\":\"assistant\",\"usage\":{\"input\":-10,\"output\":0}}\n",
+        "{\"role\":\"assistant\",\"usage\":null}\n",
+        "{\"role\":\"assistant\",\"timestamp\":\"2026-09-05T12:00:00Z\",\"model\":\"gpt-4o\",\"usage\":{\"input\":-2,\"output\":5,\"reasoning\":99,\"cacheRead\":3,\"cacheWrite\":-4,\"cost\":{\"total\":-1}}}\n",
+        "{\"role\":\"assistant\",\"timestamp\":1788609600000,\"model\":\"gpt-4o\",\"provider\":\"aside\",\"usage\":{\"input\":2,\"output\":4,\"reasoning\":-1}}\n",
+        "{\"role\":\"assistant\",\"usage\":{"
+    ));
+    // When parsed through discovery and native dispatch.
+    let messages = parse_local_unified_messages_with_pricing_uncached(options, None)
+        .await
+        .unwrap();
+    // Then negatives cannot reduce totals and reasoning cannot exceed output.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].tokens.input, 0);
+    assert_eq!(messages[0].tokens.output, 0);
+    assert_eq!(messages[0].tokens.reasoning, 5);
+    assert_eq!(messages[0].tokens.cache_read, 3);
+    assert_eq!(messages[0].tokens.cache_write, 0);
+    assert_eq!(messages[0].tokens.total(), 8);
+    assert_eq!(messages[1].tokens.total(), 6);
+    assert_eq!(messages[1].tokens.reasoning, 0);
+    assert!(messages
+        .iter()
+        .all(|m| m.timestamp == 1_788_609_600_000 && m.cost == 0.0));
+    assert!(messages.iter().all(|m| m.provider_id == "openai"));
+}
+
+#[tokio::test]
+async fn aside_source_cost_and_estimates_do_not_double_bill_reasoning() {
+    use std::collections::HashMap;
+    use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
+    use tokscale_core::sessions::CostSource;
+    // Given synthetic fixed rates and a paid response beside a gateway zero-cost row.
+    let home = tempfile::tempdir().unwrap();
+    let options = write_session(home.path(), concat!(
+        "{\"role\":\"assistant\",\"model\":\"gpt-4o\",\"provider\":\"openai-codex\",\"usage\":{\"input\":10,\"output\":20,\"reasoning\":7,\"cacheRead\":30,\"cacheWrite\":4,\"cost\":{\"total\":0.25}}}\n",
+        "{\"role\":\"assistant\",\"model\":\"gpt-4o\",\"provider\":\"aside\",\"usage\":{\"input\":10,\"output\":20,\"reasoning\":7,\"cacheRead\":30,\"cacheWrite\":4,\"cost\":{\"total\":0}}}\n"
+    ));
+    let pricing = PricingService::new(
+        HashMap::from([(
+            "gpt-4o".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0001),
+                cache_creation_input_token_cost: Some(0.003),
+                ..Default::default()
+            },
+        )]),
+        HashMap::new(),
+    );
+    // When the standard pricing lane applies its existing cost contract.
+    let messages = parse_local_unified_messages_with_pricing_uncached(options, Some(&pricing))
+        .await
+        .unwrap();
+    // Then the recorded positive cost wins, zero falls back, and output is billed once.
+    assert_eq!(messages.len(), 2);
+    assert!((messages[0].cost - 0.25).abs() < 1e-12);
+    assert_eq!(messages[0].cost_source, CostSource::ProviderReported);
+    assert!(
+        (messages[1].cost - 0.065).abs() < 1e-12,
+        "{}",
+        messages[1].cost
+    );
+    assert_eq!(messages[1].cost_source, CostSource::Estimated);
+}
+
+#[tokio::test]
+async fn aside_accounts_responses_and_native_timestamps() {
+    // Given a repeated response, a different provider, and two ID-less calls.
+    let home = tempfile::tempdir().unwrap();
+    let row = serde_json::json!({
+        "role": "assistant", "timestamp": 1_788_598_095_439_i64,
+        "model": "gpt-4o", "provider": "openai-codex", "responseId": "response-one",
+        "usage": {"input": 10, "output": 20, "cacheRead": 30, "cacheWrite": 4,
+            "reasoning": 7, "totalTokens": 64, "cost": {"total": 0.25}}
+    });
+    let mut other_provider = row.clone();
+    other_provider["provider"] = "anthropic".into();
+    let mut no_id = row.clone();
+    no_id.as_object_mut().unwrap().remove("responseId");
+    for (account, rows) in [
+        ("0", vec![&row, &no_id, &no_id]),
+        ("1", vec![&row, &other_provider]),
+    ] {
+        let path = home.path().join(format!(
+            ".aside/u/{account}/sessions/session/messages.jsonl"
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            rows.iter()
+                .map(|row| row.to_string() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+    }
+
+    // When the public native API scans and dispatches the flat format.
+    let messages = parse_local_unified_messages_with_pricing_uncached(
+        LocalParseOptions {
+            home_dir: Some(home.path().to_string_lossy().into_owned()),
+            clients: Some(vec!["aside".into()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Then routing identity is retained and reasoning is not counted twice.
+    assert_eq!(messages.len(), 4);
+    assert!(messages
+        .iter()
+        .all(|m| m.client == "aside" && m.timestamp == 1_788_598_095_439));
+    assert_eq!(messages.iter().map(|m| m.tokens.total()).sum::<i64>(), 256);
+    assert_eq!(messages.iter().map(|m| m.tokens.reasoning).sum::<i64>(), 28);
+    assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 52);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.provider_id == "openai-codex")
+            .count(),
+        3
+    );
+    assert!((messages.iter().map(|m| m.cost).sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn aside_discovers_only_session_transcripts() {
+    // Given synthetic sessions and usage-shaped files outside the session boundary.
+    let home = tempfile::tempdir().unwrap();
+    let allowed = [
+        ".aside/u/0/sessions/2026-09-05_one/messages.jsonl",
+        ".aside/u/1/sessions/2026-09-06_two/messages.jsonl",
+    ];
+    let excluded = [
+        ".aside/accounts.json",
+        ".aside/u/0/passwords/messages.jsonl",
+        ".aside/u/0/memory/messages.jsonl",
+        ".aside/u/0/sessions/2026-09-05_one/artifacts/messages.jsonl",
+        ".aside/u/0/sessions/2026-09-05_one/other.jsonl",
+    ];
+    for relative in allowed.iter().chain(excluded.iter()) {
+        let path = home.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}\n").unwrap();
+    }
+
+    // When the existing scanner is asked for the native client.
+    let scan = scan_all_clients_with_env_strategy(
+        home.path().to_str().unwrap(),
+        &["aside".to_string()],
+        false,
+    );
+
+    // Then only the exact transcripts are discoverable across accounts.
+    let mut actual: Vec<_> = scan.all_files().into_iter().map(|(_, path)| path).collect();
+    actual.sort();
+    let expected: Vec<_> = allowed.iter().map(|path| home.path().join(path)).collect();
+    assert_eq!(actual, expected);
+}
+
+/// Real Aside transcripts never put a vendor in `provider`: the field records
+/// the ROUTE. On a read-only snapshot of a live `~/.aside` tree the only three
+/// values present were `ai-gateway` (865 rows), `aside` (613) and
+/// `claude-code` (57) — so 60% of records carried a proxy id where pricing and
+/// the public per-provider breakdown expect a vendor.
+///
+/// Passing `ai-gateway` through also denies the row `ResolutionKind::ProviderScoped`:
+/// the resolver only grants it when the hint names the vendor owning the
+/// matched key, and `prepare_submission_pricing` zeroes anything it demotes as
+/// `UNVERIFIED_PROVIDER_IDENTITY_REASON`.
+#[test]
+fn aside_route_providers_resolve_to_vendors_not_proxies() {
+    // Given the three provider values a real Aside tree actually writes.
+    let home = tempfile::tempdir().unwrap();
+    let rows = [
+        // A gateway route names no vendor, so the model id has to decide.
+        ("ai-gateway", "claude-fable-5", "anthropic"),
+        ("ai-gateway", "gpt-5.6-luna", "openai"),
+        // A Claude Code subscription is an Anthropic route.
+        ("claude-code", "claude-opus-4-8", "anthropic"),
+        // Aside's own gateway was already treated as nameless.
+        ("aside", "gpt-5.6-terra", "openai"),
+        // An unrecognized route with an unrecognizable model stays unknown
+        // rather than inventing a vendor.
+        ("ai-gateway", "mystery-model", "unknown"),
+    ];
+    let body = rows
+        .iter()
+        .map(|(provider, model, _)| {
+            serde_json::json!({
+                "role": "assistant", "provider": provider, "model": model,
+                "usage": {"input": 1}
+            })
+            .to_string()
+                + "\n"
+        })
+        .collect::<String>();
+    write_session(home.path(), &body);
+
+    // When the parser resolves provider identity.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    // Then no proxy id survives into the reported provider.
+    assert_eq!(messages.len(), rows.len());
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        rows.iter().map(|(_, _, want)| *want).collect::<Vec<_>>(),
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.provider_id != "ai-gateway" && m.provider_id != "claude-code"),
+        "a routing id must never be published as a provider"
+    );
+}
+
+/// A vendor id Aside may start writing is a stronger claim than inference from
+/// a model name, so the route mapping must not become an allowlist that drops
+/// ids it has not heard of.
+#[test]
+fn aside_keeps_explicit_non_route_providers() {
+    let home = tempfile::tempdir().unwrap();
+    let body = [("openai-codex", "gpt-4o"), ("custom-provider", "gpt-4o")]
+        .iter()
+        .map(|(provider, model)| {
+            serde_json::json!({
+                "role": "assistant", "provider": provider, "model": model,
+                "usage": {"input": 1}
+            })
+            .to_string()
+                + "\n"
+        })
+        .collect::<String>();
+    write_session(home.path(), &body);
+
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        ["openai-codex", "custom-provider"],
+    );
+}
+
+/// Real Anthropic-API rows carry `usage.cacheWrite1h` (present on 921 of 1,535
+/// assistant rows in the read-only snapshot). It is the subset of `cacheWrite`
+/// billed at the 1-hour cache TTL — 2x input instead of 1.25x — so dropping it
+/// bills those tokens at the cheaper rate. `TokenBreakdown::total()` does not
+/// add the bucket, and the invariant is that it never exceeds `cache_write`.
+#[test]
+fn aside_reads_one_hour_cache_writes_and_clamps_them() {
+    // Given a faithful bucket, a self-contradicting one, and a negative one.
+    let home = tempfile::tempdir().unwrap();
+    let body = [
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 100, "cacheWrite1h": 40}}),
+        // A 1h subset larger than the write it belongs to cannot be trusted
+        // past the write itself.
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 10, "cacheWrite1h": 99}}),
+        serde_json::json!({"role": "assistant", "model": "claude-fable-5",
+            "usage": {"input": 1, "cacheWrite": 10, "cacheWrite1h": -5}}),
+        // The key is absent on non-Anthropic routes.
+        serde_json::json!({"role": "assistant", "model": "gpt-5.6-luna",
+            "usage": {"input": 1, "cacheWrite": 10}}),
+    ]
+    .iter()
+    .map(|row| row.to_string() + "\n")
+    .collect::<String>();
+    write_session(home.path(), &body);
+
+    // When parsing the metadata-only rows.
+    let messages = tokscale_core::sessions::aside::parse_aside_file(
+        &home
+            .path()
+            .join(".aside/u/0/sessions/synthetic/messages.jsonl"),
+    );
+
+    // Then the 1h subset is retained, clamped to its write, and never negative.
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| (m.tokens.cache_write, m.tokens.cache_write_1h))
+            .collect::<Vec<_>>(),
+        [(100, 40), (10, 10), (10, 0), (10, 0)],
+    );
+    // The subset is not an extra bucket: it must not inflate the total.
+    assert_eq!(messages[0].tokens.total(), 101);
+}
+
+/// The 1h bucket has to survive the cache, export and legacy lanes too, or the
+/// rate is correct on a cold scan and wrong on every later one. The warm pass
+/// is the one that matters: a cache entry that never recorded the bucket
+/// restores the cheaper 5-minute rate on every run after the first.
+#[tokio::test]
+#[serial_test::serial]
+async fn aside_one_hour_cache_writes_survive_every_lane() {
+    use tokscale_core::{parse_local_clients, parse_local_unified_messages_with_pricing};
+    let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let _env = common::EnvGuard::set(&[
+        ("TOKSCALE_CONFIG_DIR", cache.path().as_os_str()),
+        ("XDG_CACHE_HOME", cache.path().as_os_str()),
+    ]);
+    let row = serde_json::json!({
+        "role": "assistant", "timestamp": 1_788_609_600_000_i64,
+        "model": "claude-fable-5", "provider": "ai-gateway",
+        "responseId": "one-hour",
+        "usage": {"input": 1, "cacheWrite": 100, "cacheWrite1h": 40}
+    });
+    let options = write_session(home.path(), &(row.to_string() + "\n"));
+
+    // When every public lane consumes the same native fixture.
+    let uncached = parse_local_unified_messages_with_pricing_uncached(options.clone(), None)
+        .await
+        .unwrap();
+    let cold = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let warm = parse_local_unified_messages_with_pricing(options.clone(), None)
+        .await
+        .unwrap();
+    let legacy = parse_local_clients(options).unwrap();
+
+    // Then the 1h subset and the mapped vendor survive the cache round trip.
+    assert_eq!(cold, warm, "a cache hit must not drop the 1h bucket");
+    for messages in [&uncached, &cold, &warm] {
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 100);
+        assert_eq!(messages[0].tokens.cache_write_1h, 40);
+        assert_eq!(messages[0].provider_id, "anthropic");
+    }
+    // And the export/submission lane reports them too.
+    assert_eq!(legacy.messages.len(), 1);
+    assert_eq!(legacy.messages[0].cache_write, 100);
+    assert_eq!(legacy.messages[0].cache_write_1h, 40);
+    assert_eq!(legacy.messages[0].provider_id, "anthropic");
+}
+
+/// The depth half of what `scan_aside_accounts` guarantees, stated so a
+/// refactor onto the generic walker fails here instead of silently widening
+/// what Aside discovery can read. `scan_directory` matches on filename without
+/// pinning the depth, so each of these would be admitted by it.
+///
+/// Complements `aside_discovers_only_session_transcripts`, which covers the
+/// session's siblings; this one covers the wrong depths inside and above a
+/// session, including one below it.
+#[test]
+fn aside_discovery_pins_the_transcript_depth() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".aside/u");
+
+    let real = root.join("0/sessions/2026-09-05_real/messages.jsonl");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, "{}\n").unwrap();
+
+    // Correctly named transcripts at every wrong depth: too shallow, too deep,
+    // and in the sibling directories a session really does have.
+    for wrong in [
+        "0/messages.jsonl",
+        "0/sessions/messages.jsonl",
+        "0/sessions/2026-09-05_real/artifacts/messages.jsonl",
+        "0/sessions/2026-09-05_real/tmp/messages.jsonl",
+        "0/sessions/2026-09-05_real/nested/deeper/messages.jsonl",
+        "0/memory/projects/messages.jsonl",
+    ] {
+        let path = root.join(wrong);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}\n").unwrap();
+    }
+
+    let scan =
+        scan_all_clients_with_env_strategy(home.path().to_str().unwrap(), &["aside".into()], false);
+
+    let found: Vec<_> = scan.all_files().into_iter().map(|(_, path)| path).collect();
+    assert_eq!(
+        found,
+        vec![real],
+        "only `<account>/sessions/<session>/messages.jsonl` may be discovered"
+    );
+}
+
+/// The symlink half: a transcript-shaped alias must not read a file outside the
+/// session tree. `scan_directory` accepts a symlink whose target is a file, and
+/// an Aside account tree sits beside `memory/`, `password-manager/` and
+/// `accounts.json`, so this is the property that makes the custom walk
+/// necessary rather than merely tidy.
+///
+/// Unix-only for the same reason as
+/// `aside_discovery_does_not_follow_account_or_transcript_symlinks`: creating a
+/// symlink on Windows needs a privilege CI does not grant, and
+/// `std::os::unix::fs::symlink` does not exist there.
+#[cfg(unix)]
+#[test]
+fn aside_discovery_refuses_symlinked_transcripts() {
+    use std::os::unix::fs::symlink;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".aside/u");
+
+    let real = root.join("0/sessions/2026-09-05_real/messages.jsonl");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, "{}\n").unwrap();
+
+    // A credential-shaped file outside the session tree, aliased into it under
+    // the transcript's own name.
+    let secret = home.path().join("private/accounts.json");
+    std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    std::fs::write(&secret, "{}\n").unwrap();
+    let aliased = root.join("0/sessions/2026-09-06_alias");
+    std::fs::create_dir_all(&aliased).unwrap();
+    symlink(&secret, aliased.join("messages.jsonl")).unwrap();
+
+    let scan =
+        scan_all_clients_with_env_strategy(home.path().to_str().unwrap(), &["aside".into()], false);
+
+    let found: Vec<_> = scan.all_files().into_iter().map(|(_, path)| path).collect();
+    assert_eq!(
+        found,
+        vec![real],
+        "a symlinked transcript must not be discovered"
+    );
+}

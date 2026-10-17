@@ -3,7 +3,7 @@
 //! Supports the clawdboard.ai account export ("daily aggregates") and
 //! `ccusage`'s own `daily --json` output (the `cc.json` that viberank and
 //! similar dashboards ingest). The importer normalizes either into tokscale's
-//! native [`GraphResult`], which the CLI then writes out as standard tokscale
+//! native [`GraphResultV2`], which the CLI then writes out as standard tokscale
 //! JSON (identical in shape to `tokscale graph`) for review or archival, or
 //! uploads it as labelled backfill with `import --submit`.
 //!
@@ -43,8 +43,8 @@ use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use std::collections::{BTreeMap, BTreeSet};
 use tokscale_core::{
-    calculate_intensities, generate_graph_result, ClientContribution, ClientId, DailyContribution,
-    DailyTotals, GraphResult, TokenBreakdown,
+    calculate_intensities_v2, generate_graph_result_v2, ClientContributionV2, ClientId,
+    DailyContributionV2, DailyTotalsV2, GraphResultV2, TokenBreakdown,
 };
 
 /// Import source formats understood by [`parse_export`].
@@ -53,7 +53,7 @@ pub const SUPPORTED_FORMATS: &[&str] = &["clawdboard", "ccusage"];
 /// Result of a successful import.
 pub struct ImportOutcome {
     /// Normalized usage, ready to serialize as tokscale JSON.
-    pub graph: GraphResult,
+    pub graph: GraphResultV2,
     /// Client ids present in the export that tokscale does not recognize.
     /// The leaderboard rejects unknown clients, so these are surfaced to the
     /// caller as a warning rather than silently dropped or silently kept.
@@ -179,13 +179,13 @@ fn normalize_client_id(source: &str) -> String {
 /// Accumulates per-(client, model) rows within a single day.
 #[derive(Default)]
 struct DayBuilder {
-    clients: BTreeMap<String, ClientContribution>,
+    clients: BTreeMap<String, ClientContributionV2>,
 }
 
 /// Parse a clawdboard account export into normalized tokscale data.
 ///
-/// Grouping: one [`DailyContribution`] per calendar date; within a day, one
-/// [`ClientContribution`] per (client, model), summed across every aggregate
+/// Grouping: one [`DailyContributionV2`] per calendar date; within a day, one
+/// [`ClientContributionV2`] per (client, model), summed across every aggregate
 /// row that shares that date (clawdboard splits rows by machine).
 pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
     let export: ClawdboardExport =
@@ -328,15 +328,15 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
 
     // BTreeMap iterates dates in sorted order already; the explicit sort keeps
     // the invariant obvious and independent of the map type.
-    let mut contributions: Vec<DailyContribution> = days
+    let mut contributions: Vec<DailyContributionV2> = days
         .into_iter()
         .map(|(date, builder)| finalize_day(date, builder))
         .collect();
     contributions.sort_by(|a, b| a.date.cmp(&b.date));
-    calculate_intensities(&mut contributions);
+    calculate_intensities_v2(&mut contributions);
 
     // `processing_time_ms = 0`: this data was imported, not scanned.
-    let graph = generate_graph_result(contributions, 0);
+    let graph = generate_graph_result_v2(contributions, 0);
 
     Ok(ImportOutcome {
         graph,
@@ -649,8 +649,8 @@ fn model_family(model: &str) -> Option<&'static str> {
 
 /// Parse a `ccusage daily --json` export into normalized tokscale data.
 ///
-/// Grouping matches [`parse_clawdboard_export`]: one [`DailyContribution`] per
-/// date, one [`ClientContribution`] per (client, model) within it.
+/// Grouping matches [`parse_clawdboard_export`]: one [`DailyContributionV2`] per
+/// date, one [`ClientContributionV2`] per (client, model) within it.
 pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
     let export: CcusageExport =
         serde_json::from_str(json).context("failed to parse ccusage export JSON")?;
@@ -864,14 +864,14 @@ pub fn parse_ccusage_export(json: &str) -> Result<ImportOutcome> {
         }
     }
 
-    let mut contributions: Vec<DailyContribution> = days
+    let mut contributions: Vec<DailyContributionV2> = days
         .into_iter()
         .map(|(date, builder)| finalize_day(date, builder))
         .collect();
     contributions.sort_by(|a, b| a.date.cmp(&b.date));
-    calculate_intensities(&mut contributions);
+    calculate_intensities_v2(&mut contributions);
 
-    let graph = generate_graph_result(contributions, 0);
+    let graph = generate_graph_result_v2(contributions, 0);
 
     Ok(ImportOutcome {
         graph,
@@ -1044,26 +1044,27 @@ fn add_row(day: &mut DayBuilder, client: &str, model: &str, tokens: TokenBreakdo
     let entry = day
         .clients
         .entry(format!("{client}\u{0}{model}"))
-        .or_insert_with(|| ClientContribution {
+        .or_insert_with(|| ClientContributionV2 {
             client: client.to_string(),
             model_id: model.to_string(),
             provider_id: String::new(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
             messages: 0,
+            cost_provenance: None,
         });
     entry.tokens += &tokens;
     entry.cost += cost;
 }
 
-/// Roll a day's per-client rows up into a [`DailyContribution`], deriving day
+/// Roll a day's per-client rows up into a [`DailyContributionV2`], deriving day
 /// totals and the token breakdown *from* the client rows so the result is
 /// internally consistent (the server validator requires client rows to sum to
 /// day totals, and `tokenBreakdown` to equal day totals).
-fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
+fn finalize_day(date: String, builder: DayBuilder) -> DailyContributionV2 {
     let mut token_breakdown = TokenBreakdown::default();
     let mut cost = 0.0;
-    let mut clients: Vec<ClientContribution> = Vec::with_capacity(builder.clients.len());
+    let mut clients: Vec<ClientContributionV2> = Vec::with_capacity(builder.clients.len());
 
     for client in builder.clients.into_values() {
         token_breakdown += &client.tokens;
@@ -1078,14 +1079,15 @@ fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
             .then_with(|| a.model_id.cmp(&b.model_id))
     });
 
-    DailyContribution {
+    DailyContributionV2 {
         date,
-        totals: DailyTotals {
+        totals: DailyTotalsV2 {
             tokens: token_breakdown.total(),
             cost,
             // clawdboard does not export per-model message counts; leaving this
             // at 0 keeps the day internally consistent (0 == sum of client 0s).
             messages: 0,
+            cost_provenance: None,
         },
         intensity: 0,
         token_breakdown,

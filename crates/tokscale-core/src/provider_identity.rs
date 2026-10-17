@@ -318,6 +318,8 @@ fn inferred_provider_from_model_inner(
 
     if contains_family(&lower, "mistral", delimit_family_names)
         || contains_family(&lower, "mixtral", delimit_family_names)
+        || contains_family(&lower, "codestral", delimit_family_names)
+        || contains_family(&lower, "devstral", delimit_family_names)
     {
         return Some("mistral");
     }
@@ -483,6 +485,14 @@ mod tests {
         );
         assert_eq!(
             inferred_provider_from_model("mistral-large"),
+            Some("mistral")
+        );
+        assert_eq!(
+            inferred_provider_from_model("codestral-latest"),
+            Some("mistral")
+        );
+        assert_eq!(
+            inferred_provider_from_model("devstral-small"),
             Some("mistral")
         );
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));

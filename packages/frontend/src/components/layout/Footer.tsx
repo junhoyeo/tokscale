@@ -3,6 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import styled from 'styled-components';
+import { TOKSCALE_DISCORD_URL, TOKSCALE_X_URL } from '@/lib/community';
 
 const Container = styled.div`
   width: 100%;
@@ -223,6 +224,10 @@ const LegalLinks = styled.nav`
   }
 `;
 
+const CommunityLinks = styled(LegalLinks)`
+  margin-top: 4px;
+`;
+
 export function Footer() {
   const currentYear = new Date().getFullYear();
 
@@ -265,6 +270,19 @@ export function Footer() {
             >
               github.com/junhoyeo/tokscale
             </GitHubLink>
+            <CommunityLinks aria-label="Community">
+              <a href={TOKSCALE_DISCORD_URL} target="_blank" rel="noopener noreferrer">
+                Discord
+              </a>
+              <a
+                href={TOKSCALE_X_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Tokscale on X"
+              >
+                X
+              </a>
+            </CommunityLinks>
             <LegalLinks aria-label="Legal">
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>

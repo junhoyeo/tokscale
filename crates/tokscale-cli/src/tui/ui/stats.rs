@@ -2,12 +2,12 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::widgets::{
-    ambient_stable_scrollbar, format_cost, format_tokens, get_client_color,
-    get_client_display_name, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    format_cost, format_tokens, get_client_color, get_client_display_name, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ClickAction};
 use crate::tui::data::find_peak_hour;
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
+use crate::ui_glyphs::ChartFill;
 
 const CELL_WIDTH: u16 = 2;
 fn day_labels(lang: TuiLanguage) -> &'static [&'static str] {
@@ -37,6 +37,41 @@ fn month_labels(lang: TuiLanguage) -> &'static [&'static str] {
         TuiLanguage::Fr => &[
             "jan", "fév", "mar", "avr", "mai", "jui", "jul", "aoû", "sep", "oct", "nov", "déc",
         ],
+    }
+}
+
+fn contribution_cell(app: &App, color: Color, selected: bool, empty: bool) -> (String, Style) {
+    match app.glyphs.chart_fill {
+        ChartFill::Foreground => {
+            if selected {
+                (
+                    app.glyphs.heat_selected.to_string(),
+                    app.theme.graph_cell_selected_style(color),
+                )
+            } else if empty {
+                (
+                    app.glyphs.heat_empty.to_string(),
+                    app.theme.subtle_text_style(),
+                )
+            } else {
+                (app.glyphs.heat_cell.to_string(), Style::default().fg(color))
+            }
+        }
+        ChartFill::Background => {
+            if selected {
+                (
+                    app.glyphs.heat_selected.to_string(),
+                    app.theme.graph_cell_selected_style(color),
+                )
+            } else if empty {
+                (
+                    app.glyphs.heat_empty.to_string(),
+                    app.theme.subtle_text_style(),
+                )
+            } else {
+                (app.glyphs.heat_cell.to_string(), Style::default().bg(color))
+            }
+        }
     }
 }
 
@@ -93,14 +128,13 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_background = app.theme.background;
     let theme_muted = app.theme.muted;
     let theme_colors = app.theme.colors;
-    let subtle_text_style = app.theme.subtle_text_style();
     let selected_cell = app.selected_graph_cell;
     let is_narrow = app.is_narrow();
 
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(theme_border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleContributionGraph),
@@ -172,19 +206,9 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
             let (cell_str, style) = match day_opt {
                 Some(day) => {
                     let color = intensity_color(day.intensity);
-                    if is_selected {
-                        ("▓▓", app.theme.graph_cell_selected_style(color))
-                    } else {
-                        ("██", Style::default().fg(color))
-                    }
+                    contribution_cell(app, color, is_selected, false)
                 }
-                None => {
-                    if is_selected {
-                        ("▓▓", app.theme.graph_cell_selected_style(theme_colors[0]))
-                    } else {
-                        ("· ", subtle_text_style)
-                    }
-                }
+                None => contribution_cell(app, theme_colors[0], is_selected, true),
             };
 
             let cell = Paragraph::new(cell_str).style(style);
@@ -232,7 +256,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabStats)),
@@ -332,7 +356,11 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(row1_label, Style::default().fg(app.theme.muted)),
         Span::raw(" "),
         Span::styled(
-            truncate_model_name(favorite_model_name, if is_narrow { 15 } else { 30 }),
+            truncate_model_name(
+                favorite_model_name,
+                if is_narrow { 15 } else { 30 },
+                app.glyphs.ellipsis,
+            ),
             Style::default().fg(model_color),
         ),
     ]);
@@ -485,14 +513,29 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} ", tr(lang, MessageKey::StatsLess)),
             Style::default().fg(app.theme.muted),
         ),
-        Span::styled("· ", app.theme.subtle_text_style()),
-        Span::styled("██", Style::default().fg(app.theme.colors[1])),
+        {
+            let (text, style) = contribution_cell(app, app.theme.colors[0], false, true);
+            Span::styled(text, style)
+        },
+        {
+            let (text, style) = contribution_cell(app, app.theme.colors[1], false, false);
+            Span::styled(text, style)
+        },
         Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[2])),
+        {
+            let (text, style) = contribution_cell(app, app.theme.colors[2], false, false);
+            Span::styled(text, style)
+        },
         Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[3])),
+        {
+            let (text, style) = contribution_cell(app, app.theme.colors[3], false, false);
+            Span::styled(text, style)
+        },
         Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[4])),
+        {
+            let (text, style) = contribution_cell(app, app.theme.colors[4], false, false);
+            Span::styled(text, style)
+        },
         Span::styled(
             format!(" {}", tr(lang, MessageKey::StatsMore)),
             Style::default().fg(app.theme.muted),
@@ -595,7 +638,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleDayBreakdown),
@@ -684,7 +727,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("● {}", client_name),
+                        format!("{} {}", app.glyphs.legend_dot, client_name),
                         Style::default()
                             .fg(client_color)
                             .add_modifier(Modifier::BOLD),
@@ -707,9 +750,16 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                         app.model_color_for(&model_info.provider, &model_info.color_key);
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("●", Style::default().fg(model_color)),
+                        Span::styled(app.glyphs.legend_dot, Style::default().fg(model_color)),
                         Span::styled(
-                            format!(" {}", truncate_model_name(&model_info.display_name, 25)),
+                            format!(
+                                " {}",
+                                truncate_model_name(
+                                    &model_info.display_name,
+                                    25,
+                                    app.glyphs.ellipsis
+                                )
+                            ),
                             Style::default().fg(app.theme.foreground),
                         ),
                     ]));
@@ -749,17 +799,26 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                                 format_tokens(model_info.tokens.input),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · Out: ", subtle_text_style),
+                            Span::styled(
+                                format!(" {} Out: ", app.glyphs.compact_separator),
+                                subtle_text_style,
+                            ),
                             Span::styled(
                                 format_tokens(model_info.tokens.output),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · CR: ", subtle_text_style),
+                            Span::styled(
+                                format!(" {} CR: ", app.glyphs.compact_separator),
+                                subtle_text_style,
+                            ),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_read),
                                 secondary_text_style,
                             ),
-                            Span::styled(" · CW: ", subtle_text_style),
+                            Span::styled(
+                                format!(" {} CW: ", app.glyphs.compact_separator),
+                                subtle_text_style,
+                            ),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_write),
                                 secondary_text_style,
@@ -793,7 +852,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, inner);
 
     if app.stats_breakdown_total_lines > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state = viewport_scrollbar_state(
             app.stats_breakdown_total_lines,
@@ -812,7 +871,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn truncate_model_name(s: &str, max_chars: usize) -> String {
+fn truncate_model_name(s: &str, max_chars: usize, marker: &str) -> String {
     if max_chars == 0 {
         return String::new();
     }
@@ -820,10 +879,10 @@ fn truncate_model_name(s: &str, max_chars: usize) -> String {
     if char_count <= max_chars {
         s.to_string()
     } else if max_chars == 1 {
-        "…".to_string()
+        marker.to_string()
     } else {
         let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{}…", head)
+        format!("{head}{marker}")
     }
 }
 

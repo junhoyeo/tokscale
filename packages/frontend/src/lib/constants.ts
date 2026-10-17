@@ -27,6 +27,7 @@ export const MONTH_LABELS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Ju
 
 // Source configuration
 export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
+  aside: "Aside",
   opencode: "OpenCode",
   claude: "Claude Code",
   codex: "Codex CLI",
@@ -85,11 +86,13 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   hindsight: "Hindsight",
   "micode-desktop": "Xiaomi MiMo AI",
   muse: "Muse Code",
+  vibe: "Mistral Vibe",
 };
 
 // Client logos from GitHub CDN (public repo)
 const GITHUB_CDN_BASE = "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets";
 export const SOURCE_LOGOS: Record<ClientType, string> = {
+  aside: `${GITHUB_CDN_BASE}/client-aside.png`,
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
@@ -154,9 +157,11 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   // Distinct desktop product icon (from Xiaomi MiMo AI.app Resources/icon.icns).
   "micode-desktop": `${GITHUB_CDN_BASE}/client-micode-desktop.png`,
   muse: "https://github.com/meta-models.png",
+  vibe: "https://github.com/mistralai.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
+  aside: "#64748B",
   opencode: "#00A8E8",
   claude: "#f97316",
   codex: "#10B981",
@@ -215,6 +220,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   hindsight: "#0891B2",
   "micode-desktop": "#FF6900",
   muse: "#0064E0",
+  vibe: "#FA520F",
 };
 
 // Derived values

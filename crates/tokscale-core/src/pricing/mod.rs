@@ -6,6 +6,7 @@ pub mod litellm;
 pub mod lookup;
 pub mod models_dev;
 pub mod openrouter;
+pub(crate) mod provenance;
 mod self_hosted;
 
 use custom::CustomPricing;
@@ -16,6 +17,7 @@ use tokio::sync::OnceCell;
 
 use crate::TokenBreakdown;
 
+pub use crate::EstimateSource;
 pub use litellm::ModelPricing;
 
 static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
@@ -59,8 +61,11 @@ pub fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 pub struct PricingService {
-    custom: CustomPricing,
-    lookup: PricingLookup,
+    custom: Arc<CustomPricing>,
+    lookup: Arc<PricingLookup>,
+    cost_estimates: Option<provenance::CostEstimateCapture>,
+    #[cfg(test)]
+    detailed_calculations: std::sync::atomic::AtomicUsize,
 }
 
 impl PricingService {
@@ -86,15 +91,61 @@ impl PricingService {
         models_dev_data: HashMap<String, ModelPricing>,
     ) -> Self {
         Self {
-            custom,
-            lookup: PricingLookup::new_with_archive(
+            custom: Arc::new(custom),
+            lookup: Arc::new(PricingLookup::new_with_archive(
                 litellm_data,
                 openrouter_data,
                 Self::build_cursor_overrides(),
                 Self::build_sakana_overrides(),
                 models_dev_data,
                 Self::build_archive_overrides(),
-            ),
+            )),
+            cost_estimates: None,
+            #[cfg(test)]
+            detailed_calculations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detailed_calculation_count(&self) -> usize {
+        self.detailed_calculations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A graph scan shares immutable rates, but owns its captured origins so
+    /// concurrent reports cannot consume each other's message metadata.
+    pub(crate) fn with_cost_provenance_capture(&self) -> Self {
+        Self {
+            custom: Arc::clone(&self.custom),
+            lookup: Arc::clone(&self.lookup),
+            cost_estimates: Some(provenance::CostEstimateCapture::default()),
+            #[cfg(test)]
+            detailed_calculations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn record_cost_estimate_source(
+        &self,
+        message: &crate::sessions::UnifiedMessage,
+        source: EstimateSource,
+    ) {
+        if let Some(capture) = &self.cost_estimates {
+            capture.record(message, source);
+        }
+    }
+
+    pub(crate) fn take_cost_estimate_source(
+        &self,
+        message: &crate::sessions::UnifiedMessage,
+    ) -> Option<EstimateSource> {
+        self.cost_estimates
+            .as_ref()
+            .and_then(|capture| capture.take(message))
+    }
+
+    pub(crate) fn clear_cost_estimate_sources(&self) {
+        if let Some(capture) = &self.cost_estimates {
+            capture.clear();
         }
     }
 
@@ -604,14 +655,43 @@ impl PricingService {
         self.calculate_cost_with_provider(model_id, None, &usage)
     }
 
-    pub fn calculate_cost_with_provider(
+    pub fn calculate_cost_detailed(
+        &self,
+        model_id: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning: i64,
+    ) -> (f64, Option<crate::EstimateSource>) {
+        let usage = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: 0,
+            reasoning,
+        };
+        self.calculate_cost_detailed_with_provider(model_id, None, &usage)
+    }
+
+    /// Price `usage` and report which pricing source produced the figure.
+    ///
+    /// The cost is identical to what `calculate_cost_with_provider` has always
+    /// returned: a custom match wins outright, even when it prices the usage at
+    /// zero. The source is `None` when no rate covers the usage, so a zero that
+    /// means "unpriced" is never reported as an estimate.
+    pub fn calculate_cost_detailed_with_provider(
         &self,
         model_id: &str,
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
-    ) -> f64 {
+    ) -> (f64, Option<crate::EstimateSource>) {
+        #[cfg(test)]
+        self.detailed_calculations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(result) = self.custom.lookup_with_key(model_id) {
-            return compute_cost(
+            let cost = compute_cost(
                 result.pricing,
                 usage.input,
                 usage.output,
@@ -620,10 +700,22 @@ impl PricingService {
                 usage.cache_write_1h,
                 usage.reasoning,
             );
+            let covered = cost > 0.0 || (usage.total() > 0 && result.pricing.covers_usage(usage));
+            return (cost, covered.then_some(crate::EstimateSource::Custom));
         }
 
         self.lookup
-            .calculate_cost_with_provider(model_id, provider_id, usage)
+            .calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+    }
+
+    pub fn calculate_cost_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> f64 {
+        self.calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+            .0
     }
 
     pub fn covers_usage_with_provider(
@@ -634,7 +726,7 @@ impl PricingService {
     ) -> bool {
         self.resolve_for_usage_with_provider(model_id, provider_id, usage)
             .is_some_and(|result| {
-                result.evidence.is_submission_safe() && result.pricing.covers_usage(usage)
+                result.evidence.is_submission_safe() && result.covers_usage(usage)
             })
     }
 
@@ -697,6 +789,22 @@ mod tests {
         }
     }
 
+    fn haiku_55_pricing() -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: Some(1e-7),
+            input_cost_per_token_above_100k_tokens: Some(5e-7),
+            output_cost_per_token: Some(5e-7),
+            output_cost_per_token_above_100k_tokens: Some(2.5e-6),
+            cache_read_input_token_cost: Some(1e-8),
+            cache_read_input_token_cost_above_100k_tokens: Some(5e-8),
+            cache_creation_input_token_cost: Some(1.25e-7),
+            cache_creation_input_token_cost_above_100k_tokens: Some(6.25e-7),
+            cache_creation_input_token_cost_above_1hr: Some(2e-7),
+            cache_creation_input_token_cost_above_1hr_above_100k_tokens: Some(1e-6),
+            ..Default::default()
+        }
+    }
+
     fn pricing_row_with_1hr_cache_write_rate() -> ModelPricing {
         ModelPricing {
             input_cost_per_token: Some(1e-05),
@@ -726,6 +834,177 @@ mod tests {
             service.calculate_cost_with_provider("claude-fable-5-1", Some("anthropic"), &usage);
 
         assert!((cost - 3.25).abs() < 1e-9, "cost was {cost}");
+    }
+
+    #[test]
+    fn test_calculate_cost_detailed_distinguishes_sources() {
+        let mut custom = HashMap::new();
+        custom.insert("custom-model".to_string(), model_pricing(0.00001, 0.00002));
+        custom.insert("custom-free".to_string(), model_pricing(0.0, 0.0));
+
+        let mut litellm = HashMap::new();
+        litellm.insert("catalog-model".to_string(), model_pricing(0.00003, 0.00004));
+
+        let service = PricingService::new_with_custom(
+            CustomPricing::from_models(custom),
+            litellm,
+            HashMap::new(),
+        );
+
+        let usage = TokenBreakdown {
+            input: 1000,
+            output: 1000,
+            ..Default::default()
+        };
+
+        // Custom model returns EstimateSource::Custom
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("custom-model", None, &usage);
+        assert!(cost > 0.0);
+        assert_eq!(source, Some(crate::EstimateSource::Custom));
+
+        // Custom free model covering usage returns EstimateSource::Custom with 0 cost
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("custom-free", None, &usage);
+        assert_eq!(cost, 0.0);
+        assert_eq!(source, Some(crate::EstimateSource::Custom));
+
+        // Catalog model returns EstimateSource::Catalog
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("catalog-model", None, &usage);
+        assert!(cost > 0.0);
+        assert_eq!(source, Some(crate::EstimateSource::Catalog));
+
+        // Unknown model returns None
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("unknown-model", None, &usage);
+        assert_eq!(cost, 0.0);
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn detailed_cost_keeps_partial_custom_row_at_zero_instead_of_falling_to_catalog() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "shared-model".to_string(),
+            ModelPricing {
+                output_cost_per_token: Some(0.00002),
+                ..Default::default()
+            },
+        );
+        let mut litellm = HashMap::new();
+        litellm.insert("shared-model".to_string(), model_pricing(0.00003, 0.00004));
+        let service = custom_service(custom, litellm, HashMap::new());
+
+        let input_only = TokenBreakdown {
+            input: 1000,
+            ..Default::default()
+        };
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("shared-model", None, &input_only);
+        assert_eq!(cost, 0.0);
+        assert_eq!(source, None);
+        assert_eq!(
+            service.calculate_cost_with_provider("shared-model", None, &input_only),
+            0.0
+        );
+    }
+
+    #[test]
+    fn detailed_cost_prices_reasoning_tokens() {
+        let mut custom = HashMap::new();
+        custom.insert("reasoner".to_string(), model_pricing(0.0, 0.00002));
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+
+        let (cost, source) = service.calculate_cost_detailed("reasoner", 0, 0, 0, 0, 1000);
+        assert!(cost > 0.0);
+        assert_eq!(source, Some(crate::EstimateSource::Custom));
+    }
+
+    #[test]
+    fn detailed_cost_reports_catalog_for_covered_zero_rate_rows() {
+        let mut litellm = HashMap::new();
+        litellm.insert("free-model".to_string(), model_pricing(0.0, 0.0));
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1000,
+            output: 1000,
+            ..Default::default()
+        };
+
+        let (cost, source) =
+            service.calculate_cost_detailed_with_provider("free-model", None, &usage);
+        assert_eq!(cost, 0.0);
+        assert_eq!(source, Some(crate::EstimateSource::Catalog));
+    }
+
+    #[test]
+    fn haiku_55_long_context_submission_coverage_rejects_flat_source_rows() {
+        let at_boundary = TokenBreakdown {
+            input: 100_000,
+            output: 1,
+            ..Default::default()
+        };
+        let above_boundary = TokenBreakdown {
+            input: 100_001,
+            output: 1,
+            ..Default::default()
+        };
+
+        let litellm = PricingService::new(
+            HashMap::from([("claude-haiku-5-5".into(), haiku_55_pricing())]),
+            HashMap::new(),
+        );
+        for alias in ["claude-haiku-5-5-high", "claude-haiku-5.5-low"] {
+            assert!(litellm.covers_usage_with_provider(alias, Some("anthropic"), &above_boundary,));
+        }
+
+        let mut flat = haiku_55_pricing();
+        flat.input_cost_per_token_above_100k_tokens = None;
+        flat.output_cost_per_token_above_100k_tokens = None;
+        flat.cache_read_input_token_cost_above_100k_tokens = None;
+        flat.cache_creation_input_token_cost_above_100k_tokens = None;
+        flat.cache_creation_input_token_cost_above_1hr_above_100k_tokens = None;
+        let openrouter = PricingService::new(
+            HashMap::new(),
+            HashMap::from([("anthropic/claude-haiku-5-5".into(), flat)]),
+        );
+        assert!(openrouter.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &at_boundary,
+        ));
+        assert!(!openrouter.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &above_boundary,
+        ));
+
+        let mut models_dev_pricing = haiku_55_pricing();
+        models_dev_pricing.cache_creation_input_token_cost_above_1hr = None;
+        models_dev_pricing.cache_creation_input_token_cost_above_1hr_above_100k_tokens = None;
+        let models_dev = PricingService::new_with_custom_and_models_dev(
+            CustomPricing::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([("anthropic/claude-haiku-5-5".into(), models_dev_pricing)]),
+        );
+        assert!(models_dev.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &above_boundary,
+        ));
+        let hourly = TokenBreakdown {
+            input: 100_000,
+            cache_write: 1,
+            cache_write_1h: 1,
+            ..Default::default()
+        };
+        assert!(!models_dev.covers_usage_with_provider(
+            "claude-haiku-5-5",
+            Some("anthropic"),
+            &hourly,
+        ));
     }
 
     fn custom_service(

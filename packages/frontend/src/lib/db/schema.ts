@@ -14,8 +14,9 @@ import {
   unique,
   uniqueIndex,
   primaryKey,
+  check,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   USERS_USERNAME_LOWER_UNIQUE_INDEX,
   usernameLowerExpression,
@@ -671,6 +672,8 @@ export const groups = pgTable(
     description: text("description"),
     avatarUrl: text("avatar_url"),
     isPublic: boolean("is_public").notNull().default(true),
+    timeZone: varchar("time_zone", { length: 100 }).notNull().default("UTC"),
+    weekStartsOn: integer("week_starts_on").notNull().default(1),
     createdBy: uuid("created_by")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -684,6 +687,7 @@ export const groups = pgTable(
   (table) => [
     index("idx_groups_created_by").on(table.createdBy),
     index("idx_groups_visibility_updated").on(table.isPublic, table.updatedAt),
+    check("groups_week_starts_on_check", sql`${table.weekStartsOn} BETWEEN 0 AND 6`),
   ]
 );
 

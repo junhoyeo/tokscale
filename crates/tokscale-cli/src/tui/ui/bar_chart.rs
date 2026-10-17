@@ -3,9 +3,7 @@ use ratatui::prelude::*;
 use super::widgets::format_tokens;
 use crate::tui::app::App;
 use crate::tui::i18n::{tr, MessageKey};
-
-/// 8-level block characters for sub-cell precision (matching OpenTUI)
-const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+use crate::ui_glyphs::ChartFill;
 
 const MONTH_NAMES: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -87,7 +85,12 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
         } else {
             String::new()
         };
-        let padded_label = format!("{:>width$}|", y_label, width = (y_label_width - 1) as usize);
+        let padded_label = format!(
+            "{:>width$}{}",
+            y_label,
+            app.glyphs.axis_vertical,
+            width = (y_label_width - 1) as usize
+        );
         for (i, ch) in padded_label.chars().enumerate() {
             let x = area.x + i as u16;
             if x < area.x + y_label_width {
@@ -111,17 +114,27 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
             // Get the character and color for this cell using stacked model logic
             let (ch, fg_color) = get_stacked_bar_content(
                 bar_data,
-                total,
                 row_threshold,
                 prev_threshold,
                 threshold_diff,
                 app.theme.muted,
                 app.theme.highlight,
+                app.glyphs.chart_blocks,
             );
 
             for _ in 0..bar_width {
                 if x_pos < area.x + area.width {
-                    buf[(x_pos, y)].set_char(ch).set_fg(fg_color);
+                    let cell = &mut buf[(x_pos, y)];
+                    cell.set_char(ch);
+                    match app.glyphs.chart_fill {
+                        ChartFill::Foreground => {
+                            cell.set_fg(fg_color);
+                        }
+                        ChartFill::Background if ch != ' ' || total > prev_threshold => {
+                            cell.set_bg(fg_color);
+                        }
+                        ChartFill::Background => {}
+                    }
                     x_pos += 1;
                 }
             }
@@ -131,7 +144,12 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
     // X-axis
     let axis_y = area.y + 1 + chart_height as u16;
     if axis_y < area.y + area.height {
-        let zero_label = format!("{:>width$}|", "0", width = (y_label_width - 1) as usize);
+        let zero_label = format!(
+            "{:>width$}{}",
+            "0",
+            app.glyphs.axis_vertical,
+            width = (y_label_width - 1) as usize
+        );
         for (i, ch) in zero_label.chars().enumerate() {
             let x = area.x + i as u16;
             if x < area.x + y_label_width {
@@ -145,7 +163,7 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
         // locale, same as the border glyphs in `AMBIENT_STABLE_BORDER_SET`.
         for x in (area.x + y_label_width)..(area.x + area.width) {
             buf[(x, axis_y)]
-                .set_char('-')
+                .set_char(app.glyphs.axis_horizontal)
                 .set_style(Style::default().fg(app.theme.muted));
         }
     }
@@ -194,13 +212,14 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
 
 fn get_stacked_bar_content(
     bar_data: &StackedBarData,
-    total: f64,
     row_threshold: f64,
     prev_threshold: f64,
     threshold_diff: f64,
     muted_color: Color,
     fallback_color: Color,
+    blocks: &[char; 9],
 ) -> (char, Color) {
+    let total = bar_data.total as f64;
     if total <= prev_threshold {
         return (' ', muted_color);
     }
@@ -240,7 +259,7 @@ fn get_stacked_bar_content(
     }
 
     if total >= row_threshold {
-        return (BLOCKS[8], best_color);
+        return (blocks[8], best_color);
     }
 
     let ratio = if threshold_diff > 0.0 {
@@ -249,5 +268,5 @@ fn get_stacked_bar_content(
         1.0
     };
     let block_index = (ratio * 8.0).floor().clamp(1.0, 8.0) as usize;
-    (BLOCKS[block_index], best_color)
+    (blocks[block_index], best_color)
 }

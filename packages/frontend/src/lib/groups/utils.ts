@@ -4,11 +4,7 @@ import { groupRoles, type GroupRole } from "../db/schema";
 export const GROUP_SLUG_MAX_LENGTH = 100;
 
 const RESERVED_GROUP_SLUGS = new Set(["new", "join", "settings", "members"]);
-const ROLE_LEVEL: Record<GroupRole, number> = {
-  owner: 3,
-  admin: 2,
-  member: 1,
-};
+export { canManageGroupRole, hasGroupRole } from "./roles";
 
 interface SlugOptions {
   suffix?: string | number;
@@ -16,14 +12,6 @@ interface SlugOptions {
 
 export function isGroupRole(role: unknown): role is GroupRole {
   return typeof role === "string" && groupRoles.includes(role as GroupRole);
-}
-
-export function hasGroupRole(userRole: GroupRole, requiredRole: GroupRole): boolean {
-  return ROLE_LEVEL[userRole] >= ROLE_LEVEL[requiredRole];
-}
-
-export function canManageGroupRole(actorRole: GroupRole, targetRole: GroupRole): boolean {
-  return ROLE_LEVEL[actorRole] > ROLE_LEVEL[targetRole];
 }
 
 export function normalizeInvitedUsername(username: string): string {

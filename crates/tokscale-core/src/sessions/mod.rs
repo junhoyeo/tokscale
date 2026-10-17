@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod antigravity;
 pub mod antigravity_cli;
+pub mod aside;
 pub mod augment;
 pub mod cherrystudio;
 pub mod claudecode;
@@ -58,6 +59,7 @@ pub(crate) mod tencent_buddy;
 pub mod trae;
 pub mod unsloth;
 pub(crate) mod utils;
+pub mod vibe;
 pub mod warp;
 pub mod workbuddy;
 pub mod zcode;
@@ -122,6 +124,10 @@ pub struct UnifiedMessage {
     /// Such rows must remain unpriced rather than accepting fallback attribution.
     #[serde(default)]
     pub model_attribution_conflicted: bool,
+    /// Copilot-only attribution provenance. Stored in its namespace-specific
+    /// cache envelope so adding this does not change other clients' wire layout.
+    #[serde(skip)]
+    pub copilot_context: Option<copilot::CopilotContextProvenance>,
 }
 
 const fn default_message_count() -> i32 {
@@ -402,6 +408,7 @@ impl UnifiedMessage {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            copilot_context: None,
         }
     }
 
@@ -456,7 +463,7 @@ impl UnifiedMessage {
         self.cost_source = CostSource::ProviderReported;
     }
 
-    pub(crate) fn mark_estimated_cost(&mut self) {
+    pub fn mark_estimated_cost(&mut self) {
         self.cost_source = CostSource::Estimated;
     }
 

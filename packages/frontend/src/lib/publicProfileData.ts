@@ -11,14 +11,12 @@ import {
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import { calculateIntensity } from "@/lib/utils";
+import { PROFILE_PERIODS, getCalendarDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
   return LEGACY_CLIENT_ALIASES[id] ?? id;
 }
-
-const PROFILE_PERIODS = ["all", "week", "month"] as const;
-type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
 
 export type PublicProfilePeriod = ProfilePeriod;
 
@@ -53,13 +51,13 @@ function parseDateKey(value: string | null | undefined): Date | null {
 }
 
 /**
- * The day every profile window ends on: the later of UTC today and the newest
+ * The day trailing profile windows end on: the later of UTC today and the newest
  * date the data itself carries.
  *
  * Contribution dates are calendar-day buckets computed by the CLI in the
  * *submitting* machine's local timezone, so a user ahead of UTC legitimately
  * reports a date that is still tomorrow here. Anchoring to the data keeps that
- * day inside every window for every viewer, wherever they are, and keeps the
+ * day inside trailing windows for every viewer, wherever they are, and keeps the
  * range-scoped stats on the same window the chart draws. Validation caps
  * contribution dates at UTC today + 2 days, so the anchor can never run more
  * than two days past the present.
@@ -73,13 +71,17 @@ function getProfileRangeAnchor(
   return latest && latest > utcToday ? latest : utcToday;
 }
 
-/** Trailing seven- or thirty-day window ending on `end`; null for lifetime. */
+/** Resolve a rolling or UTC calendar period; null for lifetime. */
 function getProfilePeriodDateRange(
   period: ProfilePeriod,
   end: Date,
 ): ProfilePeriodDateRange | null {
   if (period === "all") {
     return null;
+  }
+
+  if (period === "this-month" || period === "last-month") {
+    return getCalendarDateRange(period === "this-month" ? "month" : period, end);
   }
 
   const start = new Date(end);
@@ -127,6 +129,7 @@ export interface PublicProfileRouteParams {
 export async function getPublicProfileResponse(
   request: Request,
   { params }: PublicProfileRouteParams,
+  now: Date = new Date(),
 ) {
   try {
     const { username } = await params;
@@ -134,7 +137,6 @@ export async function getPublicProfileResponse(
     const period = parseProfilePeriod(searchParams.get("period"));
     // One clock reading for the whole request, so a UTC midnight crossed
     // mid-request cannot put the query and the window on different days.
-    const now = new Date();
     // The window a period request draws ends on the anchor, which is only known
     // once the stats query returns. The anchor can only move *forward* of UTC
     // today, so a window measured back from UTC today starts on or before the
@@ -274,10 +276,16 @@ export async function getPublicProfileResponse(
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
-    // Resolved only once the newest submitted date is known, so every window —
-    // lifetime and period alike — ends on the data instead of on UTC "today".
+    // Calendar months stay anchored to UTC today; ahead-of-UTC day buckets remain in their month.
     const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
-    const periodRange = getProfilePeriodDateRange(period, rangeAnchor);
+    const periodRange = getProfilePeriodDateRange(
+      period,
+      period === "this-month" || period === "last-month" ? now : rangeAnchor,
+    );
+    if (period === "this-month" && periodRange) {
+      const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
+      periodRange.end = toUtcDateString(new Date(Math.min(rangeAnchor.getTime(), monthEnd.getTime())));
+    }
     const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
     // Ranks over rankable users only. A hidden user is absent from the CTE
     // entirely, so this returns no row and the profile reports rank null. The
@@ -816,6 +824,9 @@ export async function loadPublicProfileForPage(
   username: string,
   period: PublicProfilePeriod,
 ): Promise<PublicProfilePageResult> {
+  const now = new Date();
+  const utcDateKey =
+    period === "all" ? "all" : toUtcDateString(getUtcToday(now));
   const load = unstable_cache(
     async (): Promise<PublicProfilePageResult> => {
       const query = period === "all" ? "" : `?period=${period}`;
@@ -824,6 +835,7 @@ export async function loadPublicProfileForPage(
           `http://tokscale.internal/api/users/${encodeURIComponent(username)}${query}`,
         ),
         { params: Promise.resolve({ username }) },
+        now,
       );
 
       if (response.status === 308) {
@@ -839,7 +851,7 @@ export async function loadPublicProfileForPage(
 
       return { data: await response.json(), kind: "data" };
     },
-    ["public-profile-page", username, period],
+    ["public-profile-page", username, period, utcDateKey],
     {
       revalidate: 60,
       tags: [`user:${normalizeUsernameCacheKey(username)}`],
