@@ -3188,7 +3188,7 @@ fn assert_cursor_setup_warning(json: &serde_json::Value) {
             .any(|warning| warning.as_str().is_some_and(|text| text
                 .contains("tokscale cursor login")
                 && text.contains("tokscale cursor sync --json")
-                && text.contains("cursor-cache/usage*.csv")
+                && text.contains("cursor-cache/usage*.json")
                 && text.contains("Tokscale does not parse local `~/.cursor`"))),
         "warnings did not explain Cursor setup: {warnings:?}"
     );
@@ -3286,7 +3286,7 @@ fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
                 .contains(tmp.path().to_str().unwrap())
                 && text.contains("tokscale cursor login")
                 && text.contains("tokscale cursor sync --json")
-                && text.contains("cursor-cache/usage*.csv"))),
+                && text.contains("cursor-cache/usage*.json"))),
         "warnings did not explain Cursor --home setup: {warnings:?}"
     );
 }

@@ -1583,11 +1583,11 @@ fn cursor_setup_state(home_dir: &Option<String>) -> Option<CursorSetupState> {
     let has_cache = cursor::has_cursor_usage_cache_in_home(&home_path);
     let cache_glob = if home_override {
         home_path
-            .join(".config/tokscale/cursor-cache/usage*.csv")
+            .join(".config/tokscale/cursor-cache/usage*.json")
             .to_string_lossy()
             .to_string()
     } else {
-        "~/.config/tokscale/cursor-cache/usage*.csv".to_string()
+        "~/.config/tokscale/cursor-cache/usage*.json".to_string()
     };
 
     Some(CursorSetupState {
