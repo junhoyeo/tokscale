@@ -5,6 +5,7 @@ mod antigravity;
 mod claude;
 pub mod codex;
 mod copilot;
+mod cursor;
 mod grok;
 pub mod helpers;
 mod kimi;
@@ -409,8 +410,20 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
             Fetch::Single(copilot::fetch),
         ),
         (
+            "cursor",
+            "Cursor",
+            cursor::has_credentials,
+            Fetch::Single(cursor::fetch),
+        ),
+        (
+            "grok-bot",
+            "Grok Bot",
+            cursor::has_grok_bot_credentials,
+            Fetch::Multi(cursor::fetch_grok_bot),
+        ),
+        (
             "grok",
-            "Grok Build",
+            "Grok",
             grok::has_credentials,
             Fetch::Single(grok::fetch),
         ),
@@ -458,9 +471,28 @@ fn disabled_provider_ids() -> std::collections::HashSet<String> {
         .usage
         .disabled_providers
         .into_iter()
-        .map(|id| id.trim().to_ascii_lowercase())
+        .map(|id| normalize_disabled_provider_id(&id))
         .filter(|id| !id.is_empty())
         .collect()
+}
+
+fn normalize_disabled_provider_id(id: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "grok build" | "grok-build" | "grok_build" => "grok".to_string(),
+        _ => id,
+    }
+}
+
+fn canonical_provider_label(label: &str) -> &str {
+    if ["Grok", "Grok Build", "grok-build", "grok_build"]
+        .iter()
+        .any(|alias| label.trim().eq_ignore_ascii_case(alias))
+    {
+        "Grok"
+    } else {
+        label
+    }
 }
 
 fn filter_disabled_outputs(
@@ -469,6 +501,10 @@ fn filter_disabled_outputs(
 ) -> Vec<UsageOutput> {
     outputs
         .into_iter()
+        .map(|mut output| {
+            output.provider = canonical_provider_label(&output.provider).to_string();
+            output
+        })
         .filter(|output| {
             provider_id_for_label(&output.provider).is_none_or(|id| !disabled.contains(id))
         })
@@ -476,6 +512,7 @@ fn filter_disabled_outputs(
 }
 
 fn provider_id_for_label(label: &str) -> Option<&'static str> {
+    let label = canonical_provider_label(label);
     usage_providers(Fetch::Multi(codex::fetch_all))
         .into_iter()
         .find_map(|(id, provider, _, _)| (provider == label).then_some(id))
@@ -569,7 +606,8 @@ fn fetch_all_report_from_providers(
             }
         }
         report.outputs = filter_disabled_outputs(report.outputs, disabled);
-        report.diagnostics.retain(|diagnostic| {
+        report.diagnostics.retain_mut(|diagnostic| {
+            diagnostic.provider = canonical_provider_label(&diagnostic.provider).to_string();
             provider_id_for_label(&diagnostic.provider).is_none_or(|id| !disabled.contains(id))
         });
         report
@@ -798,6 +836,40 @@ mod tests {
 
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].provider, "Codex");
+    }
+
+    #[test]
+    fn disabled_grok_filters_legacy_cached_cards() {
+        let disabled = std::collections::HashSet::from(["grok".to_string()]);
+        let outputs = filter_disabled_outputs(
+            vec![
+                sample_output("Grok"),
+                sample_output("Grok Build"),
+                sample_output("Grok Bot"),
+            ],
+            &disabled,
+        );
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].provider, "Grok Bot");
+    }
+
+    #[test]
+    fn enabled_legacy_grok_card_uses_registered_label() {
+        for alias in ["Grok Build", " grok build ", "grok-build", "grok_build"] {
+            let outputs = filter_disabled_outputs(
+                vec![sample_output(alias)],
+                &std::collections::HashSet::new(),
+            );
+            assert_eq!(outputs[0].provider, "Grok");
+        }
+    }
+
+    #[test]
+    fn legacy_grok_disabled_ids_are_normalized() {
+        for alias in ["grok", " Grok Build ", "GROK-BUILD", "grok_build"] {
+            assert_eq!(normalize_disabled_provider_id(alias), "grok");
+        }
+        assert_eq!(normalize_disabled_provider_id(" GROK-BOT "), "grok-bot");
     }
 
     #[test]
