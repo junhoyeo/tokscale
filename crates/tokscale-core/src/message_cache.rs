@@ -1318,8 +1318,13 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             (ClientId::MiMoDesktop, 5),
             // +1 for Kilo's independent history. v1->v2: assistant rows the
             // Kilo CLI migrated from the VS Code extension (`providerID` and
-            // `modelID` both `"legacy"`, zero usage) are no longer emitted;
-            // a warm v1 entry would keep reporting them as a "legacy" model.
+            // `modelID` both `"legacy"`, zero usage, `ses_migrated_*` session)
+            // are no longer emitted. Kilo's SQLite store is read directly
+            // rather than through a per-source cache entry, so what this bump
+            // retires is the source-agnostic aggregate cache that
+            // `parser_generation()` keys: without it a warm aggregate would
+            // keep replaying totals that counted those rows as a "legacy"
+            // model.
             (ClientId::Kilo, 1),
         ],
     },
@@ -7832,6 +7837,134 @@ mod tests {
             &crate::scanner::ScannerSettings::default(),
         );
         assert_eq!(second, first);
+    }
+
+    /// The shared roo/kilo base bump is what retires cached task-log rows.
+    /// Their bytes never change when the parser is fixed, so a warm entry at
+    /// the old version would keep serving the double-counted input, the
+    /// mislabeled provider and the stale cost authority forever. Removing the
+    /// `ROO_KILO_TASK_LOG_PARSER_BASE_VERSION` bump alone leaves every cold
+    /// parser test green, so this is the regression that pins it.
+    #[test]
+    #[serial_test::serial]
+    fn test_kilocode_stale_parser_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let task_dir = PathBuf::from(
+            ClientId::KiloCode
+                .data()
+                .resolve_path_with_env_strategy(&source_home.path().to_string_lossy(), false),
+        )
+        .join("task-warm");
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ui_path = task_dir.join("ui_messages.json");
+        std::fs::write(
+            &ui_path,
+            r#"[{"type":"say","say":"api_req_started","ts":1748038758034,"text":"{\"cost\":0.25,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"openai\"}"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            task_dir.join("api_conversation_history.json"),
+            "<environment_details>\n<model>anthropic/claude-sonnet-4</model>\n</environment_details>",
+        )
+        .unwrap();
+
+        let fingerprint =
+            match SourceFingerprint::check_roo_path_samples_only(&ui_path, None).unwrap() {
+                FingerprintStatus::Changed(fingerprint) => fingerprint,
+                FingerprintStatus::Unchanged => {
+                    panic!("an uncached source must build a fingerprint")
+                }
+            };
+        let identity = CacheIdentity::for_client(ClientId::KiloCode);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        // What the pre-fix parser cached for these exact bytes: input gross of
+        // cache, provider taken from the wire protocol.
+        let stale_message = UnifiedMessage::new(
+            "kilocode",
+            "anthropic/claude-sonnet-4",
+            "openai",
+            "task-warm",
+            1748038758034,
+            TokenBreakdown {
+                input: 1000,
+                output: 10,
+                cache_read: 600,
+                cache_write: 100,
+                cache_write_1h: 0,
+                reasoning: 0,
+            },
+            0.25,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &ui_path,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &ui_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(
+            loaded.get(identity, &ui_path).is_none(),
+            "a shard written at the previous parser version must not be served"
+        );
+
+        let parsed = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kilocode".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].tokens.input, 300, "cache overlap must be removed");
+        assert_eq!(parsed[0].tokens.cache_read, 600);
+        assert_eq!(parsed[0].tokens.cache_write, 100);
+        assert_eq!(parsed[0].provider_id, "anthropic");
+        assert!(
+            matches!(
+                SourceFingerprint::check_roo_path_samples_only(&ui_path, Some(&fingerprint)),
+                Some(FingerprintStatus::Unchanged)
+            ),
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt
+            .get(identity, &ui_path)
+            .expect("the reparsed entry should be persisted at the current version");
+        assert_eq!(cached.parser_version, identity.parser_version);
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].tokens.input, 300);
+        assert_eq!(cached.messages[0].provider_id, "anthropic");
+    }
+
+    /// Exact versions after this change, so a later edit cannot silently
+    /// collide a member with the version it is replacing. The shared base
+    /// moved 2 -> 3, so Roo/Kilo Code land on 3 and Cline keeps its own
+    /// offset; Kilo CLI moves by its own offset instead.
+    #[test]
+    fn test_roo_kilo_family_parser_versions_after_cache_overlap_fix() {
+        assert_eq!(parser_version(ClientId::RooCode), 3);
+        assert_eq!(parser_version(ClientId::KiloCode), 3);
+        assert_eq!(parser_version(ClientId::Cline), 6);
+        assert_eq!(parser_version(ClientId::Kilo), 2);
     }
 
     #[test]

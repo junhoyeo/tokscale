@@ -51,7 +51,7 @@ mod tests {
         assert_eq!(messages[0].model_id, "gpt-5");
         assert_eq!(messages[0].session_id, "kilo-task-1");
         assert_eq!(messages[0].agent.as_deref(), Some("KiloAgent"));
-        // OpenAI-protocol `tokensIn` already includes the 7 + 3 cached tokens.
+        // `tokensIn` already includes the 7 + 3 cached tokens.
         assert_eq!(messages[0].tokens.input, 30);
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 7);
@@ -123,6 +123,7 @@ mod tests {
         for (task, model) in [
             ("kilo-task-claude", "anthropic/claude-sonnet-4"),
             ("kilo-task-grok", "x-ai/grok-code-fast-1"),
+            ("kilo-task-auto", "kilo-auto/frontier"),
         ] {
             let task_dir = dir.path().join("tasks").join(task);
             fs::create_dir_all(&task_dir).unwrap();
@@ -147,5 +148,11 @@ mod tests {
         let grok = parse_kilocode_file(&dir.path().join("tasks/kilo-task-grok/ui_messages.json"));
         assert_eq!(grok[0].model_id, "x-ai/grok-code-fast-1");
         assert_eq!(grok[0].provider_id, "xai");
+
+        // `kilo-auto/*` is Kilo's own router, not a vendor named `kilo-auto`:
+        // Kilo itself bills these turns and stores them as provider `kilo`.
+        let auto = parse_kilocode_file(&dir.path().join("tasks/kilo-task-auto/ui_messages.json"));
+        assert_eq!(auto[0].model_id, "kilo-auto/frontier");
+        assert_eq!(auto[0].provider_id, "kilo");
     }
 }

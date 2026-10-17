@@ -308,6 +308,10 @@ mod tests {
         assert_eq!(messages[0].model_id, "claude-sonnet-4");
         assert_eq!(messages[0].session_id, "cline-task-1");
         assert_eq!(messages[0].agent.as_deref(), Some("ClineAgent"));
+        // Cline keeps `tokensIn`, `cacheReads` and `cacheWrites` disjoint
+        // (upstream `message-translator.ts` subtracts before persisting), so
+        // input is used as written -- unlike the Roo/Kilo Code logs that share
+        // this parser.
         assert_eq!(messages[0].tokens.input, 40);
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 7);

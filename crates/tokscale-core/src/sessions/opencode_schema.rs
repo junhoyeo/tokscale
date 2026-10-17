@@ -610,10 +610,16 @@ const MICODE_QUERY_GROUPS: &[&[&str]] = &[MICODE_QUERIES];
 ///
 /// Kilo CLI imports the Kilo Code VS Code extension's task history into this
 /// database as `ses_migrated_*` sessions whose assistant turns are stamped
-/// `providerID`/`modelID` `"legacy"` with all-zero tokens and cost. Those
-/// rows carry no usage, and the same turns are already counted (with real
-/// tokens and model) by the `kilocode` task-log parser, so they are skipped
-/// rather than reported as a zero-token "legacy" model.
+/// `providerID`/`modelID` `"legacy"` with all-zero tokens and cost
+/// (`kilo-vscode/src/legacy-migration/sessions/lib/messages.ts` writes exactly
+/// that shape). Those rows carry no usage, and the same turns are already
+/// counted (with real tokens and model) by the `kilocode` task-log parser, so
+/// they are skipped rather than reported as a zero-token "legacy" model.
+///
+/// Every part of that shape is required, not just the two ids: a row that
+/// merely spells its provider and model `legacy` while carrying real usage is
+/// somebody's actual spend and must survive. The `_` in the session prefix is
+/// escaped because it is a SQLite `LIKE` wildcard.
 const KILO_QUERIES: &[&str] = &[r#"
         SELECT m.id, m.session_id, m.data, NULL AS workspace_root, NULL AS session_title, 1 AS eligible
         FROM message m
@@ -623,6 +629,13 @@ const KILO_QUERIES: &[&str] = &[r#"
           AND NOT (
             json_extract(m.data, '$.providerID') IS 'legacy'
             AND json_extract(m.data, '$.modelID') IS 'legacy'
+            AND m.session_id LIKE 'ses_migrated\_%' ESCAPE '\'
+            AND IFNULL(json_extract(m.data, '$.cost'), 0) = 0
+            AND IFNULL(json_extract(m.data, '$.tokens.input'), 0) = 0
+            AND IFNULL(json_extract(m.data, '$.tokens.output'), 0) = 0
+            AND IFNULL(json_extract(m.data, '$.tokens.reasoning'), 0) = 0
+            AND IFNULL(json_extract(m.data, '$.tokens.cache.read'), 0) = 0
+            AND IFNULL(json_extract(m.data, '$.tokens.cache.write'), 0) = 0
           )
     "#];
 
