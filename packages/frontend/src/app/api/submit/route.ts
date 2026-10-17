@@ -37,10 +37,12 @@ import {
 } from "@/lib/db/dailyBreakdownReported";
 import {
   addClientBreakdownIncrement,
+  applyRecountProofToCell,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
   scanScopeCoversFullHistory,
   SUPPORTED_VERSIONED_PARSERS,
+  type ClientRecountProof,
   type DeviceParserStates,
   type ParserHighWaterPlan,
 } from "@/lib/db/parserHighWater";
@@ -174,6 +176,29 @@ function expandDaysForReplaceLayouts(
     }
   }
   return layoutOnlyDates;
+}
+
+/**
+ * A recount proof may describe a day the submission does not date at all:
+ * every row the previous generation counted there was a duplicate the
+ * corrected generation drops. Such a day joins the write set as an empty day
+ * so the stored cell can be corrected; nothing else on it is resubmitted.
+ */
+function expandDaysForRecountProofs(
+  daysToProcess: Map<string, SubmissionData["contributions"][number]>,
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  existingDates: ReadonlySet<string>
+): Set<string> {
+  const proofOnlyDates = new Set<string>();
+  for (const [, plan] of parserPlans) {
+    for (const date of plan.recountDays ?? []) {
+      if (!daysToProcess.has(date) && existingDates.has(date)) {
+        daysToProcess.set(date, emptyLayoutDay(date));
+        proofOnlyDates.add(date);
+      }
+    }
+  }
+  return proofOnlyDates;
 }
 
 function mergeModelBreakdowns(
@@ -863,6 +888,15 @@ export async function POST(request: Request) {
             submittedDevice.parserVersions as Record<string, number> | undefined,
             client
           ),
+          recountProof: isBackfill
+            ? undefined
+            : ownValue(
+                (data.scanScope?.recountProofs ?? {}) as Record<
+                  string,
+                  ClientRecountProof
+                >,
+                client
+              ),
         });
         if (plan.mode === "status-quo") continue;
         parserPlans.set(client, plan);
@@ -878,6 +912,11 @@ export async function POST(request: Request) {
         } else if (plan.mode === "freeze") {
           warnings.push(
             `Ignored ${label} changes because this parser generation or partial snapshot cannot safely advance the device high-water.`
+          );
+        }
+        if (plan.rejectedRecountDays?.length) {
+          warnings.push(
+            `Ignored the ${label} recount proof for ${plan.rejectedRecountDays.length} day(s) because it does not describe the submitted snapshot; stored history on those days was kept.`
           );
         }
         if (plan.highWaterDeficit) {
@@ -942,6 +981,13 @@ export async function POST(request: Request) {
       const replaceClients = [...parserPlans]
         .filter(([, plan]) => isReplacePlan(plan))
         .map(([client]) => client);
+      // Recount proofs correct stored cells in place. Each correction is
+      // reported once per client, after the per-day loop has measured what
+      // it actually removed.
+      const recountRemoved = new Map<
+        string,
+        { days: number; tokens: number; cost: number }
+      >();
       // The Antigravity family replaces as one atomic unit, so its credited
       // lifetime cost is one number, captured from the stored rows BEFORE the
       // rewrite can delete the source that carried it. Individual per-client
@@ -977,6 +1023,13 @@ export async function POST(request: Request) {
         parserPlans,
         existingDeviceDays
       );
+      for (const date of expandDaysForRecountProofs(
+        daysToProcess,
+        parserPlans,
+        new Set(existingDeviceDays.map((day) => day.date))
+      )) {
+        layoutOnlyDates.add(date);
+      }
 
       // ------------------------------------------
       // STEP 3c: Compute merge results in memory, then batch write
@@ -1081,6 +1134,53 @@ export async function POST(request: Request) {
           >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
             normalizeClientBreakdownAliases(rawExistingBreakdown);
+          // A recount proof corrects the stored cell FIRST; today's bounded
+          // increment is then added on top of the corrected cell, exactly as
+          // the planner credited it. The corrected cell is written directly
+          // after the merge: it is lower than the stored one by design, which
+          // the regression guard would otherwise refuse.
+          const recountedCells = new Map<string, ClientBreakdownData>();
+          const incomingCostIsComplete =
+            incomingDay.totals?.costIsComplete ?? true;
+          for (const [client, plan] of plannedIncrementClients) {
+            const stored = ownValue(existingClientBreakdown, client);
+            const proofDay = ownValue(
+              (ownValue(
+                (data.scanScope?.recountProofs ?? {}) as Record<
+                  string,
+                  ClientRecountProof
+                >,
+                client
+              ) ?? {}) as ClientRecountProof,
+              incomingDay.date
+            );
+            if (!stored || !proofDay || !plan.recountDays?.includes(incomingDay.date)) {
+              continue;
+            }
+            const { cell, removed } = applyRecountProofToCell(stored, proofDay);
+            const increment = incomingClientBreakdown[client];
+            recountedCells.set(
+              client,
+              increment ? addClientBreakdownIncrement(cell, increment) : cell
+            );
+            clientsToMerge.delete(client);
+            delete incomingClientBreakdown[client];
+            // An incomplete snapshot may not lower cost (the write below
+            // floors it at the stored model costs), so only a complete one
+            // actually removes the proven cost; report what is written.
+            const removedCost = incomingCostIsComplete ? removed.cost : 0;
+            if (removed.tokens > 0 || removedCost > 0 || removed.messages > 0) {
+              const total = recountRemoved.get(client) ?? {
+                days: 0,
+                tokens: 0,
+                cost: 0,
+              };
+              total.days += 1;
+              total.tokens += removed.tokens;
+              total.cost += removedCost;
+              recountRemoved.set(client, total);
+            }
+          }
           for (const [client] of plannedIncrementClients) {
             const increment = incomingClientBreakdown[client];
             if (increment) {
@@ -1110,10 +1210,32 @@ export async function POST(request: Request) {
             );
           }
           const mergedClientBreakdown = mergeResult.merged;
+          for (const [client, cell] of recountedCells) {
+            // The proof restates the whole cell's cost, so a complete snapshot
+            // clears an earlier floor exactly, the documented rule for a
+            // complete write. An incomplete one may still only raise cost:
+            // the stored (pre-correction) model costs stay as floors and the
+            // cell stays tagged, and the cost correction lands on the first
+            // complete snapshot of the same layout.
+            const written = applyCostCompleteness(
+              cell,
+              ownValue(existingClientBreakdown, client),
+              incomingCostIsComplete
+            );
+            // A cell the proof empties entirely (every stored row was a
+            // duplicate) leaves nothing to keep; dropping it lets an
+            // otherwise empty day row go with it below.
+            if (written.tokens === 0 && written.messages === 0 && written.cost === 0) {
+              delete mergedClientBreakdown[client];
+            } else {
+              mergedClientBreakdown[client] = written;
+            }
+          }
           for (const [client] of plannedIncrementClients) {
             const merged = mergedClientBreakdown[client];
             if (
               merged &&
+              !recountedCells.has(client) &&
               ownValue(existingClientBreakdown, client)?.provenance
                 ?.costIsComplete === false
             ) {
@@ -1209,6 +1331,14 @@ export async function POST(request: Request) {
         replaceCostFloors,
         incompleteReplaceClients
       );
+      for (const [client, removed] of recountRemoved) {
+        const label = ownValue(SOURCE_DISPLAY_NAMES, client) ?? client;
+        warnings.push(
+          `Corrected ${label} history on ${removed.days} day(s) from its parser recount proof: removed ${removed.tokens.toLocaleString(
+            "en-US"
+          )} tokens and $${removed.cost.toFixed(4)} the previous parser generation had double counted. Stored usage the proof does not describe was kept.`
+        );
+      }
       if (antigravityReplacing && antigravityFamilyFloor > 0) {
         reapplyReplaceFamilyCostFloor(
           mergedRows,

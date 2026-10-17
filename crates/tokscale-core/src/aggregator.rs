@@ -361,6 +361,8 @@ pub fn generate_graph_result_v2(
         time_metrics: None,
         unpriced_submission_usage: Vec::new(),
         incomplete_cost_dates: std::collections::BTreeSet::new(),
+        recount_proofs: std::collections::BTreeMap::new(),
+        source_reads: std::collections::BTreeMap::new(),
     }
 }
 

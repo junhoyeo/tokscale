@@ -261,6 +261,8 @@ impl From<GraphResult> for crate::GraphResultV2 {
             time_metrics: value.time_metrics,
             unpriced_submission_usage: value.unpriced_submission_usage,
             incomplete_cost_dates: value.incomplete_cost_dates,
+            recount_proofs: std::collections::BTreeMap::new(),
+            source_reads: std::collections::BTreeMap::new(),
         }
     }
 }
