@@ -3433,7 +3433,86 @@ fn test_cursor_desktop_session_is_imported_before_graph_and_submit_sync() {
                 .exists(),
             "the imported session must reach sync even though the offline proxy refuses it: {output:?}"
         );
+
+        // A failed first implicit sync must not repeat on the very next report:
+        // the recorded attempt bounds the retry until freshness expires. An
+        // explicit `submit` keeps syncing because the user asked for it.
+        if args[0] == "graph" {
+            let marker = tmp
+                .path()
+                .join(".config/tokscale/cursor-cache/usage.last-sync-attempt");
+            let first_attempt = fs::metadata(&marker).unwrap().modified().unwrap();
+            let output = cmd_with_home(tmp.path())
+                .env("APPDATA", tmp.path().join("AppData/Roaming"))
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            assert_eq!(
+                fs::metadata(&marker).unwrap().modified().unwrap(),
+                first_attempt,
+                "{args:?} retried the failed Cursor sync on the next report"
+            );
+        }
     }
+}
+
+/// Logout is a durable boundary: a still-signed-in desktop session must not be
+/// re-imported by an ordinary report, and the purged cache must stay gone.
+#[test]
+fn test_cursor_logout_blocks_implicit_desktop_reimport_until_explicit_login() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_desktop_session(tmp.path());
+    let credentials = tmp.path().join(".config/tokscale/cursor-credentials.json");
+    let cache_dir = tmp.path().join(".config/tokscale/cursor-cache");
+
+    // A first report imports the desktop session, as the feature intends.
+    cmd_with_home(tmp.path())
+        .env("APPDATA", tmp.path().join("AppData/Roaming"))
+        .args(["graph", "--client", "cursor", "--no-spinner"])
+        .assert()
+        .success();
+    assert!(credentials.exists());
+
+    cmd_with_home(tmp.path())
+        .args(["cursor", "logout", "--all", "--purge-cache"])
+        .assert()
+        .success();
+    assert!(!credentials.exists());
+    assert!(!cache_dir.exists());
+
+    for args in [
+        vec!["graph", "--no-spinner"],
+        vec!["graph", "--client", "cursor", "--no-spinner"],
+        vec!["--no-spinner", "submit", "--client", "cursor", "--dry-run"],
+    ] {
+        let output = cmd_with_home(tmp.path())
+            .env("APPDATA", tmp.path().join("AppData/Roaming"))
+            .env("TOKSCALE_API_TOKEN", "test-token")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(
+            !credentials.exists(),
+            "{args:?} re-imported a desktop session after an explicit logout"
+        );
+        assert!(
+            !cache_dir.join("usage.json").exists(),
+            "{args:?} recovered purged Cursor usage after an explicit logout"
+        );
+    }
+
+    // Only an explicit Cursor command restores discovery.
+    cmd_with_home(tmp.path())
+        .env("APPDATA", tmp.path().join("AppData/Roaming"))
+        .args(["cursor", "sync", "--json", "--timeout", "1"])
+        .assert()
+        .success();
+    assert!(
+        credentials.exists(),
+        "an explicit `cursor sync` must restore desktop discovery"
+    );
 }
 
 #[test]

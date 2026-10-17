@@ -123,6 +123,29 @@ fn cursor_cache_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".config/tokscale/cursor-cache")
 }
 
+fn cursor_desktop_auto_import_disabled_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config/tokscale/cursor-desktop-auto-import.disabled")
+}
+
+fn cursor_desktop_auto_import_is_disabled_in_home(home_dir: &Path) -> bool {
+    cursor_desktop_auto_import_disabled_path(home_dir).is_file()
+}
+
+fn disable_cursor_desktop_auto_import_in_home(home_dir: &Path) -> Result<()> {
+    atomic_write_file(
+        &cursor_desktop_auto_import_disabled_path(home_dir),
+        "disabled by explicit Cursor logout\n",
+    )
+}
+
+fn clear_cursor_desktop_auto_import_in_home(home_dir: &Path) -> Result<()> {
+    let path = cursor_desktop_auto_import_disabled_path(home_dir);
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 fn old_cursor_cache_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".tokscale/cursor-cache")
 }
@@ -179,11 +202,12 @@ fn cursor_page_limit(largest_page_yield: usize) -> usize {
 /// memory for the download to a fraction of a developer machine's RAM.
 const CURSOR_MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
 
-/// Marker file touched at the end of every `sync_cursor_cache` run (even when
-/// some accounts fail). Its mtime gates secondary-account freshness checks so
-/// a permanently-stale secondary (expired token, removed account, network
-/// partition) does not force an implicit sync on every invocation.
+/// Account-scoped marker written at the end of every `sync_cursor_cache` run
+/// (even when some accounts fail). Its mtime bounds retry suppression, while
+/// the hashed account list prevents one account's attempt from suppressing a
+/// newly-added or newly-active account.
 const CURSOR_SYNC_ATTEMPT_MARKER: &str = "usage.last-sync-attempt";
+const CURSOR_SYNC_ATTEMPT_MARKER_VERSION: u32 = 1;
 
 /// Cache-file extensions tokscale recognizes, in preference order: JSON is the
 /// current format, CSV is the legacy export still read for pre-switch caches.
@@ -209,6 +233,13 @@ pub struct CursorCredentialsStore {
     #[serde(rename = "activeAccountId")]
     pub active_account_id: String,
     pub accounts: HashMap<String, CursorCredentials>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorSyncAttemptMarker {
+    version: u32,
+    account_hashes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -649,9 +680,17 @@ pub fn cursor_state_vscdb_candidates(home_dir: &Path) -> Vec<PathBuf> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
+        if let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            paths.push(config_dir.join("Cursor/User/globalStorage/state.vscdb"));
+        }
         paths.push(home_dir.join(".config/Cursor/User/globalStorage/state.vscdb"));
     }
 
+    paths.dedup();
     paths
 }
 
@@ -1264,7 +1303,10 @@ pub fn find_account(name_or_id: &str) -> Option<AccountInfo> {
 }
 
 pub fn save_credentials(token: &str, label: Option<&str>) -> Result<String> {
-    upsert_credentials(token, label)
+    let home = home_dir()?;
+    let account_id = upsert_credentials_in_home(&home, token, label)?;
+    clear_cursor_desktop_auto_import_in_home(&home)?;
+    Ok(account_id)
 }
 
 pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
@@ -1277,6 +1319,11 @@ fn remove_account_in_home(home: &Path, name_or_id: &str, purge_cache: bool) -> R
 
     let resolved = resolve_account_id(&store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Account not found: {}", name_or_id))?;
+
+    // A logout is a durable privacy boundary. Persist the opt-out before
+    // deleting credentials or caches so a normal report cannot silently import
+    // the still-signed-in Cursor desktop session and undo the logout.
+    disable_cursor_desktop_auto_import_in_home(home)?;
 
     let was_active = resolved == store.active_account_id;
 
@@ -1351,6 +1398,10 @@ pub fn remove_all_accounts(purge_cache: bool) -> Result<()> {
 }
 
 fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
+    // Write the non-secret tombstone first. If this fails, do not claim a
+    // successful logout that the next implicit report would immediately undo.
+    disable_cursor_desktop_auto_import_in_home(home)?;
+
     let cache_dir = cursor_cache_dir(home);
     if purge_cache {
         // `--all --purge-cache` is an explicit deletion request. Remove both
@@ -1597,11 +1648,11 @@ fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
     vec![cache_dir.join("usage.json")]
 }
 
-fn cursor_usage_cache_file_is_fresh(path: &Path, max_age: Duration) -> bool {
+fn cursor_usage_cache_file_is_fresh_at(path: &Path, max_age: Duration, now: SystemTime) -> bool {
     let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
         return false;
     };
-    match SystemTime::now().duration_since(mtime) {
+    match now.duration_since(mtime) {
         Ok(age) => age < max_age,
         // mtime is in the future (clock skew) — treat as fresh; a clock-skew
         // cache is no less authoritative than a freshly-fetched one, and we'd
@@ -1610,21 +1661,105 @@ fn cursor_usage_cache_file_is_fresh(path: &Path, max_age: Duration) -> bool {
     }
 }
 
-fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
+/// The accounts a recent attempt marker names, when it is fresh and readable.
+/// `None` means no fresh marker. `Some(None)` is a legacy marker written by an
+/// older binary, which names no account and therefore cannot be account-scoped.
+fn cursor_sync_attempt_scope(
+    cache_dir: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> Option<Option<Vec<String>>> {
+    let path = cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER);
+    if !cursor_usage_cache_file_is_fresh_at(&path, max_age, now) {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<CursorSyncAttemptMarker>(&text) {
+        Ok(marker) if marker.version == CURSOR_SYNC_ATTEMPT_MARKER_VERSION => {
+            Some(Some(marker.account_hashes))
+        }
+        _ => Some(None),
+    }
+}
+
+/// A fresh attempt for this account. A legacy unscoped marker still excuses a
+/// stale or missing secondary (its pre-upgrade meaning) so a rolling upgrade
+/// does not start syncing on every invocation.
+fn cursor_secondary_attempt_excuses(
+    cache_dir: &Path,
+    account_id: &str,
+    max_age: Duration,
+    now: SystemTime,
+) -> bool {
+    match cursor_sync_attempt_scope(cache_dir, max_age, now) {
+        Some(Some(hashes)) => hashes
+            .iter()
+            .any(|hash| hash == &cursor_cache_owner_hash(account_id)),
+        Some(None) => true,
+        None => false,
+    }
+}
+
+/// A fresh account-scoped attempt for this account. A legacy unscoped marker is
+/// refused here: it must never excuse a missing active cache, which earlier
+/// versions always treated as stale.
+fn cursor_active_attempt_excuses(
+    cache_dir: &Path,
+    account_id: &str,
+    max_age: Duration,
+    now: SystemTime,
+) -> bool {
+    matches!(
+        cursor_sync_attempt_scope(cache_dir, max_age, now),
+        Some(Some(hashes)) if hashes
+            .iter()
+            .any(|hash| hash == &cursor_cache_owner_hash(account_id))
+    )
+}
+
+fn write_cursor_sync_attempt_marker(
+    cache_dir: &Path,
+    store: &CursorCredentialsStore,
+) -> Result<()> {
+    let mut account_hashes = store
+        .accounts
+        .keys()
+        .map(|id| cursor_cache_owner_hash(id))
+        .collect::<Vec<_>>();
+    account_hashes.sort_unstable();
+    account_hashes.dedup();
+    let marker = CursorSyncAttemptMarker {
+        version: CURSOR_SYNC_ATTEMPT_MARKER_VERSION,
+        account_hashes,
+    };
+    atomic_write_file(
+        &cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER),
+        &serde_json::to_string(&marker)?,
+    )
+}
+
+fn cursor_usage_cache_is_fresh_in_at(home_dir: &Path, max_age: Duration, now: SystemTime) -> bool {
     let cache_dir = cursor_cache_dir(home_dir);
     if !cache_dir.exists() {
         return false;
     }
 
-    // The active account's cache is non-negotiable: if it is stale or missing,
-    // implicit sync must run so reports read current data. A legacy `usage.csv`
-    // with no `usage.json` counts as stale so the first run after upgrade
-    // migrates the account to the JSON cache.
+    let store = load_credentials_store_from_home(home_dir);
     let active_path = cache_dir.join("usage.json");
-    if !cursor_usage_cache_file_is_fresh(&active_path, max_age) {
+    let active_attempt_fresh = store.as_ref().is_some_and(|store| {
+        store.accounts.contains_key(&store.active_account_id)
+            && cursor_active_attempt_excuses(&cache_dir, &store.active_account_id, max_age, now)
+    });
+    let active_file_fresh = cursor_usage_cache_file_is_fresh_at(&active_path, max_age, now);
+
+    // A stale active cache must still refresh. A missing first cache may use a
+    // recent account-scoped attempt marker so an unavailable desktop session
+    // does not add the network timeout to every report. The retry resumes when
+    // the bounded freshness window expires.
+    if !active_file_fresh && (active_path.exists() || !active_attempt_fresh) {
         return false;
     }
-    let store = load_credentials_store_from_home(home_dir);
+
     let expected_paths = expected_cursor_usage_cache_paths_in(home_dir);
     if let Some(store) = &store {
         // Legacy aliases or interrupted-switch duplicates must be preserved
@@ -1643,58 +1778,52 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
                 return false;
             }
         }
-        let owner_hash = cursor_cache_owner_hash_from_file(&active_path);
-        let expected_hash = cursor_cache_owner_hash(&store.active_account_id);
-        if owner_hash.as_deref() != Some(expected_hash.as_str()) {
-            return false;
+        if active_path.exists() {
+            let owner_hash = cursor_cache_owner_hash_from_file(&active_path);
+            let expected_hash = cursor_cache_owner_hash(&store.active_account_id);
+            if owner_hash.as_deref() != Some(expected_hash.as_str()) {
+                return false;
+            }
         }
     }
-
-    // For secondaries, a fresh sync-attempt marker is sufficient. This avoids
-    // forcing a sync on every invocation when a secondary account is
-    // permanently stale (expired token, removed account, persistent API
-    // failure). Without the marker, `.all(...)` would return `false` forever.
-    let marker_fresh =
-        cursor_usage_cache_file_is_fresh(&cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), max_age);
 
     expected_paths
         .iter()
         .filter(|p| *p != &active_path)
         .all(|path| {
+            let account_id = store.as_ref().and_then(|store| {
+                store.accounts.keys().find(|id| {
+                    *path == cache_dir.join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+                })
+            });
+
             // A recent attempt may excuse a missing or stale secondary, but
             // never a live file whose ownership is unknown or disagrees.
             if path.exists() {
                 let owner_hash = cursor_cache_owner_hash_from_file(path);
                 let verified = owner_hash.as_deref().is_some_and(|hash| {
-                    store.as_ref().is_some_and(|store| {
-                        store.accounts.keys().any(|id| {
-                            cursor_cache_owner_hash(id) == hash
-                                && *path
-                                    == cache_dir.join(format!(
-                                        "usage.{}.json",
-                                        cursor_account_cache_stem(id)
-                                    ))
-                        })
-                    })
+                    account_id.is_some_and(|id| cursor_cache_owner_hash(id) == hash)
                 });
                 if !verified {
                     return false;
                 }
             }
-            cursor_usage_cache_file_is_fresh(path, max_age) || marker_fresh
+            cursor_usage_cache_file_is_fresh_at(path, max_age, now)
+                || account_id.is_some_and(|id| {
+                    cursor_secondary_attempt_excuses(&cache_dir, id, max_age, now)
+                })
         })
 }
 
-/// True when the active cursor usage cache (`usage.json`) was refreshed within
-/// `max_age` AND every secondary account cache is either fresh or a recent
-/// sync-attempt marker exists. The active cache is unconditionally required —
-/// a stale active means reports would show out-of-date data. Secondaries are
-/// best-effort: when a secondary is permanently stale (expired token, removed
-/// account, persistent API failure) the marker short-circuits the check so we
-/// don't force an implicit sync on every invocation. Used by the implicit
-/// pre-report sync path to avoid hitting the Cursor API on every invocation.
-/// The manual `tokscale cursor sync` CLI bypasses this — explicit user intent
-/// is always honored.
+fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
+    cursor_usage_cache_is_fresh_in_at(home_dir, max_age, SystemTime::now())
+}
+
+/// True when the active Cursor cache is fresh and every secondary is fresh or
+/// has an account-scoped recent attempt. A stale active cache is never excused.
+/// A missing first active cache may be excused until its recent attempt expires,
+/// which bounds retries when desktop discovery succeeds but the API is offline.
+/// The manual `tokscale cursor sync` CLI bypasses this gate.
 pub fn cursor_usage_cache_is_fresh(max_age: Duration) -> bool {
     let Ok(home_dir) = home_dir() else {
         return false;
@@ -1715,6 +1844,12 @@ pub fn is_cursor_logged_in() -> bool {
 pub fn ensure_cursor_session_for_sync() -> bool {
     if is_cursor_logged_in() {
         return true;
+    }
+    let Ok(home) = home_dir() else {
+        return false;
+    };
+    if cursor_desktop_auto_import_is_disabled_in_home(&home) {
+        return false;
     }
     matches!(ensure_credentials_from_local_cursor(), Ok(Some(_)))
 }
@@ -2321,17 +2456,11 @@ where
         }
     }
 
-    // Touch the sync-attempt marker unconditionally after the per-account loop
-    // (regardless of partial failures). The marker's mtime short-circuits the
-    // secondary-account freshness check so a permanently-stale secondary
-    // doesn't force an implicit sync on every invocation. We ignore errors
-    // here — if the marker can't be written (e.g. disk full) the gate simply
-    // falls through to the cache-freshness check as before.
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER));
+    // Record exactly the accounts attempted in this run. The mtime bounds retry
+    // suppression, while account hashes keep a later login or account switch
+    // from inheriting another account's failed-attempt cooldown. Failure to
+    // write the best-effort marker simply leaves the normal retry path enabled.
+    let _ = write_cursor_sync_attempt_marker(&cache_dir, &store);
 
     if success_count == 0 {
         return SyncCursorResult {
@@ -2479,9 +2608,36 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     explicit: bool,
     explicit_timeout: Option<Duration>,
 ) -> SyncCursorResult {
-    // Prefer a fresh token from the local Cursor desktop login when available.
-    // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
-    let _ = ensure_credentials_from_local_cursor();
+    let home = match home_dir() {
+        Ok(home) => home,
+        Err(error) => {
+            return SyncCursorResult {
+                synced: false,
+                rows: 0,
+                error: Some(format!("Failed to get home dir: {error}")),
+            };
+        }
+    };
+
+    // Explicit sync is a deliberate opt-in and restores desktop discovery.
+    // Implicit sync must respect a prior logout even when another saved account
+    // remains available to sync.
+    if explicit {
+        if let Err(error) = clear_cursor_desktop_auto_import_in_home(&home) {
+            return SyncCursorResult {
+                synced: false,
+                rows: 0,
+                error: Some(format!(
+                    "Failed to restore Cursor desktop discovery: {error}"
+                )),
+            };
+        }
+    }
+    if explicit || !cursor_desktop_auto_import_is_disabled_in_home(&home) {
+        // Prefer a fresh token from the local Cursor desktop login when
+        // available, avoiding stale manually-pasted cookies after a refresh.
+        let _ = ensure_credentials_from_local_cursor();
+    }
 
     let configured_secs =
         setting_budget_for(explicit, explicit_timeout, configured_sync_timeout_secs);
@@ -2633,6 +2789,7 @@ pub fn run_cursor_logout(name: Option<String>, all: bool, purge_cache: bool) -> 
     if all {
         let accounts = list_accounts();
         if accounts.is_empty() && !purge_cache {
+            remove_all_accounts(false)?;
             println!("\n  {}\n", "No saved Cursor accounts.".yellow());
             return Ok(());
         }
@@ -2657,6 +2814,7 @@ pub fn run_cursor_logout(name: Option<String>, all: bool, purge_cache: bool) -> 
     }
 
     let Some(store) = load_credentials_store() else {
+        remove_all_accounts(false)?;
         println!("\n  {}\n", "No saved Cursor accounts.".yellow());
         return Ok(());
     };
@@ -2956,6 +3114,46 @@ mod tests {
         let read = read_access_token_from_state_vscdb(&db_path)?;
         assert_eq!(read, access);
         Ok(())
+    }
+
+    /// Electron stores Linux user data under `$XDG_CONFIG_HOME` when it is set,
+    /// so discovery must probe it before the `$HOME/.config` fallback.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    #[serial]
+    fn test_state_vscdb_candidates_honour_xdg_config_home() {
+        let home = TempDir::new().unwrap();
+        let xdg = TempDir::new().unwrap();
+        // The guard restores the developer's XDG_CONFIG_HOME even when an
+        // assertion below panics, so later #[serial] tests are not poisoned.
+        let _guard = EnvVarGuard::set("XDG_CONFIG_HOME", xdg.path().to_str().unwrap());
+
+        let candidates = cursor_state_vscdb_candidates(home.path());
+        assert_eq!(
+            candidates.first(),
+            Some(&xdg.path().join("Cursor/User/globalStorage/state.vscdb")),
+            "an absolute XDG root must be probed first: {candidates:?}"
+        );
+        assert!(
+            candidates.contains(
+                &home
+                    .path()
+                    .join(".config/Cursor/User/globalStorage/state.vscdb")
+            ),
+            "the home fallback must remain: {candidates:?}"
+        );
+
+        // A relative or empty override is ignored rather than resolved weirdly.
+        for ignored in ["", "relative/config"] {
+            let _inner = EnvVarGuard::set("XDG_CONFIG_HOME", ignored);
+            assert_eq!(
+                cursor_state_vscdb_candidates(home.path()),
+                vec![home
+                    .path()
+                    .join(".config/Cursor/User/globalStorage/state.vscdb")],
+                "an unusable XDG_CONFIG_HOME must fall back to home"
+            );
+        }
     }
 
     #[test]
@@ -6087,6 +6285,163 @@ mod tests {
             cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER).exists(),
             "marker must be written even when a secondary account fetch fails"
         );
+        let marker: CursorSyncAttemptMarker = serde_json::from_str(&fs::read_to_string(
+            cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER),
+        )?)?;
+        assert_eq!(marker.version, CURSOR_SYNC_ATTEMPT_MARKER_VERSION);
+        for account in ["active-account", "team/account"] {
+            assert!(
+                marker
+                    .account_hashes
+                    .contains(&cursor_cache_owner_hash(account)),
+                "every attempted account must be named: {marker:?}"
+            );
+        }
+        // A legacy unscoped marker keeps its pre-upgrade meaning for a stale
+        // secondary, but can never excuse a missing active cache.
+        fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+        let now = SystemTime::now();
+        assert!(cursor_secondary_attempt_excuses(
+            &cache_dir,
+            "team/account",
+            Duration::from_secs(300),
+            now
+        ));
+        assert!(!cursor_active_attempt_excuses(
+            &cache_dir,
+            "active-account",
+            Duration::from_secs(300),
+            now
+        ));
+        Ok(())
+    }
+
+    /// A discovered desktop session whose first sync fails must not add the
+    /// network timeout to every later report. The attempt is account-scoped, so
+    /// it expires with the freshness window and never covers another account.
+    #[test]
+    fn test_failed_first_sync_attempt_is_bounded_and_account_scoped() -> Result<()> {
+        let home = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "desktop-account".to_string(),
+            CursorCredentials {
+                session_token: "desktop-account%3A%3Atoken".to_string(),
+                user_id: Some("desktop-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: None,
+            },
+        );
+        save_credentials_store_in_home(
+            home.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "desktop-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let max_age = Duration::from_secs(300);
+        let now = SystemTime::now();
+        assert!(
+            !cursor_usage_cache_is_fresh_in_at(home.path(), max_age, now),
+            "no cache and no attempt must sync"
+        );
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            home.path(),
+            |_fetch| async move { Err(anyhow::anyhow!("offline")) },
+        ));
+        assert!(!result.synced);
+        let cache_dir = cursor_cache_dir(home.path());
+        assert!(
+            !cache_dir.join("usage.json").exists(),
+            "a failed fetch must not write a cache"
+        );
+        assert!(
+            cursor_usage_cache_is_fresh_in_at(home.path(), max_age, now),
+            "a recent failed attempt must suppress an immediate retry"
+        );
+        assert!(
+            !cursor_usage_cache_is_fresh_in_at(home.path(), max_age, SystemTime::now() + max_age),
+            "suppression must expire with the freshness window"
+        );
+
+        // A newly added account cannot inherit the other account's cooldown.
+        let mut store = load_credentials_store_from_home(home.path()).unwrap();
+        store.accounts.insert(
+            "second-account".to_string(),
+            CursorCredentials {
+                session_token: "second-account%3A%3Atoken".to_string(),
+                user_id: Some("second-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: None,
+            },
+        );
+        store.active_account_id = "second-account".to_string();
+        save_credentials_store_in_home(home.path(), &store)?;
+        assert!(
+            !cursor_usage_cache_is_fresh_in_at(home.path(), max_age, now),
+            "an account switch must not reuse another account's attempt"
+        );
+        Ok(())
+    }
+
+    /// Logout is a durable boundary: it persists a non-secret tombstone that
+    /// stops implicit desktop discovery, and only explicit login or sync
+    /// restores it.
+    #[test]
+    fn test_logout_persists_desktop_auto_import_opt_out() -> Result<()> {
+        for purge in [false, true] {
+            let home = TempDir::new()?;
+            let mut accounts = HashMap::new();
+            accounts.insert(
+                "desktop-account".to_string(),
+                CursorCredentials {
+                    session_token: "desktop-account%3A%3Atoken".to_string(),
+                    user_id: Some("desktop-account".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    label: Some("work".to_string()),
+                },
+            );
+            save_credentials_store_in_home(
+                home.path(),
+                &CursorCredentialsStore {
+                    version: 1,
+                    active_account_id: "desktop-account".to_string(),
+                    accounts,
+                },
+            )?;
+            let cache_dir = cursor_cache_dir(home.path());
+            fs::create_dir_all(&cache_dir)?;
+            fs::write(
+                cache_dir.join("usage.json"),
+                owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "desktop-account")?,
+            )?;
+
+            assert!(!cursor_desktop_auto_import_is_disabled_in_home(home.path()));
+            remove_account_in_home(home.path(), "desktop-account", purge)?;
+            assert!(
+                cursor_desktop_auto_import_is_disabled_in_home(home.path()),
+                "logout must persist the opt-out (purge={purge})"
+            );
+            // The tombstone lives outside cursor-cache, so a purge keeps it.
+            assert!(!cursor_desktop_auto_import_disabled_path(home.path()).starts_with(&cache_dir));
+
+            clear_cursor_desktop_auto_import_in_home(home.path())?;
+            assert!(!cursor_desktop_auto_import_is_disabled_in_home(home.path()));
+
+            disable_cursor_desktop_auto_import_in_home(home.path())?;
+            remove_all_accounts_in_home(home.path(), purge)?;
+            assert!(
+                cursor_desktop_auto_import_is_disabled_in_home(home.path()),
+                "logout --all must persist the opt-out (purge={purge})"
+            );
+        }
         Ok(())
     }
 
