@@ -687,6 +687,25 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> (f64, Option<crate::EstimateSource>) {
+        self.calculate_cost_detailed_with_provider_inner(model_id, provider_id, usage, false)
+    }
+
+    pub fn calculate_cost_detailed_for_multi_call_aggregate(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> (f64, Option<crate::EstimateSource>) {
+        self.calculate_cost_detailed_with_provider_inner(model_id, provider_id, usage, true)
+    }
+
+    fn calculate_cost_detailed_with_provider_inner(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+        multi_call_aggregate: bool,
+    ) -> (f64, Option<crate::EstimateSource>) {
         #[cfg(test)]
         self.detailed_calculations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -704,8 +723,13 @@ impl PricingService {
             return (cost, covered.then_some(crate::EstimateSource::Custom));
         }
 
-        self.lookup
-            .calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+        if multi_call_aggregate {
+            self.lookup
+                .calculate_cost_detailed_for_multi_call_aggregate(model_id, provider_id, usage)
+        } else {
+            self.lookup
+                .calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+        }
     }
 
     pub fn calculate_cost_with_provider(

@@ -1649,7 +1649,10 @@ fn parser_version(client: ClientId) -> u32 {
         // of stopping at the first one, and usage dedup keys carry the record's
         // file position. Both change the parse of byte-identical input, so
         // cached entries hold truncated and under-deduplicated output (#1031).
-        ClientId::Grok => 7,
+        // v7->v8: turn aggregates retain modelCalls and trustworthy
+        // costUsdTicks. Unchanged closed sessions otherwise replay v7 rows with
+        // message_count = 1 and no provider-reported cost (#1387).
+        ClientId::Grok => 8,
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -5598,11 +5601,96 @@ mod tests {
     }
 
     #[test]
-    fn test_grok_resilient_line_reader_parser_version_invalidates_v6_entries() {
-        // A Grok session file that is never appended to again keeps its
-        // fingerprint forever, so only the version bump discards the truncated
-        // v6 parse and forces a cold reparse.
-        assert_eq!(parser_version(ClientId::Grok), 7);
+    fn test_grok_cost_and_call_count_parser_version_invalidates_v7_entries() {
+        // A closed Grok session file keeps its fingerprint forever, so only the
+        // version bump discards cached rows without modelCalls/costUsdTicks.
+        assert_eq!(parser_version(ClientId::Grok), 8);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grok_v7_shard_reparses_unchanged_cost_and_call_count() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let session_dir = source_home
+            .path()
+            .join(".grok/sessions/%2Ftmp%2Fprobe/probe-session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let source = session_dir.join("updates.jsonl");
+        std::fs::write(
+            &source,
+            r#"{"method":"session/update","params":{"sessionId":"probe-session","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":20,"modelCalls":8,"costUsdTicks":12345000000,"modelUsage":{"grok-4.5":{"inputTokens":100,"outputTokens":20,"modelCalls":8,"costUsdTicks":12345000000}}}}},"_meta":{"eventId":"turn-1","agentTimestampMs":1790900001000}}"#,
+        )
+        .unwrap();
+
+        let current_identity = CacheIdentity::for_client(ClientId::Grok);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 7,
+        };
+        let fingerprint = SourceFingerprint::from_grok_path(&source).unwrap();
+        let stale_message = UnifiedMessage::new(
+            "grok",
+            "grok-4.5",
+            "xai",
+            "probe-session",
+            1_790_900_001_000,
+            crate::TokenBreakdown {
+                input: 100,
+                output: 20,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["grok".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_count, 8);
+        assert_eq!(
+            messages[0].cost_source,
+            crate::sessions::CostSource::ProviderReported
+        );
+        assert!((messages[0].cost - 1.2345).abs() < 1e-9);
+        assert_eq!(
+            SourceFingerprint::from_grok_path(&source).unwrap(),
+            fingerprint,
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache
+            .get(current_identity, &source)
+            .expect("the v8 parse must replace the stale v7 row");
+        assert_eq!(rebuilt.parser_version, 8);
+        assert_eq!(rebuilt.messages[0].message_count, 8);
+        assert_eq!(
+            rebuilt.messages[0].cost_source,
+            crate::sessions::CostSource::ProviderReported
+        );
     }
 
     #[test]

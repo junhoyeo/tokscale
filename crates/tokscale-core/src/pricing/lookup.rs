@@ -1900,13 +1900,43 @@ impl PricingLookup {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> (f64, Option<crate::EstimateSource>) {
+        self.calculate_cost_detailed_with_provider_inner(model_id, provider_id, usage, false)
+    }
+
+    /// Price a usage row known to combine more than one model request.
+    ///
+    /// Full-request tiers (xAI 200K, OpenAI 272K, Anthropic Haiku 5.5 100K)
+    /// are selected per request. An aggregate only exposes the sum, so neither
+    /// its total nor its arithmetic mean can tell whether any constituent
+    /// request crossed a boundary. Use the base rates instead of applying a
+    /// request-wide tier to the aggregate as if it were one request.
+    pub fn calculate_cost_detailed_for_multi_call_aggregate(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> (f64, Option<crate::EstimateSource>) {
+        self.calculate_cost_detailed_with_provider_inner(model_id, provider_id, usage, true)
+    }
+
+    fn calculate_cost_detailed_with_provider_inner(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+        multi_call_aggregate: bool,
+    ) -> (f64, Option<crate::EstimateSource>) {
         let provider_id = normalize_provider_hint(provider_id);
         let result = match self.resolve_for_usage(model_id, provider_id, usage) {
             Some(r) => r,
             None => return (0.0, None),
         };
 
-        let cost = compute_cost_for_lookup(&result, provider_id, usage);
+        let cost = if multi_call_aggregate {
+            compute_cost_for_multi_call_aggregate(&result, provider_id, usage)
+        } else {
+            compute_cost_for_lookup(&result, provider_id, usage)
+        };
         if cost > 0.0 {
             return (cost, Some(crate::EstimateSource::Catalog));
         }
@@ -2334,6 +2364,7 @@ fn uses_anthropic_haiku_55_full_request_100k_pricing(result: &LookupResult) -> b
 fn compute_anthropic_haiku_55_full_request_100k_cost(
     result: &LookupResult,
     usage: &TokenBreakdown,
+    apply_request_tier: bool,
 ) -> f64 {
     let mut pricing = result.pricing.clone();
     let prompt_tokens = usage
@@ -2350,7 +2381,10 @@ fn compute_anthropic_haiku_55_full_request_100k_cost(
     // request is priced on its own: a request over the threshold pays the
     // higher prices even when part of its prompt is a cache hit, and earlier
     // requests keep the prices they were billed at."
-    if prompt_tokens > ANTHROPIC_HAIKU_55_PRICING_THRESHOLD_TOKENS {
+    // A multi-call turn aggregate cannot reveal which constituent request
+    // crossed the boundary, so that caller disables the request-wide tier and
+    // uses the base rates as an explicit approximation.
+    if apply_request_tier && prompt_tokens > ANTHROPIC_HAIKU_55_PRICING_THRESHOLD_TOKENS {
         let use_high = |high: Option<f64>, base: &mut Option<f64>| {
             if high.is_some_and(is_valid_price_value) {
                 *base = high;
@@ -2497,7 +2531,11 @@ fn uses_xai_full_request_200k_pricing(result: &LookupResult, provider_id: Option
     has_complete_200k_tier && !has_other_context_tier && !has_cache_write_pricing
 }
 
-fn compute_xai_full_request_200k_cost(result: &LookupResult, usage: &TokenBreakdown) -> f64 {
+fn compute_xai_full_request_200k_cost(
+    result: &LookupResult,
+    usage: &TokenBreakdown,
+    apply_request_tier: bool,
+) -> f64 {
     let mut pricing = result.pricing.clone();
     let prompt_tokens = usage.input.max(0).saturating_add(usage.cache_read.max(0));
 
@@ -2505,7 +2543,10 @@ fn compute_xai_full_request_200k_cost(result: &LookupResult, usage: &TokenBreakd
     // high rates for the entire request. Its public usage schema and current
     // LiteLLM rows publish no separate cache-write bucket, so an unpriced
     // cache-write value deliberately cannot flip every priced bucket.
-    if prompt_tokens >= TIERED_PRICING_THRESHOLD_200K_TOKENS as i64 {
+    // A multi-call turn aggregate cannot reveal which constituent request
+    // crossed the boundary, so that caller disables the request-wide tier and
+    // uses the base rates as an explicit approximation.
+    if apply_request_tier && prompt_tokens >= TIERED_PRICING_THRESHOLD_200K_TOKENS as i64 {
         pricing.input_cost_per_token = pricing.input_cost_per_token_above_200k_tokens;
         pricing.output_cost_per_token = pricing.output_cost_per_token_above_200k_tokens;
         pricing.cache_read_input_token_cost = pricing.cache_read_input_token_cost_above_200k_tokens;
@@ -2534,6 +2575,23 @@ fn compute_cost_for_lookup(
     provider_id: Option<&str>,
     usage: &TokenBreakdown,
 ) -> f64 {
+    compute_cost_for_lookup_inner(result, provider_id, usage, false)
+}
+
+fn compute_cost_for_multi_call_aggregate(
+    result: &LookupResult,
+    provider_id: Option<&str>,
+    usage: &TokenBreakdown,
+) -> f64 {
+    compute_cost_for_lookup_inner(result, provider_id, usage, true)
+}
+
+fn compute_cost_for_lookup_inner(
+    result: &LookupResult,
+    provider_id: Option<&str>,
+    usage: &TokenBreakdown,
+    multi_call_aggregate: bool,
+) -> f64 {
     let calculate = |pricing| {
         compute_cost(
             pricing,
@@ -2546,10 +2604,14 @@ fn compute_cost_for_lookup(
         )
     };
     if uses_anthropic_haiku_55_full_request_100k_pricing(result) {
-        return compute_anthropic_haiku_55_full_request_100k_cost(result, usage);
+        return compute_anthropic_haiku_55_full_request_100k_cost(
+            result,
+            usage,
+            !multi_call_aggregate,
+        );
     }
     if uses_xai_full_request_200k_pricing(result, provider_id) {
-        return compute_xai_full_request_200k_cost(result, usage);
+        return compute_xai_full_request_200k_cost(result, usage, !multi_call_aggregate);
     }
 
     let total_input = usage
@@ -2562,7 +2624,9 @@ fn compute_cost_for_lookup(
     }
 
     let mut pricing = result.pricing.clone();
-    if total_input <= TIERED_PRICING_THRESHOLD_272K_TOKENS as i64 {
+    // Like xAI's 200K tier, OpenAI's 272K tier is selected per request, so a
+    // multi-call aggregate stays on the base rates.
+    if multi_call_aggregate || total_input <= TIERED_PRICING_THRESHOLD_272K_TOKENS as i64 {
         pricing.input_cost_per_token_above_272k_tokens = None;
         pricing.output_cost_per_token_above_272k_tokens = None;
         pricing.cache_read_input_token_cost_above_272k_tokens = None;
@@ -8140,6 +8204,87 @@ mod tests {
         let cost = compute_cost_for_lookup(&result, Some("xai"), &usage);
         let expected = 149_999.0 * 0.000002 + 0.000006 + 50_000.0 * 0.0000005;
         assert!((cost - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn xai_200k_full_request_pricing_is_not_applied_to_multi_call_aggregate() {
+        let result = xai_200k_result("xai/grok-4.5", "LiteLLM");
+
+        // The issue #1387 reproduction case: eight calls totaling 372,794
+        // prompt tokens. The turn aggregate cannot reveal any call's prompt.
+        let turn_usage = TokenBreakdown {
+            input: 58_682,
+            output: 3_877,
+            cache_read: 314_112,
+            reasoning: 4_144,
+            ..Default::default()
+        };
+
+        // A real single request at this size must retain xAI's request-wide
+        // high tier. This guards against underpricing long individual calls.
+        let single_call_cost = compute_cost_for_lookup(&result, Some("xai"), &turn_usage);
+        let expected_high =
+            58_682.0 * 0.000004 + (3_877.0 + 4_144.0) * 0.000012 + 314_112.0 * 0.000001;
+        assert!((single_call_cost - expected_high).abs() < 1e-12);
+
+        let aggregate_cost =
+            compute_cost_for_multi_call_aggregate(&result, Some("xai"), &turn_usage);
+        let expected_base =
+            58_682.0 * 0.000002 + (3_877.0 + 4_144.0) * 0.000006 + 314_112.0 * 0.0000005;
+        assert!((aggregate_cost - expected_base).abs() < 1e-12);
+
+        // Do not replace the unknowable per-request distribution with an
+        // arithmetic mean. Even an aggregate averaging above 200K stays on the
+        // explicit base-rate fallback when provider-reported cost is absent.
+        let large_aggregate = TokenBreakdown {
+            input: 500_000,
+            output: 10_000,
+            ..Default::default()
+        };
+        let large_aggregate_cost =
+            compute_cost_for_multi_call_aggregate(&result, Some("xai"), &large_aggregate);
+        let expected_large_base = 500_000.0 * 0.000002 + 10_000.0 * 0.000006;
+        assert!((large_aggregate_cost - expected_large_base).abs() < 1e-12);
+    }
+
+    #[test]
+    fn openai_272k_full_request_pricing_is_not_applied_to_multi_call_aggregate() {
+        let result = openai_272k_result("openai/gpt-5.5", "LiteLLM");
+        let usage = TokenBreakdown {
+            input: 300_000,
+            output: 10_000,
+            ..Default::default()
+        };
+
+        // A real single request above 272K keeps the request-wide high tier.
+        let single_call_cost = compute_cost_for_lookup(&result, Some("openai"), &usage);
+        let expected_high = 300_000.0 * 0.000010 + 10_000.0 * 0.000045;
+        assert!((single_call_cost - expected_high).abs() < 1e-12);
+
+        // An aggregate of several calls cannot prove any one of them crossed
+        // the boundary, so it stays on the base rates.
+        let aggregate_cost = compute_cost_for_multi_call_aggregate(&result, Some("openai"), &usage);
+        let expected_base = 300_000.0 * 0.000005 + 10_000.0 * 0.000030;
+        assert!((aggregate_cost - expected_base).abs() < 1e-12);
+    }
+
+    #[test]
+    fn anthropic_haiku_100k_full_request_pricing_is_not_applied_to_multi_call_aggregate() {
+        let result = anthropic_haiku_55_100k_result("claude-haiku-5-5", "LiteLLM");
+        let usage = TokenBreakdown {
+            input: 150_000,
+            output: 1_000,
+            ..Default::default()
+        };
+
+        let single_call_cost = compute_cost_for_lookup(&result, Some("anthropic"), &usage);
+        let expected_high = 150_000.0 * 5e-7 + 1_000.0 * 2.5e-6;
+        assert!((single_call_cost - expected_high).abs() < 1e-12);
+
+        let aggregate_cost =
+            compute_cost_for_multi_call_aggregate(&result, Some("anthropic"), &usage);
+        let expected_base = 150_000.0 * 1e-7 + 1_000.0 * 5e-7;
+        assert!((aggregate_cost - expected_base).abs() < 1e-12);
     }
 
     #[test]

@@ -13,8 +13,8 @@ use tokscale_core::content_extractor::{extract_session_content, metadata_only_co
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
 use tokscale_core::{
-    calculate_cost_with_service_tier, parse_local_clients, CostSource, LocalParseOptions,
-    ParsedMessage, TokenBreakdown,
+    calculate_cost_with_service_tier, calculate_cost_with_service_tier_for_multi_call_aggregate,
+    parse_local_clients, CostSource, LocalParseOptions, ParsedMessage, TokenBreakdown,
 };
 
 pub struct ReportOptions {
@@ -134,9 +134,11 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
     record_new_sessions(db, &parsed.messages, pricing.as_deref())
 }
 
-/// Aggregate `messages` per session and record every session the wiki has not
-/// seen yet. Recorded sessions are never rewritten, so the figures computed
-/// here are the ones the wiki keeps.
+/// Aggregate `messages` per session and refresh the wiki's accounting fields.
+///
+/// `WikiDb::upsert_entry` preserves existing summaries while replacing token,
+/// cost, model, and message totals. This lets parser-generation changes repair
+/// previously recorded sessions instead of leaving stale accounting forever.
 fn record_new_sessions(
     db: &WikiDb,
     messages: &[ParsedMessage],
@@ -175,23 +177,20 @@ fn record_new_sessions(
         agg.total_cost += compute_msg_cost(msg, pricing);
         // NOTE: the wiki `report` view intentionally groups on the raw model_id
         // and does not apply `modelAliases` folding (nor the grouping
-        // normalization every other report uses). Wiki entries are persisted
-        // append-only — previously-recorded sessions are not rewritten (see the
-        // `existing.contains` skip below) — so folding here would leave a mix of
-        // raw and canonical names across sessions recorded before vs after
-        // aliases were configured. To fold in a future change, wrap the key with
+        // normalization every other report uses). Wiki accounting is refreshed
+        // from source, but stored rows created by older releases can still carry
+        // raw model names until their source is scanned again. To fold in a
+        // future change, wrap the key with
         // `tokscale_core::normalize_model_for_grouping(&msg.model_id)` here and in
         // the by-model/daily/session/JSON surfaces.
-        *agg.models.entry(msg.model_id.clone()).or_insert(0) += 1;
-        agg.message_count += msg.message_count;
+        let model_count = agg.models.entry(msg.model_id.clone()).or_insert(0);
+        *model_count = model_count.saturating_add(1);
+        agg.message_count = agg.message_count.saturating_add(msg.message_count.max(0));
     }
 
     let mut new_count = 0;
     for (session_id, agg) in &session_map {
-        if existing.contains(session_id) {
-            continue;
-        }
-
+        let is_new = !existing.contains(session_id);
         let models_used: Vec<String> = agg.models.keys().cloned().collect();
         let duration_minutes = (agg.last_active - agg.created_at) / 60;
 
@@ -220,7 +219,9 @@ fn record_new_sessions(
 
         db.upsert_entry(&entry)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        new_count += 1;
+        if is_new {
+            new_count += 1;
+        }
     }
 
     if new_count > 0 {
@@ -1650,20 +1651,31 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
     let Some(pricing) = pricing else {
         return 0.0;
     };
-    calculate_cost_with_service_tier(
-        pricing,
-        &msg.model_id,
-        Some(&msg.provider_id),
-        &TokenBreakdown {
-            input: msg.input,
-            output: msg.output,
-            cache_read: msg.cache_read,
-            cache_write: msg.cache_write,
-            cache_write_1h: msg.cache_write_1h,
-            reasoning: msg.reasoning,
-        },
-        msg.service_tier.as_deref(),
-    )
+    let tokens = TokenBreakdown {
+        input: msg.input,
+        output: msg.output,
+        cache_read: msg.cache_read,
+        cache_write: msg.cache_write,
+        cache_write_1h: msg.cache_write_1h,
+        reasoning: msg.reasoning,
+    };
+    if msg.client == "grok" && msg.message_count > 1 {
+        calculate_cost_with_service_tier_for_multi_call_aggregate(
+            pricing,
+            &msg.model_id,
+            Some(&msg.provider_id),
+            &tokens,
+            msg.service_tier.as_deref(),
+        )
+    } else {
+        calculate_cost_with_service_tier(
+            pricing,
+            &msg.model_id,
+            Some(&msg.provider_id),
+            &tokens,
+            msg.service_tier.as_deref(),
+        )
+    }
 }
 
 fn format_tokens(tokens: i64) -> String {
@@ -1714,6 +1726,18 @@ mod tests {
                 input_cost_per_token: Some(0.0001),
                 output_cost_per_token: Some(0.0002),
                 cache_read_input_token_cost: Some(0.00001),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "xai/grok-4.5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000005),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.000001),
                 ..Default::default()
             },
         );
@@ -1771,6 +1795,30 @@ mod tests {
             canonical > 0.0,
             "expected a positive cost for a known model"
         );
+    }
+
+    #[test]
+    fn compute_msg_cost_skips_xai_request_tier_for_grok_multi_call_aggregate() {
+        let pricing = test_pricing_service();
+        let mut aggregate = parsed_message("grok-4.5");
+        aggregate.client = "grok".to_string();
+        aggregate.provider_id = "xai".to_string();
+        aggregate.input = 58_682;
+        aggregate.output = 3_877;
+        aggregate.cache_read = 314_112;
+        aggregate.reasoning = 4_144;
+        aggregate.message_count = 8;
+
+        let aggregate_cost = compute_msg_cost(&aggregate, Some(&pricing));
+        let expected_base =
+            58_682.0 * 0.000002 + (3_877.0 + 4_144.0) * 0.000006 + 314_112.0 * 0.0000005;
+        assert!((aggregate_cost - expected_base).abs() < 1e-12);
+
+        aggregate.message_count = 1;
+        let single_request_cost = compute_msg_cost(&aggregate, Some(&pricing));
+        let expected_high =
+            58_682.0 * 0.000004 + (3_877.0 + 4_144.0) * 0.000012 + 314_112.0 * 0.000001;
+        assert!((single_request_cost - expected_high).abs() < 1e-12);
     }
 
     #[test]
@@ -1957,9 +2005,8 @@ mod tests {
     fn wiki_keeps_the_reported_cost_of_a_token_free_fx_session() {
         // fx can snapshot a session with a positive `total_cost`, no per-model
         // entries and zero tokens; the parser attributes it to `fx-unknown`
-        // with the reported cost. Pricing that row from its tokens yields $0,
-        // and the wiki never rewrites a session it has already recorded, so
-        // the wrong figure would stick for good.
+        // with the reported cost. Pricing that row from its tokens would record
+        // $0.00 instead.
         let home = tempfile::TempDir::new().unwrap();
         let session = home.path().join(".fx/sessions/sess-1");
         std::fs::create_dir_all(&session).unwrap();
@@ -2010,6 +2057,38 @@ mod tests {
             "wiki must keep the provider-reported cost, got {}",
             entry.total_cost
         );
+    }
+
+    #[test]
+    fn wiki_refreshes_accounting_while_preserving_summary() {
+        let home = tempfile::TempDir::new().unwrap();
+        let db = WikiDb::open(&home.path().join("wiki.db")).unwrap();
+        let mut stored = titled_entry("s1", "Keep this summary");
+        stored.total_input_tokens = 1;
+        stored.total_cost = 0.01;
+        stored.message_count = 1;
+        db.upsert_entry(&stored).unwrap();
+
+        let mut message = parsed_message("grok-4.5");
+        message.client = "grok".to_string();
+        message.provider_id = "xai".to_string();
+        message.input = 100;
+        message.output = 20;
+        message.cache_read = 30;
+        message.message_count = 8;
+        message.cost = 1.2345;
+        message.cost_source = CostSource::ProviderReported;
+
+        record_new_sessions(&db, &[message], None).unwrap();
+
+        let refreshed = db.get_entry("s1").unwrap().unwrap();
+        assert_eq!(refreshed.title.as_deref(), Some("Keep this summary"));
+        assert_eq!(refreshed.total_input_tokens, 100);
+        assert_eq!(refreshed.total_output_tokens, 20);
+        assert_eq!(refreshed.total_cache_read, 30);
+        assert!((refreshed.total_cost - 1.2345).abs() < 1e-9);
+        assert_eq!(refreshed.message_count, 8);
+        assert_eq!(refreshed.models_used, vec!["grok-4.5".to_string()]);
     }
 
     fn titled_entry(session_id: &str, title: &str) -> WikiEntry {

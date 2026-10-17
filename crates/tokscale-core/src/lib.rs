@@ -6000,6 +6000,25 @@ pub fn calculate_cost_with_service_tier(
         * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
 }
 
+/// Price a Grok turn row that aggregates more than one model call.
+///
+/// The recorded service tier multiplier still applies, but per-request
+/// full-request tier boundaries (xAI 200K, OpenAI 272K, Haiku 5.5 100K) cannot
+/// be inferred from turn-level token sums and are therefore not applied to the
+/// aggregate.
+pub fn calculate_cost_with_service_tier_for_multi_call_aggregate(
+    pricing: &pricing::PricingService,
+    model_id: &str,
+    provider_id: Option<&str>,
+    tokens: &TokenBreakdown,
+    service_tier: Option<&str>,
+) -> f64 {
+    pricing
+        .calculate_cost_detailed_for_multi_call_aggregate(model_id, provider_id, tokens)
+        .0
+        * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
+}
+
 pub fn calculate_cost_detailed_with_service_tier(
     pricing: &pricing::PricingService,
     model_id: &str,
@@ -6051,11 +6070,20 @@ fn apply_pricing_if_available(
         return;
     };
 
-    let (calculated_cost, estimate_source) = pricing.calculate_cost_detailed_with_provider(
-        &message.model_id,
-        Some(&message.provider_id),
-        &message.tokens,
-    );
+    let (calculated_cost, estimate_source) =
+        if message.client == "grok" && message.message_count > 1 {
+            pricing.calculate_cost_detailed_for_multi_call_aggregate(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            )
+        } else {
+            pricing.calculate_cost_detailed_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            )
+        };
     let calculated_cost = calculated_cost * pricing_multiplier(message, pricing);
 
     if let Some(source) = estimate_source {
@@ -19813,6 +19841,98 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.42);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_preserves_grok_provider_reported_cost() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-4.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000003),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.0000006),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "grok",
+            "grok-4.5",
+            "xai",
+            "probe-session",
+            1_790_900_001_000,
+            TokenBreakdown {
+                input: 58_682,
+                output: 3_877,
+                cache_read: 314_112,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 4_144,
+            },
+            1.2345,
+        );
+        msg.message_count = 8;
+        msg.mark_provider_reported_cost();
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 1.2345);
+        assert_eq!(msg.cost_source, sessions::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_uses_base_rates_for_grok_turn_aggregate_when_estimated() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-4.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                input_cost_per_token_above_200k_tokens: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                output_cost_per_token_above_200k_tokens: Some(0.000012),
+                cache_read_input_token_cost: Some(0.0000003),
+                cache_read_input_token_cost_above_200k_tokens: Some(0.0000006),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        // Issue #1387 reproduction: 8 calls, prompt 372,794 >= 200k.
+        let mut msg = UnifiedMessage::new(
+            "grok",
+            "grok-4.5",
+            "xai",
+            "probe-session",
+            1_790_900_001_000,
+            TokenBreakdown {
+                input: 58_682,
+                output: 3_877,
+                cache_read: 314_112,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 4_144,
+            },
+            0.0,
+        );
+        msg.message_count = 8;
+
+        let mut single_request = msg.clone();
+        single_request.message_count = 1;
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_pricing_if_available(&mut single_request, Some(&pricing));
+
+        // Base rate expected: $0.2597236 (NOT the doubled request-wide tier $0.5194472).
+        assert!((msg.cost - 0.2597236).abs() < 1e-7);
+        assert_eq!(msg.cost_source, sessions::CostSource::Estimated);
+        // The aggregate exception must not underprice a real single request.
+        assert!((single_request.cost - 0.5194472).abs() < 1e-7);
+        assert_eq!(single_request.cost_source, sessions::CostSource::Estimated);
     }
 
     #[test]
