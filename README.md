@@ -1911,11 +1911,18 @@ Hindsight writes no local session logs of its own. Running `tokscale hindsight s
 
 Location: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. [Oh My Pi](https://github.com/can1357/oh-my-pi) writes the same session format under `~/.omp/agent/sessions/` and is tracked as its own `omp` client.
 
-JSONL format with session header and message entries:
+JSONL format with session, message, and usage entries:
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
+
+Tokscale reads native standalone `usage` entries with `provider`, `model`, and `usage` fields. It accepts any `kind` value. Pi defines this record as [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry).
+
+Records without usage do not add token counts. Tokscale uses its existing price data for each provider and model pair.
+
+This behavior applies to Pi-format parsers for Pi, Oh My Pi, Senpi, Kimchi Coding, and Prime Agent. Copied records retain their deduplication identity. Kimchi keeps its existing session-scoped identity. The parser cache is invalidated after an upgrade, so Tokscale reads the sessions again.
 
 ### Senpi (OmO Native)
 
