@@ -1649,7 +1649,9 @@ fn parser_version(client: ClientId) -> u32 {
         // of stopping at the first one, and usage dedup keys carry the record's
         // file position. Both change the parse of byte-identical input, so
         // cached entries hold truncated and under-deduplicated output (#1031).
-        ClientId::Grok => 7,
+        // v7->v8: unified inference durations are now measured and anchored
+        // at request start, while overlap selection retains the source clock.
+        ClientId::Grok => 8,
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -5598,11 +5600,40 @@ mod tests {
     }
 
     #[test]
-    fn test_grok_resilient_line_reader_parser_version_invalidates_v6_entries() {
-        // A Grok session file that is never appended to again keeps its
-        // fingerprint forever, so only the version bump discards the truncated
-        // v6 parse and forces a cold reparse.
-        assert_eq!(parser_version(ClientId::Grok), 7);
+    #[serial_test::serial]
+    fn grok_v7_shards_are_reparsed_with_inference_duration() {
+        let home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(home.path());
+        let path = home.path().join(".grok/logs/unified.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100,"completion_tokens":25,"model_elapsed_ms":500}}"#).unwrap();
+        let fingerprint = SourceFingerprint::from_grok_path(&path).unwrap();
+        let current = CacheIdentity::for_client(ClientId::Grok);
+        let previous = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 7,
+        };
+        let mut stale = test_entry(previous, &path, "session-1");
+        stale.fingerprint = fingerprint.clone();
+        stale.messages[0].timestamp = 1_700_000_000_000;
+        let shard = cache_shard_path(current, &path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, previous, &[stale], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let cold = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["grok".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].timestamp, 1_699_999_999_500);
+        assert_eq!(cold[0].duration_ms, Some(500));
+        assert_eq!(
+            SourceFingerprint::from_grok_path(&path).unwrap(),
+            fingerprint
+        );
     }
 
     #[test]
