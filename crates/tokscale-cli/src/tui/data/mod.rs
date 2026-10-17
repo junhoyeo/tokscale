@@ -4079,68 +4079,25 @@ after"#,
         )
         .unwrap();
 
-        let architect_expected = expected_message_cost(
-            &pricing,
-            "claude-sonnet-4",
-            "anthropic",
-            CoreTokenBreakdown {
-                input: 420_000,
-                output: 120_000,
-                cache_read: 32_000,
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-        ) + expected_message_cost(
-            &pricing,
-            "claude-sonnet-4",
-            "anthropic",
-            CoreTokenBreakdown {
-                input: 90_000,
-                output: 60_000,
-                cache_read: 12_000,
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-        );
-        let reviewer_expected = expected_message_cost(
-            &pricing,
-            "claude-haiku-4",
-            "anthropic",
-            CoreTokenBreakdown {
-                input: 70_000,
-                output: 26_000,
-                cache_read: 8_000,
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-        ) + expected_message_cost(
-            &pricing,
-            "claude-haiku-4",
-            "anthropic",
-            CoreTokenBreakdown {
-                input: 22_000,
-                output: 18_000,
-                cache_read: 3_000,
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-        );
+        // The task log records a positive per-request `cost`, which is now
+        // kept as the client's own charge instead of being re-estimated, so
+        // the agent total is the sum of the logged values. `tokensIn` is gross
+        // of cache on these rows, so input is the residual and the cache
+        // buckets are counted once: (420k-32k)+120k+32k + (90k-12k)+60k+12k.
+        let architect_expected = 8.4 + 3.1;
+        let reviewer_expected = 1.8 + 0.9;
 
         assert_eq!(usage.agents.len(), 2);
         assert_eq!(usage.agents[0].agent, "Architect");
         assert_eq!(usage.agents[0].clients, "roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert_cost_matches(usage.agents[0].cost, architect_expected);
-        assert_eq!(usage.agents[0].tokens.total(), 734_000);
+        assert_eq!(usage.agents[0].tokens.total(), 690_000);
 
         assert_eq!(usage.agents[1].agent, "Reviewer");
         assert_eq!(usage.agents[1].message_count, 2);
         assert_cost_matches(usage.agents[1].cost, reviewer_expected);
-        assert_eq!(usage.agents[1].tokens.total(), 147_000);
+        assert_eq!(usage.agents[1].tokens.total(), 136_000);
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
