@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 ///
 /// v2->v3: a positive `cost` is marked provider-reported so submission keeps it
 /// instead of re-pricing (and zeroing) the row, Roo/Kilo Code `tokensIn` has
-/// the cache buckets it already contains subtracted out (Cline's stay
-/// disjoint), and a bare `apiProtocol` no longer outranks the provider named by
-/// the model id.
+/// the cache buckets it already contains subtracted out once the row is new
+/// enough to be gross of them (Cline's stay disjoint at every age), and a bare
+/// `apiProtocol` no longer outranks the provider named by the model id.
 pub(crate) const ROO_KILO_TASK_LOG_PARSER_BASE_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
@@ -137,17 +137,19 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             .or_else(|| api_protocol.map(str::to_string))
             .unwrap_or_else(|| "unknown".to_string());
 
-        // On Roo and Kilo Code, `tokensIn` is gross of cache, so the cache
-        // buckets come out of input to stop counting them twice. The wire
-        // protocol is NOT the discriminator: Roo `416fa5727e` (2025-10-31)
-        // changed `Task.ts` to persist `tokensIn: costResult.totalInputTokens`,
-        // which is base + cache for *both* protocols, and current Roo's
+        // On Roo and Kilo Code, `tokensIn` became gross of cache when Roo
+        // `416fa5727e` (2025-10-31, released in v3.29.5) changed `Task.ts` to
+        // persist `tokensIn: costResult.totalInputTokens`; current Roo's
         // `consolidateTokenUsage.ts` says the same ("tokensIn now stores TOTAL
-        // input tokens"). Only pre-2025-10 Anthropic-protocol rows were net of
-        // cache, and there the subtraction is self-limiting: such a row records
-        // base input with the cache buckets beside it, so subtracting a value
-        // it never included can only reach zero, never go negative, and the
-        // cache buckets are still reported in full.
+        // input tokens ... applies to both Anthropic and OpenAI protocols").
+        // So the cache buckets come out of input to stop counting them twice,
+        // and the wire protocol is NOT the discriminator.
+        //
+        // Before that change, an Anthropic-protocol row recorded `input_tokens`
+        // net of cache, and subtracting there would undercount real input
+        // (1000 net with 600 + 100 cache would report 300, not 1000). Those
+        // rows are identified by their own timestamp, which is the request
+        // time, so the schema is read from the row rather than guessed.
         //
         // Cline forked this format and did NOT follow that change: it keeps
         // the three buckets disjoint on purpose ("Classic Cline/webview
@@ -155,11 +157,12 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
         // buckets" -- `apps/vscode/src/sdk/message-translator.ts`), and its own
         // totals add all three. Subtracting there would undercount real input,
         // so the client decides.
-        let input = if gross_input_includes_cache(source) {
-            residual_input(payload.tokens_in, payload.cache_reads, payload.cache_writes)
-        } else {
-            payload.tokens_in
-        };
+        let input =
+            if gross_input_includes_cache(source, timestamp, payload.api_protocol.as_deref()) {
+                residual_input(payload.tokens_in, payload.cache_reads, payload.cache_writes)
+            } else {
+                payload.tokens_in
+            };
 
         let mut message = UnifiedMessage::new_with_agent(
             source,
@@ -299,19 +302,44 @@ struct ApiReqStartedPayload {
     api_protocol: Option<String>,
 }
 
-/// Whether this client's `tokensIn` includes the cache buckets.
+/// First millisecond at which a Roo/Kilo Code task row records `tokensIn`
+/// gross of the cache buckets.
 ///
-/// Roo and Kilo Code persist `costResult.totalInputTokens`, which is gross of
-/// cache; Cline deliberately keeps the buckets disjoint. The standalone Cline
-/// CLI lane in `cline.rs` subtracts because the SDK usage event it reads *is*
-/// gross -- that is a different source, not a disagreement.
-fn gross_input_includes_cache(source: &str) -> bool {
-    !matches!(source, "cline")
+/// Roo `416fa5727e` landed on 2025-10-31 and shipped in v3.29.5 (2025-11-01).
+/// The boundary is deliberately the release day rather than the commit day, so
+/// a row written by the last pre-release build is still read with the old
+/// schema; the cost of erring this way is counting cache twice for at most one
+/// day of history, against silently undercounting real input.
+const GROSS_INPUT_FROM_MS: i64 = 1_762_041_600_000; // 2025-11-02T00:00:00Z
+
+/// Whether this row's `tokensIn` includes the cache buckets.
+///
+/// Three different producers write this one format:
+///
+/// - Cline keeps `tokensIn`, `cacheReads` and `cacheWrites` disjoint on
+///   purpose, at every age, so it never subtracts. (The standalone Cline CLI
+///   lane in `cline.rs` does subtract, because the SDK usage event it reads is
+///   itself gross -- a different source, not a disagreement.)
+/// - Roo and Kilo Code are gross of cache from [`GROSS_INPUT_FROM_MS`] on.
+/// - Before that, only the OpenAI protocol was gross; Anthropic-protocol rows
+///   were net, and an absent `apiProtocol` on a row that old means the field
+///   predates being written at all, which is the Anthropic-style schema.
+fn gross_input_includes_cache(source: &str, timestamp: i64, api_protocol: Option<&str>) -> bool {
+    if source == "cline" {
+        return false;
+    }
+    if timestamp >= GROSS_INPUT_FROM_MS {
+        return true;
+    }
+    api_protocol
+        .map(str::trim)
+        .and_then(|protocol| protocol.rsplit('/').next())
+        .is_some_and(|protocol| protocol.eq_ignore_ascii_case("openai"))
 }
 
 /// Non-cached input tokens for a task-log row whose `tokensIn` is gross of
-/// the cache buckets, clamped at zero so a pre-2025-10 row that recorded
-/// `tokensIn` net of cache cannot produce negative input.
+/// the cache buckets, clamped at zero so a corrupt row whose buckets exceed
+/// its own input cannot report negative input.
 fn residual_input(tokens_in: i64, cache_reads: i64, cache_writes: i64) -> i64 {
     tokens_in
         .saturating_sub(cache_reads)
@@ -420,21 +448,21 @@ mod tests {
         task_dir.join("ui_messages.json")
     }
 
-    /// `tokensIn` is gross of cache on both protocols in every log this parser
-    /// still sees (Roo `416fa5727e`), so the cache buckets come out of input
-    /// regardless of `apiProtocol` -- including when the row omits it, which
-    /// is what current Cline writes.
+    /// From Roo v3.29.5 (2025-11) on, `tokensIn` is gross of cache on both
+    /// protocols, so the buckets come out of input regardless of
+    /// `apiProtocol` -- including when the row omits the field, which is what
+    /// current Cline-style writers do.
     #[test]
     fn test_parse_roocode_cache_overlap_and_cost_provenance() {
         let dir = TempDir::new().unwrap();
         let ui_messages = r#"[
-  {"type":"say","say":"api_req_started","ts":1748038758034,
+  {"type":"say","say":"api_req_started","ts":1789022955199,
    "text":"{\"cost\":0,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"openai\"}"},
-  {"type":"say","say":"api_req_started","ts":1748038758035,
+  {"type":"say","say":"api_req_started","ts":1789022955200,
    "text":"{\"cost\":0.5,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"anthropic\"}"},
-  {"type":"say","say":"api_req_started","ts":1748038758036,
+  {"type":"say","say":"api_req_started","ts":1789022955201,
    "text":"{\"tokensIn\":1000,\"tokensOut\":10}"},
-  {"type":"say","say":"api_req_started","ts":1748038758037,
+  {"type":"say","say":"api_req_started","ts":1789022955202,
    "text":"{\"cost\":0.25,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100}",
    "modelInfo":{"providerId":"openai","modelId":"gpt-5"}}
 ]"#;
@@ -460,30 +488,46 @@ mod tests {
         // No `cost` key: left for the pricing service to estimate.
         assert!(!messages[2].has_authoritative_cost());
 
-        // No `apiProtocol` at all (current Cline): still de-overlapped.
+        // No `apiProtocol` at all: a modern row is still de-overlapped.
         assert_eq!(messages[3].tokens.input, 300);
         assert_eq!(messages[3].tokens.cache_read, 600);
         assert_eq!(messages[3].provider_id, "openai");
         assert!(messages[3].has_authoritative_cost());
     }
 
-    /// A pre-2025-10 Anthropic-protocol row recorded `tokensIn` net of cache.
-    /// Subtracting buckets it never included must clamp at zero rather than
-    /// go negative, and must never reduce the cache buckets themselves.
+    /// Before Roo v3.29.5, an Anthropic-protocol row recorded `input_tokens`
+    /// net of cache. Subtracting there would undercount real input, so a row
+    /// that old keeps `tokensIn` as written -- while an OpenAI-protocol row of
+    /// the same age, which was always gross, is still de-overlapped.
     #[test]
-    fn test_parse_roocode_legacy_net_input_clamps_at_zero() {
+    fn test_parse_roocode_legacy_anthropic_input_is_already_net_of_cache() {
         let dir = TempDir::new().unwrap();
         let ui_messages = r#"[
   {"type":"say","say":"api_req_started","ts":1748038758034,
+   "text":"{\"cost\":0.1,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"anthropic\"}"},
+  {"type":"say","say":"api_req_started","ts":1748038758035,
+   "text":"{\"cost\":0.1,\"tokensIn\":1000,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"openai\"}"},
+  {"type":"say","say":"api_req_started","ts":1748038758036,
    "text":"{\"cost\":0.1,\"tokensIn\":300,\"tokensOut\":10,\"cacheReads\":600,\"cacheWrites\":100,\"apiProtocol\":\"anthropic\"}"}
 ]"#;
         let path = setup_task(&dir, "task-legacy-net", ui_messages, None);
 
         let messages = parse_roocode_file(&path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages.len(), 3);
+
+        // Legacy Anthropic: already net of cache, so left alone. Subtracting
+        // would have reported 300 for 1000 real input tokens.
+        assert_eq!(messages[0].tokens.input, 1000);
         assert_eq!(messages[0].tokens.cache_read, 600);
         assert_eq!(messages[0].tokens.cache_write, 100);
+
+        // Legacy OpenAI: gross even then, so the buckets still come out.
+        assert_eq!(messages[1].tokens.input, 300);
+
+        // A legacy Anthropic row whose input is smaller than the cache sum is
+        // simply reported as written; nothing is clamped away.
+        assert_eq!(messages[2].tokens.input, 300);
+        assert_eq!(messages[2].tokens.cache_read, 600);
     }
 
     #[test]
