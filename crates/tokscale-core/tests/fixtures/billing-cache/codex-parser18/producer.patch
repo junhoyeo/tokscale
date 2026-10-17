@@ -1,0 +1,133 @@
+diff --git a/crates/tokscale-core/src/message_cache.rs b/crates/tokscale-core/src/message_cache.rs
+index 9422efa6..5d993323 100644
+--- a/crates/tokscale-core/src/message_cache.rs
++++ b/crates/tokscale-core/src/message_cache.rs
+@@ -3804,6 +3804,128 @@ mod tests {
+     use tempfile::{NamedTempFile, TempDir};
+     use wait_timeout::ChildExt;
+
++    /// Export through the unmodified upstream parser, entry type, and writer.
++    /// Run only when deliberately regenerating this historical wire fixture.
++    #[test]
++    #[ignore = "historical fixture producer; requires TOKSCALE_CODEX_FIXTURE_OUT"]
++    fn export_released_codex_v10_parser18_fixture() {
++        use crate::sessions::codex::parse_codex_file_incremental;
++        let prefix = include_str!("../tests/fixtures/codex-v10-parser18-producer/prefix.jsonl");
++        let append_pending =
++            include_str!("../tests/fixtures/codex-v10-parser18-producer/append-pending.jsonl");
++        let append_settled =
++            include_str!("../tests/fixtures/codex-v10-parser18-producer/append-settled.jsonl");
++        let complete =
++            include_str!("../tests/fixtures/codex-v10-parser18-producer/complete.jsonl");
++        assert_eq!(format!("{prefix}{append_pending}{append_settled}"), complete);
++        let output = PathBuf::from(std::env::var_os("TOKSCALE_CODEX_FIXTURE_OUT").unwrap());
++        std::fs::create_dir_all(&output).unwrap();
++        let dir = TempDir::new().unwrap();
++        let source = dir.path().join("codex-v10-parser18.jsonl");
++        std::fs::write(&source, prefix).unwrap();
++
++        let identity = CacheIdentity::for_client(ClientId::Codex);
++        assert_eq!(identity.parser_version, 18);
++        assert_eq!(CACHE_FORMAT_VERSION, 10);
++        let parsed = parse_codex_file_incremental(&source, 0, CodexParseState::default());
++        assert!(parsed.parse_succeeded);
++        assert_eq!(parsed.consumed_offset, prefix.len() as u64);
++        assert_eq!(parsed.messages.len(), 2);
++        assert_eq!(parsed.messages.iter().map(|m| m.tokens.total()).sum::<i64>(), 330);
++        assert_eq!(parsed.state.usage_event_ordinal, 1);
++        assert!(parsed.state.turn_coverage.turn_ids.contains("turn-1"));
++        assert!(!parsed.state.turn_coverage.turn_ids.contains("turn-2"));
++        assert!(parsed.state.pending_turn_start);
++        assert_eq!(parsed.state.session_provider.as_deref(), Some("gateway"));
++        assert_eq!(parsed.state.settled_usage_records.len(), 1);
++        let state_json = serde_json::to_value(&parsed.state).unwrap();
++        assert_eq!(state_json["pending_usage_record"]["response_id"], "response-pending");
++        assert_eq!(state_json["pending_usage_record"]["after_compacted"], true);
++        assert_eq!(state_json["pending_usage_record"]["turn_start"], true);
++        assert_eq!(state_json["pending_usage_record"]["service_tier"], "priority");
++        assert_eq!(state_json["pending_usage_record"]["model"], "gpt-5.5");
++
++        let incremental = build_codex_incremental_cache(
++            &source, parsed.consumed_offset, parsed.state,
++        ).unwrap();
++        assert!(incremental.ends_with_newline);
++        let mut fingerprint = SourceFingerprint::from_path(&source).unwrap();
++        assert_eq!(incremental.prefix_hash, fingerprint.content_hash);
++        // Normalize only the entry's external path and filesystem timestamp.
++        // Every state field and message comes from the original parser.
++        fingerprint.modified_ns = 1;
++        let entry = CachedSourceEntry::new(
++            identity,
++            Path::new("/synthetic/codex-v10-parser18.jsonl"),
++            fingerprint,
++            parsed.messages,
++            parsed.fallback_timestamp_indices,
++            Some(incremental),
++        );
++        let binary = output.join("codex-v10-parser18.bin");
++        write_shard_with_limit(&binary, identity, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
++        let ShardReadStatus::Loaded(mut loaded) = read_shard(&binary, identity) else {
++            panic!("upstream writer must produce a current readable shard");
++        };
++        let cached = loaded.remove(0);
++        let incremental = cached.codex_incremental.unwrap();
++        assert_eq!(serde_json::to_value(&incremental.state).unwrap(), state_json);
++        assert_eq!(incremental.consumed_offset, prefix.len() as u64);
++        assert!(codex_prefix_matches(&source, &incremental));
++        std::fs::write(
++            output.join("expected-prefix-state.json"),
++            serde_json::to_vec_pretty(&incremental).unwrap(),
++        ).unwrap();
++
++        std::fs::OpenOptions::new().append(true).open(&source).unwrap()
++            .write_all(append_pending.as_bytes()).unwrap();
++        let pending = parse_codex_file_incremental(
++            &source, incremental.consumed_offset, incremental.state,
++        );
++        assert!(pending.parse_succeeded);
++        assert_eq!(pending.messages.len(), 1);
++        assert_eq!(pending.messages[0].tokens.total(), 330);
++        assert!(pending.messages[0].is_turn_start);
++        assert_eq!(pending.messages[0].service_tier.as_deref(), Some("priority"));
++        assert!(pending.state.pending_usage_record.is_none());
++        assert_eq!(pending.state.settled_usage_records.len(), 1);
++        std::fs::OpenOptions::new().append(true).open(&source).unwrap()
++            .write_all(append_settled.as_bytes()).unwrap();
++        let settled = parse_codex_file_incremental(
++            &source, pending.consumed_offset, pending.state,
++        );
++        assert!(settled.parse_succeeded);
++        assert!(settled.messages.is_empty(), "late settled response cannot count twice");
++        assert!(settled.state.pending_usage_record.is_none());
++        assert!(settled.state.settled_usage_records.is_empty());
++        let fresh = parse_codex_file_incremental(&source, 0, CodexParseState::default());
++        let mut incremental_messages = cached.messages;
++        incremental_messages.extend(pending.messages);
++        incremental_messages.extend(settled.messages);
++        assert_eq!(fresh.messages, incremental_messages);
++        assert_eq!(fresh.messages.len(), 3);
++        assert_eq!(fresh.messages.iter().map(|m| m.tokens.total()).sum::<i64>(), 660);
++        assert_eq!(fresh.state.turn_coverage, settled.state.turn_coverage);
++        let mut fresh_state = serde_json::to_value(&fresh.state).unwrap();
++        let mut resumed_state = serde_json::to_value(&settled.state).unwrap();
++        // Compare the HashSet structurally above, not its nondeterministic JSON order.
++        fresh_state.as_object_mut().unwrap().remove("turn_coverage");
++        resumed_state.as_object_mut().unwrap().remove("turn_coverage");
++        assert_eq!(fresh_state, resumed_state);
++        std::fs::write(
++            output.join("expected-complete-messages.json"),
++            serde_json::to_vec_pretty(&fresh.messages).unwrap(),
++        ).unwrap();
++        for (name, content) in [
++            ("prefix.jsonl", prefix),
++            ("append-pending.jsonl", append_pending),
++            ("append-settled.jsonl", append_settled),
++            ("complete.jsonl", complete),
++        ] {
++            std::fs::write(output.join(name), content).unwrap();
++        }
++    }
++
+     #[test]
+     #[serial_test::serial]
+     fn cache_warning_is_deferred_once_while_the_tui_is_active() {

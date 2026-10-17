@@ -168,6 +168,10 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         usage.tokens,
                         0.0,
                         Some(dedup_key),
+                    )
+                    .with_billing(
+                        Some(provider_id),
+                        super::BillingIdentityOrigin::ExplicitRecord,
                     );
                     message.agent = Some("headless".to_string());
                     message.is_turn_start = index == 0;

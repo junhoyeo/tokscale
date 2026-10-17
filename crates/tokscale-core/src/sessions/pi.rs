@@ -1031,6 +1031,13 @@ fn parse_pi_format_file_inner(
             },
             reported_cost.unwrap_or(0.0),
             agent.clone(),
+        )
+        .with_billing(
+            message
+                .provider
+                .as_deref()
+                .filter(|provider| accepts_replacement_field(provider, options.lossy_line_reader)),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         if reported_cost.is_some() {
             unified.mark_provider_reported_cost();

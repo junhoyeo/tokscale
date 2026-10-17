@@ -469,6 +469,9 @@ pub(crate) struct ClaudeCheckpoint {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ClaudeParseState {
     session_id: String,
+    /// A genuine record-level billing disagreement must survive an append;
+    /// otherwise A + B (Unknown) followed by A becomes incorrectly scoped.
+    billing_conflicts: HashSet<usize>,
     provider_confidences: Vec<u8>,
     split_reporting_dedup_keys: HashSet<String>,
     pending_turn_start: bool,
@@ -489,8 +492,16 @@ impl ClaudeCheckpoint {
             .iter()
             .collect::<Vec<_>>();
         split_reporting_dedup_keys.sort_unstable();
+        let mut billing_conflicts = self
+            .state
+            .billing_conflicts
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        billing_conflicts.sort_unstable();
         let state = (
             &self.state.session_id,
+            billing_conflicts,
             &self.state.provider_confidences,
             split_reporting_dedup_keys,
             self.state.pending_turn_start,
@@ -778,6 +789,7 @@ fn parse_claude_lines(
     } = start;
     let ClaudeParseState {
         mut session_id,
+        mut billing_conflicts,
         mut provider_confidences,
         mut split_reporting_dedup_keys,
         mut pending_turn_start,
@@ -906,11 +918,15 @@ fn parse_claude_lines(
                 if let Some(tool_message) = tool_result_message {
                     if let Some(ref dedup_key) = tool_message.dedup_key {
                         if let Some(&existing_idx) = processed_hashes.get(dedup_key) {
+                            let mut billing_conflicted = billing_conflicts.contains(&existing_idx);
                             merge_claude_tool_result_duplicate(
                                 &mut messages[existing_idx],
-                                tool_message.tokens.input,
-                                tool_message.timestamp,
+                                &tool_message,
+                                &mut billing_conflicted,
                             );
+                            if billing_conflicted {
+                                billing_conflicts.insert(existing_idx);
+                            }
                             continue;
                         }
                         processed_hashes.insert(dedup_key.clone(), messages.len());
@@ -952,6 +968,18 @@ fn parse_claude_lines(
                     None => continue,
                 };
 
+                let billing_identity = super::BillingIdentity::from_explicit(
+                    message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref())
+                        .or(metadata_provider_hint),
+                    if message.provider_id.is_some() || entry.provider_id.is_some() {
+                        super::BillingIdentityOrigin::ExplicitRecord
+                    } else {
+                        super::BillingIdentityOrigin::ExplicitSession
+                    },
+                );
                 let duplicate_provider_choice = claude_provider_choice_from_parts(
                     message.model.as_deref(),
                     message
@@ -981,6 +1009,39 @@ fn parse_claude_lines(
                     );
                     if usage.reports_cache_split() {
                         split_reporting_dedup_keys.insert(hash.clone());
+                    }
+                    let existing = &mut messages[existing_idx];
+                    let same_model = message.model.as_deref().is_none_or(|raw| {
+                        raw == existing
+                            .pricing_model_id
+                            .as_deref()
+                            .unwrap_or(&existing.model_id)
+                    });
+                    let weaker_identity = matches!(
+                        (&existing.billing_identity, &billing_identity),
+                        (
+                            super::BillingIdentity::Known {
+                                origin: super::BillingIdentityOrigin::ExplicitRecord,
+                                ..
+                            },
+                            super::BillingIdentity::Known {
+                                origin: super::BillingIdentityOrigin::ExplicitSession,
+                                ..
+                            }
+                        )
+                    );
+                    let conflicting_records = matches!((&existing.billing_identity, &billing_identity),
+                        (super::BillingIdentity::Known { id: first, origin: super::BillingIdentityOrigin::ExplicitRecord },
+                         super::BillingIdentity::Known { id: second, origin: super::BillingIdentityOrigin::ExplicitRecord }) if first != second);
+                    if same_model && conflicting_records {
+                        existing.billing_identity = super::BillingIdentity::Unknown;
+                        billing_conflicts.insert(existing_idx);
+                    } else if same_model
+                        && !weaker_identity
+                        && billing_identity.id().is_some()
+                        && !billing_conflicts.contains(&existing_idx)
+                    {
+                        existing.billing_identity = billing_identity.clone();
                     }
                     if let Some(choice) = duplicate_provider_choice {
                         update_claude_provider_id(
@@ -1048,6 +1109,8 @@ fn parse_claude_lines(
                         0.0,
                         dedup_key,
                     );
+                    unified.billing_identity = billing_identity;
+                    unified.preserve_pricing_model(&raw_model);
                     unified.duration_ms = duration_ms;
                     unified.agent = sidechain_agent.clone();
                     unified.set_workspace(workspace_key.clone(), workspace_label.clone());
@@ -1152,6 +1215,8 @@ fn parse_claude_lines(
         provider_confidences.push(provider_confidence);
     }
 
+    reconcile_advisor_billing(&mut messages);
+
     // Duplicate assembly is done, so the documented invariant
     // (`cache_write_1h` never exceeds `cache_write`) is restored here. An
     // initially inconsistent partial record — a 1-hour split arriving before
@@ -1186,6 +1251,7 @@ fn parse_claude_lines(
                 unclamped_cache_write_1h,
                 state: ClaudeParseState {
                     session_id,
+                    billing_conflicts,
                     provider_confidences,
                     split_reporting_dedup_keys,
                     pending_turn_start,
@@ -1206,6 +1272,34 @@ fn parse_claude_lines(
         messages,
         checkpoint,
     }
+}
+
+/// Reconcile supplementary advisor rows after parents have finished merging.
+/// Stable keys preserve this relationship across streaming, retained history,
+/// checkpoint resumes, and cross-file deduplication. Return changed rows so a
+/// caller holding estimated costs can reprice them against the final channel.
+pub(crate) fn reconcile_advisor_billing(messages: &mut [UnifiedMessage]) -> Vec<usize> {
+    let parents = claude_dedup_index(messages);
+    let mut changed = Vec::new();
+    for index in 0..messages.len() {
+        if messages[index].message_count != 0 || messages[index].has_authoritative_cost() {
+            continue;
+        }
+        let parent_index = messages[index].dedup_key.as_deref().and_then(|key| {
+            let (parent_key, position) = key.rsplit_once(":advisor:")?;
+            position.parse::<usize>().ok()?;
+            parents.get(parent_key).copied()
+        });
+        if let Some(parent_index) =
+            parent_index.filter(|&parent_index| messages[parent_index].message_count > 0)
+        {
+            if messages[index].billing_identity != messages[parent_index].billing_identity {
+                messages[index].billing_identity = messages[parent_index].billing_identity.clone();
+                changed.push(index);
+            }
+        }
+    }
+    changed
 }
 
 // Top-level usage already sums the main-model iterations, excluding advisors.
@@ -1247,6 +1341,8 @@ pub(crate) fn claude_advisor_messages(
                     .as_ref()
                     .map(|key| format!("{key}:advisor:{index}")),
             );
+            advisor.billing_identity = parent.billing_identity.clone();
+            advisor.preserve_pricing_model(model);
             advisor.message_count = 0;
             advisor.agent.clone_from(&parent.agent);
             advisor.set_workspace(parent.workspace_key.clone(), parent.workspace_label.clone());
@@ -1354,7 +1450,7 @@ fn cc_mirror_variant_metadata_from_path(
                 .as_deref()
                 .or(metadata.provider.as_deref())
         })
-        .and_then(cc_mirror_provider_id);
+        .map(str::to_string);
 
     Some(CcMirrorVariantMetadata { name, provider_id })
 }
@@ -1496,18 +1592,61 @@ pub(crate) fn merge_message_completeness(
     }
     if candidate.has_authoritative_cost() && !existing.has_authoritative_cost() {
         existing.cost = candidate.cost;
+        // Authoritative amount and its model/channel evidence are one record.
+        existing.model_id.clone_from(&candidate.model_id);
+        existing.provider_id.clone_from(&candidate.provider_id);
+        existing
+            .pricing_model_id
+            .clone_from(&candidate.pricing_model_id);
+        existing
+            .billing_identity
+            .clone_from(&candidate.billing_identity);
+        existing.service_tier.clone_from(&candidate.service_tier);
         existing.mark_provider_reported_cost();
     }
 }
 
 fn merge_claude_tool_result_duplicate(
     existing: &mut UnifiedMessage,
-    input_tokens: i64,
-    timestamp_ms: i64,
+    incoming: &UnifiedMessage,
+    billing_conflicted: &mut bool,
 ) {
-    existing.tokens.input = existing.tokens.input.max(input_tokens.max(0));
-    if timestamp_ms >= existing.timestamp {
-        existing.set_timestamp(timestamp_ms);
+    existing.tokens.input = existing.tokens.input.max(incoming.tokens.input.max(0));
+    if incoming.timestamp >= existing.timestamp {
+        existing.set_timestamp(incoming.timestamp);
+    }
+
+    let weaker_identity = matches!(
+        (&existing.billing_identity, &incoming.billing_identity),
+        (
+            super::BillingIdentity::Known {
+                origin: super::BillingIdentityOrigin::ExplicitRecord,
+                ..
+            },
+            super::BillingIdentity::Known {
+                origin: super::BillingIdentityOrigin::ExplicitSession,
+                ..
+            }
+        )
+    );
+    let conflicting_records = matches!(
+        (&existing.billing_identity, &incoming.billing_identity),
+        (
+            super::BillingIdentity::Known {
+                id: first,
+                origin: super::BillingIdentityOrigin::ExplicitRecord,
+            },
+            super::BillingIdentity::Known {
+                id: second,
+                origin: super::BillingIdentityOrigin::ExplicitRecord,
+            }
+        ) if first != second
+    );
+    if conflicting_records {
+        existing.billing_identity = super::BillingIdentity::Unknown;
+        *billing_conflicted = true;
+    } else if !weaker_identity && incoming.billing_identity.id().is_some() && !*billing_conflicted {
+        existing.billing_identity = incoming.billing_identity.clone();
     }
 }
 
@@ -1581,7 +1720,7 @@ fn extract_claude_tool_result_message(
             .as_ref()
             .and_then(|message| message.model.clone())
     });
-    let provider_hint = extract_claude_provider(&value)
+    let record_provider_hint = extract_claude_provider(&value)
         .or_else(|| {
             context
                 .entry
@@ -1621,9 +1760,15 @@ fn extract_claude_tool_result_message(
             None => "unknown".to_string(),
         },
     };
-    let provider_hint = provider_hint
+    let provider_hint = record_provider_hint
+        .clone()
         .or_else(|| context.last_provider_hint.map(str::to_string))
         .or_else(|| context.default_provider_hint.map(str::to_string));
+    let billing_origin = if record_provider_hint.is_some() {
+        super::BillingIdentityOrigin::ExplicitRecord
+    } else {
+        super::BillingIdentityOrigin::ExplicitSession
+    };
 
     let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
     let model = canonicalize_claude_model(&raw_model);
@@ -1649,7 +1794,9 @@ fn extract_claude_tool_result_message(
         usage
             .dedup_key
             .map(|key| tool_result_dedup_key(context.client_id, context.session_id, &key)),
-    );
+    )
+    .with_billing(provider_hint.as_deref(), billing_origin)
+    .with_pricing_model(&raw_model);
     message.message_count = 0;
     message.agent = context.sidechain_agent;
     message.set_workspace(context.workspace_key, context.workspace_label);
@@ -2006,36 +2153,43 @@ fn extract_claude_headless_message(
         return None;
     }
     let provider_hint = extract_claude_provider(value);
-    let provider_id = claude_provider_id(
-        &raw_model,
-        provider_hint.as_deref().or(default_provider_hint),
-    );
+    let billing_provider = provider_hint.as_deref().or(default_provider_hint);
+    let billing_origin = if provider_hint.is_some() {
+        super::BillingIdentityOrigin::ExplicitRecord
+    } else {
+        super::BillingIdentityOrigin::ExplicitSession
+    };
+    let provider_id = claude_provider_id(&raw_model, billing_provider);
     let model = canonicalize_claude_model(&raw_model);
     let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
 
-    Some(UnifiedMessage::new(
-        client_id,
-        model,
-        provider_id,
-        session_id.to_string(),
-        timestamp,
-        {
-            let cache_write = extract_i64(usage.get("cache_creation_input_tokens"))
-                .unwrap_or(0)
-                .max(0);
-            TokenBreakdown {
-                input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
-                output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
-                cache_read: extract_i64(usage.get("cache_read_input_tokens"))
+    Some(
+        UnifiedMessage::new(
+            client_id,
+            model,
+            provider_id,
+            session_id.to_string(),
+            timestamp,
+            {
+                let cache_write = extract_i64(usage.get("cache_creation_input_tokens"))
                     .unwrap_or(0)
-                    .max(0),
-                cache_write,
-                cache_write_1h: extract_cache_write_1h(usage).min(cache_write),
-                reasoning: 0,
-            }
-        },
-        0.0,
-    ))
+                    .max(0);
+                TokenBreakdown {
+                    input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
+                    output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
+                    cache_read: extract_i64(usage.get("cache_read_input_tokens"))
+                        .unwrap_or(0)
+                        .max(0),
+                    cache_write,
+                    cache_write_1h: extract_cache_write_1h(usage).min(cache_write),
+                    reasoning: 0,
+                }
+            },
+            0.0,
+        )
+        .with_billing(billing_provider, billing_origin)
+        .with_pricing_model(&raw_model),
+    )
 }
 
 /// Internal Claude Code system/tool tags that should NOT be counted as human turns.
@@ -2151,7 +2305,7 @@ fn claude_provider_choice_from_hint(
     model: Option<&str>,
     provider_hint: Option<&str>,
 ) -> Option<ClaudeProviderChoice> {
-    let hint = provider_hint.and_then(provider_identity::canonical_provider)?;
+    let hint = provider_hint.and_then(cc_mirror_provider_id)?;
 
     if hint == "anthropic" {
         if let Some(inferred_provider) =
@@ -2239,10 +2393,13 @@ fn finalize_headless_state(
         *state = ClaudeHeadlessState::default();
         return None;
     }
-    let provider_id = claude_provider_id(
-        &raw_model,
-        state.provider_id.as_deref().or(default_provider_hint),
-    );
+    let billing_provider = state.provider_id.as_deref().or(default_provider_hint);
+    let billing_origin = if state.provider_id.is_some() {
+        super::BillingIdentityOrigin::ExplicitRecord
+    } else {
+        super::BillingIdentityOrigin::ExplicitSession
+    };
+    let provider_id = claude_provider_id(&raw_model, billing_provider);
     let model = canonicalize_claude_model(&raw_model);
     let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
     if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
@@ -2265,7 +2422,9 @@ fn finalize_headless_state(
             reasoning: 0,
         },
         0.0,
-    );
+    )
+    .with_billing(billing_provider, billing_origin)
+    .with_pricing_model(&raw_model);
 
     *state = ClaudeHeadlessState::default();
     Some(message)
@@ -2933,6 +3092,41 @@ mod tests {
         assert_eq!(messages[0].model_id, "sonnet");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].message_count, 0);
+        assert_eq!(
+            messages[0].billing_identity,
+            crate::sessions::BillingIdentity::Known {
+                id: "zai".into(),
+                origin: crate::sessions::BillingIdentityOrigin::ExplicitSession,
+            }
+        );
+    }
+
+    #[test]
+    fn tool_result_duplicate_prefers_record_billing_in_both_orders() {
+        let session = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_billing","tool_output":{"input_tokens":4}}]}}"#;
+        let record = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.100Z","message":{"model":"sonnet","providerId":"vertex","content":[{"type":"tool_result","tool_use_id":"toolu_billing","tool_output":{"input_tokens":8}}]}}"#;
+        for content in [
+            format!("{session}\n{record}"),
+            format!("{record}\n{session}"),
+        ] {
+            let (_temp_dir, path) = create_cc_mirror_project_file(
+                &content,
+                "zai-worker",
+                "zai",
+                "project-one",
+                "session.jsonl",
+            );
+            let messages = parse_claude_file(&path);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.input, 8);
+            assert_eq!(
+                messages[0].billing_identity,
+                crate::sessions::BillingIdentity::Known {
+                    id: "vertex".into(),
+                    origin: crate::sessions::BillingIdentityOrigin::ExplicitRecord,
+                }
+            );
+        }
     }
 
     #[test]
@@ -4238,6 +4432,7 @@ mod tests {
 mod advisor_usage_tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
 
     fn fixture() -> Value {
         // Public, trimmed transcript from #1386; main iterations sum to top-level usage.
@@ -4274,6 +4469,46 @@ mod advisor_usage_tests {
         )
         .unwrap();
         parse_claude_file(&path)
+    }
+
+    #[test]
+    fn authoritative_advisor_keeps_its_recorded_amount_and_identity() {
+        for cost in [0.0, 7.25] {
+            let parent = UnifiedMessage::new(
+                "claude",
+                "parent-model",
+                "anthropic",
+                "s",
+                1,
+                TokenBreakdown::default(),
+                0.0,
+            )
+            .with_billing(
+                Some("anthropic"),
+                super::super::BillingIdentityOrigin::ExplicitRecord,
+            );
+            let mut advisor = UnifiedMessage::new(
+                "claude",
+                "advisor-model",
+                "vertex",
+                "s",
+                1,
+                TokenBreakdown::default(),
+                cost,
+            )
+            .with_billing(
+                Some("vertex"),
+                super::super::BillingIdentityOrigin::ExplicitRecord,
+            );
+            advisor.dedup_key = Some("msg:req:advisor:0".into());
+            advisor.message_count = 0;
+            advisor.mark_provider_reported_cost();
+            let original = advisor.clone();
+            let mut messages = vec![parent, advisor];
+            messages[0].dedup_key = Some("msg:req".into());
+            assert!(reconcile_advisor_billing(&mut messages).is_empty());
+            assert_eq!(messages[1], original);
+        }
     }
 
     #[test]
@@ -4372,6 +4607,124 @@ mod advisor_usage_tests {
         );
     }
 
+    fn assert_advisor_billing_follows_parent(
+        session_provider: Option<&str>,
+        providers: &[Option<&str>],
+        expected_provider: Option<&str>,
+    ) {
+        for repeat_advisor in [true, false] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let config_dir = if let Some(provider) = session_provider {
+                let variant_dir = dir.path().join(".cc-mirror/advisor");
+                let config_dir = variant_dir.join("config");
+                std::fs::create_dir_all(&config_dir).unwrap();
+                std::fs::write(
+                    variant_dir.join("variant.json"),
+                    json!({"name": "advisor", "provider": provider, "configDir": config_dir})
+                        .to_string(),
+                )
+                .unwrap();
+                config_dir
+            } else {
+                dir.path().join(".claude")
+            };
+            let path = config_dir.join("projects/-tmp-repro/repro.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let lines: Vec<String> = providers
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    let mut record = fixture();
+                    if let Some(provider) = provider {
+                        record["message"]["providerId"] = json!(provider);
+                    }
+                    record["message"]["usage"]["output_tokens"] = json!(779 + index);
+                    record["message"]["usage"]["iterations"][1]["output_tokens"] =
+                        json!(2343 + index);
+                    if !repeat_advisor && index > 0 {
+                        record["message"]["usage"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("iterations");
+                    }
+                    format!("{record}\n")
+                })
+                .collect();
+            std::fs::write(&path, lines.concat()).unwrap();
+            let full = parse_claude_file_with_checkpoint(&path, Some(dir.path()));
+            assert_eq!(full.messages.len(), 2);
+            let parent = &full.messages[0];
+            let advisor = &full.messages[1];
+            assert_eq!(
+                parent.billing_identity,
+                crate::sessions::BillingIdentity::from_explicit(
+                    expected_provider,
+                    crate::sessions::BillingIdentityOrigin::ExplicitRecord,
+                )
+            );
+            assert_eq!(advisor.billing_identity, parent.billing_identity);
+            assert_eq!(parent.tokens.output, 778 + providers.len() as i64);
+            assert_eq!(advisor.tokens.input, 114995);
+            assert_eq!(
+                advisor.tokens.output,
+                if repeat_advisor {
+                    2342 + providers.len() as i64
+                } else {
+                    2343
+                }
+            );
+            assert_eq!(advisor.pricing_context().raw_model, "claude-fable-5-1");
+            assert_eq!(advisor.cost, 0.0);
+            assert_eq!(advisor.cost_source, crate::sessions::CostSource::Unknown);
+            assert_eq!(parent.message_count, 1);
+            assert_eq!(advisor.message_count, 0);
+            assert_eq!(advisor.duration_ms, None);
+
+            for cut in 1..lines.len() {
+                std::fs::write(&path, lines[..cut].concat()).unwrap();
+                let prefix = parse_claude_file_with_checkpoint(&path, Some(dir.path()));
+                let checkpoint: ClaudeCheckpoint =
+                    bincode::deserialize(&bincode::serialize(&prefix.checkpoint.unwrap()).unwrap())
+                        .unwrap();
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(lines[cut..].concat().as_bytes())
+                    .unwrap();
+                let resumed =
+                    resume_claude_file(&path, Some(dir.path()), &checkpoint, &prefix.messages)
+                        .unwrap();
+                assert_eq!(resumed.messages, full.messages, "cut={cut}");
+                assert_eq!(resumed.checkpoint, full.checkpoint, "cut={cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn advisor_billing_identity_promotes_unknown_on_duplicate() {
+        assert_advisor_billing_follows_parent(None, &[None, Some("vertex"), None], Some("vertex"));
+    }
+
+    #[test]
+    fn advisor_billing_identity_replaces_session_channel_on_duplicate() {
+        assert_advisor_billing_follows_parent(
+            Some("anthropic"),
+            &[None, Some("vertex"), None],
+            Some("vertex"),
+        );
+    }
+
+    #[test]
+    fn advisor_billing_identity_conflict_stays_unknown_on_duplicate() {
+        for providers in [
+            [Some("anthropic"), Some("vertex"), Some("anthropic")],
+            [Some("vertex"), Some("anthropic"), Some("vertex")],
+        ] {
+            assert_advisor_billing_follows_parent(None, &providers, None);
+        }
+    }
+
     #[test]
     fn advisor_usage_does_not_invalidate_parent_for_unknown_or_malformed_iterations() {
         for iterations in [
@@ -4461,6 +4814,80 @@ mod resume_tests {
             .unwrap();
         for line in lines {
             file.write_all(line).unwrap();
+        }
+    }
+
+    #[test]
+    fn billing_conflict_survives_checkpoint_roundtrip_and_repeated_known_record() {
+        for providers in [
+            &[Some("vertex"), Some("anthropic"), Some("vertex")][..],
+            &[Some("anthropic"), Some("vertex"), Some("anthropic")],
+            &[Some("vertex"), None, Some("anthropic"), Some("vertex")],
+            &[
+                None,
+                Some("anthropic"),
+                Some("vertex"),
+                None,
+                Some("anthropic"),
+            ],
+            &[Some("vertex"), None, Some("vertex")],
+            &[None, Some("vertex"), None],
+            &[None, None, None],
+        ] {
+            let lines: Vec<Vec<u8>> = providers
+                .iter()
+                .enumerate()
+                .map(|(n, provider)| {
+                    let mut row = serde_json::json!({
+                        "type": "assistant", "timestamp": format!("2026-10-01T10:00:0{}Z", n + 1),
+                        "requestId": "req", "message": { "id": "msg", "model": "claude-sonnet-4.6",
+                        "usage": { "input_tokens": 10, "output_tokens": n + 1 } }
+                    });
+                    if let Some(provider) = provider {
+                        row["message"]["providerId"] = (*provider).into();
+                    }
+                    format!("{row}\n").into_bytes()
+                })
+                .collect();
+            for cut in 1..lines.len() {
+                let dir = TempDir::new().unwrap();
+                let path = transcript_path(&dir);
+                append(&path, &lines[..cut]);
+                let first = parse_claude_file_with_checkpoint(&path, None);
+                let checkpoint: ClaudeCheckpoint =
+                    bincode::deserialize(&bincode::serialize(&first.checkpoint.unwrap()).unwrap())
+                        .unwrap();
+                append(&path, &lines[cut..]);
+                let resumed =
+                    resume_claude_file(&path, None, &checkpoint, &first.messages).unwrap();
+                let full = parse_claude_file_with_checkpoint(&path, None);
+                assert_eq!(resumed.messages, full.messages, "{providers:?}, cut={cut}");
+                assert_eq!(resumed.checkpoint, full.checkpoint);
+                assert_eq!(resumed.messages.len(), 1);
+                assert_eq!(resumed.messages[0].tokens.output, providers.len() as i64);
+                assert_eq!(
+                    resumed.messages[0].pricing_model_id.as_deref(),
+                    Some("claude-sonnet-4.6")
+                );
+                let known: std::collections::BTreeSet<_> =
+                    providers.iter().flatten().copied().collect();
+                let expected_id = if known.len() == 1 {
+                    known.first().copied()
+                } else {
+                    None
+                };
+                assert_eq!(resumed.messages[0].billing_identity.id(), expected_id);
+                if !checkpoint.state.billing_conflicts.is_empty() {
+                    let mut tampered = checkpoint;
+                    assert!(!tampered.state.billing_conflicts.is_empty());
+                    tampered.state.billing_conflicts.clear();
+                    assert!(
+                        !tampered.has_valid_integrity(),
+                        "conflict memory is integrity protected"
+                    );
+                    assert!(resume_claude_file(&path, None, &tampered, &first.messages).is_none());
+                }
+            }
         }
     }
 

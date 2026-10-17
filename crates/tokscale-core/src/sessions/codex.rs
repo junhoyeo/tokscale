@@ -144,6 +144,7 @@ pub struct CodexModelInfo {
 /// affect usage accounting.
 #[derive(Debug, Deserialize)]
 pub struct CodexThreadSettings {
+    pub model_provider_id: Option<String>,
     pub service_tier: Option<String>,
 }
 
@@ -1202,6 +1203,11 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                     && payload.payload_type.as_deref() == Some("thread_settings_applied")
                     && !state.forked_child_waiting_for_turn_context
                 {
+                    if let Some(settings) = payload.thread_settings.as_ref() {
+                        if let Some(provider) = &settings.model_provider_id {
+                            state.session_provider = Some(provider.clone());
+                        }
+                    }
                     if payload.thread_settings.is_some() {
                         // A snapshot without a tier (standard processing)
                         // clears the sticky tier from then on.
@@ -1898,6 +1904,10 @@ fn new_codex_usage_message(
         0.0,
         agent,
     )
+    .with_billing(
+        state.session_provider.as_deref(),
+        super::BillingIdentityOrigin::ExplicitSession,
+    )
 }
 
 /// Count the pending `token_usage_record` as its own usage row: no token_count
@@ -2540,6 +2550,10 @@ fn parse_codex_headless_line(
         },
         0.0,
         agent,
+    )
+    .with_billing(
+        state.session_provider.as_deref(),
+        super::BillingIdentityOrigin::ExplicitSession,
     );
     if used_fallback_timestamp {
         let identity = CodexFallbackDedupIdentity {
@@ -4824,6 +4838,12 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure");
+        assert_eq!(messages[0].billing_identity.id(), Some("azure"));
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("codex:usage-fallback:"));
         assert_eq!(messages[0].agent.as_deref(), Some(CODEX_DEFAULT_AGENT));
     }
 
@@ -5588,6 +5608,58 @@ mod tests {
 
     fn total_tokens(messages: &[UnifiedMessage]) -> i64 {
         messages.iter().map(|m| m.tokens.total()).sum()
+    }
+
+    #[test]
+    fn native_usage_paths_preserve_explicit_billing_without_inference() {
+        for originator in ["codex_vscode", "openclaw"] {
+            for provider in [Some("azure"), None] {
+                let original = compaction_rollout(originator);
+                let content = match provider {
+                    Some(provider) => original.replace(
+                        r#""model_provider":"openai""#,
+                        &format!(r#""model_provider":"{provider}""#),
+                    ),
+                    None => original.replace(r#","model_provider":"openai""#, ""),
+                };
+                let file = create_test_file(&content);
+                let messages = parse_codex_file(file.path());
+                assert_eq!(messages.len(), 3, "regular, compaction, regular");
+                assert_eq!(total_tokens(&messages), 705);
+                for message in &messages {
+                    assert_eq!(message.billing_identity.id(), provider);
+                    assert_eq!(message.provider_id, provider.unwrap_or("openai"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_usage_records_preserve_explicit_billing_without_inference() {
+        for terminal in ["task_complete", "turn_aborted"] {
+            for provider in [Some("gateway"), None] {
+                let meta = match provider {
+                    Some(provider) => session_meta_line("codex_vscode").replace(
+                        r#""model_provider":"openai""#,
+                        &format!(r#""model_provider":"{provider}""#),
+                    ),
+                    None => session_meta_line("codex_vscode")
+                        .replace(r#","model_provider":"openai""#, ""),
+                };
+                let content = meta
+                    + &turn_lines("2026-10-01T00:01:00Z", "turn-1")
+                    + &record_line("2026-10-01T00:01:05Z", "turn-1", "resp-1", (100, 80, 10))
+                    + &format!(
+                        r#"{{"timestamp":"2026-10-01T00:01:06Z","type":"event_msg","payload":{{"type":"{terminal}","turn_id":"turn-1"}}}}"#
+                    )
+                    + "\n";
+                let file = create_test_file(&content);
+                let messages = parse_codex_file(file.path());
+                assert_eq!(messages.len(), 1, "{terminal}");
+                assert_eq!(total_tokens(&messages), 110);
+                assert_eq!(messages[0].billing_identity.id(), provider);
+            }
+        }
     }
 
     #[test]

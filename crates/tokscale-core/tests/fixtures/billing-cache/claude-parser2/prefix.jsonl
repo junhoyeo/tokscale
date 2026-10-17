@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","message":{"role":"user","content":"Start the synthetic transcript."}}
+{"type":"assistant","timestamp":"2026-10-01T10:00:01.000Z","requestId":"req_live","providerId":"gateway","message":{"id":"msg_live","model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":500}}}}
+{"type":"assistant","timestamp":"2026-10-01T10:00:02.000Z","requestId":"req_second","providerId":"gateway","message":{"id":"msg_second","model":"claude-sonnet-4-5","usage":{"input_tokens":40,"output_tokens":4}}}
+{"type":"user","timestamp":"2026-10-01T10:01:00.000Z","message":{"role":"user","content":"Continue the synthetic transcript."}}

@@ -621,6 +621,10 @@ fn message_from_parts(
         tokens,
         cost,
         Some(HERMES_AGENT_NAME.to_string()),
+    )
+    .with_billing(
+        row.billing_provider.as_deref(),
+        super::BillingIdentityOrigin::ExplicitRecord,
     );
     msg.message_count = row.message_count.max(0);
     msg.dedup_key = Some(dedup_key);

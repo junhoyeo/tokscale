@@ -756,6 +756,7 @@ pub(crate) fn reported_cost(cost: Option<f64>) -> Option<f64> {
 /// channel-suffixed sibling database, or an overlap between schema generations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OpenCodeSchemaFingerprint {
+    billing_provider: Option<String>,
     created_bits: u64,
     completed_bits: Option<u64>,
     model_id: String,
@@ -881,6 +882,11 @@ impl SchemaAccumulator {
         };
         let model_id = resolved_model_id?;
 
+        let billing_provider = if cfg.dual_schema {
+            msg.resolve_provider_id()
+        } else {
+            msg.provider_id.clone()
+        };
         let provider_id = resolve_provider(&msg, &model_id, cfg);
 
         // A payload with no `$.time` is dropped unless the client supplies a
@@ -963,6 +969,10 @@ impl SchemaAccumulator {
             },
             cost,
             agent.clone(),
+        )
+        .with_billing(
+            billing_provider.as_deref(),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         if cfg.record_duration {
             unified.duration_ms = duration_ms(created_ms, completed_ms);
@@ -1018,6 +1028,9 @@ impl SchemaAccumulator {
             completed_bits: completed_ms.map(f64::to_bits),
             model_id,
             provider_id,
+            billing_provider: billing_provider
+                .as_deref()
+                .and_then(super::normalize_billing_provider),
             input,
             output,
             reasoning,
@@ -1414,6 +1427,7 @@ pub(crate) static INCREMENTAL_RESCANS: std::sync::atomic::AtomicUsize =
 
 /// A scan's messages plus the state a later scan needs to resume from it.
 pub(crate) struct OpenCodeSchemaScan {
+    pub complete: bool,
     pub messages: Vec<UnifiedMessage>,
     /// `None` for a client with no incremental support, and for a database
     /// that could not be opened.
@@ -1424,6 +1438,7 @@ impl OpenCodeSchemaScan {
     fn empty() -> Self {
         Self {
             messages: Vec::new(),
+            complete: false,
             incremental: None,
         }
     }
@@ -1497,6 +1512,8 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
     // incrementally, and a mark that silently skipped it would serve those rows
     // stale forever. One such group disqualifies the whole database.
     let mut resumable = true;
+    let mut complete = true;
+    let mut matched_group = false;
 
     for (group_index, group) in cfg.query_groups.iter().enumerate() {
         let incremental = cfg
@@ -1527,7 +1544,9 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
                 break;
             }
         }
+        matched_group |= chosen.is_some();
         if chosen.is_some() && !read_every_row {
+            complete = false;
             resumable = false;
         }
         parsed_rows.push(group_parsed_rows);
@@ -1614,6 +1633,7 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
     let merged_dedup_keys = acc.merged_dedup_keys.into_iter().collect();
 
     OpenCodeSchemaScan {
+        complete: complete && matched_group,
         messages: acc.messages,
         incremental: cfg.incremental_groups.filter(|_| resumable).map(|_| {
             OpenCodeIncrementalState {
@@ -1902,6 +1922,7 @@ pub(crate) fn rescan_opencode_schema_sqlite_with_session_clients(
     #[cfg(test)]
     INCREMENTAL_RESCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(OpenCodeSchemaScan {
+        complete: true,
         messages,
         incremental: Some(OpenCodeIncrementalState {
             groups: marks,

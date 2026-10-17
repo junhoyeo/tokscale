@@ -1,6 +1,6 @@
 # Cost provenance API
 
-The original graph structs and functions retain their Rust field layouts and signatures. Existing `DailyTotals { tokens, cost, messages }` literals and callers of `generate_graph`, `aggregate_by_date`, `calculate_summary`, and `DailyFold` continue to compile. `UnifiedMessage` and `CostSource` also retain their original layouts.
+The original graph structs and functions retain their Rust field layouts and signatures. Existing `DailyTotals { tokens, cost, messages }` literals and callers of `generate_graph`, `aggregate_by_date`, `calculate_summary`, and `DailyFold` continue to compile. `CostSource` retains its original layout. Parser-facing `UnifiedMessage` now has the additional public fields `billing_identity`, `pricing_model_id`, and `estimate_status`. Existing exhaustive struct literals must be updated to include these fields; callers should use its constructors instead.
 
 Opt into provenance with `GraphResultV2`, the related `V2` aggregate types, and the corresponding `_v2` graph and aggregation functions. The CLI uses these APIs, so its JSON includes `costProvenance` beside the existing cost fields. `From` conversions between original and V2 aggregates preserve numeric values and metadata; converting to the original types discards provenance, and converting legacy data to V2 treats its source as unknown.
 

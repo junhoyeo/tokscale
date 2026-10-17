@@ -396,9 +396,10 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                     .or(fallback_model.as_deref())
                     .unwrap_or("unknown")
                     .to_string();
-                let provider_id = source
-                    .and_then(|s| s.get("provider"))
-                    .and_then(Value::as_str)
+                let record_provider = source
+                    .and_then(|source| source.get("provider"))
+                    .and_then(non_empty_string);
+                let provider_id = record_provider
                     .or(fallback_provider.as_deref())
                     .unwrap_or("unknown")
                     .to_string();
@@ -524,12 +525,20 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 let mut message = UnifiedMessage::new_with_dedup(
                     "dsh",
                     model_id,
-                    provider_id,
+                    provider_id.clone(),
                     &sid,
                     message_timestamp,
                     tokens,
                     0.0,
                     Some(dedup_key),
+                )
+                .with_billing(
+                    Some(&provider_id),
+                    if record_provider.is_some() {
+                        super::BillingIdentityOrigin::ExplicitRecord
+                    } else {
+                        super::BillingIdentityOrigin::ExplicitSession
+                    },
                 );
                 message.is_turn_start = is_turn_start;
                 if let Some(cwd) = &workspace_key {
@@ -1043,6 +1052,13 @@ mod tests {
         assert_eq!(messages[0].model_id, "glm-5.3");
         assert_eq!(messages[0].provider_id, "zai-coding-cn");
         assert_eq!(
+            messages[0].billing_identity,
+            crate::sessions::BillingIdentity::Known {
+                id: "zai-coding-cn".into(),
+                origin: crate::sessions::BillingIdentityOrigin::ExplicitRecord,
+            }
+        );
+        assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("dsh:msg:m-served:1787122684043:zai-coding-cn:glm-5.3:8425:207:576:0:0")
         );
@@ -1356,6 +1372,13 @@ mod tests {
         assert_eq!(msg.session_id, folder);
         assert_eq!(msg.model_id, "deepseek-v4-flash");
         assert_eq!(msg.provider_id, "irix");
+        assert_eq!(
+            msg.billing_identity,
+            crate::sessions::BillingIdentity::Known {
+                id: "irix".into(),
+                origin: crate::sessions::BillingIdentityOrigin::ExplicitSession,
+            }
+        );
     }
 
     #[test]

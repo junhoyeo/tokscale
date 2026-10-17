@@ -493,7 +493,6 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -515,6 +514,8 @@ tokscale pricing list-overrides
 }
 ```
 
+JSON 스키마는 이 저장소의 [schemas/custom-pricing.schema.json](schemas/custom-pricing.schema.json)에 있습니다. 편집기 검증에는 해당 스키마의 로컬 사본을 사용하세요.
+
 오버라이드 가격은 대부분의 API 프로바이더가 가격을 공개하는 방식과 같이 백만 토큰당 달러 단위로 입력하며, Tokscale은 내부적으로 토큰당 요율로 변환합니다. `input_cost_per_million_tokens` 또는 `output_cost_per_million_tokens` 중 적어도 하나는 존재해야 하며, 캐시 읽기/캐시 생성 필드는 선택 사항입니다. 명시적인 `0`도 허용되며, 무료 모델을 선언하는 방법입니다 — `0`은 "비용이 없다"는 진술이고, 필드를 생략하는 것은 요율을 모른다는 뜻이라 사용량이 가격 미책정으로 남습니다. 복사/붙여넣기 호환성을 위해 `input_cost_per_token`, `output_cost_per_token`, `cache_read_input_token_cost` 같은 LiteLLM 스타일의 토큰당 필드명도 허용되지만, 백만 토큰당 이름이 권장되는 사용자용 형식입니다. 티어나 캐시 가격을 생략하려면 해당 필드를 비워 두세요. 음수이거나 유한하지 않은 값은 잘못된 것으로 처리되어 오타가 회계를 조용히 바꾸지 않도록 해당 모델 항목 전체를 건너뜁니다. 선택적 `source` 및 `notes` 필드는 Tokscale이 무시하므로 사용자 자신의 기록용으로 사용할 수 있습니다.
 
 오버라이드는 정확 일치 전용이며 대소문자를 구분하지 않습니다. Tokscale은 원본 모델 ID를 먼저 확인하고, 그다음 기존 합성 `/models/` 정규화를 확인한 뒤, 일치하는 오버라이드가 없으면 LiteLLM, OpenRouter, Cursor 가격, 퍼지 매칭으로 넘어갑니다. 원본 정확 일치가 정규화된 정확 일치보다 우선하므로, `accounts/fireworks/routers/kimi-k2p6-turbo`는 특정 게이트웨이 모델을 오버라이드할 수 있고 `kimi-k2p6-turbo`는 정규화된 `/models/` 경로를 커버할 수 있습니다. 오버라이드는 시작 시 한 번 로드되므로 파일을 편집한 후에는 명령을 다시 실행하세요. 업스트림 LiteLLM 가격 업데이트를 기다리는 동안 잘못된 모델 가격 버그를 로컬에서 수정하는 권장 방법입니다.
@@ -532,6 +533,12 @@ tokscale pricing list-overrides
 | `meta-llama/` | `fireworks_ai/` |
 
 예시: `grok-code`는 `azure_ai/grok-code-fast-1` ($3.50/$17.50) 대신 `xai/grok-code-fast-1` ($0.20/$1.50)와 일치합니다.
+
+#### 결제 채널별 가격
+
+기존 전역 `models`와 함께 `provider_overrides`를 설정할 수 있습니다. `tokscale pricing MODEL --billing-provider vertex --source custom --json --no-spinner`로 조회합니다. 기존 `--provider`는 여전히 가격표 출처를 뜻합니다. 채널은 로그의 전체 라벨을 공백 제거 및 ASCII 대소문자 무시로 비교하며 모델 제조사에서 추론하지 않습니다. 실제 결제 계정이나 판매자를 검증하는 기능은 아닙니다.
+
+`tokscale pricing validate-overrides --strict --json --no-spinner`로 오프라인 검증하고, `tokscale pricing explain --json --no-spinner`로 메시지별 채널·요율 배수·커버리지·추정 상태를 로컬에서 확인하세요. 사용자 요율은 기본 요율이며 기록된 확정 비용은 0도 유지합니다. 설정 수정 후 재시작하면 과거 추정액도 현재 가격으로 재계산하고 만료된 추정액은 합계에서 제외합니다. 구버전으로 내려가면 채널별 규칙은 무시됩니다. [우선순위, 캐시 이전 및 예제](docs/provider-pricing.md).
 
 ### 소셜 플랫폼 명령어
 

@@ -1,0 +1,3 @@
+# Frozen cache states retain exact source byte offsets and prefix hashes.
+*.jsonl text eol=lf
+*.bin -text

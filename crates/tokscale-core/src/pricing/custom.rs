@@ -3,7 +3,7 @@ use crate::sessions::synthetic::normalize_synthetic_model;
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,11 +16,22 @@ const MAX_CUSTOM_PRICING_MODEL_CAPACITY: usize = 10_000;
 #[derive(Clone, Default)]
 pub struct CustomPricing {
     models: HashMap<String, ModelPricing>,
+    providers: HashMap<String, HashMap<String, ModelPricing>>,
+    diagnostics: Vec<CustomPricingDiagnostic>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CustomPricingDiagnostic {
+    pub file: String,
+    pub code: String,
+    pub path: String,
+    pub message: String,
 }
 
 pub struct CustomLookupResult<'a> {
     pub matched_key: &'a str,
     pub pricing: &'a ModelPricing,
+    pub matched_provider_id: Option<&'a str>,
     /// Whether `matched_key` was reached through synthetic-model
     /// normalization rather than the requested id. Provenance reports this,
     /// so a `hf:zai-org/GLM-4.7` usage row priced by a `glm-4.7` custom entry
@@ -32,6 +43,10 @@ pub struct CustomLookupResult<'a> {
 struct RawCustomPricingFile {
     #[serde(default, deserialize_with = "deserialize_models")]
     models: Vec<(String, Value)>,
+    #[serde(default)]
+    provider_overrides: Vec<Value>,
+    #[serde(flatten)]
+    extra: HashMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -70,9 +85,65 @@ struct CustomModelPricing {
     cache_read_input_token_cost: Option<f64>,
     cache_read_input_token_cost_above_200k_tokens: Option<f64>,
     cache_read_input_token_cost_above_272k_tokens: Option<f64>,
+    #[serde(flatten)]
+    extra: HashMap<String, Value>,
 }
 
+const CUSTOM_RATE_FIELDS: &[&str] = &[
+    "input_cost_per_million_tokens",
+    "input_cost_per_million_tokens_above_128k_tokens",
+    "input_cost_per_million_tokens_above_200k_tokens",
+    "input_cost_per_million_tokens_above_256k_tokens",
+    "input_cost_per_million_tokens_above_272k_tokens",
+    "input_cost_per_token",
+    "input_cost_per_token_above_128k_tokens",
+    "input_cost_per_token_above_200k_tokens",
+    "input_cost_per_token_above_256k_tokens",
+    "input_cost_per_token_above_272k_tokens",
+    "output_cost_per_million_tokens",
+    "output_cost_per_million_tokens_above_128k_tokens",
+    "output_cost_per_million_tokens_above_200k_tokens",
+    "output_cost_per_million_tokens_above_256k_tokens",
+    "output_cost_per_million_tokens_above_272k_tokens",
+    "output_cost_per_token",
+    "output_cost_per_token_above_128k_tokens",
+    "output_cost_per_token_above_200k_tokens",
+    "output_cost_per_token_above_256k_tokens",
+    "output_cost_per_token_above_272k_tokens",
+    "cache_creation_input_token_cost_per_million_tokens",
+    "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens",
+    "cache_creation_input_token_cost",
+    "cache_creation_input_token_cost_above_200k_tokens",
+    "cache_creation_input_token_cost_per_million_tokens_above_1hr",
+    "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens",
+    "cache_creation_input_token_cost_above_1hr",
+    "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
+    "cache_read_input_token_cost_per_million_tokens",
+    "cache_read_input_token_cost_per_million_tokens_above_200k_tokens",
+    "cache_read_input_token_cost_per_million_tokens_above_272k_tokens",
+    "cache_read_input_token_cost",
+    "cache_read_input_token_cost_above_200k_tokens",
+    "cache_read_input_token_cost_above_272k_tokens",
+];
+
 impl CustomModelPricing {
+    fn suspicious_unknown_rate_field(&self) -> Option<&str> {
+        self.extra
+            .keys()
+            .filter(|field| {
+                field
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|part| {
+                        matches!(
+                            part.to_ascii_lowercase().as_str(),
+                            "cost" | "price" | "pricing" | "rate" | "rates"
+                        )
+                    })
+            })
+            .map(String::as_str)
+            .min()
+    }
+
     fn into_model_pricing(self) -> Result<ModelPricing, String> {
         let input_cost_per_token = base_price(
             self.input_cost_per_million_tokens,
@@ -222,29 +293,28 @@ impl CustomPricing {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to stat file: {err}"));
-                return Self::default();
+                return Self::invalid(path, "$", "io_error", format!("failed to stat file: {err}"));
             }
         };
 
         if metadata.len() > MAX_CUSTOM_PRICING_FILE_BYTES {
-            warn_custom_pricing(
+            return Self::invalid(
                 path,
-                format_args!(
-                    "file is too large ({} bytes; max {} bytes)",
+                "$",
+                "file_too_large",
+                format!(
+                    "file is {} bytes; maximum is {} bytes",
                     metadata.len(),
                     MAX_CUSTOM_PRICING_FILE_BYTES
                 ),
             );
-            return Self::default();
         }
 
         let content = match fs::read_to_string(path) {
             Ok(content) => content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to read file: {err}"));
-                return Self::default();
+                return Self::invalid(path, "$", "io_error", format!("failed to read file: {err}"));
             }
         };
 
@@ -257,15 +327,18 @@ impl CustomPricing {
         for (key, pricing) in models {
             normalized.insert(key.to_lowercase(), pricing);
         }
-        Self { models: normalized }
+        Self {
+            models: normalized,
+            ..Self::default()
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.models.len()
+        self.models.len() + self.providers.values().map(HashMap::len).sum::<usize>()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.models.is_empty()
+        self.len() == 0
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, &ModelPricing)> {
@@ -278,39 +351,88 @@ impl CustomPricing {
         self.lookup_with_key(model_id).map(|result| result.pricing)
     }
 
-    pub fn lookup_with_key(&self, model_id: &str) -> Option<CustomLookupResult<'_>> {
-        let raw_key = model_id.to_lowercase();
-        if let Some(pricing) = self.models.get_key_value(&raw_key) {
-            return Some(CustomLookupResult {
-                matched_key: pricing.0,
-                pricing: pricing.1,
-                normalized: false,
-            });
-        }
+    pub fn diagnostics(&self) -> &[CustomPricingDiagnostic] {
+        &self.diagnostics
+    }
 
-        let normalized_key = normalize_synthetic_model(model_id).to_lowercase();
-        if normalized_key != raw_key {
-            if let Some(pricing) = self.models.get_key_value(&normalized_key) {
+    pub fn all_entries(&self) -> impl Iterator<Item = (Option<&str>, &str, &ModelPricing)> {
+        self.entries()
+            .map(|(model, price)| (None, model, price))
+            .chain(self.providers.iter().flat_map(|(provider, models)| {
+                models
+                    .iter()
+                    .map(move |(model, price)| (Some(provider.as_str()), model.as_str(), price))
+            }))
+    }
+
+    pub fn lookup_with_key(&self, model_id: &str) -> Option<CustomLookupResult<'_>> {
+        self.lookup_with_provider_key(model_id, None)
+    }
+
+    /// Model identity takes precedence over scope: scoped raw, global raw,
+    /// scoped synthetic-normalized, global synthetic-normalized. No aliasing
+    /// or model-derived provider identity is allowed here.
+    pub fn lookup_with_provider_key(
+        &self,
+        model_id: &str,
+        provider: Option<&str>,
+    ) -> Option<CustomLookupResult<'_>> {
+        let provider = provider.and_then(crate::sessions::normalize_billing_provider);
+        let scoped = provider
+            .as_ref()
+            .and_then(|id| self.providers.get_key_value(id));
+        let raw = model_id.to_lowercase();
+        let normalized = normalize_synthetic_model(model_id).to_lowercase();
+        for (key, was_normalized) in [(&raw, false), (&normalized, true)] {
+            if was_normalized && normalized == raw {
+                break;
+            }
+            if let Some((provider, models)) = scoped {
+                if let Some((matched_key, pricing)) = models.get_key_value(key) {
+                    return Some(CustomLookupResult {
+                        matched_key,
+                        pricing,
+                        matched_provider_id: Some(provider),
+                        normalized: was_normalized,
+                    });
+                }
+            }
+            if let Some((matched_key, pricing)) = self.models.get_key_value(key) {
                 return Some(CustomLookupResult {
-                    matched_key: pricing.0,
-                    pricing: pricing.1,
-                    normalized: true,
+                    matched_key,
+                    pricing,
+                    matched_provider_id: None,
+                    normalized: was_normalized,
                 });
             }
         }
-
         None
     }
 
-    fn load_from_str(content: &str, path: &Path) -> Self {
+    pub fn load_from_str(content: &str, path: &Path) -> Self {
+        if content.len() as u64 > MAX_CUSTOM_PRICING_FILE_BYTES {
+            return Self::invalid(path, "$", "file_too_large", "file exceeds 16 MiB".into());
+        }
         let raw: RawCustomPricingFile = match serde_json::from_str(content) {
             Ok(raw) => raw,
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to parse JSON: {err}"));
-                return Self::default();
+                return Self::invalid(path, "$", "invalid_json", err.to_string());
             }
         };
 
+        let mut result = Self::default();
+        for field in raw
+            .extra
+            .keys()
+            .filter(|field| !matches!(field.as_str(), "$schema" | "notes" | "source"))
+        {
+            result.error(
+                path,
+                &format!("$.{field}"),
+                "unknown_field",
+                "unknown top-level field".into(),
+            );
+        }
         let mut models =
             HashMap::with_capacity(raw.models.len().min(MAX_CUSTOM_PRICING_MODEL_CAPACITY));
         for (model_id, value) in raw.models {
@@ -318,17 +440,33 @@ impl CustomPricing {
             let entry: CustomModelPricing = match serde_json::from_value(value) {
                 Ok(entry) => entry,
                 Err(err) => {
-                    warn_custom_pricing(
+                    result.error(
                         path,
-                        format_args!("skipping {model_id}: malformed pricing entry: {err}"),
+                        &format!("$.models.{model_id}"),
+                        "invalid_pricing",
+                        err.to_string(),
                     );
                     continue;
                 }
             };
+            if let Some(field) = entry.suspicious_unknown_rate_field() {
+                result.error(
+                    path,
+                    &format!("$.models.{model_id}.{field}"),
+                    "unknown_rate_field",
+                    "unknown field looks like pricing and would otherwise be ignored".into(),
+                );
+                continue;
+            }
             let pricing = match entry.into_model_pricing() {
                 Ok(pricing) => pricing,
                 Err(err) => {
-                    warn_custom_pricing(path, format_args!("skipping {model_id}: {err}"));
+                    result.error(
+                        path,
+                        &format!("$.models.{model_id}"),
+                        "invalid_pricing",
+                        err,
+                    );
                     continue;
                 }
             };
@@ -343,7 +481,116 @@ impl CustomPricing {
             }
         }
 
-        Self { models }
+        result.models = models;
+        let mut seen = HashSet::new();
+        let mut duplicates = HashSet::new();
+        for (index, value) in raw.provider_overrides.into_iter().enumerate() {
+            let location = format!("$.provider_overrides[{index}]");
+            let Some(object) = value.as_object() else {
+                result.error(
+                    path,
+                    &location,
+                    "invalid_override",
+                    "expected an object".into(),
+                );
+                continue;
+            };
+            let provider = object
+                .get("provider_id")
+                .and_then(Value::as_str)
+                .and_then(crate::sessions::normalize_billing_provider);
+            let model = object
+                .get("model_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_lowercase);
+            let (Some(provider), Some(model)) = (provider, model) else {
+                result.error(
+                    path,
+                    &location,
+                    "invalid_selector",
+                    "provider_id and model_id must be nonempty strings; unknown is reserved".into(),
+                );
+                continue;
+            };
+            let key = (provider.clone(), model.clone());
+            if !seen.insert(key.clone()) {
+                duplicates.insert(key);
+            }
+            if object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "provider_id" | "model_id" | "pricing" | "notes" | "source"
+                )
+            }) {
+                result.error(
+                    path,
+                    &location,
+                    "unknown_field",
+                    "unknown override field".into(),
+                );
+                continue;
+            }
+            let Some(pricing) = object.get("pricing").and_then(Value::as_object) else {
+                result.error(
+                    path,
+                    &location,
+                    "invalid_pricing",
+                    "pricing must be an object".into(),
+                );
+                continue;
+            };
+            if let Some((field, _)) = pricing.iter().find(|(key, value)| {
+                !matches!(key.as_str(), "notes" | "source")
+                    && (!CUSTOM_RATE_FIELDS.contains(&key.as_str()) || value.is_null())
+            }) {
+                result.error(
+                    path,
+                    &format!("{location}.pricing.{field}"),
+                    "invalid_rate_field",
+                    "unknown or null rate field".into(),
+                );
+                continue;
+            }
+            match serde_json::from_value::<CustomModelPricing>(Value::Object(pricing.clone()))
+                .map_err(|err| err.to_string())
+                .and_then(CustomModelPricing::into_model_pricing)
+            {
+                Ok(price) => {
+                    result
+                        .providers
+                        .entry(provider)
+                        .or_default()
+                        .insert(model, price);
+                }
+                Err(err) => result.error(path, &location, "invalid_pricing", err),
+            }
+        }
+        let mut duplicates: Vec<_> = duplicates.into_iter().collect();
+        duplicates.sort();
+        for (provider, model) in duplicates {
+            if let Some(models) = result.providers.get_mut(&provider) {
+                models.remove(&model);
+            }
+            result.error(path, "$.provider_overrides", "duplicate_selector", format!("duplicate ({provider}, {model}); all rules in this group disabled; global/upstream fallback may apply"));
+        }
+        result
+    }
+
+    fn invalid(file: &Path, path: &str, code: &str, message: String) -> Self {
+        let mut result = Self::default();
+        result.error(file, path, code, message);
+        result
+    }
+
+    fn error(&mut self, file: &Path, path: &str, code: &str, message: String) {
+        warn_custom_pricing(file, format_args!("{code} at {path}: {message}"));
+        self.diagnostics.push(CustomPricingDiagnostic {
+            file: file.display().to_string(),
+            code: code.into(),
+            path: path.into(),
+            message,
+        });
     }
 }
 

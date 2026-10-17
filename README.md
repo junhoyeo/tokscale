@@ -495,7 +495,6 @@ Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale
 
 ```json
 {
-  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -517,6 +516,8 @@ Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale
 }
 ```
 
+The JSON schema is available at [schemas/custom-pricing.schema.json](schemas/custom-pricing.schema.json) in this repository. For editor validation, use a local copy of that schema.
+
 Override prices are entered in dollars per million tokens, matching how most API providers publish pricing; Tokscale converts them to per-token rates internally. At least one of `input_cost_per_million_tokens` or `output_cost_per_million_tokens` must be present, and cache-read/cache-creation fields are optional. An explicit `0` is allowed and is the way to declare a free model — it is a statement ("this costs nothing"), unlike an omitted field, which means the rate is unknown and leaves the usage unpriced. LiteLLM-style per-token field names such as `input_cost_per_token`, `output_cost_per_token`, and `cache_read_input_token_cost` are also accepted for copy/paste compatibility, but the per-million names are the recommended user-facing form. To omit a tier or cache price, leave the field out; negative or non-finite values are treated as invalid and the whole model entry is skipped so typos do not silently alter accounting. Optional `source` and `notes` fields are ignored by Tokscale and can be used for your own bookkeeping.
 
 Overrides are exact-only and case-insensitive. Tokscale checks the raw model ID first, then the existing synthetic `/models/` normalization, then falls through to LiteLLM, OpenRouter, Cursor pricing, and fuzzy matching if no override matches. Raw exact matches beat normalized exact matches, so `accounts/fireworks/routers/kimi-k2p6-turbo` can override one gateway-specific model while `kimi-k2p6-turbo` can cover normalized `/models/` paths. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream LiteLLM pricing updates.
@@ -534,6 +535,12 @@ When multiple matches exist, original model creators are preferred over reseller
 | `meta-llama/` | `fireworks_ai/` |
 
 Example: `grok-code` matches `xai/grok-code-fast-1` ($0.20/$1.50) instead of `azure_ai/grok-code-fast-1` ($3.50/$17.50).
+
+#### Billing-channel pricing
+
+Custom pricing now supports `provider_overrides` alongside the existing global `models` object. Use `tokscale pricing MODEL --billing-provider vertex --source custom --json --no-spinner`; the old `--provider` flag still means pricing source. Channels are exact whole log labels (trim + ASCII case-insensitive), not inferred model vendors or verified billing accounts. Unknown channels only use global/upstream estimates.
+
+Run `tokscale pricing validate-overrides --strict --json --no-spinner` to check configuration offline and `tokscale pricing explain --json --no-spinner` for local per-message scope, coverage, multiplier and estimate status. Rules are base rates; authoritative costs including zero are preserved. Restart after editing: historical estimates use current rates, while missing/stale prices do not remain in totals. Older binaries ignore scoped rules on downgrade. [Full contract, precedence, cache behavior and example](docs/provider-pricing.md).
 
 ### Social
 

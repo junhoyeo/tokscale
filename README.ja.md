@@ -497,7 +497,6 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -519,6 +518,8 @@ tokscale pricing list-overrides
 }
 ```
 
+JSON スキーマは、このリポジトリの [schemas/custom-pricing.schema.json](schemas/custom-pricing.schema.json) にあります。エディターでの検証には、このスキーマのローカルコピーを使用してください。
+
 オーバーライド価格は、ほとんどの API プロバイダーが価格を公開する方法と同じく、100万トークンあたりのドルで入力します；Tokscale は内部でこれをトークンあたりのレートに変換します。`input_cost_per_million_tokens` または `output_cost_per_million_tokens` の少なくとも一方が存在する必要があり、キャッシュ読み取り/キャッシュ作成フィールドは任意です。明示的な `0` も許可されており、無料モデルを宣言する方法です——`0` は「費用がかからない」という表明であり、フィールドの省略はレートが不明という意味なので、その使用量は価格未設定のまま残ります。コピー/ペーストの互換性のため、`input_cost_per_token`、`output_cost_per_token`、`cache_read_input_token_cost` などの LiteLLM スタイルのトークンあたりフィールド名も受け付けますが、ユーザー向けには100万トークンあたりの名前を推奨します。ティアやキャッシュ価格を省略するにはフィールドを残さないでください；負の値や非有限な値は無効として扱われ、タイプミスが集計を密かに変えないようにモデルエントリ全体がスキップされます。任意の `source` および `notes` フィールドは Tokscale には無視され、自分の記録用に使用できます。
 
 オーバーライドは完全一致のみで、大文字小文字を区別しません。Tokscale はまず生のモデル ID をチェックし、次に既存の synthetic な `/models/` 正規化、その後オーバーライドが一致しなければ LiteLLM、OpenRouter、Cursor 価格、ファジーマッチングへフォールスルーします。生の完全一致は正規化された完全一致より優先されるため、`accounts/fireworks/routers/kimi-k2p6-turbo` で特定のゲートウェイ固有モデルを上書きしつつ、`kimi-k2p6-turbo` で正規化された `/models/` パスをカバーできます。オーバーライドは起動時に一度だけ読み込まれます；ファイルを編集したらコマンドを再起動してください。これは、アップストリームの LiteLLM 価格更新を待つ間、誤ったモデル価格のバグを修正するための推奨ローカル対処法です。
@@ -536,6 +537,12 @@ tokscale pricing list-overrides
 | `meta-llama/` | `fireworks_ai/` |
 
 例：`grok-code`は`azure_ai/grok-code-fast-1`（$3.50/$17.50）ではなく`xai/grok-code-fast-1`（$0.20/$1.50）にマッチします。
+
+#### 課金チャネル別の価格
+
+従来のグローバル `models` に加え、`provider_overrides` を設定できます。`tokscale pricing MODEL --billing-provider vertex --source custom --json --no-spinner` で照会します。従来の `--provider` は価格データのソース指定のままです。チャネルはログの完全なラベルを前後空白除去・ASCII 大文字小文字無視で比較し、モデル名から推定しません。実際の請求先やアカウントを検証する機能ではありません。未知のチャネルはグローバル/アップストリームの推定価格のみを使用します。
+
+`tokscale pricing validate-overrides --strict --json --no-spinner` はオフライン検証、`tokscale pricing explain --json --no-spinner` はローカルのメッセージ別価格・倍率・カバレッジ・状態レポートです。カスタム価格は基本料金で、記録済みの確定費用はゼロも保持します。編集後は再起動してください。過去の推定額は現在の料金で再計算し、失効した推定額は合計に含めません。旧バージョンへのダウングレードではチャネル別ルールが無視されます。[優先順位、キャッシュ移行、設定例](docs/provider-pricing.md)。
 
 ### ソーシャルプラットフォームコマンド
 

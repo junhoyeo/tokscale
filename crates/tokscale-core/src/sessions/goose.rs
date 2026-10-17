@@ -102,6 +102,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             return Ok(());
         }
 
+        let billing_provider = provider_name.clone();
         let provider = resolved_provider(provider_name, &model_id, "goose");
         let mut msg = UnifiedMessage::new(
             "goose",
@@ -126,6 +127,10 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 },
             },
             0.0,
+        )
+        .with_billing(
+            billing_provider.as_deref(),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         msg.dedup_key = Some(session_id);
         messages.push(msg);

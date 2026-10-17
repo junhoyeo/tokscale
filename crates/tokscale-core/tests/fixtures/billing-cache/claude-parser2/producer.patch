@@ -1,0 +1,120 @@
+diff --git a/crates/tokscale-core/src/message_cache.rs b/crates/tokscale-core/src/message_cache.rs
+index f9111e48..6460b166 100644
+--- a/crates/tokscale-core/src/message_cache.rs
++++ b/crates/tokscale-core/src/message_cache.rs
+@@ -3873,6 +3873,115 @@ mod tests {
+     use tempfile::{NamedTempFile, TempDir};
+     use wait_timeout::ChildExt;
+
++    #[test]
++    #[ignore = "historical fixture producer; requires TOKSCALE_CLAUDE_FIXTURE_OUT"]
++    fn export_released_claude_v12_checkpoint_fixture() {
++        use crate::sessions::claudecode::{parse_claude_file_with_checkpoint, resume_claude_file};
++        let history = include_str!("../tests/fixtures/claude-v12-producer/history-before-compaction.jsonl");
++        let prefix = include_str!("../tests/fixtures/claude-v12-producer/prefix.jsonl");
++        let append = include_str!("../tests/fixtures/claude-v12-producer/append.jsonl");
++        let complete = include_str!("../tests/fixtures/claude-v12-producer/complete.jsonl");
++        assert_eq!(format!("{prefix}{append}"), complete);
++        let output = PathBuf::from(std::env::var_os("TOKSCALE_CLAUDE_FIXTURE_OUT").unwrap());
++        std::fs::create_dir_all(&output).unwrap();
++        let dir = TempDir::new().unwrap();
++        let source = dir.path().join(".claude/projects/synthetic-project/claude-v12.jsonl");
++        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
++        std::fs::write(&source, history).unwrap();
++        let historical = parse_claude_file_with_checkpoint(&source, Some(dir.path()));
++        assert_eq!(historical.messages.len(), 1);
++        let retained = historical.messages[0].clone();
++        assert_eq!(retained.dedup_key.as_deref(), Some("msg_retained:req_retained"));
++        assert_eq!(retained.provider_id, "gateway");
++        assert_eq!(retained.tokens.input, 777);
++        let retained_keys = HashSet::from([retained.dedup_key.clone().unwrap()]);
++
++        // Rewriting drops historical bytes: this row can survive only in the cache.
++        std::fs::write(&source, prefix).unwrap();
++        let parsed = parse_claude_file_with_checkpoint(&source, Some(dir.path()));
++        assert_eq!(parsed.messages.len(), 2);
++        assert!(parsed.messages.iter().all(|m| m.provider_id == "gateway"));
++        let checkpoint = parsed.checkpoint.unwrap();
++        assert!(checkpoint.has_valid_integrity());
++        let checkpoint_json = serde_json::to_value(&checkpoint).unwrap();
++        assert_eq!(checkpoint_json["consumed_offset"], prefix.len());
++        assert_eq!(checkpoint_json["message_count"], 2);
++        assert_eq!(checkpoint_json["state"]["pending_turn_start"], true);
++        assert_eq!(checkpoint_json["state"]["last_provider_hint"], "gateway");
++        assert_eq!(checkpoint_json["state"]["provider_confidences"].as_array().unwrap().len(), 2);
++        assert_eq!(checkpoint_json["state"]["split_reporting_dedup_keys"], serde_json::json!(["msg_live:req_live"]));
++        assert_eq!(checkpoint_json["unclamped_cache_write_1h"], serde_json::json!([[0, 500]]));
++        assert_eq!(parsed.messages[0].tokens.cache_write_1h, 0);
++        let mut messages = parsed.messages;
++        messages.push(retained.clone());
++        let identity = CacheIdentity::for_client(ClientId::Claude);
++        assert_eq!(identity.parser_version, 2);
++        assert_eq!(CACHE_FORMAT_VERSION, 10);
++        assert_eq!(CLAUDE_CACHE_FORMAT_VERSION, 12);
++        let mut fingerprint = SourceFingerprint::from_path(&source).unwrap();
++        fingerprint.modified_ns = 1;
++        let entry = CachedSourceEntry::new_with_retained_message_keys(
++            identity,
++            Path::new("/synthetic/.claude/projects/synthetic-project/claude-v12.jsonl"),
++            fingerprint,
++            messages,
++            &retained_keys,
++        ).with_claude_checkpoint(Some(checkpoint.clone()));
++        assert!(!entry.needs_retention_provenance_migration());
++        assert_eq!(entry.retained_message_keys(), retained_keys);
++        assert_eq!(entry.fallback_timestamp_indices, vec![2, CLAUDE_RETENTION_PROVENANCE_MARKER]);
++        let binary = output.join("claude-v12-parser2.bin");
++        write_shard_with_limit(&binary, identity, &[entry.clone()], MAX_CACHE_SHARD_BYTES).unwrap();
++        let original_bytes = std::fs::read(&binary).unwrap();
++        let envelope: CachedShardEnvelope = bincode::options().deserialize(&original_bytes).unwrap();
++        assert_eq!(envelope.format_version, 12);
++        let ShardReadStatus::Loaded(mut loaded) = read_shard(&binary, identity) else {
++            panic!("unmodified upstream writer must produce a valid native Claude v12 shard");
++        };
++        assert_eq!(std::fs::read(&binary).unwrap(), original_bytes);
++        let loaded = loaded.remove(0);
++        assert_eq!(loaded.claude_checkpoint, Some(checkpoint.clone()));
++        assert_eq!(loaded.messages, entry.messages);
++        assert_eq!(loaded.retained_message_keys(), retained_keys);
++        assert!(!loaded.needs_retention_provenance_migration());
++        std::fs::write(output.join("expected-checkpoint.json"), serde_json::to_vec_pretty(&checkpoint).unwrap()).unwrap();
++        std::fs::write(output.join("expected-entry.json"), serde_json::to_vec_pretty(&loaded).unwrap()).unwrap();
++
++        std::fs::OpenOptions::new().append(true).open(&source).unwrap()
++            .write_all(append.as_bytes()).unwrap();
++        let resumed = resume_claude_file(&source, Some(dir.path()), &checkpoint, &loaded.messages)
++            .expect("retained suffix does not invalidate a native checkpoint of the live prefix");
++        let fresh = parse_claude_file_with_checkpoint(&source, Some(dir.path()));
++        assert_eq!(resumed.messages, fresh.messages);
++        assert_eq!(resumed.checkpoint, fresh.checkpoint);
++        assert_eq!(resumed.messages.len(), 3);
++        assert_eq!(resumed.messages[0].tokens.cache_write, 800);
++        assert_eq!(resumed.messages[0].tokens.cache_write_1h, 500);
++        assert_eq!(resumed.messages[0].tokens.output, 50);
++        assert!(resumed.messages[2].is_turn_start);
++        assert!(resumed.messages.iter().all(|m| m.dedup_key != retained.dedup_key));
++        std::fs::write(output.join("expected-complete-messages.json"), serde_json::to_vec_pretty(&fresh.messages).unwrap()).unwrap();
++        let mut rebuilt = CachedSourceEntry::new_with_retained_message_keys(
++            identity,
++            Path::new("/synthetic/.claude/projects/synthetic-project/claude-v12.jsonl"),
++            SourceFingerprint::from_path(&source).unwrap(),
++            fresh.messages,
++            &HashSet::new(),
++        ).with_claude_checkpoint(fresh.checkpoint);
++        rebuilt.absorb_retained_history(&loaded);
++        assert_eq!(rebuilt.messages.len(), 4);
++        assert_eq!(rebuilt.messages[3], retained);
++        assert_eq!(rebuilt.retained_message_keys(), retained_keys);
++        assert!(!rebuilt.needs_retention_provenance_migration());
++        std::fs::write(output.join("expected-rebuilt-messages-with-history.json"), serde_json::to_vec_pretty(&rebuilt.messages).unwrap()).unwrap();
++        for (name, content) in [
++            ("history-before-compaction.jsonl", history), ("prefix.jsonl", prefix),
++            ("append.jsonl", append), ("complete.jsonl", complete),
++        ] {
++            std::fs::write(output.join(name), content).unwrap();
++        }
++    }
++
+     #[test]
+     #[serial_test::serial]
+     fn cache_warning_is_deferred_once_while_the_tui_is_active() {

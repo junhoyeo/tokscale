@@ -365,20 +365,42 @@ fn ingest_openclaw_entry(
                 .map(|turn| (turn.thread.to_string(), turn.turn.map(str::to_string)));
             let usage = msg.usage?;
 
-            let model = msg
-                .model
-                .and_then(non_empty)
+            let message_model = msg.model.and_then(non_empty);
+            let model = message_model
+                .clone()
                 .or_else(|| state.current_model.clone().and_then(non_empty))
                 .or_else(|| ctx.session_model.map(str::to_string).and_then(non_empty))?;
-            let provider = msg
-                .provider
-                .and_then(non_empty)
-                .or_else(|| state.current_provider.clone().and_then(non_empty))
+            let message_provider = msg.provider.and_then(non_empty);
+            let observed_provider = message_provider
+                .clone()
+                .or_else(|| state.current_provider.clone().and_then(non_empty));
+            let provider = observed_provider
+                .clone()
                 .or_else(|| ctx.session_provider.map(str::to_string).and_then(non_empty))
                 .unwrap_or_else(|| "unknown".to_string());
+            let billing_identity = if let Some(provider) = message_provider.as_deref() {
+                super::BillingIdentity::from_explicit(
+                    Some(provider),
+                    super::BillingIdentityOrigin::ExplicitRecord,
+                )
+            } else if let Some(provider) = observed_provider.as_deref() {
+                super::BillingIdentity::from_explicit(
+                    Some(provider),
+                    super::BillingIdentityOrigin::ExplicitSession,
+                )
+            } else {
+                // `session_windows` stores only the session's current route. It
+                // is useful attribution fallback, but cannot establish which
+                // route an older transcript event was billed through.
+                super::BillingIdentity::Unknown
+            };
 
-            state.current_model = Some(model.clone());
-            state.current_provider = Some(provider.clone());
+            if let Some(model) = message_model {
+                state.current_model = Some(model);
+            }
+            if let Some(provider) = message_provider {
+                state.current_provider = Some(provider);
+            }
             let timestamp = msg.timestamp.unwrap_or(ctx.fallback_timestamp);
             let cost = usage.cost.as_ref().and_then(|c| c.total).unwrap_or(0.0);
             let tokens = usage.to_breakdown_with_reasoning();
@@ -394,7 +416,7 @@ fn ingest_openclaw_entry(
                 )
             });
 
-            Some(UnifiedMessage::new_with_dedup(
+            let mut message = UnifiedMessage::new_with_dedup(
                 "openclaw",
                 model,
                 provider,
@@ -403,7 +425,9 @@ fn ingest_openclaw_entry(
                 tokens,
                 cost.max(0.0),
                 dedup_key,
-            ))
+            );
+            message.billing_identity = billing_identity;
+            Some(message)
         }
         _ => None,
     }
@@ -1816,6 +1840,27 @@ mod tests {
                     "message-provider",
                     "message-model"
                 ),
+            ]
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.billing_identity.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::sessions::BillingIdentity::Unknown,
+                crate::sessions::BillingIdentity::Known {
+                    id: "event-provider".into(),
+                    origin: crate::sessions::BillingIdentityOrigin::ExplicitSession,
+                },
+                crate::sessions::BillingIdentity::Known {
+                    id: "message-provider".into(),
+                    origin: crate::sessions::BillingIdentityOrigin::ExplicitRecord,
+                },
+                crate::sessions::BillingIdentity::Known {
+                    id: "message-provider".into(),
+                    origin: crate::sessions::BillingIdentityOrigin::ExplicitSession,
+                },
             ]
         );
     }

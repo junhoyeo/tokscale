@@ -3,7 +3,7 @@
 use super::utils::{
     file_modified_timestamp_ms, for_each_json_line_with_bytes, parse_timestamp_value,
 };
-use super::UnifiedMessage;
+use super::{BillingIdentityOrigin, UnifiedMessage};
 use crate::{provider_identity::inferred_provider_from_model_delimited, TokenBreakdown};
 use serde::Deserialize;
 use std::ops::ControlFlow;
@@ -154,6 +154,10 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
             timestamp,
             tokens,
             cost,
+        )
+        .with_billing(
+            record.provider.as_deref(),
+            BillingIdentityOrigin::ExplicitRecord,
         );
         if cost > 0.0 {
             message.mark_provider_reported_cost();
@@ -169,4 +173,44 @@ pub fn parse_aside_file(path: &Path) -> Vec<UnifiedMessage> {
         ControlFlow::Continue(())
     });
     messages
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::*;
+
+    #[test]
+    fn aside_keeps_explicit_billing_route_separate_from_inferred_vendor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let rows: Vec<_> = [
+            Some("ai-gateway"),
+            Some("claude-code"),
+            Some("aside"),
+            Some("anthropic"),
+            None,
+        ]
+        .into_iter()
+        .map(|provider| {
+            serde_json::json!({
+                "role":"assistant", "model":"claude-sonnet-4", "provider":provider,
+                "usage":{"input":100}, "timestamp":"2026-10-16T00:00:00Z"
+            })
+            .to_string()
+        })
+        .collect();
+        std::fs::write(&path, rows.join("\n")).unwrap();
+        let messages = parse_aside_file(&path);
+        assert_eq!(messages.len(), 5);
+        for (message, expected) in messages.iter().zip([
+            Some("ai-gateway"),
+            Some("claude-code"),
+            Some("aside"),
+            Some("anthropic"),
+            None,
+        ]) {
+            assert_eq!(message.provider_id, "anthropic");
+            assert_eq!(message.billing_identity.id(), expected);
+        }
+    }
 }

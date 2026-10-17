@@ -12,10 +12,7 @@ use tokscale_core::content_extractor::SessionContent;
 use tokscale_core::content_extractor::{extract_session_content, metadata_only_content};
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
-use tokscale_core::{
-    calculate_cost_with_service_tier, parse_local_clients, CostSource, LocalParseOptions,
-    ParsedMessage, TokenBreakdown,
-};
+use tokscale_core::{parse_local_clients, CostSource, LocalParseOptions, ParsedMessage};
 
 pub struct ReportOptions {
     pub json: bool,
@@ -1648,22 +1645,12 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
         return msg.cost;
     }
     let Some(pricing) = pricing else {
+        tokscale_core::pricing::warn_incomplete_pricing();
         return 0.0;
     };
-    calculate_cost_with_service_tier(
-        pricing,
-        &msg.model_id,
-        Some(&msg.provider_id),
-        &TokenBreakdown {
-            input: msg.input,
-            output: msg.output,
-            cache_read: msg.cache_read,
-            cache_write: msg.cache_write,
-            cache_write_1h: msg.cache_write_1h,
-            reasoning: msg.reasoning,
-        },
-        msg.service_tier.as_deref(),
-    )
+    pricing
+        .estimate_message(&tokscale_core::parsed_to_unified(msg, msg.cost))
+        .cost
 }
 
 fn format_tokens(tokens: i64) -> String {
@@ -1696,6 +1683,7 @@ struct SessionAgg {
 mod tests {
     use super::*;
     use tokscale_core::pricing::{ModelPricing, PricingService};
+    use tokscale_core::TokenBreakdown;
 
     fn test_pricing_service() -> PricingService {
         let mut litellm = HashMap::new();
@@ -1722,6 +1710,9 @@ mod tests {
 
     fn parsed_message(model_id: &str) -> ParsedMessage {
         ParsedMessage {
+            estimate_status: tokscale_core::sessions::EstimateStatus::Unpriced,
+            billing_identity: tokscale_core::sessions::BillingIdentity::Unknown,
+            pricing_model_id: None,
             client: "claude".to_string(),
             model_id: model_id.to_string(),
             provider_id: "anthropic".to_string(),

@@ -131,7 +131,7 @@ fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
                 .collect();
             let model_name = model_part.trim();
             if !model_name.is_empty() {
-                return Some(normalize_model_name(model_name));
+                return Some(model_name.to_string());
             }
         }
     }
@@ -453,12 +453,13 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         .replace(".settings", "");
 
     // Get model and provider
+    let billing_provider = settings.provider_lock.clone();
     let provider = settings.provider_lock.clone().unwrap_or_else(|| {
         get_provider_from_model(settings.model.as_deref().unwrap_or("")).to_string()
     });
 
-    let model = if let Some(m) = settings.model {
-        normalize_model_name(&m)
+    let raw_model = if let Some(m) = settings.model {
+        m
     } else {
         // Try to extract from JSONL file
         let jsonl_path = droid_jsonl_path(path);
@@ -470,6 +471,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
             get_default_model_from_provider(&provider)
         }
     };
+    let model = normalize_model_name(&raw_model);
 
     let totals = TokenBreakdown {
         input: usage.input_tokens.unwrap_or(0).max(0),
@@ -528,7 +530,12 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
                         reasoning: reasoning[index],
                     },
                     0.0,
-                );
+                )
+                .with_billing(
+                    billing_provider.as_deref(),
+                    super::BillingIdentityOrigin::ExplicitSession,
+                )
+                .with_pricing_model(&raw_model);
                 // These records are attribution fragments of one session, not
                 // separate sessions. `sessionize` opens a new interval whenever
                 // two records sit more than the idle gap apart and counts every
@@ -552,9 +559,14 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     let lock_timestamp = parse_lock_timestamp(settings.provider_lock_timestamp.as_deref());
     let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
-    vec![UnifiedMessage::new(
-        "droid", model, provider, session_id, timestamp, totals, 0.0,
-    )]
+    vec![
+        UnifiedMessage::new("droid", model, provider, session_id, timestamp, totals, 0.0)
+            .with_billing(
+                billing_provider.as_deref(),
+                super::BillingIdentityOrigin::ExplicitSession,
+            )
+            .with_pricing_model(&raw_model),
+    ]
 }
 
 #[cfg(test)]

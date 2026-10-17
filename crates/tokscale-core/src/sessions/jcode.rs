@@ -18,12 +18,10 @@ struct JcodeSession {
     provider_key: Option<String>,
     model: Option<String>,
     working_dir: Option<String>,
-    #[serde(default)]
-    messages: Vec<JcodeMessage>,
 }
 
-/// Same envelope, but with `messages` left as raw JSON so a single malformed
-/// element can be skipped instead of failing the whole snapshot deserialize.
+/// Snapshot metadata with `messages` left as raw JSON so a malformed element
+/// can be skipped without losing its stable ID or the valid sibling messages.
 #[derive(Debug, Deserialize)]
 struct JcodeSessionEnvelope {
     id: Option<String>,
@@ -132,6 +130,12 @@ fn tokens_from_usage(usage: &JcodeTokenUsage) -> TokenBreakdown {
 
 #[derive(Debug, Clone)]
 struct JcodeSessionContext {
+    // Billing evidence belongs only to the current journal append batch.
+    // A mutable snapshot-wide route cannot authenticate historical messages.
+    billing_provider: Option<String>,
+    // Track every stable ID before deserialization/usage filtering: a later
+    // correction must not assign a new route to missing, zero, or invalid usage.
+    billing_by_message_id: std::collections::HashMap<String, super::BillingIdentity>,
     session_id: String,
     model: String,
     provider: String,
@@ -157,10 +161,32 @@ impl JcodeSessionContext {
             session_id,
             model: model_id(session.model.as_deref()),
             provider: provider_id(session.provider_key.as_deref()),
+            billing_provider: None,
+            billing_by_message_id: std::collections::HashMap::new(),
             workspace_key,
             workspace_label,
             pending_turn_start: false,
             seen_user_dedup_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    fn billing_for_message(&mut self, message_id: &str) -> super::BillingIdentity {
+        let current = super::BillingIdentity::from_explicit(
+            self.billing_provider.as_deref(),
+            super::BillingIdentityOrigin::ExplicitSession,
+        );
+        self.billing_by_message_id
+            .entry(message_id.to_string())
+            .or_insert(current)
+            .clone()
+    }
+
+    fn remember_message_billing(&mut self, messages: &[serde_json::Value]) {
+        for id in messages
+            .iter()
+            .filter_map(|message| message.get("id").and_then(serde_json::Value::as_str))
+        {
+            self.billing_for_message(id);
         }
     }
 
@@ -218,6 +244,7 @@ fn parse_jcode_messages(
                 // snapshot and journal batches.
                 .unwrap_or_else(|| format!("{fallback_id_scope}:{ordinal}"));
             let dedup_key = format!("jcode:{}:{message_id}", context.session_id);
+            let billing_identity = context.billing_for_message(&message_id);
 
             // A journal correction that only replaces an already-emitted message
             // is turn-neutral: the merge in `parse_jcode_file` overwrites its
@@ -274,6 +301,7 @@ fn parse_jcode_messages(
                 0.0,
                 Some(dedup_key),
             );
+            unified.billing_identity = billing_identity;
             unified.duration_ms = duration_ms;
             if !is_replacement
                 && message.role.as_deref() == Some("assistant")
@@ -300,13 +328,11 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
         Ok(envelope) => envelope,
         Err(_) => return Vec::new(),
     };
-    let messages = lenient_jcode_messages(envelope.messages);
     let session = JcodeSession {
         id: envelope.id,
         provider_key: envelope.provider_key,
         model: envelope.model,
         working_dir: envelope.working_dir,
-        messages,
     };
 
     let session_id = session.id.clone().unwrap_or_else(|| {
@@ -317,8 +343,9 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
     });
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let mut context = JcodeSessionContext::new(session_id, &session);
+    context.remember_message_billing(&envelope.messages);
     let mut parsed = parse_jcode_messages(
-        session.messages,
+        lenient_jcode_messages(envelope.messages),
         &mut context,
         fallback_timestamp,
         "snapshot",
@@ -353,9 +380,18 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
         let Ok(entry) = serde_json::from_str::<JcodeJournalEntry>(trimmed) else {
             return;
         };
+        // Jcode journals append the unsaved message suffix with its current
+        // metadata; a route change checkpoints the snapshot instead. Only this
+        // batch's provider_key establishes a billing scope. Missing/unknown
+        // metadata must not inherit the previous batch's route.
+        context.billing_provider = entry
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_key.clone());
         if let Some(meta) = entry.meta {
             context.apply_meta(meta);
         }
+        context.remember_message_billing(&entry.append_messages);
         let journal_messages = parse_jcode_messages(
             lenient_jcode_messages(entry.append_messages),
             &mut context,

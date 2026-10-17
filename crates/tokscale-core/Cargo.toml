@@ -48,6 +48,7 @@ reqwest = { workspace = true, features = ["native-tls"] }
 reqwest = { workspace = true, features = ["native-tls-vendored"] }
 
 [dev-dependencies]
+jsonschema = { version = "0.33", default-features = false }
 tempfile = "3"
 serial_test = "3"
 wait-timeout = "0.2.1"

@@ -138,6 +138,11 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
                 tokens,
                 cost,
                 agent.clone(),
+            )
+            .with_pricing_model(model_raw)
+            .with_billing(
+                string_field(usage, "provider"),
+                super::BillingIdentityOrigin::ExplicitRecord,
             );
             message.dedup_key = Some(dedup_key);
             message.duration_ms = duration_ms;
@@ -311,6 +316,45 @@ mod tests {
         format!(
             r#"{{"timestampMs":{timestamp_ms},"event":{{"agentEvent":{{"kind":"LlmResponseMetadataEvent","modelUsage":[{{"model":"{model}","inputTokens":{input},"outputTokens":{output}}}]}}}}}}"#
         )
+    }
+
+    #[test]
+    fn aliased_model_preserves_raw_id_for_scoped_pricing() {
+        let content = r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"claude-sonnet-4.6","provider":"private-gateway","inputTokens":1000000,"outputTokens":0}]}}}"#;
+        let messages = parse_events(content);
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.model_id, "claude-sonnet-4-6");
+        assert_eq!(
+            message.pricing_model_id.as_deref(),
+            Some("claude-sonnet-4.6")
+        );
+        assert_eq!(message.billing_identity.id(), Some("private-gateway"));
+
+        let custom = pricing::custom::CustomPricing::load_from_str(
+            r#"{"provider_overrides":[{"provider_id":"private-gateway","model_id":"claude-sonnet-4.6","pricing":{"input_cost_per_million_tokens":2}},{"provider_id":"private-gateway","model_id":"claude-sonnet-4-6","pricing":{"input_cost_per_million_tokens":9}}]}"#,
+            Path::new("fixture.json"),
+        );
+        assert!(custom.diagnostics().is_empty());
+        let service = pricing::PricingService::new_with_custom(
+            custom,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let explained = service.explain_message(message);
+        assert_eq!(explained.raw_model_id, "claude-sonnet-4.6");
+        assert_eq!(
+            explained.matched_model_id.as_deref(),
+            Some("claude-sonnet-4.6")
+        );
+        assert_eq!(
+            explained.matched_provider_id.as_deref(),
+            Some("private-gateway")
+        );
+        assert_eq!(explained.scope, "provider");
+        assert_eq!(explained.final_estimate, 2.0);
+        assert!(explained.coverage);
+        assert!(!explained.normalized);
     }
 
     #[test]

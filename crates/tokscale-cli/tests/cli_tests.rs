@@ -6100,7 +6100,7 @@ fn test_submit_includes_unpriced_usage_at_zero_and_keeps_the_rest() {
         "the hint must name the custom pricing file: {stdout}"
     );
     assert!(
-        stdout.contains("keyed by the model id alone"),
+        stdout.contains("using global `models` or scoped `provider_overrides`"),
         "the hint must state the key format, since the warning above prints provider/model but CustomPricing::lookup keys on the model id: {stdout}"
     );
     assert!(
@@ -7519,6 +7519,262 @@ fn test_codex_compressed_session_reports_usage() {
         assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
         assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
         assert_eq!(json["entries"][0]["reasoning"].as_i64().unwrap(), 10);
+    }
+}
+
+#[test]
+fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
+    let tmp = TempDir::new().unwrap();
+    let config = sandbox_config_dir(tmp.path());
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("custom-pricing.json"),r#"{"models":{"atlas":{"input_cost_per_million_tokens":9}},"provider_overrides":[{"provider_id":" Vertex ","model_id":"atlas","pricing":{"input_cost_per_million_tokens":2}}]}"#).unwrap();
+    for source_flag in ["--source", "--provider"] {
+        let output = cmd_with_home(tmp.path())
+            .timeout(Duration::from_secs(10))
+            .args([
+                "pricing",
+                "atlas",
+                source_flag,
+                "custom",
+                "--billing-provider",
+                "vertex",
+                "--json",
+                "--no-spinner",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["scope"], "provider");
+        assert_eq!(value["matchedProviderId"], "vertex");
+        assert_eq!(value["pricing"]["inputCostPerToken"], 0.000002);
+        assert_eq!(value["missingRates"], serde_json::json!(["output"]));
+    }
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "atlas",
+            "--provider",
+            "custom",
+            "--json",
+            "--no-spinner",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["scope"], "global");
+    cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "validate-overrides",
+            "--strict",
+            "--json",
+            "--no-spinner",
+        ])
+        .assert()
+        .success();
+    let output = cmd_with_home(tmp.path())
+        .args(["pricing", "list-overrides", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["count"], 2);
+    assert_eq!(value["models"][0]["scope"], "global");
+    assert_eq!(value["models"][1]["providerId"], "vertex");
+}
+
+#[test]
+fn billing_label_does_not_change_catalog_resolution() {
+    let tmp = TempDir::new().unwrap();
+    let model = "claude-sonnet-4-20250514";
+    prime_canonical_sonnet_pricing_cache(tmp.path(), model);
+    for source in [
+        None,
+        Some("litellm"),
+        Some("openrouter"),
+        Some("models.dev"),
+    ] {
+        let lookup = |billing: Option<&str>| {
+            let mut command = cmd_with_home(tmp.path());
+            command.args(["pricing", model, "--json", "--no-spinner"]);
+            if let Some(source) = source {
+                command.args(["--source", source]);
+            }
+            if let Some(billing) = billing {
+                command.args(["--billing-provider", billing]);
+            }
+            let output = command
+                .timeout(Duration::from_secs(10))
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+        };
+        let baseline = lookup(None);
+        assert_eq!(baseline["scope"], "upstream");
+        for billing in ["unpriced:anything", "azure", "vertex"] {
+            let mut actual = lookup(Some(billing));
+            assert_eq!(actual["billingProviderId"], billing);
+            actual["billingProviderId"] = serde_json::Value::Null;
+            assert_eq!(actual, baseline, "source={source:?}, billing={billing}");
+        }
+    }
+}
+
+#[test]
+fn billing_strict_validation_rejects_invalid_and_unreadable_configuration() {
+    let tmp = TempDir::new().unwrap();
+    let config = sandbox_config_dir(tmp.path());
+    fs::create_dir_all(&config).unwrap();
+    let file = config.join("custom-pricing.json");
+    fs::write(&file,r#"{"provider_overrides":[{"provider_id":"unknown","model_id":"atlas","pricing":{"input_cost_per_token":1}}]}"#).unwrap();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "validate-overrides",
+            "--strict",
+            "--json",
+            "--no-spinner",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["valid"], false);
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "validate-overrides",
+            "--strict",
+            "--json",
+            "--no-spinner",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["diagnostics"][0]["code"], "io_error");
+}
+
+fn create_billing_explain_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let session = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/billing");
+    fs::create_dir_all(&session).unwrap();
+    for (index, provider) in [Some("vertex"), Some("openrouter/google"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut message = serde_json::json!({
+            "id": format!("billing-{index}"),
+            "sessionID": "billing",
+            "role": "assistant",
+            "modelID": "private-model",
+            "tokens": {"input": 1, "output": 0, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1780000000000u64 + index as u64},
+        });
+        if let Some(provider) = provider {
+            message["providerID"] = serde_json::json!(provider);
+        }
+        fs::write(
+            session.join(format!("billing-{index}.json")),
+            message.to_string(),
+        )
+        .unwrap();
+    }
+    tmp
+}
+
+#[test]
+fn billing_explain_rejects_unknown_and_blank_filters() {
+    let tmp = create_billing_explain_fixture();
+    for provider in ["unknown", " UnKnOwN ", "", " \t\n "] {
+        let output = cmd_with_home(tmp.path())
+            .timeout(Duration::from_secs(10))
+            .args([
+                "pricing",
+                "explain",
+                "--billing-provider",
+                provider,
+                "--json",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "invalid filter {provider:?} was accepted"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "invalid filter exposed local pricing rows"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--billing-provider"));
+    }
+}
+
+#[test]
+fn billing_explain_known_filter_is_exact_and_normalized() {
+    let tmp = create_billing_explain_fixture();
+    let output = cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(10))
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "fixture must contain two known channels and one unknown"
+    );
+
+    for (provider, expected) in [
+        (" VERTEX ", Some("vertex")),
+        (" OpenRouter/Google ", Some("openrouter/google")),
+        ("google", None),
+        ("no-such-channel", None),
+    ] {
+        let output = cmd_with_home(tmp.path())
+            .timeout(Duration::from_secs(10))
+            .args([
+                "pricing",
+                "explain",
+                "--billing-provider",
+                provider,
+                "--json",
+                "--no-spinner",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+        assert_eq!(rows.len(), usize::from(expected.is_some()), "{provider:?}");
+        if let Some(expected) = expected {
+            assert_eq!(rows[0]["billingProviderId"], expected);
+        }
     }
 }
 

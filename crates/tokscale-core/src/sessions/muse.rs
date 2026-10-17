@@ -159,6 +159,7 @@ pub fn parse_muse_file(path: &Path) -> Vec<UnifiedMessage> {
             0.0,
             Some(dedup_key),
         );
+        message.preserve_pricing_model(model_raw);
         message.duration_ms = duration_ms;
         messages.push((index, message));
     });
@@ -181,6 +182,10 @@ pub fn parse_muse_file(path: &Path) -> Vec<UnifiedMessage> {
                 {
                     if let Some(provider_id) = &metadata.provider_id {
                         message.provider_id.clone_from(provider_id);
+                        message.billing_identity = super::BillingIdentity::from_explicit(
+                            Some(provider_id),
+                            super::BillingIdentityOrigin::ExplicitSession,
+                        );
                     }
                 }
             }

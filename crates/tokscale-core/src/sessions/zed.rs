@@ -161,6 +161,10 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
         tokens,
         0.0,
         Some(format!("zed:{}", row.id)),
+    )
+    .with_billing(
+        Some(ZED_HOSTED_PROVIDER),
+        super::BillingIdentityOrigin::KnownHostedChannel,
     );
     message.message_count = message_count;
 

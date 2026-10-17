@@ -1,0 +1,26 @@
+{
+  "models": {
+    "claude-sonnet-4": {
+      "input_cost_per_million_tokens": 3,
+      "output_cost_per_million_tokens": 15
+    }
+  },
+  "provider_overrides": [
+    {
+      "provider_id": "vertex",
+      "model_id": "claude-sonnet-4",
+      "pricing": {
+        "input_cost_per_million_tokens": 2,
+        "output_cost_per_million_tokens": 10
+      }
+    },
+    {
+      "provider_id": "local",
+      "model_id": "qwen3-coder",
+      "pricing": {
+        "input_cost_per_million_tokens": 0,
+        "output_cost_per_million_tokens": 0
+      }
+    }
+  ]
+}

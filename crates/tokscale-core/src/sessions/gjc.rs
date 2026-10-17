@@ -149,6 +149,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         // A missing provider field is recoverable: infer it from the model name
         // (and fall back to "gjc") rather than dropping a message that carries
         // valid tokens.
+        let billing_provider = message.provider.clone();
         let provider = match message.provider {
             Some(p) if !p.is_empty() => p,
             _ => inferred_provider_from_model(&model)
@@ -205,6 +206,10 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             tokens,
             cost,
             Some(dedup_key),
+        )
+        .with_billing(
+            billing_provider.as_deref(),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         if cost_source == CostSource::ProviderReported {
             unified.mark_provider_reported_cost();

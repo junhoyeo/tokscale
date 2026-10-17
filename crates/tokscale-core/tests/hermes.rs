@@ -472,6 +472,10 @@ fn test_parse_hermes_sqlite_ignores_unknown_billing_provider_and_falls_back_to_m
     let messages = parse_hermes_sqlite(&db_path);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].provider_id, "openai");
+    assert_eq!(
+        messages[0].billing_identity,
+        tokscale_core::sessions::BillingIdentity::Unknown
+    );
 }
 
 #[test]
@@ -1084,6 +1088,20 @@ fn test_parse_hermes_sqlite_keeps_billing_providers_separate_for_same_model() {
     assert_eq!(kilocode.tokens.input, 1000);
     assert_eq!(opencode.tokens.input, 2000);
     assert_eq!(
+        kilocode.billing_identity,
+        tokscale_core::sessions::BillingIdentity::Known {
+            id: "kilocode".into(),
+            origin: tokscale_core::sessions::BillingIdentityOrigin::ExplicitRecord,
+        }
+    );
+    assert_eq!(
+        opencode.billing_identity,
+        tokscale_core::sessions::BillingIdentity::Known {
+            id: "opencode-zen".into(),
+            origin: tokscale_core::sessions::BillingIdentityOrigin::ExplicitRecord,
+        }
+    );
+    assert_eq!(
         kilocode.dedup_key.as_deref(),
         Some("hermes:session-split:glm-5.2:kilocode")
     );
@@ -1348,6 +1366,9 @@ fn test_parse_hermes_sqlite_separates_null_and_empty_billing_providers() {
 
     let messages = parse_hermes_sqlite(&db_path);
     assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(
+        |message| message.billing_identity == tokscale_core::sessions::BillingIdentity::Unknown
+    ));
 
     let keys: HashSet<&str> = messages
         .iter()
@@ -1496,6 +1517,9 @@ fn test_parse_hermes_sqlite_splits_cross_day_session_by_logged_calls() {
 
     let mut messages = parse_hermes_sqlite(&db_path);
     assert_eq!(messages.len(), 2, "one message per active day");
+    assert!(messages
+        .iter()
+        .all(|m| m.billing_identity.id() == Some("zai")));
     messages.sort_by_key(|m| m.timestamp);
 
     // Each bucket stays on the day whose calls reported it. A shared overall

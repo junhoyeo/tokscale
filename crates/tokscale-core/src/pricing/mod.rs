@@ -552,12 +552,17 @@ impl PricingService {
         openrouter_data: Option<HashMap<String, ModelPricing>>,
         models_dev_data: Option<HashMap<String, ModelPricing>>,
     ) -> Option<Self> {
-        if litellm_data.is_none() && openrouter_data.is_none() && models_dev_data.is_none() {
+        let custom = CustomPricing::load_from_default_path();
+        if litellm_data.is_none()
+            && openrouter_data.is_none()
+            && models_dev_data.is_none()
+            && custom.is_empty()
+        {
             return None;
         }
 
         Some(Self::new_with_custom_and_models_dev(
-            CustomPricing::load_from_default_path(),
+            custom,
             Self::filter_litellm_data(litellm_data.unwrap_or_default()),
             openrouter_data.unwrap_or_default(),
             models_dev_data.unwrap_or_default(),
@@ -598,41 +603,45 @@ impl PricingService {
         model_id: &str,
         force_source: Option<&str>,
     ) -> Option<LookupResult> {
-        match force_source {
-            Some(source) if source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
-            }
-            None => {
-                if let Some(result) = self.lookup_custom(model_id) {
-                    return Some(result);
-                }
-            }
-            Some(_) => {}
-        }
-
-        self.lookup.lookup_with_source(model_id, force_source)
+        self.lookup_with_source_and_provider(model_id, force_source, None)
     }
 
+    /// Explicit provider convenience API. Message callers must use PricingContext
+    /// to keep billing identity distinct from the upstream attribution hint.
     pub fn lookup_with_source_and_provider(
         &self,
         model_id: &str,
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        self.lookup_context(
+            &PricingContext::explicit(model_id, provider_id),
+            force_source,
+        )
+    }
+
+    pub fn lookup_context(
+        &self,
+        context: &PricingContext<'_>,
+        force_source: Option<&str>,
+    ) -> Option<LookupResult> {
         match force_source {
             Some(source) if source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
+                return self.lookup_custom(context)
             }
             None => {
-                if let Some(result) = self.lookup_custom(model_id) {
+                if let Some(result) = self.lookup_custom(context) {
                     return Some(result);
                 }
             }
             Some(_) => {}
         }
-
         self.lookup
-            .lookup_with_source_and_provider(model_id, force_source, provider_id)
+            .lookup_with_source_and_provider(context.model, force_source, context.upstream_hint)
+            .map(|mut selected| {
+                selected.evidence.normalized |= context.raw_model != context.model;
+                selected
+            })
     }
 
     pub fn calculate_cost(
@@ -644,15 +653,18 @@ impl PricingService {
         cache_write: i64,
         reasoning: i64,
     ) -> f64 {
-        let usage = TokenBreakdown {
-            input,
-            output,
-            cache_read,
-            cache_write,
-            cache_write_1h: 0,
-            reasoning,
-        };
-        self.calculate_cost_with_provider(model_id, None, &usage)
+        self.calculate_cost_with_provider(
+            model_id,
+            None,
+            &TokenBreakdown {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                cache_write_1h: 0,
+                reasoning,
+            },
+        )
     }
 
     pub fn calculate_cost_detailed(
@@ -687,25 +699,9 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> (f64, Option<crate::EstimateSource>) {
-        #[cfg(test)]
-        self.detailed_calculations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(result) = self.custom.lookup_with_key(model_id) {
-            let cost = compute_cost(
-                result.pricing,
-                usage.input,
-                usage.output,
-                usage.cache_read,
-                usage.cache_write,
-                usage.cache_write_1h,
-                usage.reasoning,
-            );
-            let covered = cost > 0.0 || (usage.total() > 0 && result.pricing.covers_usage(usage));
-            return (cost, covered.then_some(crate::EstimateSource::Custom));
-        }
-
-        self.lookup
-            .calculate_cost_detailed_with_provider(model_id, provider_id, usage)
+        let estimate =
+            self.estimate_context(&PricingContext::explicit(model_id, provider_id), usage);
+        (estimate.cost, estimate.source(usage))
     }
 
     pub fn calculate_cost_with_provider(
@@ -724,56 +720,204 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> bool {
-        self.resolve_for_usage_with_provider(model_id, provider_id, usage)
-            .is_some_and(|result| {
-                result.evidence.is_submission_safe() && result.covers_usage(usage)
-            })
+        self.covers_usage_context(&PricingContext::explicit(model_id, provider_id), usage)
+    }
+
+    pub fn covers_usage_context(
+        &self,
+        context: &PricingContext<'_>,
+        usage: &TokenBreakdown,
+    ) -> bool {
+        self.resolve_context(context, usage).is_some_and(|result| {
+            result.evidence.is_submission_safe() && result.covers_usage(usage)
+        })
     }
 
     /// Resolve the exact pricing evidence used to judge this usage for a
-    /// leaderboard submission.
-    ///
-    /// This differs from a plain lookup when a provider-scoped row borrows a
-    /// missing bucket rate from the canonical row. Callers that explain a
-    /// rejection must inspect this composed result, otherwise they can report
-    /// an incomplete price while the real blocker is the donor row's unsafe
-    /// model or price evidence.
+    /// leaderboard submission. Callers that explain a rejection must inspect
+    /// this selected row rather than a plain lookup.
+    #[cfg(test)]
     pub(crate) fn resolve_for_usage_with_provider(
         &self,
         model_id: &str,
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> Option<LookupResult> {
-        if let Some(result) = self.lookup_custom(model_id) {
-            return Some(result);
-        }
-
-        self.lookup.resolve_for_usage(model_id, provider_id, usage)
+        self.resolve_context(&PricingContext::explicit(model_id, provider_id), usage)
     }
 
-    fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
-        self.custom
-            .lookup_with_key(model_id)
-            .map(|result| LookupResult {
-                pricing: result.pricing.clone(),
-                source: "Custom".into(),
-                matched_key: result.matched_key.to_string(),
-                evidence: ResolutionEvidence {
-                    kind: ResolutionKind::Custom,
-                    candidate_count: 1,
-                    price_consensus: true,
-                    exact_model_identity: true,
-                    alias_applied: false,
-                    // A custom entry can be reached through synthetic-model
-                    // normalization, which is exactly the case provenance has
-                    // to disclose: the matched key is not the requested id.
-                    normalized: result.normalized,
-                    stripped: false,
-                    // A custom entry is the user stating a rate for their own
-                    // id, not a dataset namespace being read as a price sheet.
-                    subscription_namespace: false,
-                },
-            })
+    pub fn resolve_context(
+        &self,
+        context: &PricingContext<'_>,
+        usage: &TokenBreakdown,
+    ) -> Option<LookupResult> {
+        self.lookup_custom(context).or_else(|| {
+            self.lookup
+                .resolve_for_usage(context.model, context.upstream_hint, usage)
+                .map(|mut selected| {
+                    selected.evidence.normalized |= context.raw_model != context.model;
+                    selected
+                })
+        })
+    }
+
+    /// Price selection, coverage and the fast-tier decision all consume this
+    /// same selected row. A missing row is not a zero-price row.
+    pub fn estimate_context(
+        &self,
+        context: &PricingContext<'_>,
+        usage: &TokenBreakdown,
+    ) -> PricingEstimate {
+        #[cfg(test)]
+        self.detailed_calculations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(selected) = self.resolve_context(context, usage) else {
+            return PricingEstimate {
+                cost: 0.0,
+                coverage: false,
+                effective_multiplier: 1.0,
+                selected: None,
+            };
+        };
+        let effective_multiplier = context.multiplier(&selected);
+        let base_cost = if selected.source == "Custom" {
+            compute_cost(
+                &selected.pricing,
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write,
+                usage.cache_write_1h,
+                usage.reasoning,
+            )
+        } else {
+            lookup::compute_cost_for_lookup(&selected, context.upstream_hint, usage)
+        };
+        let cost = base_cost * effective_multiplier;
+        let coverage = selected.evidence.is_submission_safe() && selected.covers_usage(usage);
+        PricingEstimate {
+            cost,
+            coverage,
+            effective_multiplier,
+            selected: Some(selected),
+        }
+    }
+
+    pub fn estimate_message(&self, message: &crate::UnifiedMessage) -> PricingEstimate {
+        let mut estimate = self.estimate_context(&message.pricing_context(), &message.tokens);
+        if !message.has_authoritative_cost() && message.tokens.total() > 0 && !estimate.coverage {
+            warn_incomplete_pricing();
+        }
+        if message.client == "zed"
+            && message
+                .provider_id
+                .eq_ignore_ascii_case(crate::sessions::zed::ZED_HOSTED_PROVIDER)
+        {
+            estimate.effective_multiplier *= 1.1;
+            estimate.cost *= 1.1;
+        }
+        estimate
+    }
+
+    /// Local diagnostics only. This type is never part of a submission DTO.
+    pub fn explain_message(&self, message: &crate::UnifiedMessage) -> PricingExplanation {
+        let estimate = self.estimate_message(message);
+        let authoritative = message.has_authoritative_cost();
+        let status = if authoritative {
+            crate::sessions::EstimateStatus::Authoritative
+        } else if estimate.coverage {
+            crate::sessions::EstimateStatus::CurrentEstimate
+        } else if estimate.selected.is_some() {
+            crate::sessions::EstimateStatus::PartialEstimate
+        } else if message.cost > 0.0
+            || message.estimate_status == crate::sessions::EstimateStatus::StaleEstimate
+        {
+            crate::sessions::EstimateStatus::StaleEstimate
+        } else {
+            crate::sessions::EstimateStatus::Unpriced
+        };
+        let selected = if authoritative {
+            None
+        } else {
+            estimate.selected.as_ref()
+        };
+        PricingExplanation {
+            client: message.client.clone(),
+            model_id: message.model_id.clone(),
+            raw_model_id: message.pricing_context().raw_model.to_string(),
+            provider_id: message.provider_id.clone(),
+            billing_identity: message.billing_identity.clone(),
+            billing_provider_id: message.billing_identity.id().map(str::to_string),
+            price_source: if authoritative {
+                Some("ProviderReported".into())
+            } else {
+                selected.map(|row| row.source.clone())
+            },
+            scope: if authoritative {
+                "reported"
+            } else {
+                selected.map_or("unpriced", |row| {
+                    if row.source != "Custom" {
+                        "upstream"
+                    } else if row.matched_provider_id.is_some() {
+                        "provider"
+                    } else {
+                        "global"
+                    }
+                })
+            },
+            matched_model_id: selected.map(|row| row.matched_key.clone()),
+            matched_provider_id: selected.and_then(|row| row.matched_provider_id.clone()),
+            normalized: selected.is_some_and(|row| row.evidence.normalized),
+            alias_applied: selected.is_some_and(|row| row.evidence.alias_applied),
+            rate_basis: if authoritative { "reported" } else { "base" },
+            effective_multiplier: if authoritative {
+                1.0
+            } else {
+                estimate.effective_multiplier
+            },
+            final_estimate: if authoritative {
+                message.cost
+            } else {
+                estimate.cost
+            },
+            coverage: authoritative || estimate.coverage,
+            estimate_status: status,
+        }
+    }
+
+    fn lookup_custom(&self, context: &PricingContext<'_>) -> Option<LookupResult> {
+        let mut alias_applied = false;
+        let selected = self
+            .custom
+            .lookup_with_provider_key(context.raw_model, context.billing_provider)
+            .or_else(|| {
+                // Compatibility only: existing parser aliases used to reach old
+                // global rules. Do not broaden new scoped rules through aliases.
+                if context.raw_model != context.model {
+                    let result = self.custom.lookup_with_key(context.model);
+                    alias_applied = result.is_some();
+                    result
+                } else {
+                    None
+                }
+            });
+        selected.map(|result| LookupResult {
+            pricing: result.pricing.clone(),
+            source: "Custom".into(),
+            matched_key: result.matched_key.to_string(),
+            matched_provider_id: result.matched_provider_id.map(str::to_string),
+            evidence: ResolutionEvidence {
+                kind: ResolutionKind::Custom,
+                candidate_count: 1,
+                price_consensus: true,
+                exact_model_identity: true,
+                alias_applied,
+                normalized: result.normalized || alias_applied,
+                stripped: false,
+                subscription_namespace: false,
+            },
+        })
     }
 }
 
@@ -1005,6 +1149,52 @@ mod tests {
             Some("anthropic"),
             &hourly,
         ));
+    }
+
+    #[test]
+    fn context_estimate_and_submission_share_long_context_coverage() {
+        let mut flat = haiku_55_pricing();
+        flat.input_cost_per_token_above_100k_tokens = None;
+        flat.output_cost_per_token_above_100k_tokens = None;
+        let service = PricingService::new(
+            HashMap::new(),
+            HashMap::from([("anthropic/claude-haiku-5-5".into(), flat)]),
+        );
+        let context = PricingContext::explicit("claude-haiku-5-5", Some("anthropic"));
+        for (input, covered) in [(100_000, true), (100_001, false)] {
+            let usage = TokenBreakdown {
+                input,
+                output: 1,
+                ..Default::default()
+            };
+            assert_eq!(service.estimate_context(&context, &usage).coverage, covered);
+            assert_eq!(service.covers_usage_context(&context, &usage), covered);
+        }
+    }
+
+    #[test]
+    fn scoped_custom_long_context_prices_remain_explicit_whole_row_overrides() {
+        let custom = CustomPricing::load_from_str(
+            r#"{"provider_overrides":[{"provider_id":"gateway","model_id":"claude-haiku-5-5","pricing":{"input_cost_per_million_tokens":2,"output_cost_per_million_tokens":4}}]}"#,
+            std::path::Path::new("test.json"),
+        );
+        assert!(custom.diagnostics().is_empty());
+        let service = PricingService::new_with_custom(custom, HashMap::new(), HashMap::new());
+        let context = PricingContext::explicit("claude-haiku-5-5", Some("gateway"));
+        let usage = TokenBreakdown {
+            input: 100_001,
+            output: 1,
+            ..Default::default()
+        };
+        let estimate = service.estimate_context(&context, &usage);
+        assert!(estimate.coverage);
+        assert!(service.covers_usage_context(&context, &usage));
+        assert!((estimate.cost - 0.200006).abs() < 1e-9);
+        assert_eq!(
+            estimate.selected.unwrap().matched_provider_id.as_deref(),
+            Some("gateway")
+        );
+        assert!(!service.covers_usage_with_provider("claude-haiku-5-5", Some("other"), &usage));
     }
 
     fn custom_service(
@@ -3241,4 +3431,96 @@ mod tests {
             .expect("mimo-v2.5 must resolve first-party");
         assert_eq!(base.source, "Tokscale Archive");
     }
+}
+
+/// Identity inputs remain separate all the way from parser to chosen rate.
+#[derive(Debug, Clone, Copy)]
+pub struct PricingContext<'a> {
+    pub raw_model: &'a str,
+    pub model: &'a str,
+    pub billing_provider: Option<&'a str>,
+    pub upstream_hint: Option<&'a str>,
+    pub service_tier: Option<&'a str>,
+}
+
+impl<'a> PricingContext<'a> {
+    pub fn explicit(model: &'a str, provider: Option<&'a str>) -> Self {
+        Self {
+            raw_model: model,
+            model,
+            billing_provider: provider,
+            upstream_hint: provider,
+            service_tier: None,
+        }
+    }
+
+    fn multiplier(&self, selected: &LookupResult) -> f64 {
+        let openai = self
+            .upstream_hint
+            .and_then(crate::provider_identity::canonical_provider)
+            .as_deref()
+            == Some("openai");
+        let tier = self.service_tier.is_some_and(|tier| {
+            tier.trim().eq_ignore_ascii_case("priority") || tier.trim().eq_ignore_ascii_case("fast")
+        });
+        let normalized_fast = crate::has_openai_gpt_fast_suffix(self.raw_model)
+            && selected.evidence.normalized
+            && !crate::has_openai_gpt_fast_suffix(&selected.matched_key);
+        if openai && (tier || normalized_fast) {
+            2.0
+        } else {
+            1.0
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PricingEstimate {
+    pub cost: f64,
+    pub coverage: bool,
+    pub effective_multiplier: f64,
+    pub selected: Option<LookupResult>,
+}
+
+impl PricingEstimate {
+    /// Classify the selected rate that actually produced this estimate. A zero
+    /// without covered usage is not evidence that pricing succeeded.
+    pub(crate) fn source(&self, usage: &TokenBreakdown) -> Option<EstimateSource> {
+        let selected = self.selected.as_ref()?;
+        (self.cost > 0.0 || (usage.total() > 0 && self.coverage)).then_some(
+            if selected.source == "Custom" {
+                EstimateSource::Custom
+            } else {
+                EstimateSource::Catalog
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingExplanation {
+    pub client: String,
+    pub model_id: String,
+    pub raw_model_id: String,
+    pub provider_id: String,
+    pub billing_provider_id: Option<String>,
+    pub billing_identity: crate::sessions::BillingIdentity,
+    pub price_source: Option<String>,
+    pub scope: &'static str,
+    pub matched_model_id: Option<String>,
+    pub matched_provider_id: Option<String>,
+    pub normalized: bool,
+    pub alias_applied: bool,
+    pub rate_basis: &'static str,
+    pub effective_multiplier: f64,
+    pub final_estimate: f64,
+    pub coverage: bool,
+    pub estimate_status: crate::sessions::EstimateStatus,
+}
+
+/// Reports incomplete local totals without contaminating JSON stdout.
+pub fn warn_incomplete_pricing() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| crate::tui_signal::emit_or_defer_stderr("tokscale: some usage is partial, unpriced, or has stale pricing; cost totals may be incomplete. Run `tokscale pricing explain --json --no-spinner` for local billing-channel details.".into()));
 }

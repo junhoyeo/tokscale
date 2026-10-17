@@ -768,6 +768,10 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let cost = reported_cost.unwrap_or(0.0);
         let mut message = UnifiedMessage::new(
             CLIENT_ID, model, provider, session_id, timestamp, tokens, cost,
+        )
+        .with_billing(
+            row.provider_id.as_deref(),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         // Preserve reported USD charges and explicit zero through caching.
         // Nonzero amounts in other/unknown currencies must not be copied as

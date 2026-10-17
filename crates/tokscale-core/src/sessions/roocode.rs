@@ -180,6 +180,13 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             },
             payload.cost,
             agent.clone(),
+        )
+        .with_billing(
+            entry
+                .model_info
+                .as_ref()
+                .and_then(|info| info.provider_id.as_deref()),
+            super::BillingIdentityOrigin::ExplicitRecord,
         );
         // The task log's `cost` is computed by the extension from its own
         // bundled price sheet (Roo `Task.ts` persists
@@ -493,6 +500,82 @@ mod tests {
         assert_eq!(messages[3].tokens.cache_read, 600);
         assert_eq!(messages[3].provider_id, "openai");
         assert!(messages[3].has_authoritative_cost());
+    }
+
+    #[test]
+    fn test_shared_task_parser_keeps_billing_identity_with_cache_and_reported_cost() {
+        // The upstream cache accounting change and provider-scoped pricing must
+        // survive together for all three consumers of this parser.
+        for source in ["roocode", "kilocode", "cline"] {
+            for (timestamp, protocol, expected_input) in [
+                (
+                    1789022955199_i64,
+                    "openai",
+                    if source == "cline" { 1000 } else { 300 },
+                ),
+                (
+                    1789022955199,
+                    "bedrock/anthropic",
+                    if source == "cline" { 1000 } else { 300 },
+                ),
+                (1748038758034, "anthropic", 1000),
+            ] {
+                for (cost, authoritative) in [(0.25, true), (0.0, false)] {
+                    let dir = TempDir::new().unwrap();
+                    let rows = serde_json::json!([{
+                        "type": "say", "say": "api_req_started", "ts": timestamp,
+                        "modelInfo": {"providerId": " Gateway-A ", "modelId": "anthropic/claude-sonnet-4"},
+                        "text": serde_json::json!({"cost":cost,"tokensIn":1000,"tokensOut":10,
+                            "cacheReads":600,"cacheWrites":100,"apiProtocol":protocol}).to_string()
+                    }]);
+                    let path = setup_task(&dir, "billing-cache", &rows.to_string(), None);
+                    let messages = parse_roo_kilo_file(&path, source);
+                    assert_eq!(messages.len(), 1);
+                    let message = &messages[0];
+                    assert_eq!(message.tokens.input, expected_input, "{source}/{protocol}");
+                    assert_eq!(message.tokens.cache_read, 600);
+                    assert_eq!(message.tokens.cache_write, 100);
+                    assert_eq!(
+                        message.billing_identity,
+                        super::super::BillingIdentity::Known {
+                            id: "gateway-a".into(),
+                            origin: super::super::BillingIdentityOrigin::ExplicitRecord,
+                        }
+                    );
+                    assert_eq!(message.has_authoritative_cost(), authoritative);
+                    assert_eq!(message.cost, cost);
+                    assert_eq!(
+                        message.provider_id,
+                        if protocol.contains('/') {
+                            protocol
+                        } else {
+                            "Gateway-A"
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_model_inferred_provider_does_not_become_billing_identity() {
+        let dir = TempDir::new().unwrap();
+        let rows = serde_json::json!([{
+            "type":"say", "say":"api_req_started", "ts":1789022955199_i64,
+            "modelInfo":{"modelId":"anthropic/claude-sonnet-4"},
+            "text":serde_json::json!({"cost":0.25,"tokensIn":1000,"tokensOut":10,
+                "cacheReads":600,"cacheWrites":100,"apiProtocol":"openai"}).to_string()
+        }]);
+        let path = setup_task(&dir, "unknown-billing", &rows.to_string(), None);
+        for source in ["roocode", "kilocode", "cline"] {
+            let messages = parse_roo_kilo_file(&path, source);
+            assert_eq!(messages[0].provider_id, "anthropic");
+            assert_eq!(
+                messages[0].billing_identity,
+                super::super::BillingIdentity::Unknown
+            );
+            assert!(messages[0].has_authoritative_cost());
+        }
     }
 
     /// Before Roo v3.29.5, an Anthropic-protocol row recorded `input_tokens`

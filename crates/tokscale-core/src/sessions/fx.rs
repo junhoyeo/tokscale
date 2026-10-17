@@ -314,6 +314,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let (provider, model_id) = split_model(raw_model);
+        let pricing_model_id = (raw_model != model_id).then(|| raw_model.to_string());
         let provider_id = provider
             .as_deref()
             .and_then(provider_identity::canonical_provider)
@@ -348,6 +349,9 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            billing_identity: super::BillingIdentity::Unknown,
+            pricing_model_id,
+            estimate_status: crate::sessions::EstimateStatus::Unpriced,
             copilot_context: None,
         });
     }
@@ -390,6 +394,9 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
                 parent_session_id: None,
                 is_turn_start: false,
                 model_attribution_conflicted: false,
+                billing_identity: crate::sessions::BillingIdentity::Unknown,
+                pricing_model_id: None,
+                estimate_status: crate::sessions::EstimateStatus::Unpriced,
                 copilot_context: None,
             });
         }
@@ -400,6 +407,8 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::{custom::CustomPricing, ModelPricing, PricingService};
+    use crate::sessions::{BillingIdentity, EstimateStatus};
     use crate::TokenBreakdown;
 
     fn write_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
@@ -732,6 +741,129 @@ mod tests {
         let mut messages = parse_fx_file(&usage);
         assert_eq!(messages.len(), 1, "cost field {cost_field:?}");
         messages.remove(0)
+    }
+
+    fn custom_pricing(content: &str) -> PricingService {
+        let custom = CustomPricing::load_from_str(content, Path::new("custom-pricing.json"));
+        assert!(custom.diagnostics().is_empty());
+        PricingService::new_with_custom(custom, HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn prefixed_raw_model_custom_pricing_precedes_display_alias() {
+        let mut message = model_cost_message("");
+        let pricing = custom_pricing(
+            r#"{
+                "models": {
+                    "zai/glm-5.2": {"input_cost_per_token":0.01,"output_cost_per_token":0.02},
+                    "glm-5.2": {"input_cost_per_token":0.1,"output_cost_per_token":0.2}
+                },
+                "provider_overrides": [{
+                    "provider_id":"zai",
+                    "model_id":"zai/glm-5.2",
+                    "pricing":{"input_cost_per_token":1,"output_cost_per_token":2}
+                }]
+            }"#,
+        );
+
+        crate::apply_pricing_if_available(&mut message, Some(&pricing));
+        assert!((message.cost - 0.2).abs() < 1e-9);
+        assert_eq!(message.model_id, "glm-5.2");
+        assert_eq!(message.provider_id, "zai");
+        assert_eq!(message.pricing_model_id.as_deref(), Some("zai/glm-5.2"));
+        assert_eq!(message.billing_identity, BillingIdentity::Unknown);
+        assert_eq!(message.estimate_status, EstimateStatus::CurrentEstimate);
+        let explanation = pricing.explain_message(&message);
+        assert_eq!(explanation.raw_model_id, "zai/glm-5.2");
+        assert_eq!(explanation.matched_model_id.as_deref(), Some("zai/glm-5.2"));
+        assert_eq!(explanation.price_source.as_deref(), Some("Custom"));
+        assert_eq!(explanation.scope, "global");
+        assert!(!explanation.normalized);
+        assert!(!explanation.alias_applied);
+        assert!(explanation.coverage);
+    }
+
+    #[test]
+    fn prefixed_model_fallback_pricing_records_normalization() {
+        let custom = custom_pricing(
+            r#"{"models":{"glm-5.2":{"input_cost_per_token":0.1,"output_cost_per_token":0.2}}}"#,
+        );
+        let catalog = PricingService::new(
+            HashMap::from([(
+                "glm-5.2".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.1),
+                    output_cost_per_token: Some(0.2),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        for (pricing, source, alias_applied) in
+            [(custom, "Custom", true), (catalog, "LiteLLM", false)]
+        {
+            let mut message = model_cost_message("");
+            crate::apply_pricing_if_available(&mut message, Some(&pricing));
+            assert!((message.cost - 2.0).abs() < 1e-9, "source: {source}");
+            let explanation = pricing.explain_message(&message);
+            assert_eq!(explanation.raw_model_id, "zai/glm-5.2");
+            assert_eq!(explanation.matched_model_id.as_deref(), Some("glm-5.2"));
+            assert_eq!(explanation.price_source.as_deref(), Some(source));
+            assert!(explanation.normalized, "source: {source}");
+            assert_eq!(explanation.alias_applied, alias_applied);
+            assert!(explanation.coverage, "source: {source}");
+        }
+    }
+
+    #[test]
+    fn unprefixed_model_keeps_exact_custom_pricing_identity() {
+        let (_dir, session) = fixture();
+        let usage = write_file(
+            &session,
+            "usage-v2.json",
+            r#"{"snapshot":{"models":[{"model":"glm-5.2","input_tokens":10,"output_tokens":5}]}}"#,
+        );
+        let mut messages = parse_fx_file(&usage);
+        assert_eq!(messages.len(), 1);
+        let message = &mut messages[0];
+        let pricing = custom_pricing(
+            r#"{"models":{
+                "zai/glm-5.2":{"input_cost_per_token":1,"output_cost_per_token":2},
+                "glm-5.2":{"input_cost_per_token":0.1,"output_cost_per_token":0.2}
+            }}"#,
+        );
+
+        crate::apply_pricing_if_available(message, Some(&pricing));
+        assert!((message.cost - 2.0).abs() < 1e-9);
+        assert_eq!(message.model_id, "glm-5.2");
+        assert_eq!(message.pricing_model_id, None);
+        assert_eq!(message.pricing_context().raw_model, "glm-5.2");
+        let explanation = pricing.explain_message(message);
+        assert_eq!(explanation.matched_model_id.as_deref(), Some("glm-5.2"));
+        assert!(!explanation.normalized);
+        assert!(!explanation.alias_applied);
+        assert!(explanation.coverage);
+    }
+
+    #[test]
+    fn reported_cost_precedes_prefixed_raw_model_custom_pricing() {
+        let pricing = custom_pricing(
+            r#"{"models":{"zai/glm-5.2":{"input_cost_per_token":1,"output_cost_per_token":2}}}"#,
+        );
+        for cost in [0.0, 0.004] {
+            let mut message = model_cost_message(&format!(r#""total_cost":{cost},"#));
+            crate::apply_pricing_if_available(&mut message, Some(&pricing));
+            assert_eq!(message.cost, cost);
+            assert_eq!(message.cost_source, CostSource::ProviderReported);
+            assert_eq!(message.estimate_status, EstimateStatus::Authoritative);
+            let explanation = pricing.explain_message(&message);
+            assert_eq!(explanation.final_estimate, cost);
+            assert_eq!(
+                explanation.price_source.as_deref(),
+                Some("ProviderReported")
+            );
+            assert_eq!(explanation.scope, "reported");
+        }
     }
 
     /// Same, for the snapshot-level aggregate fallback: `models` is empty, so

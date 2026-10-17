@@ -1,0 +1,1 @@
+{"type":"assistant","timestamp":"2026-09-30T10:00:01.000Z","requestId":"req_retained","providerId":"gateway","message":{"id":"msg_retained","model":"claude-sonnet-4-5","usage":{"input_tokens":777,"output_tokens":77,"cache_read_input_tokens":70,"cache_creation_input_tokens":60,"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":20}}}}

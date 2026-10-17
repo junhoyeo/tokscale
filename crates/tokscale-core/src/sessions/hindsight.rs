@@ -168,12 +168,16 @@ pub fn parse_hindsight_file(path: &Path) -> Vec<UnifiedMessage> {
             let mut message = UnifiedMessage::new_with_dedup(
                 "hindsight",
                 record.model,
-                record.provider,
+                record.provider.clone(),
                 session_id,
                 timestamp,
                 tokens,
                 0.0,
                 Some(dedup_key),
+            )
+            .with_billing(
+                Some(&record.provider),
+                super::BillingIdentityOrigin::ExplicitRecord,
             );
 
             let bank = record.bank.filter(|b| !b.trim().is_empty());

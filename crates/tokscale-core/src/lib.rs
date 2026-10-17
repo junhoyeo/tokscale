@@ -355,6 +355,9 @@ impl ModelPerformance {
 
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
+    pub estimate_status: sessions::EstimateStatus,
+    pub billing_identity: sessions::BillingIdentity,
+    pub pricing_model_id: Option<String>,
     pub client: String,
     pub model_id: String,
     pub provider_id: String,
@@ -1165,10 +1168,12 @@ fn flush_retained_message<S: MessageSink>(
     estimate_source: Option<EstimateSource>,
 ) {
     if context.include_synthetic {
+        let raw_model = message.model_id.clone();
         sessions::synthetic::normalize_synthetic_gateway_fields(
             &mut message.model_id,
             &mut message.provider_id,
         );
+        message.preserve_pricing_model(&raw_model);
     }
 
     if let Some(timezone) = &context.timezone {
@@ -1454,7 +1459,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
         cached: message_cache::CachedSourceEntry,
         pricing: Option<&pricing::PricingService>,
     ) -> Vec<UnifiedMessage> {
+        let is_claude = cached.is_claude_namespace();
         let mut messages = cached.messages;
+        if is_claude {
+            sessions::claudecode::reconcile_advisor_billing(&mut messages);
+        }
         apply_pricing_to_messages(&mut messages, pricing);
         messages
     }
@@ -1738,23 +1747,43 @@ fn parse_all_messages_streaming<S: MessageSink>(
         // once: it re-derives the retained set from the live bytes and writes
         // the entry back with the provenance marker, so the next scan is a
         // plain warm hit.
-        let rebuild_retention_provenance = cached
-            .as_ref()
-            .is_some_and(message_cache::CachedSourceEntry::needs_retention_provenance_migration);
+        let rebuild_retention_provenance = cached.as_ref().is_some_and(|entry| {
+            entry.billing_identity_generation == 0 || entry.needs_retention_provenance_migration()
+        });
         #[cfg(test)]
         if rebuild_retention_provenance {
             RETENTION_PROVENANCE_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // Failed identity migration must not discard an old amount, and
+        // retained Claude history may no longer exist in the live file.
+        // Ordinary current-generation sources instead report the fresh
+        // readable prefix and retire their stale cache on a failed read.
+        let preserve_cached_on_failure = cached.as_ref().is_some_and(|entry| {
+            entry.billing_identity_generation == 0
+                || matches!(history, HistoryRetention::RetainObserved { .. })
+        });
         let Some(fingerprint_status) =
             fingerprint_from_path(path, cached.as_ref().map(|entry| &entry.fingerprint))
         else {
+            if preserve_cached_on_failure {
+                if let Some(entry) = cached {
+                    let retained_message_keys = entry.retained_message_keys();
+                    return CachedParseOutcome {
+                        messages: cached_messages(entry, pricing),
+                        retained_message_keys,
+                        cache_entry: None,
+                        invalidate_cache: false,
+                    };
+                }
+            }
+            source_cache.invalidate(identity, path);
             let mut messages = parse(path, None).messages;
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
                 retained_message_keys: HashSet::new(),
                 cache_entry: None,
-                invalidate_cache: false,
+                invalidate_cache: true,
             };
         };
 
@@ -1806,15 +1835,34 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let SourceParse {
             mut messages,
             cacheable,
-            claude_checkpoint,
+            mut claude_checkpoint,
         } = resumed.unwrap_or_else(|| parse(path, Some(&fingerprint)));
+        if !cacheable && preserve_cached_on_failure {
+            if let Some(entry) = cached {
+                let retained_message_keys = entry.retained_message_keys();
+                return CachedParseOutcome {
+                    messages: cached_messages(entry, pricing),
+                    retained_message_keys,
+                    cache_entry: None,
+                    invalidate_cache: false,
+                };
+            }
+        }
+
+        if !cacheable {
+            // Some lanes consume only messages/cache_entry. Retire the failed
+            // entry here so no caller can accidentally retain it on disk.
+            source_cache.invalidate(identity, path);
+        }
+
         // Reaching here means the file changed under a cache entry we still
         // hold. For a source that rewrites transcripts in place that is not
         // only "new content appeared" — it can also be "already-published
         // messages disappeared", and recomputing purely from the live bytes
         // would retire them from history (#994). Only merge when the parse is
         // cacheable: an untrustworthy parse must not be used to synthesise an
-        // entry, and the caller invalidates on that path anyway.
+        // entry; the failed cache was invalidated above.
+        let live_message_count = messages.len();
         let mut retained_message_keys = HashSet::new();
         if let HistoryRetention::RetainObserved {
             key_is_globally_stable,
@@ -1827,6 +1875,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         &cached.messages,
                         key_is_globally_stable,
                     );
+                }
+                if identity == message_cache::CacheIdentity::for_client(ClientId::Claude) {
+                    let changed = sessions::claudecode::reconcile_advisor_billing(&mut messages);
+                    // Retained tail rows are outside the parser checkpoint.
+                    // Only a changed live prefix requires a fresh full parse.
+                    if changed.iter().any(|&index| index < live_message_count) {
+                        claude_checkpoint = None;
+                    }
                 }
             }
         }
@@ -2174,10 +2230,29 @@ fn parse_all_messages_streaming<S: MessageSink>(
     ) {
         let identity = message_cache::CacheIdentity::for_client(ClientId::PrimeAgent);
         let cached = source_cache.take(identity, path);
+        let legacy_fallback = cached
+            .as_ref()
+            .filter(|entry| entry.billing_identity_generation == 0)
+            .cloned();
+        let preserve_legacy = |entry: message_cache::CachedSourceEntry| {
+            let accounting = entry.prime_accounting.clone().unwrap_or_default();
+            (
+                CachedParseOutcome {
+                    messages: cached_messages(entry, pricing),
+                    retained_message_keys: HashSet::new(),
+                    cache_entry: None,
+                    invalidate_cache: false,
+                },
+                accounting,
+            )
+        };
         let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
             path,
             cached.as_ref().map(|entry| &entry.fingerprint),
         ) else {
+            if let Some(entry) = legacy_fallback {
+                return preserve_legacy(entry);
+            }
             let (messages, accounting) =
                 sessions::prime_agent::parse_prime_agent_file_with_accounting(path);
             return uncached_prime_outcome(messages, accounting, pricing);
@@ -2193,7 +2268,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
         };
 
         if let Some(cached) = cached {
-            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
+            if cached.billing_identity_generation > 0
+                && cached.fingerprint == fingerprint
+                && !cached.messages.is_empty()
+            {
                 if let Some(accounting) = cached.prime_accounting.clone() {
                     // Prime's accounting is byte-coupled to its messages. Warm
                     // v5 scans therefore hash the complete transcript before a
@@ -2255,7 +2333,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
 
-        parse_stable_prime_source(path, identity, fingerprint, pricing)
+        let parsed = parse_stable_prime_source(path, identity, fingerprint, pricing);
+        if parsed.0.cache_entry.is_none() {
+            if let Some(entry) = legacy_fallback {
+                return preserve_legacy(entry);
+            }
+        }
+        parsed
     }
 
     fn load_or_parse_sqlite_source<F>(
@@ -2289,7 +2373,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         bool,
     ) {
         let identity = message_cache::CacheIdentity::for_client(ClientId::MiMoCode);
-        let cached = source_cache.take(identity, path);
+        let mut cached = source_cache.take(identity, path);
         let before = match message_cache::SourceFingerprint::check_sqlite_path(
             path,
             cached.as_ref().map(|entry| &entry.fingerprint),
@@ -2300,8 +2384,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
             Some(message_cache::FingerprintStatus::Changed(fingerprint)) => Some(fingerprint),
             None => None,
         };
-        if let Some(mut entry) = cached {
-            if before.as_ref() == Some(&entry.fingerprint)
+        if let Some(entry) = cached.as_mut() {
+            if entry.billing_identity_generation > 0
+                && before.as_ref() == Some(&entry.fingerprint)
                 && !entry.messages.is_empty()
                 && entry.has_valid_micode_metadata()
             {
@@ -2310,7 +2395,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 }
                 return (
                     sessions::micode::MiMoSource {
-                        messages: entry.messages,
+                        messages: std::mem::take(&mut entry.messages),
                         metadata: entry.micode_metadata.take().unwrap_or_default(),
                         complete: true,
                     },
@@ -2344,7 +2429,26 @@ fn parse_all_messages_streaming<S: MessageSink>(
             None
         };
         let invalidate = !stable || !source.complete || source.messages.is_empty();
-        (source, cache_entry, invalidate)
+        let preserve_legacy_bytes = cached
+            .as_ref()
+            .is_some_and(|entry| entry.billing_identity_generation == 0);
+        if (!stable || !source.complete) && preserve_legacy_bytes {
+            if let Some(mut entry) = cached {
+                for message in &mut entry.messages {
+                    message.refresh_derived_fields();
+                }
+                return (
+                    sessions::micode::MiMoSource {
+                        messages: entry.messages,
+                        metadata: entry.micode_metadata.take().unwrap_or_default(),
+                        complete: false,
+                    },
+                    None,
+                    false,
+                );
+            }
+        }
+        (source, cache_entry, invalidate && !preserve_legacy_bytes)
     }
 
     /// OpenCode's SQLite lane, where a warm scan reads only the rows that
@@ -2367,10 +2471,28 @@ fn parse_all_messages_streaming<S: MessageSink>(
             fingerprint: Option<message_cache::SourceFingerprint>,
             scan: sessions::opencode_schema::OpenCodeSchemaScan,
             pricing: Option<&pricing::PricingService>,
+            fallback: Option<message_cache::CachedSourceEntry>,
         ) -> CachedParseOutcome {
+            let stable = fingerprint.as_ref().is_some_and(|f| {
+                matches!(
+                    message_cache::SourceFingerprint::check_sqlite_path(path, Some(f)),
+                    Some(message_cache::FingerprintStatus::Unchanged)
+                )
+            });
+            if !scan.complete || !stable {
+                if let Some(entry) = fallback.filter(|entry| entry.billing_identity_generation == 0)
+                {
+                    return CachedParseOutcome {
+                        messages: cached_messages(entry, pricing),
+                        retained_message_keys: HashSet::new(),
+                        cache_entry: None,
+                        invalidate_cache: false,
+                    };
+                }
+            }
             let mut messages = scan.messages;
             let cache_entry = match fingerprint {
-                Some(fingerprint) if !messages.is_empty() => Some(
+                Some(fingerprint) if scan.complete && stable && !messages.is_empty() => Some(
                     message_cache::CachedSourceEntry::new(
                         identity,
                         path,
@@ -2388,7 +2510,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 messages,
                 retained_message_keys: HashSet::new(),
                 cache_entry,
-                invalidate_cache: false,
+                invalidate_cache: !scan.complete || !stable,
             }
         }
 
@@ -2403,6 +2525,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 None,
                 sessions::opencode::scan_opencode_sqlite(path),
                 pricing,
+                cached,
             );
         };
 
@@ -2411,7 +2534,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 let Some(entry) = cached.take() else {
                     unreachable!("an uncached source always builds a complete fingerprint")
                 };
-                if !entry.messages.is_empty() {
+                if entry.billing_identity_generation > 0 && !entry.messages.is_empty() {
                     return CachedParseOutcome {
                         messages: cached_messages(entry, pricing),
                         retained_message_keys: HashSet::new(),
@@ -2426,10 +2549,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
             message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
         };
 
-        if let Some(entry) = cached {
-            if entry.fingerprint == fingerprint && !entry.messages.is_empty() {
+        if let Some(entry) = cached.as_ref() {
+            if entry.billing_identity_generation > 0
+                && entry.fingerprint == fingerprint
+                && !entry.messages.is_empty()
+            {
                 return CachedParseOutcome {
-                    messages: cached_messages(entry, pricing),
+                    messages: cached_messages(entry.clone(), pricing),
                     retained_message_keys: HashSet::new(),
                     cache_entry: None,
                     invalidate_cache: false,
@@ -2441,13 +2567,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
             // whether that is still sound and says so by returning `None`.
             if let (Some(state), false) = (
                 entry.opencode_incremental.as_ref(),
-                entry.messages.is_empty(),
+                entry.messages.is_empty() || entry.billing_identity_generation == 0,
             ) {
                 let state = state.clone();
                 if let Some(scan) =
-                    sessions::opencode::rescan_opencode_sqlite(path, &state, entry.messages)
+                    sessions::opencode::rescan_opencode_sqlite(path, &state, entry.messages.clone())
                 {
-                    return finish(identity, path, Some(fingerprint), scan, pricing);
+                    return finish(identity, path, Some(fingerprint), scan, pricing, cached);
                 }
             }
         }
@@ -2458,6 +2584,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             Some(fingerprint),
             sessions::opencode::scan_opencode_sqlite(path),
             pricing,
+            cached,
         )
     }
 
@@ -2467,6 +2594,38 @@ fn parse_all_messages_streaming<S: MessageSink>(
         pricing: Option<&pricing::PricingService>,
         headless_roots: &[PathBuf],
     ) -> CodexSourceOutcome {
+        fn preserve_cached(
+            entry: message_cache::CachedSourceEntry,
+            _path: &Path,
+            pricing: Option<&pricing::PricingService>,
+            is_headless: bool,
+        ) -> CodexSourceOutcome {
+            let missing_usage = entry
+                .codex_incremental
+                .as_ref()
+                .map_or((false, false), |i| {
+                    (
+                        i.state.is_missing_usage(),
+                        i.state.has_own_synthetic_activity,
+                    )
+                });
+            let coverage = entry
+                .codex_incremental
+                .as_ref()
+                .map(|i| i.state.turn_coverage.clone())
+                .unwrap_or_default();
+            (
+                CachedParseOutcome {
+                    messages: finalize_codex_messages(entry.messages, pricing, is_headless, &[], 0),
+                    retained_message_keys: HashSet::new(),
+                    cache_entry: None,
+                    invalidate_cache: false,
+                },
+                coverage,
+                missing_usage,
+                None,
+            )
+        }
         let identity = message_cache::CacheIdentity::for_client(ClientId::Codex);
         let is_headless = is_headless_path(path, headless_roots);
         let cached = source_cache.take(identity, path);
@@ -2480,7 +2639,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
             path,
             cached.as_ref().map(|entry| &entry.fingerprint),
         ) else {
-            return parse_full_log_source(path, pricing, is_headless);
+            let entry = cached.expect("cached source checked above");
+            if entry.billing_identity_generation == 0 {
+                return preserve_cached(entry, path, pricing, is_headless);
+            }
+            let (mut outcome, coverage, missing_usage, archive_failure) =
+                parse_full_log_source(path, pricing, is_headless);
+            outcome.invalidate_cache = outcome.cache_entry.is_none();
+            return (outcome, coverage, missing_usage, archive_failure);
         };
         let fingerprint = match fingerprint_status {
             message_cache::FingerprintStatus::Unchanged => cached
@@ -2496,10 +2662,21 @@ fn parse_all_messages_streaming<S: MessageSink>(
             let reparse_from_start = |invalidate_cache: bool| {
                 let (mut outcome, turn_coverage, missing_usage, archive_failure) =
                     parse_full_log_source(path, pricing, is_headless);
+                if outcome.cache_entry.is_none()
+                    && cached.billing_identity_generation == 0
+                    && !cached.messages.is_empty()
+                {
+                    let mut preserved = preserve_cached(cached.clone(), path, pricing, is_headless);
+                    preserved.3 = archive_failure;
+                    return preserved;
+                }
                 outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
                 (outcome, turn_coverage, missing_usage, archive_failure)
             };
 
+            if cached.billing_identity_generation == 0 {
+                return reparse_from_start(false);
+            }
             if cached.fingerprint == fingerprint {
                 if message_cache::codex_cache_entry_matches_fingerprint(&cached, &fingerprint) {
                     let missing_usage =
@@ -2653,6 +2830,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let CachedParseOutcome {
             messages,
             cache_entry,
+            invalidate_cache,
             ..
         } = load_or_parse_opencode_sqlite_source(db_path, &source_cache, pricing);
 
@@ -2675,6 +2853,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
+        } else if invalidate_cache {
+            source_cache.remove(
+                message_cache::CacheIdentity::for_client(ClientId::OpenCode),
+                db_path,
+            );
         }
     }
 
@@ -2736,16 +2919,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
 
     let claude_home = PathBuf::from(home_dir);
-    let claude_outcomes: Vec<CachedParseOutcome> = scan_result
+    let mut claude_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map(|path| {
             // Claude Code rewrites a transcript in place on resume/compact,
             // so a file can lose assistant turns it already published. The
-            // retaining loader keeps those turns in the cache entry for as
-            // long as the file itself exists; deleting the transcript still
-            // drops them via `prune_missing_files`, which is what makes local
-            // disk remain the source of truth.
+            // retaining loader keeps those turns in the cache entry, even
+            // when the original transcript later disappears. Explicit cache
+            // removal remains the user's way to remove retained history.
             //
             // Only assistant turns are eligible: their `messageId:requestId`
             // key comes from the API response, so a retained copy still
@@ -2784,25 +2966,69 @@ fn parse_all_messages_streaming<S: MessageSink>(
             )
         })
         .collect();
-    let mut claude_messages: Vec<(bool, UnifiedMessage)> = Vec::new();
+    if include_all || include_synthetic || clients.iter().any(|client| client == "claude") {
+        let enabled = HashSet::from([ClientId::Claude]);
+        let mut history_roots = vec![PathBuf::from(
+            ClientId::Claude
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        )];
+        history_roots.extend(
+            scanner::extra_scan_paths_for(scanner_settings, &enabled)
+                .into_iter()
+                .map(|(_, path)| path),
+        );
+        history_roots.extend(
+            scanner::built_in_extra_scan_paths_for(home_dir, &enabled, use_env_roots)
+                .into_iter()
+                .map(|(_, path)| path),
+        );
+        history_roots.extend(headless_roots.iter().cloned());
+        history_roots.extend(
+            history_roots
+                .clone()
+                .into_iter()
+                .filter_map(|root| std::fs::canonicalize(root).ok()),
+        );
+        claude_outcomes.extend(
+            source_cache
+                .missing_claude_history(&history_roots)
+                .into_iter()
+                .map(|entry| {
+                    let retained_message_keys = entry
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.dedup_key.clone())
+                        .collect();
+                    CachedParseOutcome {
+                        messages: cached_messages(entry, pricing),
+                        retained_message_keys,
+                        cache_entry: None,
+                        invalidate_cache: false,
+                    }
+                }),
+        );
+    }
+    let mut claude_messages: Vec<(bool, bool, UnifiedMessage)> = Vec::new();
     let mut claude_keyed_indices: HashMap<String, usize> = HashMap::new();
     for outcome in claude_outcomes {
         for message in outcome.messages {
             let Some(key) = message.dedup_key.clone().filter(|key| !key.is_empty()) else {
-                claude_messages.push((false, message));
+                claude_messages.push((false, false, message));
                 continue;
             };
             let is_retained = outcome.retained_message_keys.contains(&key);
             let Some(index) = claude_keyed_indices.get(&key).copied() else {
                 claude_keyed_indices.insert(key, claude_messages.len());
-                claude_messages.push((is_retained, message));
+                claude_messages.push((is_retained, false, message));
                 continue;
             };
 
-            let (existing_is_retained, existing) = &mut claude_messages[index];
+            let (existing_is_retained, billing_conflicted, existing) = &mut claude_messages[index];
             merge_claude_cross_file_duplicate(
                 existing,
                 existing_is_retained,
+                billing_conflicted,
                 message,
                 is_retained,
                 pricing,
@@ -2814,7 +3040,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
     let mut claude_messages: Vec<_> = claude_messages
         .into_iter()
-        .map(|(_, message)| message)
+        .map(|(_, _, message)| message)
         .collect();
     if clients.is_empty() || clients.iter().any(|client| client == "claude") {
         let desktop = claude_desktop::read(Path::new(home_dir));
@@ -2825,6 +3051,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in &mut claude_messages {
             apply_pricing_if_available(message, pricing);
         }
+    }
+    for index in sessions::claudecode::reconcile_advisor_billing(&mut claude_messages) {
+        apply_pricing_if_available(&mut claude_messages[index], pricing);
     }
     all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
@@ -5564,11 +5793,7 @@ fn prepare_submission_pricing(
     for mut message in messages {
         let is_unpriced = has_positive_token_usage(&message.tokens)
             && !message.has_authoritative_cost()
-            && !pricing.covers_usage_with_provider(
-                &message.model_id,
-                Some(&message.provider_id),
-                &message.tokens,
-            );
+            && !pricing.covers_usage_context(&message.pricing_context(), &message.tokens);
 
         if is_unpriced {
             // Resolution is consulted before the routing-label reason, not
@@ -5582,11 +5807,7 @@ fn prepare_submission_pricing(
             // Nothing regresses for unpriced labels: the resolver refuses
             // routing labels outright, so with no custom entry this returns
             // None and the routing-label reason still applies.
-            let resolution = pricing.resolve_for_usage_with_provider(
-                &message.model_id,
-                Some(&message.provider_id),
-                &message.tokens,
-            );
+            let resolution = pricing.resolve_context(&message.pricing_context(), &message.tokens);
             // The gap is read from the resolution that made the row
             // unpublishable rather than restated here: a lookup with a single
             // candidate is unsafe for not naming the model, and reporting it
@@ -5794,11 +6015,7 @@ fn validate_priced_messages(
     for message in messages {
         let unpriced = has_positive_token_usage(&message.tokens)
             && !message.has_authoritative_cost()
-            && !pricing.covers_usage_with_provider(
-                &message.model_id,
-                Some(&message.provider_id),
-                &message.tokens,
-            );
+            && !pricing.covers_usage_context(&message.pricing_context(), &message.tokens);
         if !unpriced {
             continue;
         }
@@ -5902,88 +6119,12 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     }
 }
 
-fn pricing_multiplier(message: &UnifiedMessage, pricing: &pricing::PricingService) -> f64 {
-    // Zed bills hosted models at provider list price + 10%.
-    // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
-    //
-    // The multiplier is keyed on the message's `provider_id`, not on the
-    // provenance of the matched LiteLLM pricing row. Today this is safe because
-    // tokscale's bundled LiteLLM dataset only carries upstream-provider rows
-    // (anthropic, openai, google) for the underlying models. If a future
-    // LiteLLM update adds rows under provider `zed.dev` that already include
-    // Zed's markup, this function would double-bill — revisit by threading
-    // the matched-price provenance through `apply_pricing_if_available`.
-    let zed_hosted_multiplier = if message.client == "zed"
-        && message
-            .provider_id
-            .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
-    {
-        1.1
-    } else {
-        1.0
-    };
-
-    let openai_fast_mode_multiplier = openai_fast_mode_multiplier(
-        pricing,
-        &message.model_id,
-        Some(&message.provider_id),
-        message.service_tier.as_deref(),
-    );
-
-    zed_hosted_multiplier * openai_fast_mode_multiplier
-}
-
 fn has_openai_gpt_fast_suffix(model_id: &str) -> bool {
     let lower = model_id.to_lowercase();
     let tier_normalized = strip_parenthesized_reasoning_tier(&lower);
     let normalized = tier_normalized.unwrap_or(&lower);
     let terminal = normalized.rsplit('/').next().unwrap_or(normalized);
     pricing::lookup::openai_gpt_fast_base(terminal).is_some()
-}
-
-fn uses_normalized_openai_fast_tariff(
-    pricing: &pricing::PricingService,
-    model_id: &str,
-    provider_id: Option<&str>,
-) -> bool {
-    if provider_id
-        .and_then(provider_identity::canonical_provider)
-        .as_deref()
-        != Some("openai")
-        || !has_openai_gpt_fast_suffix(model_id)
-    {
-        return false;
-    }
-
-    pricing
-        .lookup_with_source_and_provider(model_id, None, provider_id)
-        .is_some_and(|result| {
-            result.evidence.normalized && !has_openai_gpt_fast_suffix(&result.matched_key)
-        })
-}
-
-fn openai_fast_mode_multiplier(
-    pricing: &pricing::PricingService,
-    model_id: &str,
-    provider_id: Option<&str>,
-    service_tier: Option<&str>,
-) -> f64 {
-    if provider_id
-        .and_then(provider_identity::canonical_provider)
-        .as_deref()
-        == Some("openai")
-        && (service_tier.is_some_and(|tier| {
-            tier.trim().eq_ignore_ascii_case("priority") || tier.trim().eq_ignore_ascii_case("fast")
-        }) || uses_normalized_openai_fast_tariff(pricing, model_id, provider_id))
-    {
-        // OpenAI's Fast mode (formerly Priority processing) applies a 2x
-        // per-token premium to its supported models. Cached input discounts
-        // continue to apply, so doubling the standard calculated cost also
-        // doubles each corresponding cached-token rate.
-        2.0
-    } else {
-        1.0
-    }
 }
 
 /// Price a parsed message while applying the request's recorded service tier.
@@ -5996,8 +6137,9 @@ pub fn calculate_cost_with_service_tier(
     tokens: &TokenBreakdown,
     service_tier: Option<&str>,
 ) -> f64 {
-    pricing.calculate_cost_with_provider(model_id, provider_id, tokens)
-        * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
+    let mut context = pricing::PricingContext::explicit(model_id, provider_id);
+    context.service_tier = service_tier;
+    pricing.estimate_context(&context, tokens).cost
 }
 
 pub fn calculate_cost_detailed_with_service_tier(
@@ -6007,12 +6149,10 @@ pub fn calculate_cost_detailed_with_service_tier(
     tokens: &TokenBreakdown,
     service_tier: Option<&str>,
 ) -> (f64, Option<EstimateSource>) {
-    let (cost, source) =
-        pricing.calculate_cost_detailed_with_provider(model_id, provider_id, tokens);
-    (
-        cost * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier),
-        source,
-    )
+    let mut context = pricing::PricingContext::explicit(model_id, provider_id);
+    context.service_tier = service_tier;
+    let estimate = pricing.estimate_context(&context, tokens);
+    (estimate.cost, estimate.source(tokens))
 }
 
 /// Merge Copilot OTEL snapshots inside a shared lane buffer.
@@ -6044,29 +6184,41 @@ fn apply_pricing_if_available(
     pricing: Option<&pricing::PricingService>,
 ) {
     if message.has_authoritative_cost() {
+        message.estimate_status = sessions::EstimateStatus::Authoritative;
         return;
     }
 
+    let stale =
+        message.cost > 0.0 || message.estimate_status == sessions::EstimateStatus::StaleEstimate;
     let Some(pricing) = pricing else {
+        if message.tokens.total() > 0 {
+            pricing::warn_incomplete_pricing();
+        }
+        message.cost = 0.0;
+        message.cost_source = CostSource::Unknown;
+        message.estimate_status = if stale {
+            sessions::EstimateStatus::StaleEstimate
+        } else {
+            sessions::EstimateStatus::Unpriced
+        };
         return;
     };
-
-    let (calculated_cost, estimate_source) = pricing.calculate_cost_detailed_with_provider(
-        &message.model_id,
-        Some(&message.provider_id),
-        &message.tokens,
-    );
-    let calculated_cost = calculated_cost * pricing_multiplier(message, pricing);
-
-    if let Some(source) = estimate_source {
-        // A covered zero rate may classify a message that carries no cost, but
-        // must never zero out a positive cost already on a non-authoritative
-        // message (e.g. after a cross-file merge).
-        if calculated_cost > 0.0 || message.cost <= 0.0 {
-            message.cost = calculated_cost;
-            message.mark_estimated_cost();
-            pricing.record_cost_estimate_source(message, source);
-        }
+    let estimate = pricing.estimate_message(message);
+    message.cost = estimate.cost;
+    message.estimate_status = if estimate.coverage {
+        sessions::EstimateStatus::CurrentEstimate
+    } else if estimate.selected.is_some() {
+        sessions::EstimateStatus::PartialEstimate
+    } else if stale {
+        sessions::EstimateStatus::StaleEstimate
+    } else {
+        sessions::EstimateStatus::Unpriced
+    };
+    if let Some(source) = estimate.source(&message.tokens) {
+        message.mark_estimated_cost();
+        pricing.record_cost_estimate_source(message, source);
+    } else {
+        message.cost_source = CostSource::Unknown;
     }
 }
 
@@ -6079,15 +6231,50 @@ fn apply_pricing_if_available(
 fn merge_claude_cross_file_duplicate(
     existing: &mut UnifiedMessage,
     existing_is_retained: &mut bool,
+    billing_conflicted: &mut bool,
     mut candidate: UnifiedMessage,
     candidate_is_retained: bool,
     pricing: Option<&pricing::PricingService>,
 ) {
-    if *existing_is_retained && !candidate_is_retained {
+    let same_provenance = *existing_is_retained == candidate_is_retained;
+    let has_authoritative_cost =
+        existing.has_authoritative_cost() || candidate.has_authoritative_cost();
+    let prefer_candidate = *existing_is_retained && !candidate_is_retained;
+    // Missing evidence is not a disagreement. Keep the sole known channel,
+    // but remember a real conflict for the whole group so a third snapshot
+    // cannot turn A + B + A back into a scoped A price. This state is local to
+    // aggregation; each source cache keeps its original billing evidence.
+    let known_billing = if same_provenance && !has_authoritative_cost {
+        match (&existing.billing_identity, &candidate.billing_identity) {
+            (sessions::BillingIdentity::Known { .. }, sessions::BillingIdentity::Unknown) => {
+                Some(existing.billing_identity.clone())
+            }
+            (sessions::BillingIdentity::Unknown, sessions::BillingIdentity::Known { .. }) => {
+                Some(candidate.billing_identity.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if has_authoritative_cost || prefer_candidate {
+        *billing_conflicted = false;
+    } else if same_provenance {
+        *billing_conflicted |= matches!((existing.billing_identity.id(), candidate.billing_identity.id()),
+            (Some(left), Some(right)) if left != right);
+    }
+    if prefer_candidate {
         sessions::claudecode::merge_message_completeness(&mut candidate, existing);
         *existing = candidate;
     } else {
         sessions::claudecode::merge_message_completeness(existing, &candidate);
+    }
+    if !existing.has_authoritative_cost() {
+        if *billing_conflicted {
+            existing.billing_identity = sessions::BillingIdentity::Unknown;
+        } else if let Some(known) = known_billing {
+            existing.billing_identity = known;
+        }
     }
     *existing_is_retained &= candidate_is_retained;
     existing.refresh_derived_fields();
@@ -6456,6 +6643,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .flatten()
         .collect();
     let mut claude_messages = Vec::new();
+    let mut billing_conflicts = Vec::new();
     let mut indices = HashMap::new();
     for message in claude_raw {
         if let Some(key) = &message.dedup_key {
@@ -6463,6 +6651,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 merge_claude_cross_file_duplicate(
                     &mut claude_messages[index],
                     &mut false,
+                    &mut billing_conflicts[index],
                     message,
                     false,
                     None,
@@ -6472,10 +6661,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             indices.insert(key.clone(), claude_messages.len());
         }
         claude_messages.push(message);
+        billing_conflicts.push(false);
     }
     if include_all || clients.iter().any(|client| client == "claude") {
         claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
     }
+    sessions::claudecode::reconcile_advisor_billing(&mut claude_messages);
     let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
     // Advisor calls and undated Desktop balances add usage, not extra replies.
     counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
@@ -7603,10 +7794,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     if include_synthetic {
         for msg in &mut messages {
+            let raw_model = msg.model_id.clone();
             sessions::synthetic::normalize_synthetic_gateway_fields(
                 &mut msg.model_id,
                 &mut msg.provider_id,
             );
+            if raw_model != msg.model_id && msg.pricing_model_id.is_none() {
+                msg.pricing_model_id = Some(raw_model);
+            }
         }
     }
 
@@ -7718,6 +7913,9 @@ pub async fn parse_local_unified_messages_deferred(
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
+        estimate_status: msg.estimate_status,
+        billing_identity: msg.billing_identity.clone(),
+        pricing_model_id: msg.pricing_model_id.clone(),
         client: msg.client.clone(),
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
@@ -7858,7 +8056,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
             reasoning: msg.reasoning,
         },
         cost,
-        cost_source: CostSource::Unknown,
+        cost_source: msg.cost_source,
         service_tier: msg.service_tier.clone(),
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
@@ -7868,6 +8066,9 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         parent_session_id: None,
         is_turn_start: false,
         model_attribution_conflicted: false,
+        billing_identity: msg.billing_identity.clone(),
+        pricing_model_id: msg.pricing_model_id.clone(),
+        estimate_status: msg.estimate_status,
         copilot_context: None,
     }
 }
@@ -12129,14 +12330,15 @@ mod tests {
         merge_claude_cross_file_duplicate(
             &mut retained,
             &mut retained_flag,
+            &mut false,
             live,
             false,
             Some(&pricing),
         );
 
         assert!(!retained_flag);
-        assert_eq!(retained.model_id, "claude-3-5-sonnet");
-        assert_eq!(retained.provider_id, "anthropic");
+        assert_eq!(retained.model_id, "claude-3-5-haiku");
+        assert_eq!(retained.provider_id, "bedrock");
         assert_eq!(retained.session_id, "live-session");
         assert_eq!(retained.tokens.input, 500);
         assert_eq!(retained.tokens.output, 999);
@@ -12558,6 +12760,89 @@ mod tests {
         assert_eq!(warm, cold_scan(&mut env));
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn claude_billing_backfill_skips_even_a_valid_incremental_checkpoint() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+        let path =
+            client_scan_root(source_home.path(), ClientId::Claude).join("demo/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = |n| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "assistant", "timestamp": format!("2026-10-01T10:00:0{n}Z"),
+                    "requestId": format!("req{n}"), "message": { "id": format!("msg{n}"),
+                    "model": "claude-sonnet-4.6", "providerId": "vertex", "usage": {"input_tokens": 10, "output_tokens": n} }
+                })
+            )
+        };
+        let scan = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        std::fs::write(&path, row(1)).unwrap();
+        assert_eq!(scan().len(), 1);
+        let identity = message_cache::CacheIdentity::for_client(ClientId::Claude);
+        let mut cache = message_cache::SourceMessageCache::load();
+        let mut entry = cache.take(identity, &path).unwrap();
+        let checkpoint = entry.claude_checkpoint.clone().unwrap();
+        let prefix_messages = entry.messages.clone();
+        // Even if all digest-covered values happen to match, a generation-zero
+        // entry cannot use incremental parsing to skip identity backfill.
+        entry.billing_identity_generation = 0;
+        cache.insert(entry);
+        cache.save_if_dirty();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(row(2).as_bytes())
+            .unwrap();
+        assert!(sessions::claudecode::resume_claude_file(
+            &path,
+            None,
+            &checkpoint,
+            &prefix_messages
+        )
+        .is_some());
+        let messages = scan();
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|m| m.billing_identity.id() == Some("vertex")));
+        assert!(!crate::CLAUDE_RESUMED_PATHS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == &path));
+        let cache = message_cache::SourceMessageCache::load();
+        let entry = cache.get(identity, &path).unwrap();
+        assert_eq!(entry.billing_identity_generation, 1);
+        assert!(entry.claude_checkpoint.is_some());
+        drop(cache);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(row(3).as_bytes())
+            .unwrap();
+        assert_eq!(scan().len(), 3);
+        assert!(crate::CLAUDE_RESUMED_PATHS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == &path));
+    }
+
     /// A subagent transcript takes its name from its `.meta.json` sidecar, so
     /// when the sidecar changed as the transcript grew, the messages before
     /// the checkpoint change too and the transcript is parsed in full.
@@ -12854,17 +13139,51 @@ mod tests {
         }
     }
 
-    /// The retention above must not resurrect a session the user deleted:
-    /// `prune_missing_files` drops the entry when the file is gone, which is
-    /// the behavior `d9df8c9c` (local session cleanup) depends on.
-    ///
-    /// The transcript is compacted first, and retention is asserted, so the
-    /// deletion runs against an entry that really is holding a turn the live
-    /// file no longer has. Deleting straight after a cold scan would prove
-    /// nothing about retention.
     #[test]
     #[serial_test::serial]
-    fn test_claude_deleted_transcript_is_not_resurrected_by_retention() {
+    fn test_claude_deleted_uncompacted_transcript_is_not_replayed() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let transcript = source_home
+            .path()
+            .join(".claude/projects/myproject/plain.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_plain","message":{"id":"msg_plain","model":"claude-sonnet-4","usage":{"input_tokens":100,"output_tokens":50}}}
+"#).unwrap();
+        let scan = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        assert_eq!(scan().len(), 1);
+        let identity = message_cache::CacheIdentity::for_client(ClientId::Claude);
+        let entry = message_cache::SourceMessageCache::load()
+            .get(identity, &transcript)
+            .unwrap();
+        assert!(!entry.holds_retained_history());
+        std::fs::remove_file(&transcript).unwrap();
+        assert!(
+            scan().is_empty(),
+            "deleting an uncompacted session must remove its usage"
+        );
+        assert!(
+            scan().is_empty(),
+            "the stale entry must remain absent on a warm scan"
+        );
+    }
+
+    /// A compacted transcript's cache holds history the live file no longer
+    /// contains. Preserve that observed history if the remaining source is
+    /// deleted, until the user explicitly clears the cache. An uncompacted
+    /// source deletion is covered separately above and must not be replayed.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_deleted_transcript_keeps_cached_compacted_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let _cache_env = redirect_cache_home(cache_home.path());
@@ -12910,9 +13229,20 @@ mod tests {
                 false,
                 &scanner::ScannerSettings::default(),
             );
-            assert!(
-                after.is_empty(),
-                "a deleted transcript stays deleted, retained turns and all; local disk remains the source of truth"
+            assert_eq!(
+                after.len(),
+                2,
+                "cached compacted history remains available after its source disappears"
+            );
+            assert_eq!(
+                after
+                    .iter()
+                    .map(|message| message.tokens.total())
+                    .sum::<i64>(),
+                retained
+                    .iter()
+                    .map(|message| message.tokens.total())
+                    .sum::<i64>()
             );
         }
     }
@@ -13254,6 +13584,196 @@ mod tests {
             assert_eq!(parsed.messages.len(), 1);
             assert_eq!(parsed.messages[0].input, 100);
             assert_eq!(parsed.messages[0].output, 20);
+        }
+    }
+
+    fn claude_advisor_billing_record(provider: &str, include_advisor: bool) -> String {
+        let mut row = serde_json::json!({
+            "type": "assistant", "timestamp": "2026-10-02T20:10:51.000Z",
+            "requestId": "req_advisor", "providerId": provider,
+            "message": {"id": "msg_advisor", "model": "fixture-parent", "usage": {
+                "input_tokens": 10, "output_tokens": 0,
+            }}
+        });
+        if include_advisor {
+            row["message"]["usage"]["iterations"] = serde_json::json!([
+                {"type": "advisor_message", "model": "fixture-advisor",
+                 "input_tokens": 20, "output_tokens": 0}
+            ]);
+        }
+        format!("{row}\n")
+    }
+
+    fn claude_advisor_billing_pricing(multiplier: f64) -> pricing::PricingService {
+        let rate = |value: f64| serde_json::json!({"input_cost_per_token": value * multiplier});
+        let custom = pricing::custom::CustomPricing::load_from_str(
+            &serde_json::json!({
+                "models": {"fixture-parent": rate(1.0), "fixture-advisor": rate(1.0)},
+                "provider_overrides": [
+                    {"provider_id": "vertex", "model_id": "fixture-parent", "pricing": rate(2.0)},
+                    {"provider_id": "vertex", "model_id": "fixture-advisor", "pricing": rate(2.0)},
+                    {"provider_id": "anthropic", "model_id": "fixture-parent", "pricing": rate(3.0)},
+                    {"provider_id": "anthropic", "model_id": "fixture-advisor", "pricing": rate(3.0)}
+                ]
+            })
+            .to_string(),
+            std::path::Path::new("synthetic-advisor-pricing.json"),
+        );
+        assert!(custom.diagnostics().is_empty());
+        pricing::PricingService::new_with_custom(custom, HashMap::new(), HashMap::new())
+    }
+
+    fn assert_claude_advisor_billing_prices(
+        messages: &[UnifiedMessage],
+        provider: Option<&str>,
+        parent_cost: f64,
+        advisor_cost: f64,
+    ) {
+        assert_eq!(messages.len(), 2);
+        for (model, input, cost, count) in [
+            ("fixture-parent", 10, parent_cost, 1),
+            ("fixture-advisor", 20, advisor_cost, 0),
+        ] {
+            let message = messages.iter().find(|m| m.model_id == model).unwrap();
+            assert_eq!(message.billing_identity.id(), provider, "{model}");
+            assert_eq!(message.tokens.input, input);
+            assert_eq!(message.tokens.output, 0);
+            assert_eq!(message.message_count, count);
+            assert_eq!(message.cost, cost, "{model}");
+            assert_eq!(message.cost_source, sessions::CostSource::Estimated);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn claude_advisor_billing_reconciles_retained_rows_after_parent_rewrite() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+        let path = home.path().join(".claude/projects/advisor/live.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let scan = |multiplier| {
+            parse_all_messages_with_pricing(
+                home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                Some(&claude_advisor_billing_pricing(multiplier)),
+            )
+        };
+        std::fs::write(&path, claude_advisor_billing_record("vertex", true)).unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("vertex"), 20.0, 40.0);
+        std::fs::write(&path, claude_advisor_billing_record("anthropic", false)).unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("anthropic"), 30.0, 60.0);
+        assert_claude_advisor_billing_prices(&scan(2.0), Some("anthropic"), 60.0, 120.0);
+
+        // Updating retained tail rows must not spoil the live prefix checkpoint.
+        crate::CLAUDE_RESUMED_PATHS.lock().unwrap().clear();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(claude_advisor_billing_record("anthropic", false).as_bytes())
+            .unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("anthropic"), 30.0, 60.0);
+        assert!(crate::CLAUDE_RESUMED_PATHS.lock().unwrap().contains(&path));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn claude_advisor_billing_reconciles_fully_compacted_pair_and_warm_cache() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+        let path = home.path().join(".claude/projects/advisor/compacted.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let scan = |multiplier| {
+            parse_all_messages_with_pricing(
+                home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                Some(&claude_advisor_billing_pricing(multiplier)),
+            )
+        };
+        std::fs::write(&path, claude_advisor_billing_record("vertex", true)).unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("vertex"), 20.0, 40.0);
+        let stale_advisor = || {
+            let mut cache = message_cache::SourceMessageCache::load();
+            let mut entry = cache
+                .all_entries()
+                .into_iter()
+                .find(|entry| entry.path.to_path_buf() == path)
+                .unwrap();
+            entry
+                .messages
+                .iter_mut()
+                .find(|message| message.model_id == "fixture-advisor")
+                .unwrap()
+                .billing_identity = sessions::BillingIdentity::Unknown;
+            // Simulate an old advisor identity without forging checkpoint integrity.
+            entry.claude_checkpoint = None;
+            cache.insert(entry);
+            cache.save_if_dirty();
+        };
+        stale_advisor();
+        std::fs::write(&path, "").unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("vertex"), 20.0, 40.0);
+        // Save-time retained-history merges can also leave a stale warm advisor.
+        stale_advisor();
+        assert_claude_advisor_billing_prices(&scan(2.0), Some("vertex"), 40.0, 80.0);
+        std::fs::remove_file(&path).unwrap();
+        assert_claude_advisor_billing_prices(&scan(1.0), Some("vertex"), 20.0, 40.0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn claude_advisor_billing_uses_final_cross_file_parent_conflict() {
+        for (advisor_name, other_name) in [("aaa.jsonl", "zzz.jsonl"), ("zzz.jsonl", "aaa.jsonl")] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let project = home.path().join(".claude/projects/advisor");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(
+                project.join(advisor_name),
+                claude_advisor_billing_record("vertex", true),
+            )
+            .unwrap();
+            std::fs::write(
+                project.join(other_name),
+                claude_advisor_billing_record("anthropic", false),
+            )
+            .unwrap();
+            std::fs::write(
+                project.join("middle.jsonl"),
+                claude_advisor_billing_record("vertex", false),
+            )
+            .unwrap();
+            for multiplier in [1.0, 2.0] {
+                let messages = parse_all_messages_with_pricing(
+                    home.path().to_str().unwrap(),
+                    &["claude".to_string()],
+                    Some(&claude_advisor_billing_pricing(multiplier)),
+                );
+                assert_claude_advisor_billing_prices(
+                    &messages,
+                    None,
+                    10.0 * multiplier,
+                    20.0 * multiplier,
+                );
+            }
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec!["claude".to_string()]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(parsed.messages.len(), 2);
+            assert!(parsed
+                .messages
+                .iter()
+                .all(|m| m.billing_identity.id().is_none()));
         }
     }
 
@@ -16092,6 +16612,18 @@ mod tests {
             drop(conn);
         };
 
+        // Start warm: a subsequent incomplete read must not replay these rows.
+        seed(4);
+        let warm_seed = parse_all_messages_with_pricing(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            None,
+        );
+        assert_eq!(warm_seed.len(), 4);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(identity, &db_path)
+            .is_some());
+
         seed(400);
         let size = std::fs::metadata(&db_path).unwrap().len();
         std::fs::OpenOptions::new()
@@ -16104,6 +16636,12 @@ mod tests {
             home.to_str().unwrap(),
             &["openclaw".to_string()],
             None,
+        );
+        let fresh = sessions::openclaw::scan_openclaw_sqlite(&db_path);
+        assert!(!fresh.complete);
+        assert_eq!(
+            partial, fresh.messages,
+            "fresh readable prefix must replace stale warm usage"
         );
         assert!(partial.len() < 400, "{}", partial.len());
         let cache = message_cache::SourceMessageCache::load();
@@ -17896,7 +18434,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pricing_if_available_keeps_existing_cost_without_pricing() {
+    fn test_apply_pricing_if_available_marks_old_estimate_stale_without_pricing() {
         let mut msg = UnifiedMessage::new_with_agent(
             "roocode",
             "gpt-4o",
@@ -17917,7 +18455,8 @@ mod tests {
 
         apply_pricing_if_available(&mut msg, None);
 
-        assert_eq!(msg.cost, 0.42);
+        assert_eq!(msg.cost, 0.0);
+        assert_eq!(msg.estimate_status, sessions::EstimateStatus::StaleEstimate);
     }
 
     #[test]
@@ -20119,7 +20658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pricing_if_available_keeps_scoped_fireworks_cost_without_exact_pricing() {
+    fn test_apply_pricing_if_available_marks_fireworks_estimate_stale_without_exact_pricing() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "fireworks_ai/accounts/fireworks/models/deepseek-r1-0528-distill-qwen3-8b".into(),
@@ -20160,7 +20699,8 @@ mod tests {
 
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
-        assert_eq!(msg.cost, 0.123);
+        assert_eq!(msg.cost, 0.0);
+        assert_eq!(msg.estimate_status, sessions::EstimateStatus::StaleEstimate);
     }
 
     #[test]
@@ -23358,5 +23898,873 @@ mod tests {
             outside_root.agent.as_deref(),
             Some(sessions::codex::CODEX_DEFAULT_AGENT)
         );
+    }
+    #[test]
+    fn billing_scoped_provenance_uses_the_selected_raw_rate_once() {
+        use crate::{CostProvenance, EstimateSource};
+        use sessions::BillingIdentityOrigin;
+        let custom = pricing::custom::CustomPricing::load_from_str(
+            r#"{"provider_overrides":[{"provider_id":"gateway","model_id":"raw/private-model","pricing":{"input_cost_per_token":0.01}}]}"#,
+            std::path::Path::new("synthetic-pricing.json"),
+        );
+        assert!(custom.diagnostics().is_empty());
+        let pricing = pricing::PricingService::new_with_custom(
+            custom,
+            HashMap::from([(
+                "display-model".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        )
+        .with_cost_provenance_capture();
+        let base = UnifiedMessage::new(
+            "test",
+            "display-model",
+            "openai",
+            "s",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            0.0,
+        )
+        .with_pricing_model("raw/private-model");
+        let mut scoped = base
+            .clone()
+            .with_billing(Some("gateway"), BillingIdentityOrigin::ExplicitRecord);
+        let mut catalog = base;
+        let mut other_raw = scoped.clone();
+        other_raw.pricing_model_id = Some("raw/catalog-only".into());
+        apply_pricing_if_available(&mut other_raw, Some(&pricing));
+        apply_pricing_if_available(&mut scoped, Some(&pricing));
+        apply_pricing_if_available(&mut catalog, Some(&pricing));
+        assert_eq!(scoped.cost, 1.0);
+        assert_eq!(catalog.cost, 1.0);
+        // Equal costs and otherwise identical metadata must not mix origins
+        // across distinct billing channels.
+        let calculations = pricing.detailed_calculation_count();
+        for (message, expected) in [
+            (scoped, EstimateSource::Custom),
+            (catalog, EstimateSource::Catalog),
+            (other_raw, EstimateSource::Catalog),
+        ] {
+            let graph = build_graph_from_messages(
+                vec![message],
+                Some(&pricing),
+                GraphPricingRequirement::Lenient,
+                std::time::Instant::now(),
+                &crate::bucket_tz::BucketTimezone::Local,
+            )
+            .unwrap();
+            assert_eq!(
+                graph.summary.cost_provenance(),
+                CostProvenance::estimated(expected)
+            );
+            assert_eq!(
+                graph.years[0].cost_provenance(),
+                CostProvenance::estimated(expected)
+            );
+        }
+        assert_eq!(pricing.detailed_calculation_count(), calculations);
+    }
+
+    #[test]
+    fn billing_repricing_provenance_distinguishes_free_partial_and_deleted_rates() {
+        use crate::{CostProvenance, EstimateSource};
+        let mut message = UnifiedMessage::new(
+            "test",
+            "private-model",
+            "provider",
+            "s",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 100,
+                ..Default::default()
+            },
+            7.0,
+        );
+        message.mark_estimated_cost();
+        for (rates, expected) in [
+            (
+                r#"{"models":{"private-model":{"input_cost_per_token":0}}}"#,
+                CostProvenance::estimated(EstimateSource::Custom),
+            ),
+            (
+                r#"{"models":{"private-model":{"output_cost_per_token":1}}}"#,
+                CostProvenance::unknown(),
+            ),
+            (r#"{"models":{}}"#, CostProvenance::unknown()),
+        ] {
+            let pricing = pricing::PricingService::new_with_custom(
+                pricing::custom::CustomPricing::load_from_str(
+                    rates,
+                    std::path::Path::new("synthetic.json"),
+                ),
+                HashMap::new(),
+                HashMap::new(),
+            )
+            .with_cost_provenance_capture();
+            apply_pricing_if_available(&mut message, Some(&pricing));
+            assert_eq!(message.cost, 0.0);
+            let graph = build_graph_from_messages(
+                vec![message.clone()],
+                Some(&pricing),
+                GraphPricingRequirement::Lenient,
+                std::time::Instant::now(),
+                &crate::bucket_tz::BucketTimezone::Local,
+            )
+            .unwrap();
+            assert_eq!(graph.summary.cost_provenance(), expected, "{rates}");
+        }
+    }
+
+    #[test]
+    fn detailed_service_tier_pricing_reuses_the_scoped_fast_rate() {
+        use crate::EstimateSource;
+        let custom = pricing::custom::CustomPricing::load_from_str(
+            r#"{"models":{"gpt-5-fast":{"input_cost_per_token":0.01},"gpt-5":{"input_cost_per_token":0.003}},"provider_overrides":[{"provider_id":"openai","model_id":"gpt-5-fast","pricing":{"input_cost_per_token":0.02}}]}"#,
+            std::path::Path::new("synthetic.json"),
+        );
+        let pricing =
+            pricing::PricingService::new_with_custom(custom, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 100,
+            ..Default::default()
+        };
+        for (provider, tier, expected) in [
+            (Some("openai"), None, 2.0),
+            (None, None, 1.0),
+            (Some("openai"), Some("priority"), 4.0),
+        ] {
+            let (cost, source) = super::calculate_cost_detailed_with_service_tier(
+                &pricing,
+                "gpt-5-fast",
+                provider,
+                &usage,
+                tier,
+            );
+            assert_eq!(cost, expected);
+            assert_eq!(source, Some(EstimateSource::Custom));
+            assert_eq!(
+                cost,
+                super::calculate_cost_with_service_tier(
+                    &pricing,
+                    "gpt-5-fast",
+                    provider,
+                    &usage,
+                    tier
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn billing_estimates_replace_paid_free_deleted_and_keep_authoritative_zero() {
+        let custom = |rate: Option<f64>| {
+            let mut models = HashMap::new();
+            if let Some(rate) = rate {
+                models.insert(
+                    "private-model".into(),
+                    pricing::ModelPricing {
+                        input_cost_per_token: Some(rate),
+                        output_cost_per_token: Some(rate),
+                        ..Default::default()
+                    },
+                );
+            }
+            pricing::PricingService::new_with_custom(
+                pricing::custom::CustomPricing::from_models(models),
+                HashMap::new(),
+                HashMap::new(),
+            )
+        };
+        let mut message = UnifiedMessage::new(
+            "claude",
+            "private-model",
+            "anthropic",
+            "s",
+            1,
+            TokenBreakdown {
+                input: 10,
+                ..Default::default()
+            },
+            7.25,
+        );
+        for (rate, expected) in [
+            (Some(1.0), 10.0),
+            (Some(0.0), 0.0),
+            (Some(2.0), 20.0),
+            (None, 0.0),
+        ] {
+            apply_pricing_if_available(&mut message, Some(&custom(rate)));
+            assert_eq!(message.cost, expected);
+            assert_eq!(
+                message.estimate_status,
+                if rate.is_some() {
+                    sessions::EstimateStatus::CurrentEstimate
+                } else {
+                    sessions::EstimateStatus::StaleEstimate
+                }
+            );
+        }
+        message.mark_provider_reported_cost();
+        apply_pricing_if_available(&mut message, Some(&custom(Some(100.0))));
+        assert_eq!(message.cost, 0.0);
+        assert_eq!(
+            message.estimate_status,
+            sessions::EstimateStatus::Authoritative
+        );
+    }
+    // Include in lib.rs mod tests. Independent synthetic lifecycle draft; not executed.
+    #[test]
+    #[serial_test::serial]
+    fn provider_warm_backfill_repricing_and_deleted_source_are_lossless() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let other_home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+        let dir = home.path().join(".claude/projects/provider-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.jsonl");
+        let row = |id: &str| {
+            serde_json::json!({"type":"assistant","providerId":"vertex","timestamp":"2026-05-28T10:00:00Z","requestId":format!("req_{id}"),"message":{"id":id,"model":"fixture-private-model","usage":{"input_tokens":100,"output_tokens":50}}}).to_string()
+        };
+        std::fs::write(&path, format!("{}\n{}\n", row("a"), row("b"))).unwrap();
+        let pricing = |rate: Option<f64>| {
+            let overrides = rate.map(|r| vec![serde_json::json!({"provider_id":"vertex","model_id":"fixture-private-model","pricing":{"input_cost_per_token":r,"output_cost_per_token":r}})]).unwrap_or_default();
+            let custom = pricing::custom::CustomPricing::load_from_str(
+                &serde_json::json!({"models":{},"provider_overrides":overrides}).to_string(),
+                std::path::Path::new("synthetic-pricing.json"),
+            );
+            assert!(custom.diagnostics().is_empty());
+            pricing::PricingService::new_with_custom(custom, HashMap::new(), HashMap::new())
+        };
+        let scan = |root: &std::path::Path, p: &pricing::PricingService| {
+            parse_all_messages_with_pricing_with_env_strategy(
+                root.to_str().unwrap(),
+                &["claude".to_string()],
+                Some(p),
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let paid = pricing(Some(1.0));
+        let cold = scan(home.path(), &paid);
+        assert_eq!(cold.len(), 2);
+        // Simulate a migrated entry awaiting backfill; source still contains both rows.
+        let mut cache = message_cache::SourceMessageCache::load();
+        let mut e = cache
+            .all_entries()
+            .into_iter()
+            .find(|e| e.path.to_path_buf() == path)
+            .unwrap();
+        e.billing_identity_generation = 0;
+        for m in &mut e.messages {
+            m.billing_identity = sessions::BillingIdentity::Unknown;
+        }
+        cache.insert(e);
+        cache.save_if_dirty();
+        drop(cache);
+        // Remove one row before backfill: this is now cache-only compacted history.
+        std::fs::write(&path, format!("{}\n", row("b"))).unwrap();
+        let backfilled = scan(home.path(), &paid);
+        assert_eq!(backfilled.len(), 2);
+        assert_eq!(
+            backfilled
+                .iter()
+                .filter(|m| matches!(m.billing_identity, sessions::BillingIdentity::Known { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            backfilled
+                .iter()
+                .filter(|m| matches!(m.billing_identity, sessions::BillingIdentity::Unknown))
+                .count(),
+            1
+        );
+        let cache = message_cache::SourceMessageCache::load();
+        let e = cache
+            .all_entries()
+            .into_iter()
+            .find(|e| e.path.to_path_buf() == path)
+            .unwrap();
+        assert_eq!(e.billing_identity_generation, 1);
+        drop(cache);
+        // Warm repricing: retained Unknown can't use scoped rule; live Known can.
+        for (rate, expected) in [
+            (Some(1.0), 150.0),
+            (Some(0.0), 0.0),
+            (Some(2.0), 300.0),
+            (None, 0.0),
+        ] {
+            let rows = scan(home.path(), &pricing(rate));
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows.iter().map(|m| m.tokens.input).sum::<i64>(), 200);
+            assert_eq!(rows.iter().map(|m| m.cost).sum::<f64>(), expected);
+        }
+        std::fs::remove_file(&path).unwrap();
+        let deleted = scan(home.path(), &paid);
+        assert_eq!(deleted.len(), 2);
+        assert_eq!(deleted.iter().map(|m| m.cost).sum::<f64>(), 150.0);
+        // Shared cache with different --home must not replay this home's deleted source.
+        assert!(scan(other_home.path(), &paid).is_empty());
+        // Restore one source row, without resurrecting a duplicate retained copy.
+        std::fs::write(&path, format!("{}\n", row("b"))).unwrap();
+        assert_eq!(scan(home.path(), &paid).len(), 2);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn failed_legacy_identity_backfill_keeps_amount_tokens_and_micode_provenance() {
+        for (client, relative) in [
+            (ClientId::MiMoCode, ".local/share/mimocode/mimocode.db"),
+            (ClientId::OpenCode, ".local/share/opencode/opencode.db"),
+            (ClientId::Codex, ".codex/sessions/fixture.jsonl.zst"),
+        ] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let path = source_home.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Discovered filename, but deterministic SQLite / zstd read failure.
+            // No permission tricks (tests must work as root too).
+            std::fs::write(&path, b"synthetic-not-a-database-or-zstd-frame").unwrap();
+            let identity = message_cache::CacheIdentity::for_client(client);
+            let mut message = UnifiedMessage::new(
+                client.as_str(),
+                "fixture-private-model",
+                "anthropic",
+                "fixture-session",
+                1780000000123,
+                TokenBreakdown {
+                    input: 11,
+                    output: 7,
+                    cache_read: 3,
+                    cache_write: 100,
+                    cache_write_1h: 25,
+                    reasoning: 13,
+                },
+                0.0,
+            );
+            message.dedup_key = Some("fixture-stable-key".into());
+            message.mark_provider_reported_cost();
+            let original = message.clone();
+            let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+            let mut entry = message_cache::CachedSourceEntry::new(
+                identity,
+                &path,
+                fingerprint,
+                vec![message],
+                if client == ClientId::Codex {
+                    vec![0]
+                } else {
+                    vec![]
+                },
+                None,
+            );
+            entry.billing_identity_generation = 0;
+            let metadata = vec![sessions::micode::MiMoRowMetadata {
+                session_created_bits: Some(1780000000000.125f64.to_bits()),
+                row: sessions::opencode_schema::OpenCodeRowMetadata {
+                    created_bits: 1780000000000.375f64.to_bits(),
+                    completed_bits: Some(1780000000001.625f64.to_bits()),
+                    has_embedded_id: true,
+                },
+            }];
+            if client == ClientId::MiMoCode {
+                entry = entry.with_micode_metadata(metadata.clone());
+            }
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.insert(entry);
+            cache.save_if_dirty();
+            drop(cache);
+            for _ in 0..2 {
+                let rows = parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &[client.as_str().to_string()],
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                );
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "{client:?}: failed backfill must replay old row"
+                );
+                assert_eq!(rows[0].tokens, original.tokens);
+                assert_eq!(rows[0].cost, 0.0);
+                assert_eq!(rows[0].cost_source, sessions::CostSource::ProviderReported);
+                assert_eq!(
+                    rows[0].timestamp, original.timestamp,
+                    "failed source cannot redate cached fallback rows"
+                );
+                assert!(matches!(
+                    rows[0].billing_identity,
+                    sessions::BillingIdentity::Unknown
+                ));
+                let cache = message_cache::SourceMessageCache::load();
+                let persisted = cache
+                    .all_entries()
+                    .into_iter()
+                    .find(|e| e.path.to_path_buf() == path)
+                    .expect("failure must not remove cache");
+                assert_eq!(
+                    persisted.billing_identity_generation, 0,
+                    "failure must not complete backfill"
+                );
+                assert_eq!(persisted.messages.len(), 1);
+                assert_eq!(persisted.messages[0].tokens, original.tokens);
+                assert_eq!(persisted.messages[0].timestamp, original.timestamp);
+                if client == ClientId::MiMoCode {
+                    assert_eq!(
+                        persisted.micode_metadata.as_deref(),
+                        Some(metadata.as_slice())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_billing_conflicts_are_order_independent_and_authority_keeps_tuple() {
+        use sessions::{BillingIdentity, BillingIdentityOrigin};
+        let row = |provider: &str| {
+            UnifiedMessage::new(
+                "claude",
+                "fixture-model",
+                "anthropic",
+                "s",
+                1,
+                TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .with_billing(Some(provider), BillingIdentityOrigin::ExplicitRecord)
+        };
+        for providers in [
+            ["vertex", "anthropic", "vertex"],
+            ["anthropic", "vertex", "anthropic"],
+        ] {
+            let mut existing = row(providers[0]);
+            let mut retained = true;
+            let mut billing_conflicted = false;
+            for provider in &providers[1..] {
+                merge_claude_cross_file_duplicate(
+                    &mut existing,
+                    &mut retained,
+                    &mut billing_conflicted,
+                    row(provider),
+                    true,
+                    None,
+                );
+            }
+            assert_eq!(existing.billing_identity, BillingIdentity::Unknown);
+        }
+        for reverse in [false, true] {
+            let mut authority = row("authority-gateway");
+            authority.model_id = "authority-model".into();
+            authority.pricing_model_id = Some("authority-raw".into());
+            authority.mark_provider_reported_cost();
+            let (mut existing, candidate) = if reverse {
+                (authority.clone(), row("other"))
+            } else {
+                (row("other"), authority.clone())
+            };
+            sessions::claudecode::merge_message_completeness(&mut existing, &candidate);
+            assert_eq!(existing.billing_identity, authority.billing_identity);
+            assert_eq!(existing.model_id, authority.model_id);
+            assert_eq!(existing.pricing_model_id, authority.pricing_model_id);
+            assert_eq!(existing.cost, 0.0);
+            assert!(existing.has_authoritative_cost());
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn current_gemini_cache_yields_to_fresh_partial_parse_and_recovers() {
+        for legacy in [false, true] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let path = source_home
+                .path()
+                .join(".gemini/tmp/project/chats/session.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let record = |input| {
+                format!(
+            "{{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session\"}}\n{{\"type\":\"result\",\"stats\":{{\"input_tokens\":{input},\"output_tokens\":5}}}}\n"
+        )
+            };
+            let scan = || {
+                parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["gemini".to_string()],
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                )
+            };
+            let identity = message_cache::CacheIdentity::for_client(ClientId::Gemini);
+            std::fs::write(&path, record(100)).unwrap();
+            assert_eq!(scan()[0].tokens.input, 100);
+            assert!(message_cache::SourceMessageCache::load()
+                .get(identity, &path)
+                .is_some());
+            if legacy {
+                let mut cache = message_cache::SourceMessageCache::load();
+                let mut entry = cache.take(identity, &path).unwrap();
+                entry.billing_identity_generation = 0;
+                cache.insert(entry);
+                cache.save_if_dirty();
+            }
+            std::fs::write(&path, format!("{}not-json\n", record(200))).unwrap();
+            for _ in 0..2 {
+                let fresh = scan();
+                assert_eq!(fresh.len(), 1);
+                assert_eq!(
+                    fresh[0].tokens.input,
+                    if legacy { 100 } else { 200 },
+                    "readable new usage must not be hidden by stale cache"
+                );
+                assert_eq!(
+                    message_cache::SourceMessageCache::load()
+                        .get(identity, &path)
+                        .is_some(),
+                    legacy
+                );
+            }
+            std::fs::write(&path, record(300)).unwrap();
+            assert_eq!(scan()[0].tokens.input, 300);
+            assert!(message_cache::SourceMessageCache::load()
+                .get(identity, &path)
+                .is_some());
+            assert_eq!(scan()[0].tokens.input, 300);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn opencode_failed_reparse_only_retains_legacy_billing_cache() {
+        for legacy in [false, true] {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let path = source_home.path().join(".local/share/opencode/opencode.db");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let conn = create_opencode_sqlite_db(&path);
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES ('msg', 'session', ?1)",
+                [build_opencode_sqlite_payload(
+                    1_700_000_000_000.0,
+                    1_700_000_000_500.0,
+                    100,
+                    5,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                )],
+            )
+            .unwrap();
+            drop(conn);
+            let original = std::fs::read(&path).unwrap();
+            let scan = || {
+                parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["opencode".to_string()],
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                )
+            };
+            assert_eq!(scan()[0].tokens.input, 100);
+            let identity = message_cache::CacheIdentity::for_client(ClientId::OpenCode);
+            if legacy {
+                let mut cache = message_cache::SourceMessageCache::load();
+                let mut entry = cache.take(identity, &path).unwrap();
+                entry.billing_identity_generation = 0;
+                cache.insert(entry);
+                cache.save_if_dirty();
+            }
+            std::fs::write(&path, b"synthetic invalid database").unwrap();
+            assert!(!sessions::opencode::scan_opencode_sqlite(&path).complete);
+            for _ in 0..2 {
+                let messages = scan();
+                assert_eq!(
+                    messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+                    if legacy { 100 } else { 0 }
+                );
+                assert_eq!(
+                    message_cache::SourceMessageCache::load()
+                        .get(identity, &path)
+                        .is_some(),
+                    legacy
+                );
+            }
+            std::fs::write(&path, original).unwrap();
+            assert_eq!(scan()[0].tokens.input, 100);
+            assert!(message_cache::SourceMessageCache::load()
+                .get(identity, &path)
+                .is_some());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn file_fingerprint_failure_only_retains_legacy_billing_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        for (client, relative, content, expected_total) in [
+            (
+                ClientId::Codex,
+                ".codex/sessions/rollout.jsonl",
+                include_str!("../tests/fixtures/billing-cache/codex-parser18/prefix.jsonl"),
+                330,
+            ),
+            (
+                ClientId::OpenCode,
+                ".local/share/opencode/storage/message/project-1/msg_001.json",
+                r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+                15,
+            ),
+        ] {
+            for legacy in [false, true] {
+                let cache_home = tempfile::TempDir::new().unwrap();
+                let source_home = tempfile::TempDir::new().unwrap();
+                let _cache_env = redirect_cache_home(cache_home.path());
+                let path = source_home.path().join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, content).unwrap();
+                let scan = || {
+                    parse_all_messages_with_pricing_with_env_strategy(
+                        source_home.path().to_str().unwrap(),
+                        &[client.as_str().to_string()],
+                        None,
+                        false,
+                        &scanner::ScannerSettings::default(),
+                    )
+                };
+                assert_eq!(
+                    scan().iter().map(|m| m.tokens.total()).sum::<i64>(),
+                    expected_total
+                );
+                let identity = message_cache::CacheIdentity::for_client(client);
+                let mut cache = message_cache::SourceMessageCache::load();
+                let mut entry = cache.take(identity, &path).unwrap();
+                let fingerprint = entry.fingerprint.clone();
+                if legacy {
+                    entry.billing_identity_generation = 0;
+                    cache.insert(entry);
+                    cache.save_if_dirty();
+                }
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+                let unreadable =
+                    message_cache::SourceFingerprint::check_path(&path, Some(&fingerprint))
+                        .is_none();
+                let messages = scan();
+                let warm = scan();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                assert!(
+                    unreadable,
+                    "fixture must exercise a failed fingerprint, not a parse failure"
+                );
+                for rows in [messages, warm] {
+                    assert_eq!(
+                        rows.iter().map(|m| m.tokens.total()).sum::<i64>(),
+                        if legacy { expected_total } else { 0 }
+                    );
+                }
+                assert_eq!(
+                    message_cache::SourceMessageCache::load()
+                        .get(identity, &path)
+                        .is_some(),
+                    legacy
+                );
+                assert_eq!(
+                    scan().iter().map(|m| m.tokens.total()).sum::<i64>(),
+                    expected_total
+                );
+                assert!(message_cache::SourceMessageCache::load()
+                    .get(identity, &path)
+                    .is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn known_billing_survives_unknown_evidence_in_either_order() {
+        use sessions::{BillingIdentity, BillingIdentityOrigin};
+        let known = UnifiedMessage::new(
+            "claude",
+            "fixture-model",
+            "anthropic",
+            "s",
+            1,
+            TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
+            0.0,
+        )
+        .with_billing(Some("vertex"), BillingIdentityOrigin::ExplicitRecord);
+        let mut unknown = known.clone();
+        unknown.billing_identity = BillingIdentity::Unknown;
+        let custom = pricing::custom::CustomPricing::load_from_str(
+            r#"{"models":{"fixture-model":{"input_cost_per_token":9}},"provider_overrides":[{"provider_id":"vertex","model_id":"fixture-model","pricing":{"input_cost_per_token":2}}]}"#,
+            Path::new("synthetic-pricing.json"),
+        );
+        assert!(custom.diagnostics().is_empty());
+        let pricing =
+            pricing::PricingService::new_with_custom(custom, HashMap::new(), HashMap::new());
+        for retained in [false, true] {
+            for reverse in [false, true] {
+                let (mut existing, candidate) = if reverse {
+                    (unknown.clone(), known.clone())
+                } else {
+                    (known.clone(), unknown.clone())
+                };
+                let mut is_retained = retained;
+                merge_claude_cross_file_duplicate(
+                    &mut existing,
+                    &mut is_retained,
+                    &mut false,
+                    candidate,
+                    retained,
+                    Some(&pricing),
+                );
+                assert_eq!(
+                    existing.billing_identity, known.billing_identity,
+                    "reverse={reverse}, retained={retained}"
+                );
+                assert_eq!(
+                    existing.cost, 2.0,
+                    "the sole known channel must keep its scoped rate"
+                );
+            }
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn current_openclaw_cache_does_not_hide_new_rows_after_payload_failure() {
+        use sessions::openclaw::test_fixtures::{
+            create_compressed_agent_db, insert_event, insert_session_window,
+        };
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let path = source_home
+            .path()
+            .join(".openclaw/agents/main/agent/openclaw-agent.sqlite");
+        let conn = create_compressed_agent_db(&path);
+        insert_session_window(
+            &conn,
+            "session",
+            Some("anthropic"),
+            Some("claude-opus-4-6"),
+            None,
+        );
+        insert_event(
+            &conn,
+            "session",
+            1,
+            &openclaw_assistant_event("a", 100, 5, 1756548000000),
+            1756548000000,
+        );
+        let scan = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["openclaw".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let identity = message_cache::CacheIdentity::for_client(ClientId::OpenClaw);
+        assert_eq!(scan()[0].tokens.input, 100);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(identity, &path)
+            .is_some());
+        insert_event(
+            &conn,
+            "session",
+            2,
+            &openclaw_assistant_event("b", 200, 5, 1756548000001),
+            1756548000001,
+        );
+        conn.execute("INSERT INTO transcript_events (session_id, seq, event_zstd, event_utf8_bytes, created_at) VALUES ('session', 3, X'FF', 10, 1756548000002)", []).unwrap();
+        let partial = sessions::openclaw::scan_openclaw_sqlite(&path);
+        assert!(!partial.complete);
+        assert_eq!(
+            partial.messages.len(),
+            2,
+            "fixture must contain a real readable prefix"
+        );
+        for _ in 0..2 {
+            let fresh = scan();
+            assert_eq!(fresh.len(), 2);
+            assert_eq!(fresh.iter().map(|m| m.tokens.input).sum::<i64>(), 300);
+            assert!(message_cache::SourceMessageCache::load()
+                .get(identity, &path)
+                .is_none());
+        }
+        conn.execute("DELETE FROM transcript_events WHERE seq = 3", [])
+            .unwrap();
+        assert_eq!(scan().len(), 2);
+        assert!(message_cache::SourceMessageCache::load()
+            .get(identity, &path)
+            .is_some());
+    }
+
+    #[test]
+    fn billing_conflicts_survive_unknown_and_repeated_known_evidence() {
+        use sessions::BillingIdentityOrigin;
+        for retained in [false, true] {
+            for providers in [
+                ["vertex", "anthropic", "unknown"],
+                ["vertex", "unknown", "anthropic"],
+                ["anthropic", "vertex", "unknown"],
+                ["anthropic", "unknown", "vertex"],
+                ["unknown", "vertex", "anthropic"],
+                ["unknown", "anthropic", "vertex"],
+                ["vertex", "anthropic", "vertex"],
+                ["anthropic", "vertex", "anthropic"],
+            ] {
+                let row = |id| {
+                    UnifiedMessage::new(
+                        "claude",
+                        "m",
+                        "anthropic",
+                        "s",
+                        1,
+                        TokenBreakdown::default(),
+                        0.0,
+                    )
+                    .with_billing(Some(id), BillingIdentityOrigin::ExplicitRecord)
+                };
+                let mut existing = row(providers[0]);
+                let mut is_retained = retained;
+                let mut conflicted = false;
+                for provider in &providers[1..] {
+                    merge_claude_cross_file_duplicate(
+                        &mut existing,
+                        &mut is_retained,
+                        &mut conflicted,
+                        row(provider),
+                        retained,
+                        None,
+                    );
+                }
+                assert!(conflicted, "{providers:?}, retained={retained}");
+                assert_eq!(
+                    existing.billing_identity,
+                    sessions::BillingIdentity::Unknown
+                );
+            }
+        }
     }
 }

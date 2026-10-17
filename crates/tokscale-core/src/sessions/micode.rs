@@ -154,6 +154,7 @@ pub(crate) mod io_tests;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct UsageFingerprint {
+    billing_provider: Option<String>,
     created_bits: u64,
     completed_bits: Option<u64>,
     model: String,
@@ -171,6 +172,7 @@ impl UsageFingerprint {
             completed_bits: timing.completed_bits,
             model: message.model_id.clone(),
             provider: message.provider_id.clone(),
+            billing_provider: message.billing_identity.id().map(str::to_string),
             tokens: [
                 message.tokens.input,
                 message.tokens.output,

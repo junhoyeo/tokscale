@@ -171,6 +171,7 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
                 .or_else(|| non_blank(requested_model))
                 .or_else(|| non_blank(thread_model))
                 .unwrap_or_else(|| "unknown".to_string());
+            let billing_provider = provider_type.clone();
             let (provider, authoritative_zero_cost) = provider_for_pricing(provider_type);
             let session_id = if thread_id.trim().is_empty() {
                 format!("unsloth:chat:{message_id}")
@@ -186,6 +187,10 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
                 tokens,
                 0.0,
                 Some(format!("unsloth:chat:{message_id}")),
+            )
+            .with_billing(
+                billing_provider.as_deref(),
+                super::BillingIdentityOrigin::ExplicitRecord,
             );
             message.agent = Some(STUDIO_AGENT.to_string());
             message.is_turn_start = true;

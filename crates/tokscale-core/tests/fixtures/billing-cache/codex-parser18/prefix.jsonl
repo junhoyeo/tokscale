@@ -1,0 +1,11 @@
+{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"id":"synthetic-codex-fixture18","originator":"codex_vscode","source":"vscode","model_provider":"gateway","cwd":"/synthetic/project"}}
+{"timestamp":"2026-10-01T00:01:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-10-01T00:01:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}
+{"timestamp":"2026-10-01T00:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110}}}}
+{"timestamp":"2026-10-01T00:01:02Z","type":"token_usage_record","payload":{"thread_id":"synthetic-codex-fixture18","turn_id":"turn-1","response_id":"response-settled","model":"gpt-5.5","usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":220}}}
+{"timestamp":"2026-10-01T00:01:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-10-01T00:02:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-10-01T00:02:00Z","type":"turn_context","payload":{"turn_id":"turn-2","model":"gpt-5.5"}}
+{"timestamp":"2026-10-01T00:02:00.001Z","type":"event_msg","payload":{"type":"user_message","message":"Please continue the synthetic fixture."}}
+{"timestamp":"2026-10-01T00:02:01Z","type":"token_usage_record","payload":{"thread_id":"synthetic-codex-fixture18","turn_id":"turn-2","response_id":"response-pending","model":"gpt-5.5","usage":{"input_tokens":300,"cached_input_tokens":60,"output_tokens":30,"reasoning_output_tokens":0,"total_tokens":330,"service_tier":"priority"}}}
+{"timestamp":"2026-10-01T00:02:01.001Z","type":"compacted","payload":{"message":"","replacement_history":[]}}

@@ -1,0 +1,963 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tokscale custom base pricing",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "notes": {},
+    "source": {},
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/legacyPricing"
+      }
+    },
+    "provider_overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model_id",
+          "pricing"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "pattern": "^(?!\\s*[uU][nN][kK][nN][oO][wW][nN]\\s*$)[\\s\\S]*\\S[\\s\\S]*$"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "pricing": {
+            "$ref": "#/$defs/pricing"
+          },
+          "notes": {},
+          "source": {}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "pricing": {
+      "type": "object",
+      "properties": {
+        "input_cost_per_million_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_128k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_256k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_token": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_token_above_128k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_token_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_token_above_256k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input_cost_per_token_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_128k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_256k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_token": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_token_above_128k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_token_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_token_above_256k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_cost_per_token_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_1hr": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_1hr": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_1hr_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_above_200k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_above_272k_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "notes": {},
+        "source": {}
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "input_cost_per_token"
+          ]
+        },
+        {
+          "required": [
+            "input_cost_per_million_tokens"
+          ]
+        },
+        {
+          "required": [
+            "output_cost_per_token"
+          ]
+        },
+        {
+          "required": [
+            "output_cost_per_million_tokens"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens",
+              "input_cost_per_token"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_128k_tokens",
+              "input_cost_per_token_above_128k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_200k_tokens",
+              "input_cost_per_token_above_200k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_256k_tokens",
+              "input_cost_per_token_above_256k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_272k_tokens",
+              "input_cost_per_token_above_272k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens",
+              "output_cost_per_token"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_128k_tokens",
+              "output_cost_per_token_above_128k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_200k_tokens",
+              "output_cost_per_token_above_200k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_256k_tokens",
+              "output_cost_per_token_above_256k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_272k_tokens",
+              "output_cost_per_token_above_272k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens",
+              "cache_creation_input_token_cost"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_creation_input_token_cost_above_200k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr",
+              "cache_creation_input_token_cost_above_1hr"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens",
+              "cache_creation_input_token_cost_above_1hr_above_200k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens",
+              "cache_read_input_token_cost"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_read_input_token_cost_above_200k_tokens"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens_above_272k_tokens",
+              "cache_read_input_token_cost_above_272k_tokens"
+            ]
+          }
+        }
+      ]
+    },
+    "legacyPricing": {
+      "type": "object",
+      "properties": {
+        "input_cost_per_million_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_128k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_256k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_million_tokens_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_token": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_token_above_128k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_token_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_token_above_256k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input_cost_per_token_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_128k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_256k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_million_tokens_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_token": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_token_above_128k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_token_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_token_above_256k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_cost_per_token_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_1hr": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_1hr": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_token_cost_above_1hr_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_per_million_tokens_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_above_200k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_read_input_token_cost_above_272k_tokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "notes": {},
+        "source": {}
+      },
+      "additionalProperties": true,
+      "propertyNames": {
+        "anyOf": [
+          {
+            "enum": [
+              "input_cost_per_million_tokens",
+              "input_cost_per_million_tokens_above_128k_tokens",
+              "input_cost_per_million_tokens_above_200k_tokens",
+              "input_cost_per_million_tokens_above_256k_tokens",
+              "input_cost_per_million_tokens_above_272k_tokens",
+              "input_cost_per_token",
+              "input_cost_per_token_above_128k_tokens",
+              "input_cost_per_token_above_200k_tokens",
+              "input_cost_per_token_above_256k_tokens",
+              "input_cost_per_token_above_272k_tokens",
+              "output_cost_per_million_tokens",
+              "output_cost_per_million_tokens_above_128k_tokens",
+              "output_cost_per_million_tokens_above_200k_tokens",
+              "output_cost_per_million_tokens_above_256k_tokens",
+              "output_cost_per_million_tokens_above_272k_tokens",
+              "output_cost_per_token",
+              "output_cost_per_token_above_128k_tokens",
+              "output_cost_per_token_above_200k_tokens",
+              "output_cost_per_token_above_256k_tokens",
+              "output_cost_per_token_above_272k_tokens",
+              "cache_creation_input_token_cost_per_million_tokens",
+              "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_creation_input_token_cost",
+              "cache_creation_input_token_cost_above_200k_tokens",
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr",
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens",
+              "cache_creation_input_token_cost_above_1hr",
+              "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
+              "cache_read_input_token_cost_per_million_tokens",
+              "cache_read_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_read_input_token_cost_per_million_tokens_above_272k_tokens",
+              "cache_read_input_token_cost",
+              "cache_read_input_token_cost_above_200k_tokens",
+              "cache_read_input_token_cost_above_272k_tokens",
+              "notes",
+              "source"
+            ]
+          },
+          {
+            "not": {
+              "pattern": "(^|_)([cC][oO][sS][tT]|[pP][rR][iI][cC][eE]|[pP][rR][iI][cC][iI][nN][gG]|[rR][aA][tT][eE][sS]?)($|_)"
+            }
+          }
+        ]
+      },
+      "anyOf": [
+        {
+          "required": [
+            "input_cost_per_token"
+          ],
+          "properties": {
+            "input_cost_per_token": {
+              "type": "number"
+            }
+          }
+        },
+        {
+          "required": [
+            "input_cost_per_million_tokens"
+          ],
+          "properties": {
+            "input_cost_per_million_tokens": {
+              "type": "number"
+            }
+          }
+        },
+        {
+          "required": [
+            "output_cost_per_token"
+          ],
+          "properties": {
+            "output_cost_per_token": {
+              "type": "number"
+            }
+          }
+        },
+        {
+          "required": [
+            "output_cost_per_million_tokens"
+          ],
+          "properties": {
+            "output_cost_per_million_tokens": {
+              "type": "number"
+            }
+          }
+        }
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens",
+              "input_cost_per_token"
+            ],
+            "properties": {
+              "input_cost_per_million_tokens": {
+                "type": "number"
+              },
+              "input_cost_per_token": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_128k_tokens",
+              "input_cost_per_token_above_128k_tokens"
+            ],
+            "properties": {
+              "input_cost_per_million_tokens_above_128k_tokens": {
+                "type": "number"
+              },
+              "input_cost_per_token_above_128k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_200k_tokens",
+              "input_cost_per_token_above_200k_tokens"
+            ],
+            "properties": {
+              "input_cost_per_million_tokens_above_200k_tokens": {
+                "type": "number"
+              },
+              "input_cost_per_token_above_200k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_256k_tokens",
+              "input_cost_per_token_above_256k_tokens"
+            ],
+            "properties": {
+              "input_cost_per_million_tokens_above_256k_tokens": {
+                "type": "number"
+              },
+              "input_cost_per_token_above_256k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "input_cost_per_million_tokens_above_272k_tokens",
+              "input_cost_per_token_above_272k_tokens"
+            ],
+            "properties": {
+              "input_cost_per_million_tokens_above_272k_tokens": {
+                "type": "number"
+              },
+              "input_cost_per_token_above_272k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens",
+              "output_cost_per_token"
+            ],
+            "properties": {
+              "output_cost_per_million_tokens": {
+                "type": "number"
+              },
+              "output_cost_per_token": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_128k_tokens",
+              "output_cost_per_token_above_128k_tokens"
+            ],
+            "properties": {
+              "output_cost_per_million_tokens_above_128k_tokens": {
+                "type": "number"
+              },
+              "output_cost_per_token_above_128k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_200k_tokens",
+              "output_cost_per_token_above_200k_tokens"
+            ],
+            "properties": {
+              "output_cost_per_million_tokens_above_200k_tokens": {
+                "type": "number"
+              },
+              "output_cost_per_token_above_200k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_256k_tokens",
+              "output_cost_per_token_above_256k_tokens"
+            ],
+            "properties": {
+              "output_cost_per_million_tokens_above_256k_tokens": {
+                "type": "number"
+              },
+              "output_cost_per_token_above_256k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "output_cost_per_million_tokens_above_272k_tokens",
+              "output_cost_per_token_above_272k_tokens"
+            ],
+            "properties": {
+              "output_cost_per_million_tokens_above_272k_tokens": {
+                "type": "number"
+              },
+              "output_cost_per_token_above_272k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens",
+              "cache_creation_input_token_cost"
+            ],
+            "properties": {
+              "cache_creation_input_token_cost_per_million_tokens": {
+                "type": "number"
+              },
+              "cache_creation_input_token_cost": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_creation_input_token_cost_above_200k_tokens"
+            ],
+            "properties": {
+              "cache_creation_input_token_cost_per_million_tokens_above_200k_tokens": {
+                "type": "number"
+              },
+              "cache_creation_input_token_cost_above_200k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr",
+              "cache_creation_input_token_cost_above_1hr"
+            ],
+            "properties": {
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr": {
+                "type": "number"
+              },
+              "cache_creation_input_token_cost_above_1hr": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens",
+              "cache_creation_input_token_cost_above_1hr_above_200k_tokens"
+            ],
+            "properties": {
+              "cache_creation_input_token_cost_per_million_tokens_above_1hr_above_200k_tokens": {
+                "type": "number"
+              },
+              "cache_creation_input_token_cost_above_1hr_above_200k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens",
+              "cache_read_input_token_cost"
+            ],
+            "properties": {
+              "cache_read_input_token_cost_per_million_tokens": {
+                "type": "number"
+              },
+              "cache_read_input_token_cost": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens_above_200k_tokens",
+              "cache_read_input_token_cost_above_200k_tokens"
+            ],
+            "properties": {
+              "cache_read_input_token_cost_per_million_tokens_above_200k_tokens": {
+                "type": "number"
+              },
+              "cache_read_input_token_cost_above_200k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cache_read_input_token_cost_per_million_tokens_above_272k_tokens",
+              "cache_read_input_token_cost_above_272k_tokens"
+            ],
+            "properties": {
+              "cache_read_input_token_cost_per_million_tokens_above_272k_tokens": {
+                "type": "number"
+              },
+              "cache_read_input_token_cost_above_272k_tokens": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

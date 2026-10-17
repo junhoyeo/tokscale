@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T00:02:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600,"cached_input_tokens":130,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":660},"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":220}}}}

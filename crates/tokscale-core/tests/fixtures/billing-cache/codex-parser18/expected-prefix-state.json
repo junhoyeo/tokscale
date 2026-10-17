@@ -1,0 +1,104 @@
+{
+  "state": {
+    "has_own_activity": true,
+    "has_supported_usage": true,
+    "has_own_synthetic_activity": false,
+    "current_model": "gpt-5.5",
+    "thread_service_tier": null,
+    "request_service_tier": "priority",
+    "current_turn_start_ms": 1790812920000,
+    "last_accepted_token_timestamp_ms": 1790812920001,
+    "previous_totals": {
+      "input": 100,
+      "output": 10,
+      "cached": 20,
+      "reasoning": 0
+    },
+    "session_is_headless": false,
+    "session_is_subagent": false,
+    "session_is_guardian": false,
+    "session_id_from_meta": "synthetic-codex-fixture18",
+    "session_forked_from_id": null,
+    "forked_child_session_id": null,
+    "forked_child_replay_session_id": null,
+    "session_provider": "gateway",
+    "session_agent": "Codex",
+    "session_workspace_key": "/synthetic/project",
+    "session_workspace_label": "project",
+    "forked_child_waiting_for_turn_context": false,
+    "forked_child_inherited_baseline": null,
+    "forked_child_inherited_reported_total": null,
+    "pending_turn_start": true,
+    "forked_child_task_started_turn_ids": [],
+    "forked_child_is_user_fork": false,
+    "session_owned_by_openclaw": false,
+    "current_turn_id": "turn-2",
+    "turn_id_announced_by_task_started": false,
+    "usage_event_ordinal": 1,
+    "turn_coverage": {
+      "turn_ids": [
+        "turn-1"
+      ],
+      "without_turn_id": false
+    },
+    "pending_usage_record": {
+      "usage": {
+        "input": 300,
+        "output": 30,
+        "cached": 60,
+        "reasoning": 0
+      },
+      "timestamp_ms": 1790812921000,
+      "turn_id": "turn-2",
+      "response_id": "response-pending",
+      "service_tier": "priority",
+      "model": "gpt-5.5",
+      "after_compacted": true,
+      "turn_start": true
+    },
+    "settled_usage_records": [
+      {
+        "input": 200,
+        "output": 20,
+        "cached": 50,
+        "reasoning": 0
+      }
+    ]
+  },
+  "consumed_offset": 2004,
+  "ends_with_newline": true,
+  "prefix_hash": [
+    206,
+    61,
+    177,
+    159,
+    216,
+    103,
+    243,
+    162,
+    188,
+    123,
+    225,
+    160,
+    190,
+    101,
+    42,
+    47,
+    107,
+    135,
+    251,
+    90,
+    6,
+    136,
+    178,
+    15,
+    80,
+    96,
+    43,
+    27,
+    33,
+    181,
+    17,
+    126
+  ]
+}

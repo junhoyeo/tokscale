@@ -16,6 +16,7 @@ pub fn lookup(model_id: &str, provider_id: Option<&str>) -> Option<LookupResult>
                 ..Default::default()
             },
             source: "Self-hosted".to_string(),
+            matched_provider_id: None,
             matched_key: model_id.to_string(),
             evidence: ResolutionEvidence::deterministic(ResolutionKind::BuiltIn),
         })

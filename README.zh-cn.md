@@ -494,7 +494,6 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -516,6 +515,8 @@ tokscale pricing list-overrides
 }
 ```
 
+JSON Schema 位于仓库中的 [schemas/custom-pricing.schema.json](schemas/custom-pricing.schema.json)。如需编辑器校验，请使用该 Schema 的本地副本。
+
 覆盖价格以每百万 Token 的美元数输入，这与大多数 API 提供商公布价格的方式一致；Tokscale 会在内部将其转换为每 Token 的费率。`input_cost_per_million_tokens` 或 `output_cost_per_million_tokens` 中至少要有一个存在，缓存读取/缓存创建字段为可选。显式的 `0` 是允许的，这正是声明免费模型的方式——`0` 是一个陈述（“这不收费”），而省略字段表示费率未知，会导致该用量未被定价。为兼容复制粘贴，也接受 LiteLLM 风格的每 Token 字段名，例如 `input_cost_per_token`、`output_cost_per_token` 和 `cache_read_input_token_cost`，但推荐面向用户使用每百万的命名形式。要省略某个层级或缓存价格，直接不写该字段即可；负值或非有限值会被视为无效，并跳过整个模型条目，以免拼写错误悄悄改变统计。可选的 `source` 和 `notes` 字段会被 Tokscale 忽略，可用于您自己的记账。
 
 覆盖是仅精确匹配且不区分大小写的。Tokscale 先检查原始模型 ID，再检查现有的合成 `/models/` 归一化，然后才在没有覆盖匹配时回退到 LiteLLM、OpenRouter、Cursor 定价和模糊匹配。原始精确匹配优先于归一化精确匹配，因此 `accounts/fireworks/routers/kimi-k2p6-turbo` 可以覆盖某个特定网关的模型，而 `kimi-k2p6-turbo` 可以覆盖归一化的 `/models/` 路径。覆盖在启动时仅加载一次；编辑文件后请重启命令。这是在等待上游 LiteLLM 价格更新期间，针对错误模型定价 Bug 的推荐本地修复方案。
@@ -533,6 +534,12 @@ tokscale pricing list-overrides
 | `meta-llama/` | `fireworks_ai/` |
 
 示例：`grok-code` 匹配 `xai/grok-code-fast-1`（$0.20/$1.50）而非 `azure_ai/grok-code-fast-1`（$3.50/$17.50）。
+
+#### 按计费渠道设置价格
+
+自定义价格保留原有全局 `models`，新增 `provider_overrides`。查询示例：`tokscale pricing MODEL --billing-provider vertex --source custom --json --no-spinner`。旧 `--provider` 仍表示价格表来源。渠道按日志完整标签匹配（去首尾空白、ASCII 大小写不敏感），不从模型厂商推断，也不代表已验证的账户或真实收款商。未知渠道只使用全局规则或上游估价。
+
+用 `tokscale pricing validate-overrides --strict --json --no-spinner` 离线校验；用 `tokscale pricing explain --json --no-spinner` 查看本地逐消息渠道、覆盖情况、倍率和费用状态。自定义费率为基础价；日志权威金额（包括零）始终保留。编辑后重启，历史估价按当前价格重算，失效旧估价不混入合计。降级旧二进制会忽略渠道规则。匹配顺序为渠道原始模型→全局原始模型→渠道 synthetic 归一模型→全局归一模型。重复渠道选择器整组禁用，缺少费用桶不会借用其他渠道。缓存升级保留 compacted 历史，不上传私有渠道诊断。[完整说明与示例](docs/provider-pricing.md)。
 
 ### 社交平台命令
 
