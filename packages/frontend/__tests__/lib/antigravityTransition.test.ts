@@ -150,4 +150,335 @@ describe("planAntigravityTransition incomplete-pricing admission", () => {
     expect(plan.mode).toBe("replace");
     expect(plan.warning).not.toContain("partial");
   });
+
+  it("replaces when historical gemini-default, unknown, or thinking model IDs are re-attributed to concrete models", () => {
+    const args = baseArgs();
+    args.existingDays = [
+      {
+        date: "2026-07-18",
+        sourceBreakdown: {
+          "antigravity-cli": {
+            tokens: 69_226_019,
+            input: 60_000_000,
+            output: 1_000_000,
+            cacheRead: 8_000_000,
+            cacheWrite: 0,
+            reasoning: 226_019,
+            messages: 500,
+            cost: 12,
+            models: {
+              "gemini-default": {
+                tokens: 69_226_019,
+                input: 60_000_000,
+                output: 1_000_000,
+                cacheRead: 8_000_000,
+                cacheWrite: 0,
+                reasoning: 226_019,
+                messages: 500,
+                cost: 12,
+              },
+            },
+          },
+        },
+      },
+      {
+        date: "2026-08-27",
+        sourceBreakdown: {
+          "antigravity-cli": {
+            tokens: 10_000,
+            input: 8_000,
+            output: 2_000,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages: 4,
+            cost: 0.1,
+            models: {
+              unknown: {
+                tokens: 3_000,
+                input: 3_000,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 2,
+                cost: 0,
+              },
+              "claude-opus-4-6-thinking": {
+                tokens: 7_000,
+                input: 5_000,
+                output: 2_000,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 2,
+                cost: 0.1,
+              },
+            },
+          },
+        },
+      },
+    ];
+    args.contributions = [
+      {
+        date: "2026-07-18",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-extra-low",
+            tokens: {
+              input: 25_000_000,
+              output: 400_000,
+              cacheRead: 4_856_468,
+              cacheWrite: 0,
+              reasoning: 100_000,
+            },
+            cost: 5,
+            messages: 220,
+          },
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-medium",
+            tokens: {
+              input: 35_000_000,
+              output: 600_000,
+              cacheRead: 3_143_532,
+              cacheWrite: 0,
+              reasoning: 126_019,
+            },
+            cost: 7,
+            messages: 280,
+          },
+        ],
+      },
+      {
+        date: "2026-08-27",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.7-flash",
+            tokens: {
+              input: 3_000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0.01,
+            messages: 2,
+          },
+          {
+            client: "antigravity-cli",
+            modelId: "claude-opus-4-6",
+            tokens: {
+              input: 5_000,
+              output: 2_000,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0.1,
+            messages: 2,
+          },
+        ],
+      },
+      {
+        date: "2026-10-18",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-4-argon-trial",
+            tokens: {
+              input: 173_302,
+              output: 1_857,
+              cacheRead: 1_172_876,
+              cacheWrite: 0,
+              reasoning: 1_077,
+            },
+            cost: 0.4932,
+            messages: 10,
+          },
+        ],
+      },
+    ];
+
+    const plan = planAntigravityTransition(args);
+    expect(plan.mode).toBe("replace");
+    expect(
+      plan.layouts?.["antigravity-cli"]?.["2026-10-18"]?.models[
+        "gemini-4-argon-trial"
+      ]?.tokens
+    ).toBe(1_349_112);
+  });
+
+  it("rebuilds schema v1 parserStates from credited existingDays instead of freezing on uncredited cellwise-max inflation", () => {
+    const args = baseArgs();
+    const creditedCell = {
+      tokens: 100_000,
+      input: 100_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 5,
+      cost: 1,
+      models: {
+        "gemini-default": {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          cost: 1,
+        },
+      },
+    };
+    args.existingDays = [
+      {
+        date: "2026-08-07",
+        sourceBreakdown: { "antigravity-cli": creditedCell },
+      },
+    ];
+    // Schema v1 (stateVersion omitted) retained the old session-start day in
+    // `days` alongside the re-dated day (`advanceDays`), inflating its sum to
+    // 200,000 even though only 100,000 was ever credited in `existingDays`.
+    args.parserStates = {
+      "antigravity-cli": {
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: {
+          "2026-08-07": creditedCell,
+          "2026-08-08": creditedCell,
+        },
+      },
+    };
+    args.contributions = [
+      {
+        date: "2026-08-08",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-medium",
+            tokens: {
+              input: 120_000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 1.2,
+            messages: 6,
+          },
+        ],
+      },
+    ];
+
+    const plan = planAntigravityTransition(args);
+    expect(plan.mode).toBe("replace");
+  });
+
+  it("deduplicates legacy ledgers across surfaces even when a model ID was canonicalized between them", () => {
+    const args = baseArgs();
+    const makeCell = (modelId: string) => ({
+      tokens: 100_000,
+      input: 100_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 5,
+      cost: 1,
+      models: {
+        [modelId]: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          cost: 1,
+        },
+      },
+    });
+    args.existingDays = [
+      {
+        date: "2026-08-07",
+        sourceBreakdown: {
+          "antigravity-cli": makeCell("claude-opus-4-6"),
+        },
+      },
+    ];
+    args.parserStates = {
+      antigravity: {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: { "2026-08-07": makeCell("claude-opus-4-6-thinking") },
+        observedDays: { "2026-08-07": makeCell("claude-opus-4-6-thinking") },
+      },
+      "antigravity-cli": {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: { "2026-08-07": makeCell("claude-opus-4-6") },
+        observedDays: { "2026-08-07": makeCell("claude-opus-4-6") },
+      },
+    };
+    args.contributions = [
+      {
+        date: "2026-08-07",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "claude-opus-4-6",
+            tokens: {
+              input: 100_000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 1,
+            messages: 5,
+          },
+        ],
+      },
+    ];
+
+    const plan = planAntigravityTransition(args);
+    expect(plan.mode).toBe("replace");
+  });
 });

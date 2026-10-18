@@ -2308,4 +2308,80 @@ describe("POST /api/submit Antigravity family cost floors", () => {
       ),
     ).toBe(true);
   });
+
+  it("reconciles and credits new usage when legacy gemini-default, unknown, or thinking model IDs are resolved on rescan", async () => {
+    const store = newStore();
+    await submitFamily(store, familySnapshotBody([
+      {
+        date: "2026-07-18",
+        costIsComplete: true,
+        models: [
+          { client: "antigravity-cli", modelId: "gemini-default", tokens: 70_000_000, cost: 10, messages: 400 },
+        ],
+      },
+      {
+        date: "2026-08-27",
+        costIsComplete: false,
+        models: [
+          { client: "antigravity-cli", modelId: "unknown", tokens: 3_000, cost: 0, messages: 3 },
+          { client: "antigravity-cli", modelId: "claude-opus-4-6-thinking", tokens: 50_000, cost: 2, messages: 10 },
+        ],
+      },
+    ]));
+    expect(storedTokens(store)).toBe(70_053_000);
+
+    const upgraded = await submitFamily(store, familySnapshotBody([
+      {
+        date: "2026-07-18",
+        costIsComplete: true,
+        models: [
+          { client: "antigravity-cli", modelId: "gemini-3.5-flash-extra-low", tokens: 30_000_000, cost: 4, messages: 180 },
+          { client: "antigravity-cli", modelId: "gemini-3.5-flash-medium", tokens: 40_000_000, cost: 6, messages: 220 },
+        ],
+      },
+      {
+        date: "2026-08-27",
+        costIsComplete: true,
+        models: [
+          { client: "antigravity-cli", modelId: "gemini-3.7-flash", tokens: 3_000, cost: 0.05, messages: 3 },
+          { client: "antigravity-cli", modelId: "claude-opus-4-6", tokens: 50_000, cost: 2, messages: 10 },
+        ],
+      },
+      {
+        date: "2026-10-18",
+        costIsComplete: true,
+        models: [
+          { client: "antigravity-cli", modelId: "gemini-4-argon-trial", tokens: 27_110_137, cost: 5.71, messages: 177 },
+        ],
+      },
+    ]));
+
+    expect(upgraded.metrics.totalTokens).toBe(97_163_137);
+    expect(storedTokens(store)).toBe(97_163_137);
+    expect(
+      (upgraded.warnings ?? []).some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(false);
+    const day0718 = store.days.find((day) => day.date === "2026-07-18")!;
+    expect(
+      day0718.sourceBreakdown["antigravity-cli"]!.models["gemini-default"],
+    ).toBeUndefined();
+    expect(
+      day0718.sourceBreakdown["antigravity-cli"]!.models[
+        "gemini-3.5-flash-extra-low"
+      ]!.tokens,
+    ).toBe(30_000_000);
+    expect(
+      day0718.sourceBreakdown["antigravity-cli"]!.models[
+        "gemini-3.5-flash-medium"
+      ]!.tokens,
+    ).toBe(40_000_000);
+    const day1018 = store.days.find((day) => day.date === "2026-10-18")!;
+    expect(
+      day1018.sourceBreakdown["antigravity-cli"]!.models[
+        "gemini-4-argon-trial"
+      ]!.tokens,
+    ).toBe(27_110_137);
+  });
 });
