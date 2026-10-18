@@ -575,4 +575,75 @@ describe("planAntigravityTransition incomplete-pricing admission", () => {
     // credited tokens; a 150,000 snapshot does not cover the lifetime and freezes.
     expect(planAntigravityTransition(args).mode).toBe("freeze");
   });
+
+  it("does not collapse two tier models within the same ledger when their seven-field vectors match", () => {
+    const args = baseArgs();
+    const tierModel = {
+      tokens: 50_000,
+      input: 50_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 3,
+      cost: 0.5,
+    };
+    const twoTierCell = {
+      tokens: 100_000,
+      input: 100_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 6,
+      cost: 1,
+      models: {
+        "gemini-3.5-flash-extra-low": tierModel,
+        "gemini-3.5-flash-medium": tierModel,
+      },
+    };
+    args.parserStates = {
+      "antigravity-cli": {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 6,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: { "2026-08-07": twoTierCell },
+        observedDays: { "2026-08-07": twoTierCell },
+      },
+    };
+    args.contributions = [
+      {
+        date: "2026-08-07",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-medium",
+            tokens: {
+              input: 60_000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0.6,
+            messages: 6,
+          },
+        ],
+      },
+    ];
+
+    // Both 50,000 tier models belong to the same ledger (total 100,000), so a
+    // 60,000 snapshot is below the credited total and must freeze.
+    expect(planAntigravityTransition(args).mode).toBe("freeze");
+  });
 });

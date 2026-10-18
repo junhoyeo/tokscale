@@ -196,14 +196,24 @@ function legacyLedgerCoverage(
   let unverifiable = false;
 
   for (const ledger of ledgers) {
+    const seenInEarlierLedgers = new Map(
+      [...cellsByDateModel.entries()].map(([key, vectors]) => [key, [...vectors]]),
+    );
     for (const [date, cell] of Object.entries(ledger.days)) {
       for (const [modelId, model] of Object.entries(modelsForHighWater(cell))) {
         const vector = emptyCoverage();
         addCoverage(vector, model);
         const canonicalModelId = canonicalLedgerModelId(modelId);
         const key = `${date}\u0000${canonicalModelId}`;
+        const earlier = seenInEarlierLedgers.get(key) ?? [];
+        const matchIndex = earlier.findIndex((existing) =>
+          sameCoverage(existing, vector),
+        );
+        if (matchIndex !== -1) {
+          earlier.splice(matchIndex, 1);
+          continue;
+        }
         const seen = cellsByDateModel.get(key) ?? [];
-        if (seen.some((existing) => sameCoverage(existing, vector))) continue;
         seen.push(vector);
         cellsByDateModel.set(key, seen);
         addCoverage(summary.total, vector);
