@@ -95,6 +95,12 @@ const GEMINI_FLASH_TIER_IDS = new Set([
  * `gemini-3-pro` vs. `claude-sonnet-4-6`) separate even when their seven-field
  * totals match. Only the tier IDs the parser emits fold; any other
  * `gemini-3.5-flash-*` variant (e.g. a future `-lite`) is a distinct model.
+ *
+ * Re-attributions out of `unknown` and `model_placeholder_*` cannot be
+ * canonicalized: the concrete model is not derivable from the legacy ID. Those
+ * cells keep their recorded IDs and are summed across surfaces, so prior
+ * coverage can overcount and a multi-surface device may still freeze. That
+ * errs safe: an uncovered snapshot freezes and never drops credited usage.
  */
 function canonicalLedgerModelId(modelId: string): string {
   const trimmed = modelId.trim().toLowerCase();
