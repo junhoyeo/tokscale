@@ -23,7 +23,6 @@ const COVERAGE_FIELDS = [
 ] as const;
 
 type Coverage = Record<(typeof COVERAGE_FIELDS)[number], number>;
-type CoverageSummary = { total: Coverage; models: Map<string, Coverage> };
 type PriorDay = { date?: string; sourceBreakdown: unknown };
 
 function emptyCoverage(): Coverage {
@@ -42,39 +41,20 @@ function addCoverage(target: Coverage, source: Partial<Coverage>): void {
   for (const field of COVERAGE_FIELDS) target[field] += source[field] ?? 0;
 }
 
-function coverage(cells: Array<ClientBreakdownData | undefined>): CoverageSummary {
+function coverage(cells: Array<ClientBreakdownData | undefined>): Coverage {
   const total = emptyCoverage();
-  const models = new Map<string, Coverage>();
   for (const cell of cells) {
-    if (!cell) continue;
-    addCoverage(total, cell);
-    for (const [modelId, model] of Object.entries(modelsForHighWater(cell))) {
-      const modelCoverage = models.get(modelId) ?? emptyCoverage();
-      addCoverage(modelCoverage, model);
-      models.set(modelId, modelCoverage);
-    }
+    if (cell) addCoverage(total, cell);
   }
-  return { total, models };
+  return total;
 }
 
-function maximum(left: CoverageSummary, right: CoverageSummary): CoverageSummary {
-  const summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+function maximum(left: Coverage, right: Coverage): Coverage {
+  const total = emptyCoverage();
   for (const field of COVERAGE_FIELDS) {
-    summary.total[field] = Math.max(left.total[field], right.total[field]);
+    total[field] = Math.max(left[field], right[field]);
   }
-  for (const modelId of new Set([...left.models.keys(), ...right.models.keys()])) {
-    const previous = left.models.get(modelId);
-    const parserState = right.models.get(modelId);
-    const modelCoverage = emptyCoverage();
-    for (const field of COVERAGE_FIELDS) {
-      modelCoverage[field] = Math.max(
-        previous?.[field] ?? 0,
-        parserState?.[field] ?? 0,
-      );
-    }
-    summary.models.set(modelId, modelCoverage);
-  }
-  return summary;
+  return total;
 }
 
 function sameCoverage(left: Coverage, right: Coverage): boolean {
@@ -88,7 +68,7 @@ type LegacyLedger = {
 
 /** Per-field lifetime of one ledger: its aggregate or its day cells, whichever is larger. */
 function ledgerLifetime(ledger: LegacyLedger): Coverage {
-  const lifetime = coverage(Object.values(ledger.days)).total;
+  const lifetime = coverage(Object.values(ledger.days));
   for (const field of COVERAGE_FIELDS) {
     const aggregate = ledger.aggregate[field];
     if (Number.isSafeInteger(aggregate) && aggregate > lifetime[field]) {
@@ -179,20 +159,20 @@ function oneLifetime(ledgers: LegacyLedger[]): boolean {
  */
 function legacyLedgerCoverage(
   ledgers: LegacyLedger[],
-): { summary: CoverageSummary; unverifiable: boolean } {
+): { total: Coverage; unverifiable: boolean } {
   if (oneLifetime(ledgers)) {
-    let summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+    let total = emptyCoverage();
     let unverifiable = false;
     for (const ledger of ledgers) {
       const single = legacyLedgerCoverage([ledger]);
-      summary = maximum(summary, single.summary);
+      total = maximum(total, single.total);
       unverifiable ||= single.unverifiable;
     }
-    return { summary, unverifiable };
+    return { total, unverifiable };
   }
 
   const cellsByDateModel = new Map<string, Coverage[]>();
-  const summary: CoverageSummary = { total: emptyCoverage(), models: new Map() };
+  const total = emptyCoverage();
   let unverifiable = false;
 
   for (const ledger of ledgers) {
@@ -216,31 +196,28 @@ function legacyLedgerCoverage(
         const seen = cellsByDateModel.get(key) ?? [];
         seen.push(vector);
         cellsByDateModel.set(key, seen);
-        addCoverage(summary.total, vector);
-        const modelCoverage = summary.models.get(canonicalModelId) ?? emptyCoverage();
-        addCoverage(modelCoverage, vector);
-        summary.models.set(canonicalModelId, modelCoverage);
+        addCoverage(total, vector);
       }
     }
 
-    const daysTotal = coverage(Object.values(ledger.days)).total;
+    const daysTotal = coverage(Object.values(ledger.days));
     for (const field of COVERAGE_FIELDS) {
       const aggregate = ledger.aggregate[field];
       if (!Number.isSafeInteger(aggregate) || aggregate < 0) {
         unverifiable = true;
         continue;
       }
-      summary.total[field] += Math.max(0, aggregate - daysTotal[field]);
+      total[field] += Math.max(0, aggregate - daysTotal[field]);
     }
   }
-  return { summary, unverifiable };
+  return { total, unverifiable };
 }
 
 /** Combine the stored family ledger and legacy per-client parser ledgers. */
 export function antigravityPriorCoverage(
   existingDays: PriorDay[],
   parserStates?: DeviceParserStates,
-): { total: Coverage; models: Map<string, Coverage>; unverifiable: boolean } {
+): { total: Coverage; unverifiable: boolean } {
   const existingBreakdowns = existingDays.map((day) =>
     (day.sourceBreakdown ?? {}) as Record<string, ClientBreakdownData>,
   );
@@ -290,7 +267,7 @@ export function antigravityPriorCoverage(
       });
       ledgers.push({
         days: creditedDays,
-        aggregate: coverage(creditedCells).total,
+        aggregate: coverage(creditedCells),
       });
       continue;
     }
@@ -298,6 +275,8 @@ export function antigravityPriorCoverage(
   }
 
   const legacy = legacyLedgerCoverage(ledgers);
-  const combined = maximum(stored, legacy.summary);
-  return { ...combined, unverifiable: unverifiable || legacy.unverifiable };
+  return {
+    total: maximum(stored, legacy.total),
+    unverifiable: unverifiable || legacy.unverifiable,
+  };
 }
