@@ -5,7 +5,6 @@ import {
 } from "./antigravityStateCoverage";
 import {
   foldParserClientSnapshot,
-  modelsForHighWater,
   SUPPORTED_VERSIONED_PARSERS,
   type DeviceParserStates,
   type IncomingParserContribution,
@@ -60,17 +59,11 @@ function addCoverage(target: Coverage, source: Partial<Coverage>): void {
 
 function familyCoverage(cells: Array<ClientBreakdownData | undefined>) {
   const total = emptyCoverage();
-  const models = new Map<string, Coverage>();
   for (const cell of cells) {
     if (!cell) continue;
     addCoverage(total, cell);
-    for (const [modelId, model] of Object.entries(modelsForHighWater(cell))) {
-      const coverage = models.get(modelId) ?? emptyCoverage();
-      addCoverage(coverage, model);
-      models.set(modelId, coverage);
-    }
   }
-  return { total, models };
+  return { total };
 }
 
 function covers(previous: Coverage, incoming?: Coverage): boolean {

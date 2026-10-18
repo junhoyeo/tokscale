@@ -481,4 +481,98 @@ describe("planAntigravityTransition incomplete-pricing admission", () => {
     const plan = planAntigravityTransition(args);
     expect(plan.mode).toBe("replace");
   });
+
+  it("keeps distinct canonical models across legacy ledgers separate even when their seven-field totals match", () => {
+    const args = baseArgs();
+    const makeCell = (modelId: string) => ({
+      tokens: 100_000,
+      input: 100_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 5,
+      cost: 1,
+      models: {
+        [modelId]: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          cost: 1,
+        },
+      },
+    });
+    args.existingDays = [
+      {
+        date: "2026-08-07",
+        sourceBreakdown: {
+          "antigravity-cli": makeCell("gemini-3-pro"),
+        },
+      },
+    ];
+    args.parserStates = {
+      antigravity: {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: { "2026-08-07": makeCell("claude-sonnet-4-6") },
+        observedDays: { "2026-08-07": makeCell("claude-sonnet-4-6") },
+      },
+      "antigravity-cli": {
+        stateVersion: 2,
+        version: 1,
+        baselineEstablished: true,
+        aggregate: {
+          tokens: 100_000,
+          input: 100_000,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          inputIncludingCacheRead: 100_000,
+        },
+        days: { "2026-08-07": makeCell("gemini-3-pro") },
+        observedDays: { "2026-08-07": makeCell("gemini-3-pro") },
+      },
+    };
+    args.contributions = [
+      {
+        date: "2026-08-07",
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3-pro",
+            tokens: {
+              input: 150_000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 1.5,
+            messages: 7,
+          },
+        ],
+      },
+    ];
+
+    // 100,000 (claude-sonnet-4-6) + 100,000 (gemini-3-pro) = 200,000 distinct
+    // credited tokens; a 150,000 snapshot does not cover the lifetime and freezes.
+    expect(planAntigravityTransition(args).mode).toBe("freeze");
+  });
 });

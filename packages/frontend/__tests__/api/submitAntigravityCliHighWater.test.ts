@@ -2357,7 +2357,9 @@ describe("POST /api/submit Antigravity family cost floors", () => {
     ]));
 
     expect(upgraded.metrics.totalTokens).toBe(97_163_137);
+    expect(upgraded.metrics.totalCost).toBeCloseTo(17.76, 8);
     expect(storedTokens(store)).toBe(97_163_137);
+    expect(storedCost(store)).toBeCloseTo(17.76, 8);
     expect(
       (upgraded.warnings ?? []).some((warning: string) =>
         warning.includes("Preserved Antigravity sources together"),
