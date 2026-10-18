@@ -78,13 +78,23 @@ function ledgerLifetime(ledger: LegacyLedger): Coverage {
   return lifetime;
 }
 
+/** The `model_Router` tiers the CLI parser resolves `gemini-default` into. */
+const GEMINI_FLASH_TIER_IDS = new Set([
+  "gemini-3.5-flash-extra-low",
+  "gemini-3.5-flash-low",
+  "gemini-3.5-flash-medium",
+  "gemini-3.5-flash-high",
+]);
+
 /**
  * Normalize legacy Antigravity model IDs to their canonical family key when
  * comparing pre-transition per-surface parser ledgers. This lets surfaces that
  * recorded the same response before and after model canonicalization
- * (`gemini-default` / `gemini-3.5-flash-*`, `claude-*-thinking` -> `claude-*`)
- * fold as one lifetime while keeping distinct models (e.g. `gemini-3-pro` vs.
- * `claude-sonnet-4-6`) separate even when their seven-field totals match.
+ * (`gemini-default` / the `gemini-3.5-flash` tiers, `claude-*-thinking` ->
+ * `claude-*`) fold as one lifetime while keeping distinct models (e.g.
+ * `gemini-3-pro` vs. `claude-sonnet-4-6`) separate even when their seven-field
+ * totals match. Only the tier IDs the parser emits fold; any other
+ * `gemini-3.5-flash-*` variant (e.g. a future `-lite`) is a distinct model.
  */
 function canonicalLedgerModelId(modelId: string): string {
   const trimmed = modelId.trim().toLowerCase();
@@ -93,7 +103,7 @@ function canonicalLedgerModelId(modelId: string): string {
     trimmed === "gemini-3-flash-a" ||
     trimmed === "gemini-3-flash-preview" ||
     trimmed === "gemini-3.5-flash" ||
-    trimmed.startsWith("gemini-3.5-flash-")
+    GEMINI_FLASH_TIER_IDS.has(trimmed)
   ) {
     return "gemini-3.5-flash";
   }

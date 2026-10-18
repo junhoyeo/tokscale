@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { antigravityPriorCoverage } from "../../src/lib/db/antigravityStateCoverage";
 import { planAntigravityTransition } from "../../src/lib/db/antigravityTransition";
 import { SUPPORTED_VERSIONED_PARSERS } from "../../src/lib/db/parserHighWater";
 
@@ -645,5 +646,65 @@ describe("planAntigravityTransition incomplete-pricing admission", () => {
     // Both 50,000 tier models belong to the same ledger (total 100,000), so a
     // 60,000 snapshot is below the credited total and must freeze.
     expect(planAntigravityTransition(args).mode).toBe("freeze");
+  });
+});
+
+describe("antigravityPriorCoverage flash tier canonicalization", () => {
+  const cell = (modelId: string) => ({
+    tokens: 100_000,
+    input: 100_000,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    messages: 5,
+    cost: 1,
+    models: {
+      [modelId]: {
+        tokens: 100_000,
+        input: 100_000,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 5,
+        cost: 1,
+      },
+    },
+  });
+  const ledger = (modelId: string) => ({
+    stateVersion: 2,
+    version: 1,
+    baselineEstablished: true,
+    aggregate: {
+      tokens: 100_000,
+      input: 100_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 5,
+      inputIncludingCacheRead: 100_000,
+    },
+    days: { "2026-08-07": cell(modelId) },
+    observedDays: { "2026-08-07": cell(modelId) },
+  });
+
+  it("folds a resolved flash tier with its legacy gemini-default cell across surfaces", () => {
+    const prior = antigravityPriorCoverage([], {
+      antigravity: ledger("gemini-default"),
+      "antigravity-cli": ledger("gemini-3.5-flash-medium"),
+    });
+    expect(prior.unverifiable).toBe(false);
+    expect(prior.total.tokens).toBe(100_000);
+  });
+
+  it("keeps a non-tier gemini-3.5-flash variant apart from a flash tier", () => {
+    const prior = antigravityPriorCoverage([], {
+      antigravity: ledger("gemini-3.5-flash-high"),
+      "antigravity-cli": ledger("gemini-3.5-flash-lite"),
+    });
+    expect(prior.unverifiable).toBe(false);
+    expect(prior.total.tokens).toBe(200_000);
   });
 });
