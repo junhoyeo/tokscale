@@ -690,10 +690,15 @@ describe("antigravityPriorCoverage flash tier canonicalization", () => {
     observedDays: { "2026-08-07": cell(modelId) },
   });
 
-  it("folds a resolved flash tier with its legacy gemini-default cell across surfaces", () => {
+  it.each([
+    "gemini-3.5-flash-extra-low",
+    "gemini-3.5-flash-low",
+    "gemini-3.5-flash-medium",
+    "gemini-3.5-flash-high",
+  ])("folds the resolved %s tier with its legacy gemini-default cell across surfaces", (tier) => {
     const prior = antigravityPriorCoverage([], {
       antigravity: ledger("gemini-default"),
-      "antigravity-cli": ledger("gemini-3.5-flash-medium"),
+      "antigravity-cli": ledger(tier),
     });
     expect(prior.unverifiable).toBe(false);
     expect(prior.total.tokens).toBe(100_000);
