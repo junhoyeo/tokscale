@@ -55,6 +55,7 @@ pub mod qwen;
 pub mod reasonix;
 pub mod roocode;
 pub mod senpi;
+pub mod shelley;
 pub mod synthetic;
 pub(crate) mod tencent_buddy;
 pub mod trae;

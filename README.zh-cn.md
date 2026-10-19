@@ -120,6 +120,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl`（Windows 通用 XDG 路径，含 `subagent/<uuid>/` 子代理记录） |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json`（Windows 通用路径；可用 `VIBE_HOME` 覆盖根目录） |
+| <img width="48px" src=".github/assets/client-shelley.png" alt="Shelley" /> | [Shelley](https://shelley.dev) | `~/.config/shelley/shelley.db`（迁移位置时用 `scanner.extraScanPaths.shelley` 指定） |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -192,7 +193,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside 和 Mistral Vibe 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe 和 Shelley 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -428,7 +429,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside` 和 `vibe`。
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside` 和 `vibe`、`shelley`。
 
 > **破坏性变更（v4.0.0）**：单客户端布尔选项（`--opencode`、`--claude`、`--codex` 等）已被移除，现在会直接报错。请改用规范的 `--client`/`-c` 选项——例如 `tokscale --client opencode,claude`。
 
@@ -1129,7 +1130,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside 和 Mistral Vibe）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside 和 Mistral Vibe、Shelley）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -1552,6 +1553,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 全平台通用 XDG 路径；解析 `session.jsonl` 的 `model_completed` 用量事件及 `subagent/` 记录 |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 按账户读取原生浏览器用量；仅扫描 `messages.jsonl`，排除 artifacts、memory 和 passwords。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（默认：`~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（默认：`%USERPROFILE%\.vibe\logs\session\`） | 全平台通用 `~/.vibe` 根目录；仅读取各会话目录的 `meta.json` 累计 `stats`，不读取 `messages.jsonl` 对话内容 |
+| Shelley | `~/.config/shelley/shelley.db` | — | 仅支持 macOS 与 Linux；迁移位置时通过 `scanner.extraScanPaths.shelley` 指定 |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 
@@ -2066,6 +2068,16 @@ Muse Spark 模型按上游数据集计价——LiteLLM 和 models.dev 均收录�
 Vibe 为每个会话创建一个目录，存放 `meta.json` 与 `messages.jsonl` 对话记录。用量是会话粒度的：对话记录不含逐条消息的模型、时间戳或 token 数，因此 Tokscale 只读取 `meta.json` 中的累计 `stats` 块（`session_prompt_tokens`、`session_completion_tokens`、`session_cached_tokens`），不读取对话内容。`session_cached_tokens` 是 `session_prompt_tokens` 的*子集*而非额外项，因此计价前会把缓存读取从输入 token 中拆出——与 Vibe 自身的成本显示采用相同算法。所以每个会话一条消息已是该格式能支持的最细粒度：`steps` 作为消息数，`end_time`（ISO-8601，缺失时用 `start_time`）作为时间戳。2.0 之前的会话把相同字段放在 `metadata` 键下，存为扁平的 `<prefix>_*.json` 文件，这种格式仍会被读取。
 
 模型取自 `meta.json` 的 `config.active_model`，即会话固定的别名。从未固定过的会话会记录空字符串——这是 Vibe 文档中「沿用所配置的默认值」的哨兵值——因此 Tokscale 不会把用量归到空模型，而是先从会话自身的 `config.models` 表解析，再退回 Mistral 公布的默认别名。注意别名（`mistral-medium-3.5`）并非实际请求 ID：Vibe 发送的是公开价格数据集中不存在的 CLI 专用端点名（`mistral-vibe-cli-latest`），所以计价按别名匹配。工作区标签来自 `environment.working_directory`，缺失时回退到 `origin_directory`。
+
+### Shelley
+
+位置：`~/.config/shelley/shelley.db`（这是以服务方式部署 Shelley 时的常见布局，而非 Shelley 的默认值：`-db` 的 `shelley.db` 按服务进程的工作目录解析；位于其他位置的数据库通过 `scanner.extraScanPaths.shelley` 或 `TOKSCALE_EXTRA_DIRS` 指定）
+
+Shelley 把每个会话保存在同一个 SQLite 数据库里，而不是转录文件树，因此数据源是由另一进程写入的活动 WAL 模式数据库。文件以严格只读方式打开，但只读打开仍会重放 `-wal` 附属文件，因此已提交但尚未检查点的轮次同样可见。主文件的修改时间可能比 `-wal` 晚很多，所以缓存失效判定必须把附属文件算进去；否则长期运行的 Shelley 会在执行检查点之前一直返回过期统计。
+
+用量存放在两个 JSON 列中：`messages.usage_data` 保存直接调用，`messages.other_usage_data` 保存间接调用（slug 生成、压缩、调用 LLM 的工具）的 JSON 数组，两者都会计入。同一条消息同时带有两者时会产生两行，只有间接调用的消息本身也算一行。并非调用的行会被过滤掉：Shelley 在这些行上也写入全零的 `usage_data`，其中也包括 `type = 'agent'` 的行；会话分叉复制进来的行（`forked_from_message_id`）会被跳过，因为原行已包含同一次调用。
+
+模型取消息中的原始传输 ID，而不是会话自身可变的 `model` 列。只有当该行内所有调用都上报了 `cost_usd` 时才采用该值，否则整行按本地计价。`input_tokens`、`output_tokens`、`cache_read_input_tokens` 与 `cache_creation_input_tokens` 对应 `TokenBreakdown` 的四个桶，时间戳优先取 `start_time` 而非 `created_at`（落在调用结束）。无论会话已归档还是仍为草稿都会计入，子代理会话（`user_initiated = 0`）计为名为 `Shelley Subagent` 的代理，并关联到父会话。
 
 ## 定价
 
