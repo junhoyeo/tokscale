@@ -1423,6 +1423,54 @@ fn emit_codex_scan_warnings(
     tui_signal::update_codex_scan_warnings(warnings);
 }
 
+/// Parse one DSH transcript, recording it in `skipped` when the reader refused
+/// it so the scan can say which sessions its totals omit.
+fn parse_dsh_file_recording_skips(
+    path: &Path,
+    skipped: &Mutex<Vec<(PathBuf, String)>>,
+) -> Vec<UnifiedMessage> {
+    sessions::dsh::parse_dsh_file_checked(path).unwrap_or_else(|reason| {
+        skipped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((path.to_path_buf(), reason));
+        Vec::new()
+    })
+}
+
+fn dsh_skipped_transcript_warning(mut skipped: Vec<(PathBuf, String)>) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+
+    skipped.sort();
+    skipped.dedup_by(|left, right| left.0 == right.0);
+    let total = skipped.len();
+    let examples = skipped
+        .iter()
+        .take(2)
+        .map(|(path, reason)| format!("{path:?} ({})", reason.escape_debug()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Warning: skipped {total} DSH transcript{} that could not be read. Recorded token totals omit {}. Example{}: {examples}.",
+        if total == 1 { "" } else { "s" },
+        if total == 1 { "this session" } else { "these sessions" },
+        if total == 1 { "" } else { "s" },
+    ))
+}
+
+fn emit_dsh_scan_warnings(skipped: Mutex<Vec<(PathBuf, String)>>) {
+    let skipped = skipped
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tui_signal::update_dsh_scan_warnings(
+        dsh_skipped_transcript_warning(skipped)
+            .into_iter()
+            .collect(),
+    );
+}
+
 fn parse_all_messages_streaming<S: MessageSink>(
     home_dir: &str,
     clients: &[String],
@@ -3886,15 +3934,18 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // source — the generic source cache (which reprices unconditionally) is
     // safe here, same as opencodereview. Forking copies the parent's completed
     // prefix into the child transcript verbatim, so the lane also needs one
-    // cross-file dedup pass on the per-call `message.id`.
+    // cross-file dedup pass on the per-call `message.id`. A refused transcript
+    // yields no messages and so is never cached: every scan sees it again.
+    let dsh_skipped = Mutex::new(Vec::new());
     parse_cached_lane_deduped(
         &scan_result,
         &mut source_cache,
         pricing,
         &mut all_messages,
         ClientId::Dsh,
-        sessions::dsh::parse_dsh_file,
+        |path| parse_dsh_file_recording_skips(path, &dsh_skipped),
     );
+    emit_dsh_scan_warnings(dsh_skipped);
 
     // LM Studio local-server logs can retain or repeat the same final response
     // across files. Response IDs provide a stable cross-file dedup key, while
@@ -7287,11 +7338,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.
+    let dsh_skipped = Mutex::new(Vec::new());
     let dsh_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Dsh)
         .par_iter()
-        .flat_map(|path| sessions::dsh::parse_dsh_file(path))
+        .flat_map(|path| parse_dsh_file_recording_skips(path, &dsh_skipped))
         .collect();
+    emit_dsh_scan_warnings(dsh_skipped);
     let mut dsh_seen: HashSet<String> = HashSet::new();
     let dsh_msgs: Vec<ParsedMessage> = dsh_msgs_raw
         .into_iter()
@@ -9736,6 +9789,86 @@ mod tests {
         assert!(
             take_codex_archive_warnings().is_empty(),
             "a scan of readable archives must clear the stale warning"
+        );
+    }
+
+    fn take_dsh_skipped_transcript_warnings() -> Vec<String> {
+        crate::tui_signal::take_deferred_stderr_for_test()
+            .into_iter()
+            .filter(|message| message.contains("DSH transcript"))
+            .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn oversized_dsh_transcripts_warn_on_cached_and_local_scans() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".dsh/sessions/-work");
+        let good_dir = sessions.join("session-good");
+        let big_dir = sessions.join("session-big");
+        std::fs::create_dir_all(&good_dir).unwrap();
+        std::fs::create_dir_all(&big_dir).unwrap();
+        let rows = concat!(
+            r#"{"type":"session","id":"session-good","createdAt":1,"cwd":"/work"}"#,
+            "\n",
+            r#"{"type":"assistant/message","time":1786669454772,"data":{"turn":1,"message":{"id":"m-1","source":{"provider":"p","model":"m"}},"usage":{"inputTokens":10,"outputTokens":20}}}"#,
+        );
+        std::fs::write(
+            good_dir.join("session.jsonl.zstd"),
+            zstd::encode_all(rows.as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+        // A few kilobytes of frames that decode past the 64 MiB ceiling.
+        let frame = zstd::encode_all(vec![b'a'; 1024 * 1024].as_slice(), 3).unwrap();
+        let big_path = big_dir.join("session.jsonl.zstd");
+        std::fs::write(&big_path, frame.repeat(65)).unwrap();
+
+        let clients = vec!["dsh".to_string()];
+        let home = source_home.path().to_str().unwrap();
+        let scan_cached = || parse_all_messages_with_pricing(home, &clients, None);
+        let assert_warning = |warning: &str| {
+            assert!(warning.contains("skipped 1 DSH transcript that could not be read"));
+            assert!(warning.contains("Recorded token totals omit this session"));
+            assert!(warning.contains("session-big"));
+            assert!(warning.contains("byte ceiling"));
+            assert!(!warning.contains("session-good"));
+            assert_eq!(
+                warning.lines().count(),
+                1,
+                "the TUI warning must stay on one line"
+            );
+        };
+
+        for _ in 0..2 {
+            let messages = scan_cached();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].session_id, "session-good");
+        }
+        let warnings = take_dsh_skipped_transcript_warnings();
+        assert_eq!(warnings.len(), 1, "the TUI keeps only the latest aggregate");
+        assert_warning(&warnings[0]);
+
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(direct.counts.get(ClientId::Dsh), 1);
+        let warnings = take_dsh_skipped_transcript_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_warning(&warnings[0]);
+
+        std::fs::remove_file(&big_path).unwrap();
+        assert_eq!(scan_cached().len(), 1);
+        assert!(
+            take_dsh_skipped_transcript_warnings().is_empty(),
+            "a scan without refused transcripts must clear the stale warning"
         );
     }
 

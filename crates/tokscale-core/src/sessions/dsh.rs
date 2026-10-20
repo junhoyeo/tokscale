@@ -92,22 +92,21 @@ const MAX_DECODED_TRANSCRIPT_BYTES: usize = 64 * 1024 * 1024;
 /// A transcript that crosses either ceiling is skipped with a warning naming
 /// the limit it hit, and contributes no messages — the same outcome an
 /// unreadable or undecodable one already has, and not a failure of the scan.
-fn read_session_bytes(path: &Path) -> Vec<u8> {
-    match read_session_bytes_bounded(
+/// The diagnostic is returned so the scan can tell the user which sessions
+/// its totals omit.
+fn read_session_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    read_session_bytes_bounded(
         path,
         MAX_TRANSCRIPT_FILE_BYTES,
         MAX_DECODED_TRANSCRIPT_BYTES,
-    ) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(
-                path = %path.display(),
-                error = %err,
-                "Skipping DSH transcript"
-            );
-            Vec::new()
-        }
-    }
+    )
+    .inspect_err(|err| {
+        warn!(
+            path = %path.display(),
+            error = %err,
+            "Skipping DSH transcript"
+        );
+    })
 }
 
 /// Split from [`read_session_bytes`] so the ceiling tests can drive caps small
@@ -198,9 +197,16 @@ fn read_session_bytes_bounded(
 /// embedded in its compact Assistant stream. Events without usable timestamps
 /// are skipped; zero-usage rows do not produce contributions.
 pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
-    let decoded = read_session_bytes(path);
+    parse_dsh_file_checked(path).unwrap_or_default()
+}
+
+/// Same as [`parse_dsh_file`], but a transcript the reader refused comes back
+/// as the diagnostic naming why instead of as an empty session, so the scan
+/// can report the tokens it could not count.
+pub fn parse_dsh_file_checked(path: &Path) -> Result<Vec<UnifiedMessage>, String> {
+    let decoded = read_session_bytes(path)?;
     if decoded.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // The transcript directory is named after the session id; it is the
@@ -579,7 +585,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 /// Milliseconds between two DSH row clocks, or `None` when the pair cannot
@@ -850,8 +856,14 @@ mod tests {
             "the payload must pass the read ceiling so the decoded one is what refuses it"
         );
 
-        assert!(read_session_bytes(file.path()).is_empty());
+        assert!(read_session_bytes(file.path()).is_err());
         assert!(parse_dsh_file(file.path()).is_empty());
+        let err = parse_dsh_file_checked(file.path())
+            .expect_err("a refused transcript must be reported, not read as an empty session");
+        assert!(
+            err.contains(&MAX_DECODED_TRANSCRIPT_BYTES.to_string()),
+            "the diagnostic must name the ceiling it hit: {err}"
+        );
     }
 
     #[test]
@@ -866,12 +878,15 @@ mod tests {
         let expected = rows.join("\n");
 
         let compressed = write_zstd_session(&rows);
-        assert_eq!(read_session_bytes(compressed.path()), expected.as_bytes());
+        assert_eq!(
+            read_session_bytes(compressed.path()).unwrap(),
+            expected.as_bytes()
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("session.jsonl");
         std::fs::write(&plain, &expected).unwrap();
-        assert_eq!(read_session_bytes(&plain), expected.as_bytes());
+        assert_eq!(read_session_bytes(&plain).unwrap(), expected.as_bytes());
 
         // and: the transcript still parses to the same message it always did.
         let messages = parse_dsh_file(compressed.path());
