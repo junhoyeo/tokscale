@@ -902,6 +902,7 @@ impl PricingService {
             },
             coverage: authoritative || estimate.coverage,
             estimate_status: status,
+            attribution: attribution_explanation(message),
         }
     }
 
@@ -3522,6 +3523,31 @@ impl PricingEstimate {
     }
 }
 
+fn attribution_explanation(
+    message: &crate::UnifiedMessage,
+) -> Option<PricingAttributionExplanation> {
+    let decision = crate::model_attribution::diagnostics::lookup(message)?;
+    let (adapter, evidence, served_provider, served_model) = match decision.resolved_target() {
+        Some((adapter, provider, model, strength)) => (
+            Some(adapter),
+            Some(strength.label()),
+            Some(provider.to_string()),
+            Some(model.to_string()),
+        ),
+        None => (None, None, None, None),
+    };
+    Some(PricingAttributionExplanation {
+        outcome: decision.outcome_label(),
+        requested_model: decision.requested_model,
+        requested_provider: decision.requested_provider,
+        matched_by: decision.matched_by,
+        adapter,
+        evidence,
+        served_provider,
+        served_model,
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PricingExplanation {
@@ -3542,6 +3568,30 @@ pub struct PricingExplanation {
     pub final_estimate: f64,
     pub coverage: bool,
     pub estimate_status: crate::sessions::EstimateStatus,
+    /// Local attribution evidence for this row: which gateway (if any)
+    /// established the served model, how the record was correlated, and what
+    /// the row asked for. `None` when no gateway evidence was available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<PricingAttributionExplanation>,
+}
+
+/// Evidence behind a model identity, for `pricing explain` only.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingAttributionExplanation {
+    pub outcome: &'static str,
+    pub requested_model: String,
+    pub requested_provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_by: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
 }
 
 /// Reports incomplete local totals without contaminating JSON stdout.

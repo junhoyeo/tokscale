@@ -13,6 +13,7 @@ pub mod machine_label;
 pub mod mcp;
 mod message_cache;
 pub mod model_alias;
+mod model_attribution;
 pub mod opencode_model_name;
 mod parser;
 pub mod paths;
@@ -1330,6 +1331,9 @@ struct FlushContext<'a> {
     /// which [`message_machine_label`] reads as the default local label, so a
     /// device without the setting emits exactly the messages it did before.
     local_machine_label: Option<&'a str>,
+    /// Gateway evidence that may re-identify a row. `None` on scans that load
+    /// no ledger, where every message streams through unchanged.
+    overlay: Option<&'a model_attribution::GatewayOverlay>,
 }
 
 fn matches_flush_filter(message: &UnifiedMessage, context: &FlushContext<'_>) -> bool {
@@ -1400,10 +1404,43 @@ fn flush_retained_lane<S: MessageSink>(
         let estimate_source = context
             .pricing
             .and_then(|pricing| pricing.take_cost_estimate_source(&message));
-        flush_retained_message(message, context, sink, estimate_source);
+        if let Some(message) = park_for_attribution(message, context, sink, estimate_source) {
+            flush_retained_message(message, context, sink, estimate_source);
+        }
     }
     if let Some(pricing) = context.pricing {
         pricing.clear_cost_estimate_sources();
+    }
+}
+
+/// Hold a message back when a loaded gateway ledger could claim it, so every
+/// feasible claim in the scan is known before any row changes identity.
+///
+/// Returns `None` when the message already left the lane, either parked for
+/// resolution or released unchanged past the park cap; `Some` means the caller
+/// still owns it. A message with no plausible ledger match is never retained,
+/// so an ordinary scan streams exactly as before and the full history is never
+/// buffered.
+fn park_for_attribution<S: MessageSink>(
+    message: UnifiedMessage,
+    context: &FlushContext<'_>,
+    sink: &mut S,
+    estimate_source: Option<EstimateSource>,
+) -> Option<UnifiedMessage> {
+    let Some(overlay) = context.overlay else {
+        return Some(message);
+    };
+    if !overlay.could_claim(&message) {
+        return Some(message);
+    }
+    match overlay.park(message, estimate_source) {
+        Ok(()) => None,
+        Err(message) => {
+            // Fail closed, never silently: the row keeps its source identity
+            // and pricing, and simply is not attributed.
+            flush_retained_message(*message, context, sink, estimate_source);
+            None
+        }
     }
 }
 
@@ -1425,7 +1462,9 @@ fn flush_message<S: MessageSink>(
         return;
     }
 
-    flush_retained_message(message, context, sink, estimate_source);
+    if let Some(message) = park_for_attribution(message, context, sink, estimate_source) {
+        flush_retained_message(message, context, sink, estimate_source);
+    }
 }
 
 fn parse_all_messages_with_pricing_with_cache_policy(
@@ -3008,6 +3047,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // label, if any.
     let machine_labeler =
         machine_label::MachineLabeler::from_scanner_settings(scanner_settings, Some(home_dir));
+    // Load gateway ledgers once per scan. Their evidence re-identifies rows
+    // that were already counted; it never adds usage of its own.
+    let overlay = model_attribution::GatewayOverlay::load(home_dir, use_env_roots);
+    model_attribution::diagnostics::clear();
     let flush_context = {
         let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
         FlushContext {
@@ -3017,6 +3060,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             include_synthetic,
             timezone: timezone.is_pinned().then_some(timezone),
             local_machine_label: machine_labeler.configured_local_label(),
+            overlay: overlay.as_ref(),
         }
     };
     let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
@@ -3360,12 +3404,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // virtual combo or include an originally ineligible row.
     all_messages.retain(|message| matches_flush_filter(message, &flush_context));
 
-    // Correlate successful Responses-only OpenCodex combo attempts with
-    // physical models. This changes attribution, never token-counted rows.
-    if sessions::opencodex::attribute_codex_messages(home_dir, use_env_roots, &mut all_messages) > 0
-    {
-        apply_pricing_to_messages(&mut all_messages, pricing);
-    }
+    // Gateway evidence (OpenCodex, Magpie) re-identifies matching rows when
+    // the scan finishes, not here: a call can pass through more than one
+    // gateway, so claims are resolved once over the whole parked set.
 
     // Codex must flush before Copilot for its cross-source dedup, but the
     // prefiltered lane must not re-evaluate the rewritten model/provider.
@@ -4857,6 +4898,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // messages are released. The deferred policy deliberately hands these
     // complete messages to its caller before the owned cache write can begin.
     flush_lane(&mut all_messages, &flush_context, sink);
+
+    // Rows a loaded gateway ledger could claim were held back by the flush
+    // tail. Resolve them now, with every lane's evidence on the table, and
+    // release them through the same tail so they are normalized and bucketed
+    // exactly like a streamed row.
+    if let Some(overlay) = overlay.as_ref() {
+        overlay.finish(pricing, |message, estimate_source| {
+            flush_retained_message(message, &flush_context, sink, estimate_source);
+        });
+    }
+
     StreamingParseOutcome {
         coverage: desktop_coverage,
         pending_save,
@@ -12278,6 +12330,7 @@ mod tests {
             include_synthetic: true,
             timezone: None,
             local_machine_label: None,
+            overlay: None,
         };
         let mut message = UnifiedMessage::new(
             "codex",
@@ -13984,6 +14037,313 @@ mod tests {
             assert_eq!(messages[0].tokens.reasoning, 5);
             assert_eq!(messages[0].tokens.total(), 125);
         }
+    }
+
+    /// Write a Magpie ledger under `home`, as an installed gateway does.
+    fn write_magpie_ledger(home: &std::path::Path, rows: &[serde_json::Value]) {
+        let dir = home.join(".config/magpie");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = String::new();
+        for row in rows {
+            body.push_str(&serde_json::to_string(row).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(dir.join("usage.jsonl"), body).unwrap();
+    }
+
+    fn magpie_row(selector: &str, served: &str) -> serde_json::Value {
+        serde_json::json!({
+            "t": "2024-12-01T10:00:00.000Z",
+            "provider": "zai-coding-cn",
+            "model": "glm-5.2",
+            "req": selector,
+            "served": served,
+            "in": 100,
+            "out": 50,
+            "cache_read": 0,
+            "cache_write": 0,
+            "ms": 3_000,
+            "status": 200,
+            "session": "session-magpie",
+            "tier_served": "priority"
+        })
+    }
+
+    fn write_claude_transcript(home: &std::path::Path, model: &str, session: &str) {
+        let dir = home.join(".claude/projects/gateway-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            format!(
+                r#"{{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","message":{{"id":"msg-gateway","model":"{model}","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_gateway_ledger_reidentifies_a_non_openai_client_cold_and_warm() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_claude_transcript(source_home.path(), "glm-5.2", "session-magpie");
+        write_magpie_ledger(source_home.path(), &[magpie_row("glm-5.2", "glm-5.3")]);
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "glm-5.3".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        for scan in ["cold", "warm"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                Some(&pricing),
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1, "{scan} scan must not add or drop usage");
+            assert_eq!(messages[0].model_id, "glm-5.3", "{scan} scan");
+            assert_eq!(messages[0].provider_id, "zai-coding-cn", "{scan} scan");
+            assert_eq!(
+                messages[0].service_tier.as_deref(),
+                Some("priority"),
+                "{scan} scan"
+            );
+            // Repriced at the served model's rate: 100 input + 50 output.
+            assert!(
+                (messages[0].cost - 0.2).abs() < 1e-9,
+                "{scan} scan cost {}",
+                messages[0].cost
+            );
+            assert_eq!(messages[0].tokens.input, 100, "{scan} scan");
+            assert_eq!(messages[0].tokens.output, 50, "{scan} scan");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_unattributed_gateway_row_keeps_its_original_identity() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let dir = source_home.path().join(".claude/projects/gateway-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session-magpie.jsonl"),
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","message":{"id":"msg-cost","model":"glm-5.2","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+        )
+        .unwrap();
+        write_magpie_ledger(source_home.path(), &[magpie_row("glm-5.2", "glm-5.3")]);
+
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.3");
+        // No pricing service: the resolved row is explicitly unpriced rather
+        // than keeping an estimate computed for the requested selector.
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(
+            messages[0].estimate_status,
+            crate::sessions::EstimateStatus::Unpriced
+        );
+    }
+
+    /// A ledger row whose token counters disagree with the transcript is not
+    /// evidence. The row keeps the identity its source reported, so a gateway
+    /// log that recorded a different call can never silently repoint usage.
+    #[test]
+    #[serial_test::serial]
+    fn a_ledger_row_with_different_tokens_leaves_the_row_unattributed() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_claude_transcript(source_home.path(), "glm-5.2", "session-magpie");
+        let mut row = magpie_row("glm-5.2", "glm-5.3");
+        row["out"] = serde_json::json!(999);
+        write_magpie_ledger(source_home.path(), &[row]);
+
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.2");
+        assert!(!messages[0].model_attribution_conflicted);
+    }
+
+    /// A gateway record may attribute exactly one request. Two identical
+    /// transcript rows and one ledger row is ambiguous, so neither is
+    /// attributed and both keep their original identity.
+    #[test]
+    #[serial_test::serial]
+    fn one_ledger_row_cannot_attribute_two_client_rows() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let dir = source_home
+            .path()
+            .join(".claude/projects/gateway-duplicate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session-magpie.jsonl"),
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","message":{"id":"msg-one","model":"glm-5.2","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","message":{"id":"msg-two","model":"glm-5.2","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+        )
+        .unwrap();
+        write_magpie_ledger(source_home.path(), &[magpie_row("glm-5.2", "glm-5.3")]);
+
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| message.model_id == "glm-5.2"));
+    }
+
+    /// A call that passed through two gateways is one call. When both ledgers
+    /// report the same served model, the row resolves once and the provider
+    /// naming comes from the observation nearest the upstream provider.
+    #[test]
+    #[serial_test::serial]
+    fn nested_gateways_agreeing_on_one_model_resolve_once() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("nested.jsonl"),
+            concat!(
+                r#"{"timestamp":"2024-12-01T09:59:59Z","type":"turn_context","payload":{"model":"combo/auto"}}"#,
+                "\n",
+                r#"{"timestamp":"2024-12-01T10:00:08Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":25,"reasoning_output_tokens":5,"total_tokens":525}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let opencodex_dir = source_home.path().join(".opencodex");
+        std::fs::create_dir_all(&opencodex_dir).unwrap();
+        std::fs::write(
+            opencodex_dir.join("usage.jsonl"),
+            serde_json::to_string(&serde_json::json!({
+                "timestamp": 1_733_047_204_000i64,
+                "provider": "combo",
+                "requestedModel": "combo/auto",
+                "servedModel": "glm-5.3",
+                "inboundProtocol": "responses",
+                "status": 200,
+                "durationMs": 6_000,
+                "attempts": [{
+                    "ordinal": 1,
+                    "provider": "zai-coding-cn",
+                    "model": "glm-5.2",
+                    "adapter": "fixture",
+                    "status": 200,
+                    "durationMs": 6_000,
+                    "sendCount": 1,
+                    "usageStatus": "reported",
+                    "usage": {"inputTokens": 500, "outputTokens": 25, "totalTokens": 525, "cachedInputTokens": 400, "reasoningOutputTokens": 5}
+                }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        // The same call as a downstream gateway saw it, naming the upstream
+        // provider for the same served model.
+        write_magpie_ledger(source_home.path(), &[magpie_row("combo/auto", "glm-5.3")]);
+
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1, "two ledgers are still one call");
+        assert_eq!(messages[0].model_id, "glm-5.3");
+        assert!(!messages[0].model_attribution_conflicted);
+        assert_eq!(messages[0].provider_id, "zai-coding-cn");
+        assert_eq!(messages[0].tokens.cache_read, 400);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn contradictory_gateway_models_stay_unresolved_and_unpriced() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_claude_transcript(source_home.path(), "glm-5.2", "session-magpie");
+        // Two gateways observed different served models for one call.
+        let opencodex_dir = source_home.path().join(".opencodex");
+        std::fs::create_dir_all(&opencodex_dir).unwrap();
+        std::fs::write(
+            opencodex_dir.join("usage.jsonl"),
+            serde_json::to_string(&serde_json::json!({
+                "timestamp": 1_733_047_200_000i64,
+                "provider": "combo",
+                "requestedModel": "glm-5.2",
+                "servedModel": "other-served-model",
+                "inboundProtocol": "responses",
+                "status": 200,
+                "durationMs": 3_000,
+                "attempts": [{
+                    "ordinal": 1,
+                    "provider": "fixture-provider",
+                    "model": "wire-model",
+                    "adapter": "fixture",
+                    "status": 200,
+                    "durationMs": 3_000,
+                    "sendCount": 1,
+                    "usageStatus": "reported",
+                    "usage": {"inputTokens": 100, "outputTokens": 50}
+                }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        write_magpie_ledger(source_home.path(), &[magpie_row("glm-5.2", "glm-5.3")]);
+
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.2");
+        assert!(messages[0].model_attribution_conflicted);
+        assert_eq!(messages[0].cost, 0.0);
     }
 
     #[test]
@@ -19306,6 +19666,7 @@ mod tests {
             include_synthetic: true,
             timezone: Some(crate::bucket_tz::BucketTimezone::Local),
             local_machine_label: None,
+            overlay: None,
         };
         flush_lane(&mut vec![message.clone()], &context, &mut collector);
         assert_eq!(scan.take_cost_estimate_source(&message), None);
