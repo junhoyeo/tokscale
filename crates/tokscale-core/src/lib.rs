@@ -14379,6 +14379,58 @@ mod tests {
         assert!((submitted[0].cost - 0.2).abs() < 1e-9);
     }
 
+    /// The evidence tier survives a warm cache hit.
+    ///
+    /// A row's tier is decided by the parser that read the field, so it has to
+    /// be stored with the message. If a warm scan lost it, a gateway ledger
+    /// could then re-identify a row the cold scan refused to touch.
+    #[test]
+    #[serial_test::serial]
+    fn native_model_evidence_survives_a_warm_cache_hit() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let sessions = source_home.path().join(".dsh/sessions/session-1");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","id":"session-dsh","createdAt":1,"cwd":"/work"}"#,
+                "\n",
+                r#"{"type":"assistant/message","seq":42,"time":1787122684043,"data":{"turn":1,"message":{"id":"m-served","source":{"kind":"model","provider":"zai-coding-cn","model":"glm-5.2","replayState":{"response":{"responseModel":"glm-5.3"}}}},"usage":{"inputTokens":100,"outputTokens":50}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        // The ledger claims the row and names a different model. It must lose
+        // on both the cold and the warm scan.
+        let mut row = magpie_row("glm-5.3", "glm-5.2");
+        row["in"] = serde_json::json!(100);
+        row["out"] = serde_json::json!(50);
+        row["t"] = serde_json::json!("2026-08-19T03:38:04.043Z");
+        row["session"] = serde_json::json!("session-dsh");
+        write_magpie_ledger(source_home.path(), &[row]);
+
+        for scan in ["cold", "warm"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["dsh".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1, "{scan} scan");
+            assert_eq!(messages[0].model_id, "glm-5.3", "{scan} scan");
+            assert_eq!(
+                messages[0].model_evidence,
+                crate::sessions::ModelEvidence::ResponseReported,
+                "{scan} scan must keep the parser's evidence tier"
+            );
+        }
+    }
+
     /// A row cached before a ledger existed is attributed on the next scan.
     ///
     /// The source cache stores parsed messages, not resolved identities, so a
