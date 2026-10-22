@@ -15074,6 +15074,169 @@ mod tests {
         );
     }
 
+    /// The service tier is a separate authoritative claim about the call. One
+    /// ledger reporting it and the other staying silent must not discard it:
+    /// "magpie" sorts before "opencodex", and that ordering cannot decide a
+    /// price.
+    #[test]
+    #[serial_test::serial]
+    fn nested_gateways_keep_a_tier_only_one_of_them_reported() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_nested_codex_rollout(source_home.path(), NESTED_GATEWAY_USAGE, None);
+        write_nested_gateway_ledgers_with_tiers(
+            source_home.path(),
+            "glm-5.3",
+            "zai-coding-cn",
+            Some("priority"),
+            "glm-5.3",
+            "zai-coding-cn",
+            None,
+        );
+
+        let (messages, attribution) = parse_all_messages_with_pricing_and_attribution(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.3");
+        assert_eq!(
+            messages[0].service_tier.as_deref(),
+            Some("priority"),
+            "the silent ledger is not a competing tier claim"
+        );
+        let decision = attribution.lookup(&messages[0]).expect("resolved");
+        assert_eq!(decision.outcome_label(), "resolved");
+        assert_eq!(decision.participating_adapters, vec!["magpie", "opencodex"]);
+    }
+
+    /// Two ledgers naming different served tiers describe two different
+    /// tariffs for one call. Neither adapter can prove the other wrong, so the
+    /// row must not pick one by adapter name: it stays unpriced and marked.
+    #[test]
+    #[serial_test::serial]
+    fn nested_gateways_disagreeing_about_the_service_tier_stay_conflicted_and_unpriced() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_nested_codex_rollout(source_home.path(), NESTED_GATEWAY_USAGE, None);
+        write_nested_gateway_ledgers_with_tiers(
+            source_home.path(),
+            "gpt-5.3",
+            "openai",
+            Some("priority"),
+            "gpt-5.3",
+            "openai",
+            Some("default"),
+        );
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.3".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let (messages, attribution) = parse_all_messages_with_pricing_and_attribution(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].model_attribution_conflicted);
+        assert_eq!(
+            messages[0].model_id, "combo/auto",
+            "the row keeps the identity its source proved"
+        );
+        assert_eq!(messages[0].service_tier, None);
+        assert_eq!(
+            messages[0].cost, 0.0,
+            "neither tier may be used to produce an estimate"
+        );
+        assert_eq!(
+            messages[0].cost_source,
+            crate::sessions::CostSource::Unknown
+        );
+        assert_eq!(
+            messages[0].estimate_status,
+            crate::sessions::EstimateStatus::Unpriced
+        );
+        let decision = attribution.lookup(&messages[0]).expect("decision");
+        assert_eq!(decision.outcome_label(), "conflict");
+    }
+
+    /// The served identity changed and no ledger reported a tier for it. The
+    /// request-scoped tier described the selector the client asked for, so it
+    /// must not double the served model's rate.
+    #[test]
+    #[serial_test::serial]
+    fn a_changed_served_model_drops_the_unconfirmed_request_tier() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        write_nested_codex_rollout(
+            source_home.path(),
+            r#"{"input_tokens":100,"output_tokens":50,"total_tokens":150}"#,
+            Some("priority"),
+        );
+        let mut row = magpie_row("combo/auto", "gpt-5.3");
+        row["provider"] = serde_json::json!("openai");
+        row["in"] = serde_json::json!(100);
+        row["out"] = serde_json::json!(50);
+        row.as_object_mut().unwrap().remove("tier_served");
+        write_magpie_ledger(source_home.path(), &[row]);
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.3".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let (messages, attribution) = parse_all_messages_with_pricing_and_attribution(
+            source_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.3");
+        assert_eq!(
+            messages[0].service_tier, None,
+            "the request tier was never confirmed for the served identity"
+        );
+        assert!(
+            (messages[0].cost - 0.2).abs() < 1e-9,
+            "the unconfirmed priority multiplier must not apply, cost {}",
+            messages[0].cost
+        );
+        assert_eq!(
+            attribution
+                .lookup(&messages[0])
+                .expect("decision")
+                .outcome_label(),
+            "resolved"
+        );
+    }
+
     /// The same call seen by two ledgers that disagree about the served model
     /// is a contradiction: neither adapter can prove it is upstream of the
     /// other, so the row stays unresolved and unpriced.
@@ -15287,6 +15450,37 @@ mod tests {
         );
     }
 
+    const NESTED_GATEWAY_USAGE: &str = r#"{"input_tokens":500,"cached_input_tokens":400,"output_tokens":25,"reasoning_output_tokens":5,"total_tokens":525}"#;
+
+    /// A Codex rollout whose only usage row is one token_count event.
+    /// `service_tier` is request-scoped evidence from the turn context.
+    fn write_nested_codex_rollout(
+        home: &std::path::Path,
+        last_token_usage: &str,
+        service_tier: Option<&str>,
+    ) {
+        let sessions = home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let turn_context = match service_tier {
+            Some(tier) => format!(
+                r#"{{"timestamp":"2024-12-01T09:59:59Z","type":"turn_context","payload":{{"model":"combo/auto","service_tier":{}}}}}"#,
+                serde_json::to_string(tier).unwrap()
+            ),
+            None => {
+                r#"{"timestamp":"2024-12-01T09:59:59Z","type":"turn_context","payload":{"model":"combo/auto"}}"#
+                    .to_string()
+            }
+        };
+        let token_count = format!(
+            r#"{{"timestamp":"2024-12-01T10:00:08Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{last_token_usage}}}}}}}"#
+        );
+        std::fs::write(
+            sessions.join("nested.jsonl"),
+            format!("{turn_context}\n{token_count}\n"),
+        )
+        .unwrap();
+    }
+
     fn write_nested_gateway_ledgers(
         home: &std::path::Path,
         opencodex_served: &str,
@@ -15306,36 +15500,67 @@ mod tests {
         magpie_served: &str,
         magpie_provider: &str,
     ) {
+        write_nested_gateway_ledgers_with_tiers(
+            home,
+            opencodex_served,
+            "zai-coding-cn",
+            None,
+            magpie_served,
+            magpie_provider,
+            Some("priority"),
+        );
+    }
+
+    fn write_nested_gateway_ledgers_with_tiers(
+        home: &std::path::Path,
+        opencodex_served: &str,
+        opencodex_provider: &str,
+        opencodex_tier: Option<&str>,
+        magpie_served: &str,
+        magpie_provider: &str,
+        magpie_tier: Option<&str>,
+    ) {
         let opencodex_dir = home.join(".opencodex");
         std::fs::create_dir_all(&opencodex_dir).unwrap();
-        std::fs::write(
-            opencodex_dir.join("usage.jsonl"),
-            serde_json::to_string(&serde_json::json!({
-                "timestamp": 1_733_047_204_000i64,
-                "provider": "combo",
-                "requestedModel": "combo/auto",
-                "servedModel": opencodex_served,
-                "inboundProtocol": "responses",
+        let mut opencodex_row = serde_json::json!({
+            "timestamp": 1_733_047_204_000i64,
+            "provider": "combo",
+            "requestedModel": "combo/auto",
+            "servedModel": opencodex_served,
+            "inboundProtocol": "responses",
+            "status": 200,
+            "durationMs": 6_000,
+            "attempts": [{
+                "ordinal": 1,
+                "provider": opencodex_provider,
+                "model": "glm-5.2",
+                "adapter": "fixture",
                 "status": 200,
                 "durationMs": 6_000,
-                "attempts": [{
-                    "ordinal": 1,
-                    "provider": "zai-coding-cn",
-                    "model": "glm-5.2",
-                    "adapter": "fixture",
-                    "status": 200,
-                    "durationMs": 6_000,
-                    "sendCount": 1,
-                    "usageStatus": "reported",
-                    "usage": {"inputTokens": 500, "outputTokens": 25, "totalTokens": 525, "cachedInputTokens": 400, "reasoningOutputTokens": 5}
-                }]
-            }))
-            .unwrap()
-                + "\n",
+                "sendCount": 1,
+                "usageStatus": "reported",
+                "usage": {"inputTokens": 500, "outputTokens": 25, "totalTokens": 525, "cachedInputTokens": 400, "reasoningOutputTokens": 5}
+            }]
+        });
+        if let Some(tier) = opencodex_tier {
+            opencodex_row["attempts"][0]["tierOutcome"] = serde_json::json!({
+                "responseServiceTier": tier,
+                "responseTierAuthoritative": true
+            });
+        }
+        std::fs::write(
+            opencodex_dir.join("usage.jsonl"),
+            serde_json::to_string(&opencodex_row).unwrap() + "\n",
         )
         .unwrap();
         let mut row = magpie_row("combo/auto", magpie_served);
         row["provider"] = serde_json::json!(magpie_provider);
+        match magpie_tier {
+            Some(tier) => row["tier_served"] = serde_json::json!(tier),
+            None => {
+                row.as_object_mut().unwrap().remove("tier_served");
+            }
+        }
         // Same call as the OpenCodex row above: identical token signature.
         // Magpie's `in` excludes cache traffic, and its `out` already contains
         // reasoning, so 100 + 400 cached and 25 completion match Codex's

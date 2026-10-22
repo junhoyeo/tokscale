@@ -28,13 +28,12 @@ pub(crate) fn apply_target(
     if message.model_evidence == crate::sessions::ModelEvidence::ResponseReported {
         return false;
     }
+    let model_changed = message.provider_id != target.provider || message.model_id != target.model;
     let tier_changed = target
         .service_tier
         .as_ref()
         .is_some_and(|tier| message.service_tier.as_ref() != Some(tier));
-    let identity_changed =
-        message.provider_id != target.provider || message.model_id != target.model || tier_changed;
-    if !identity_changed {
+    if !model_changed && !tier_changed {
         return false;
     }
 
@@ -42,6 +41,13 @@ pub(crate) fn apply_target(
     message.model_id = target.model.clone();
     if let Some(service_tier) = &target.service_tier {
         message.service_tier = Some(service_tier.clone());
+    } else {
+        // The row's tier described the request that named the previous model.
+        // New evidence replaced that identity without reporting a served
+        // tier, so the old value is unconfirmed for the call that actually
+        // ran; keeping it would apply a multiplier the new evidence never
+        // established.
+        message.service_tier = None;
     }
     // The pre-attribution raw model was the selector or the client's spelling
     // of it. Pricing must now resolve the model that actually served the call.
@@ -143,6 +149,103 @@ mod tests {
         // those 400 tokens stay unpriced rather than billed at the input rate.
         assert!((message.cost - 0.14).abs() < 1e-9, "{}", message.cost);
         assert_eq!(message.cost_source, CostSource::Estimated);
+    }
+
+    /// A tier recorded for the requested identity is not evidence for the
+    /// served one. When the model changes and no observation reported a tier
+    /// for the call that actually ran, the old multiplier must not survive.
+    #[test]
+    fn a_changed_model_drops_an_unconfirmed_request_tier() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "served-model".to_string(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new(litellm, HashMap::new());
+        let mut message = message();
+        message.service_tier = Some("priority".into());
+
+        assert!(apply_target(
+            &mut message,
+            &target("served-model", "openai", EvidenceStrength::ResponseReported),
+            Some(&pricing),
+        ));
+
+        assert_eq!(message.model_id, "served-model");
+        assert_eq!(
+            message.service_tier, None,
+            "the request tier was never confirmed for the served identity"
+        );
+        // 100 input + 20 output at the base rate. The old priority tier would
+        // have doubled this for an OpenAI identity.
+        assert!((message.cost - 0.14).abs() < 1e-9, "{}", message.cost);
+    }
+
+    /// The same identity is not a reason to discard the tier the source
+    /// already recorded: nothing replaced it, and no observation contradicted
+    /// it.
+    #[test]
+    fn an_unchanged_identity_keeps_the_source_tier() {
+        let mut message = message();
+        message.model_id = "served-model".into();
+        message.provider_id = "openai".into();
+        message.service_tier = Some("priority".into());
+
+        assert!(!apply_target(
+            &mut message,
+            &target("served-model", "openai", EvidenceStrength::ResponseReported),
+            None,
+        ));
+
+        assert_eq!(message.service_tier.as_deref(), Some("priority"));
+    }
+
+    /// An observation that did report a tier supplies it, including when the
+    /// model also changed.
+    #[test]
+    fn a_reported_tier_replaces_the_source_tier() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "served-model".to_string(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new(litellm, HashMap::new());
+        let mut message = message();
+        message.service_tier = Some("priority".into());
+        let mut target = target("served-model", "openai", EvidenceStrength::ResponseReported);
+        target.service_tier = Some("default".into());
+
+        assert!(apply_target(&mut message, &target, Some(&pricing)));
+
+        assert_eq!(message.service_tier.as_deref(), Some("default"));
+        assert!((message.cost - 0.14).abs() < 1e-9, "{}", message.cost);
+    }
+
+    /// A provider-reported amount, including an explicit zero, survives a
+    /// tier correction untouched.
+    #[test]
+    fn a_provider_reported_zero_survives_a_tier_correction() {
+        let mut message = message();
+        message.cost = 0.0;
+        message.mark_provider_reported_cost();
+        message.service_tier = Some("priority".into());
+        let mut target = target("served-model", "openai", EvidenceStrength::ResponseReported);
+        target.service_tier = Some("default".into());
+
+        assert!(apply_target(&mut message, &target, None));
+
+        assert_eq!(message.service_tier.as_deref(), Some("default"));
+        assert_eq!(message.cost, 0.0);
+        assert_eq!(message.cost_source, CostSource::ProviderReported);
+        assert_eq!(message.estimate_status, EstimateStatus::Authoritative);
     }
 
     #[test]
@@ -304,5 +407,14 @@ mod tests {
         mark_attribution_conflict(&mut reported);
         assert_eq!(reported.cost, 2.5);
         assert_eq!(reported.cost_source, CostSource::ProviderReported);
+
+        // An explicit zero is still an amount, not a missing price.
+        let mut reported_zero = message();
+        reported_zero.cost = 0.0;
+        reported_zero.mark_provider_reported_cost();
+        mark_attribution_conflict(&mut reported_zero);
+        assert_eq!(reported_zero.cost, 0.0);
+        assert_eq!(reported_zero.cost_source, CostSource::ProviderReported);
+        assert_eq!(reported_zero.estimate_status, EstimateStatus::Authoritative);
     }
 }
