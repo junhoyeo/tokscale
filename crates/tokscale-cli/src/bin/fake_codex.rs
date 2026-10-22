@@ -1,11 +1,11 @@
-//! A stand-in for the `codex` binary, used by the `headless_capture_*` tests in
-//! `tests/cli_tests.rs`.
+//! A stand-in for provider binaries used by the CLI integration tests.
 //!
 //! Those tests assert three things about `tokscale headless <command>`: that the
 //! child's exit code is passed through verbatim, that a fast-exiting child is
 //! not waited on until the timeout, and that a hung child is killed and reported
 //! as 124. None of that is platform-specific — `run_capture_command` is ordinary
 //! `std::process` code — so the coverage is worth having everywhere.
+//! Client-coverage tests also use an invocation marker to detect provider launches.
 //!
 //! The fixture used to be a `#!/bin/sh` script written at test time, which is
 //! the one part that could not cross platforms: Windows has no shebang, and
@@ -80,6 +80,11 @@ fn main() {
     match mode.as_str() {
         "success" => emit("captured ok"),
         "args" => emit(&std::env::args().skip(1).collect::<Vec<_>>().join("\n")),
+        "record-invocation" => {
+            let path = std::env::var_os("TOKSCALE_FAKE_CODEX_INVOCATION_FILE")
+                .expect("invocation marker path");
+            std::fs::write(path, "invoked").expect("failed to write invocation marker");
+        }
         "fail" => {
             emit("captured fail");
             std::process::exit(17);

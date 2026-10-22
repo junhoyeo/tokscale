@@ -5446,6 +5446,86 @@ fn test_clients_command_includes_claude_transcripts_text() {
 }
 
 #[test]
+fn test_clients_json_explains_cloud_coverage_without_running_providers() {
+    let tmp = create_codex_fixture_dir();
+    let projects = tmp.path().join(".claude/projects/test-project");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        projects.join("session.jsonl"),
+        r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"req-local","message":{"id":"msg-local","model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+    )
+    .unwrap();
+
+    let fake_bin = create_fake_codex_bin();
+    fs::copy(
+        Path::new(env!("CARGO_BIN_EXE_fake_codex")),
+        fake_bin.path().join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        }),
+    )
+    .unwrap();
+    let invocation_file = tmp.path().join("provider-invoked");
+
+    let output = cmd_with_home(tmp.path())
+        .env("PATH", fake_bin.path())
+        .env("TOKSCALE_FAKE_CODEX_MODE", "record-invocation")
+        .env("TOKSCALE_FAKE_CODEX_INVOCATION_FILE", &invocation_file)
+        .args(["--no-spinner", "clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !invocation_file.exists(),
+        "local client diagnostics must not invoke Claude or Codex"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let clients = json["clients"].as_array().unwrap();
+    for (client, code) in [
+        ("claude", "claude_cloud_history_not_synced"),
+        ("codex", "codex_cloud_history_not_synced"),
+    ] {
+        let row = clients.iter().find(|row| row["client"] == client).unwrap();
+        assert_eq!(row["messageCount"], 1);
+        let diagnostic = row["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["code"] == code)
+            .unwrap();
+        assert_eq!(diagnostic["severity"], "info");
+        assert!(diagnostic.get("paths").is_none());
+    }
+    assert!(json.get("codexAccountActivity").is_none());
+}
+
+#[test]
+fn test_clients_command_explains_cloud_coverage_without_session_files() {
+    let tmp = create_empty_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .args(["--no-spinner", "clients"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Claude Code cloud sessions are not fetched automatically.",
+        ))
+        .stdout(predicate::str::contains(
+            "Codex cloud task history is not fetched automatically.",
+        ))
+        .stdout(predicate::str::contains("tokscale codex activity"))
+        .stdout(predicate::str::contains(
+            "account-minus-local is not a cloud usage total",
+        ));
+}
+
+#[test]
 fn test_clients_json_includes_claude_desktop_diagnostic() {
     let tmp = create_empty_fixture_dir();
     fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();

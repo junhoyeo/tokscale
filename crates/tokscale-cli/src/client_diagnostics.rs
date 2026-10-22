@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tokscale_core::ClientId;
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,8 +25,32 @@ const CLAUDE_DESKTOP_MESSAGE: &str =
 
 const CLAUDE_DESKTOP_HELP: &str = "All model IDs with recorded usage are accepted. Undated cumulative balances appear only in all-time local totals; truncated trees, counter resets and chats without usage can leave gaps. Dates and tokens are never inferred from chat text.";
 
-pub fn diagnostics_for_clients_row(home_dir: &Path, use_env_roots: bool) -> Vec<ClientDiagnostic> {
-    claude_diagnostics(home_dir, use_env_roots, true)
+pub fn diagnostics_for_clients_row(
+    client: ClientId,
+    home_dir: &Path,
+    use_env_roots: bool,
+) -> Vec<ClientDiagnostic> {
+    match client {
+        ClientId::Claude => {
+            let mut diagnostics = claude_diagnostics(home_dir, use_env_roots, true);
+            diagnostics.push(ClientDiagnostic {
+                code: "claude_cloud_history_not_synced",
+                severity: "info",
+                message: "Claude Code cloud sessions are not fetched automatically.",
+                help: "Only locally available transcripts and retained Claude Desktop cache entries with recorded usage can be counted. Retained history may be incomplete; missing tokens are not inferred from conversation text.",
+                paths: Vec::new(),
+            });
+            diagnostics
+        }
+        ClientId::Codex => vec![ClientDiagnostic {
+            code: "codex_cloud_history_not_synced",
+            severity: "info",
+            message: "Codex cloud task history is not fetched automatically.",
+            help: "Run tokscale codex activity for a separate account snapshot. Its token accounting may differ from local rollouts, so account-minus-local is not a cloud usage total.",
+            paths: Vec::new(),
+        }],
+        _ => Vec::new(),
+    }
 }
 
 pub fn diagnostics_for_empty_explicit_report(

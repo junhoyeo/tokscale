@@ -1712,7 +1712,11 @@ Tokscale의 기본 home-root 위치 밖에 세션을 보관하는 경우, 클라
 
 `~/.claude/transcripts/` 아래의 래퍼 트랜스크립트 파일은 실제 Claude 사용량 메타데이터를 포함할 때만 계산됩니다. 사용자/도구 이벤트는 있지만 `usage` 블록이 없는 파일은 추정하지 않고 건너뜁니다.
 
-Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude Desktop 채팅 회계가 아닙니다. Claude Desktop은 `~/Library/Application Support/Claude` 같은 위치에 앱 데이터를 저장하지만, Anthropic은 소비자용 데스크톱 채팅이나 채팅 기록 내보내기에 대한 안정적인 로컬 메시지별 토큰 원장을 문서화하지 않습니다. Claude Desktop 데이터는 존재하지만 Claude Code JSONL 루트만 스캔 가능한 경우 `tokscale clients`를 실행하면 진단 정보를 볼 수 있습니다. `tokscale usage`는 Claude Code 자격 증명으로부터 best-effort Claude 구독 할당량 막대를 표시할 수 있는 반면, 조직/API 사용량은 Anthropic의 Admin Usage and Cost API에 속하며 로컬 트랜스크립트 스캔과는 의도적으로 분리되어 있습니다.
+`claude` 클라이언트는 Claude Desktop에 남아 있는 Code/Cowork 트랜스크립트와 대화 캐시의 사용량 정보도 로컬에서 읽습니다. 캐시는 전체 계정 이력이 아니므로 삭제되거나 일부만 남은 대화, 사용량 카운터가 없는 채팅은 누락될 수 있습니다. 대화 텍스트로 토큰을 추정하지 않습니다. 날짜를 알 수 없는 누적 잔여량은 전체 기간의 로컬 합계에만 반영하며, 날짜별 보고서·그래프·리더보드 제출에서는 제외합니다. 가격표로 계산한 비용은 API 사용 기준 추정치이며 구독 요금이 아닙니다. `tokscale usage`는 구독 할당량을 별도로 보여줍니다.
+
+**클라우드/웹 세션:** Tokscale은 Claude Code 웹 버전(`claude.ai/code`)의 세션 이력을 자동으로 가져오지 않습니다. 사용량이 클라우드에만 남아 있는 세션은 로컬 합계·보고서·내보내기·제출·리더보드에 포함되지 않습니다. 로컬 트랜스크립트와 Desktop 캐시에 기록된 사용량은 위의 수집 범위와 날짜 제한에 따라 집계할 수 있습니다. `tokscale clients`는 클라우드 계정 조회 없이 이 수집 범위를 안내합니다.
+
+Claude의 [`--teleport <session-id>`](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal)는 클라우드 세션을 로컬 터미널로 가져옵니다. Tokscale이 해당 이력을 집계하려면 가져온 로컬 기록에 사용량 메타데이터가 있어야 합니다. 대화 텍스트만으로는 부족하며, teleport가 완전한 토큰 이력을 보장하지는 않습니다. 기본 경로 밖의 트랜스크립트는 `scanner.extraScanPaths`로 추가할 수 있습니다.
 
 ### Codex CLI
 
@@ -1724,6 +1728,10 @@ Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude 
 ```
 
 같은 rollout의 사본은 한 번만 집계됩니다. 두 디렉터리에 모두 있거나 일반 파일과 압축 파일로 함께 있는 세션도 사용량이 두 번 잡히지 않습니다.
+
+**클라우드 작업:** Tokscale은 Codex 클라우드(`chatgpt.com/codex`)의 작업 이력을 자동으로 가져오지 않습니다. 로컬 rollout이 없는 작업은 로컬 합계·보고서·내보내기·제출·리더보드에 포함되지 않습니다. `tokscale codex activity` 또는 `tokscale codex activity --json`을 실행하면 설치된 Codex app-server의 현재 인증으로 조회 시각이 표시된 계정 활동 스냅샷을 확인할 수 있습니다. 이 조회는 명시적으로 실행할 때만 이루어지며, `tokscale clients`는 로컬 수집 범위만 안내합니다.
+
+계정 활동에는 이 기기에 남은 rollout 밖의 사용량이 포함될 수 있지만, 토큰 계산 방식과 날짜 경계가 로컬 파싱과 동일하다는 보장은 없습니다. 계정 값에서 로컬 합계를 빼도 클라우드 사용량이 되지는 않습니다. 다른 기기, 계정 차이, 누락된 로컬 이력도 차이를 만들 수 있습니다. 스냅샷은 로컬 합계·보고서·내보내기·제출·리더보드와 분리되며 비용은 확인할 수 없음(`N/A`)으로 표시됩니다.
 
 ### Copilot CLI
 

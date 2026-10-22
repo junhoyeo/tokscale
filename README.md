@@ -1770,6 +1770,10 @@ Cumulative `modelUsage` snapshots are **not** added together or added on top of 
 
 **The app cache is not a complete account history.** Truncated trees (`hasOlder`/`earlierCursor`), evicted/deleted conversations, incomplete streaming usage and counter resets can leave gaps. Tokscale reads the current live cache; it does not fetch missing cloud pages, recover deleted records, or retain private conversation text. An export containing only chat text cannot supply an exact token ledger. `tokscale usage` remains a separate view of subscription quota bars.
 
+**Cloud/web sessions:** Tokscale does not automatically fetch session history from Claude Code on the web (`claude.ai/code`). Sessions whose usage exists only in the cloud are absent from local totals, reports, exports, submissions, and leaderboards. Locally retained transcripts and Desktop cache entries can contribute recorded usage, subject to the coverage and date limits above. `tokscale clients` explains this coverage without querying a cloud account.
+
+Claude's [`--teleport <session-id>`](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal) brings a cloud session into the local terminal. Tokscale can count that history only if the resulting local records contain usage metadata; conversation text alone is insufficient, and teleport is not a guarantee of complete token history. Transcripts stored outside the default roots can be added through `scanner.extraScanPaths`.
+
 ### Codex CLI
 
 Location: `~/.codex/sessions/` and `~/.codex/archived_sessions/` (`*.jsonl` rollouts, zstd-compressed `*.jsonl.zst` copies, and other archive copies that add a suffix to the `.jsonl` name)
@@ -1780,6 +1784,10 @@ Event-based format with `token_count` events:
 ```
 
 Copies of one rollout are counted once, so a session that exists in both directories, or as both a plain and a compressed file, does not double its usage.
+
+**Cloud tasks:** Tokscale does not automatically fetch task history from Codex cloud (`chatgpt.com/codex`). Tasks without locally available rollouts are absent from local totals, reports, exports, submissions, and leaderboards. Run `tokscale codex activity` or `tokscale codex activity --json` for a timestamped account-activity snapshot using the installed Codex app-server's active authentication. This lookup is opt-in; `tokscale clients` only displays local coverage information.
+
+Account activity may cover usage outside this device's retained rollouts, but its token accounting and day boundaries are not established as equivalent to local parsing. Subtracting local totals does not identify cloud usage: other devices, account differences, and missing local history can also contribute to the gap. The snapshot remains separate from local totals, reports, exports, submissions, and leaderboards; its cost is unavailable (`N/A`).
 
 ### Copilot CLI
 

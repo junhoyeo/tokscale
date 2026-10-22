@@ -1712,7 +1712,11 @@ OpenCode 根据构建时的发布渠道决定数据库文件名：`latest`/`beta
 
 `~/.claude/transcripts/` 下的包装转录文件仅在包含真实 Claude 使用量元数据时才会被统计。包含用户/工具事件但没有 `usage` 块的文件会被跳过，而不会进行估算。
 
-Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claude Desktop 聊天。Claude Desktop 会将应用数据存储在 `~/Library/Application Support/Claude` 等位置，但 Anthropic 并未为消费级桌面聊天或聊天历史导出提供文档化、稳定的本地按消息 Token 账本。当存在 Claude Desktop 数据但只有 Claude Code JSONL 根目录可扫描时，运行 `tokscale clients` 可看到一条诊断信息。`tokscale usage` 可以根据 Claude Code 凭据尽力显示 Claude 订阅配额条，而组织/API 使用量属于 Anthropic 的 Admin Usage 和 Cost API，与本地转录扫描有意分离。
+`claude` 客户端还会在本地读取 Claude Desktop 保留的 Code/Cowork 转录文件及对话缓存中的使用量信息。缓存并非完整的账号历史，已删除或不完整的对话、没有用量计数器的聊天可能存在缺失。Tokscale 不会根据对话文本估算 Token。日期未知的累计余额仅计入全部时间的本地总量，不计入按日期筛选的报告、图表或排行榜提交。根据价格表计算的费用是 API 等价估算值，并非订阅账单。`tokscale usage` 单独显示订阅配额。
+
+**云端/网页会话：** Tokscale 不会自动获取网页版 Claude Code (`claude.ai/code`) 的会话历史。用量仅保存在云端的会话不会计入本地总量、报告、导出、提交或排行榜。本地转录文件和 Desktop 缓存中记录的用量可按上述覆盖范围和日期限制统计。`tokscale clients` 无需查询云端账号即可说明本地收集范围。
+
+Claude 的 [`--teleport <session-id>`](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal) 可以将云端会话带到本地终端。Tokscale 只有在导入的本地记录包含用量元数据时才能统计该历史。仅有对话文本并不足够，teleport 也不保证完整的 Token 历史。默认路径之外的转录文件可通过 `scanner.extraScanPaths` 添加。
 
 ### Codex CLI
 
@@ -1724,6 +1728,10 @@ Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claud
 ```
 
 同一 rollout 的多个副本只计一次，因此同时存在于两个目录中、或同时有普通文件和压缩文件的会话，其使用量不会被重复计算。
+
+**云端任务：** Tokscale 不会自动获取 Codex cloud (`chatgpt.com/codex`) 的任务历史。没有本地 rollout 的任务不会计入本地总量、报告、导出、提交或排行榜。运行 `tokscale codex activity` 或 `tokscale codex activity --json`，可通过已安装的 Codex app-server 的当前认证查看带有获取时间的账号活动快照。此查询仅在显式运行时进行；`tokscale clients` 只显示本地收集范围。
+
+账号活动可能涵盖本机保留的 rollout 之外的用量，但其 Token 计算方式和日期边界并不保证与本地解析相同。账号值减去本地总量并不能确定云端用量：其他设备、账号差异以及缺失的本地历史也会造成差值。快照与本地总量、报告、导出、提交及排行榜保持分离，费用显示为不可用 (`N/A`)。
 
 ### Copilot CLI
 
