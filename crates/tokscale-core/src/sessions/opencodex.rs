@@ -117,8 +117,7 @@ fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
         provider,
         service_tier,
         session_ids: Vec::new(),
-        request_ids: Vec::new(),
-        response_ids: Vec::new(),
+        stable_ids: Vec::new(),
         start_ms: timestamp,
         duration_ms: Some(duration_ms),
         signatures,
@@ -218,7 +217,7 @@ pub(crate) fn load_index(
     use_env_roots: bool,
 ) -> Option<std::sync::Arc<GatewayIndex>> {
     let path = usage_log_path(home_dir, use_env_roots);
-    cached_index(&path, "opencodex", MatchPolicy::opencodex(), |path| {
+    cached_index(&path, MatchPolicy::opencodex(), |path| {
         read_ledger(path, decode_row).ok()
     })
 }

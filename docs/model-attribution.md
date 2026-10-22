@@ -58,6 +58,15 @@ Adding a gateway means decoding its records into the shared evidence shape and r
 
 `tokscale pricing explain --json --no-spinner` reports, per row, the attribution outcome (`resolved`, `unresolved`, `conflict`), the requested model and provider, the adapter and evidence strength that established the served model, and the served identity. The attribution block is local-only: it is not added to cached messages or to submission payloads.
 
+## Reserved and unimplemented surfaces
+
+What the code does not claim, deliberately:
+
+- `upstream` (an aggregator naming the provider behind itself, e.g. OpenRouter naming DeepInfra) is ignored. It names a party the ledger observed, not a model, and Tokscale has no provider identity to attach it to.
+- Ledger fields that would only describe a call (effort, endpoint, stop reason, error type, credits, key fingerprints, account identity) are not read. Attribution needs the model, the provider, the tier the response reported, and the correlation evidence; the rest would be local telemetry this feature does not expose.
+- Identifier matching accepts both the response id and the vendor request id, because either is a stable string a client parser can repeat in its dedup key. It proves the two records describe one call; it never names a model on its own.
+- Cost splitting across models inside one aggregate is not implemented. A row with `message_count != 1` is never attributed.
+
 ## Limits
 
 - A portable Magpie install keeps its ledger beside the executable, outside the home directory a scan reads; those rows stay unattributed rather than guessed.

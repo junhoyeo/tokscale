@@ -23,7 +23,7 @@ use crate::model_attribution::apply::{apply_target, mark_attribution_conflict};
 use crate::model_attribution::diagnostics::{self, AttributionOutcome, Decision};
 use crate::model_attribution::matcher::{Candidate, GatewayIndex, ResolvedTarget};
 use crate::model_attribution::resolver::{resolve, Observation, Resolution};
-use crate::model_attribution::{magpie, MAX_PARKED_MESSAGES};
+use crate::model_attribution::{magpie, park_cap};
 use crate::pricing::PricingService;
 use crate::sessions::opencodex;
 use crate::{EstimateSource, UnifiedMessage};
@@ -91,7 +91,7 @@ impl GatewayOverlay {
         estimate_source: Option<EstimateSource>,
     ) -> Result<(), Box<UnifiedMessage>> {
         let mut parked = self.parked.borrow_mut();
-        if parked.len() >= MAX_PARKED_MESSAGES {
+        if parked.len() >= park_cap() {
             self.exhausted.set(true);
             return Err(Box::new(message));
         }
@@ -246,10 +246,223 @@ impl GatewayOverlay {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_park_cap_for_test(cap: Option<usize>) {
+        crate::model_attribution::PARK_CAP_OVERRIDE.with(|value| value.set(cap));
+    }
+
     fn target(&self, precedence: &u8, candidate: &Candidate) -> Option<ResolvedTarget> {
         self.indexes
             .iter()
             .find(|(value, _)| value == precedence)
             .and_then(|(_, index)| index.record(candidate.record).target())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_attribution::matcher::{
+        EvidenceStrength, GatewayRecord, MatchPolicy, TokenSignature,
+    };
+    use crate::{CostSource, TokenBreakdown};
+
+    const START: i64 = 1_700_000_000_000;
+
+    fn record(selector: &str) -> GatewayRecord {
+        let tokens = TokenBreakdown {
+            input: 100,
+            output: 20,
+            cache_read: 400,
+            ..Default::default()
+        };
+        GatewayRecord {
+            adapter: "fixture",
+            selector: Some(selector.into()),
+            selected_model: None,
+            served_model: Some("served-model".into()),
+            provider: Some("provider".into()),
+            service_tier: None,
+            session_ids: Vec::new(),
+            stable_ids: Vec::new(),
+            start_ms: START,
+            duration_ms: Some(1_000),
+            signatures: vec![TokenSignature::from_gateway(
+                tokens.input,
+                tokens.output + tokens.reasoning,
+                tokens.cache_read,
+                tokens.cache_write,
+                tokens.reasoning,
+            )],
+            completed: true,
+            target_eligible: true,
+            allow_selected_fallback: false,
+        }
+    }
+
+    fn message(selector: &str) -> UnifiedMessage {
+        let mut message = UnifiedMessage::new(
+            "claude",
+            selector,
+            "anthropic",
+            "session",
+            START,
+            TokenBreakdown {
+                input: 100,
+                output: 20,
+                cache_read: 400,
+                ..Default::default()
+            },
+            5.0,
+        );
+        message.duration_ms = Some(1_000);
+        message.cost_source = CostSource::Estimated;
+        message
+    }
+
+    fn overlay(records: Vec<GatewayRecord>) -> GatewayOverlay {
+        GatewayOverlay {
+            indexes: vec![(
+                1,
+                Arc::new(GatewayIndex::new(MatchPolicy::opencodex(), records)),
+            )],
+            parked: RefCell::new(Vec::new()),
+            exhausted: std::cell::Cell::new(false),
+        }
+    }
+
+    fn finish(overlay: &GatewayOverlay) -> Vec<UnifiedMessage> {
+        let mut released = Vec::new();
+        overlay.finish(None, |message, _| released.push(message));
+        released
+    }
+
+    #[test]
+    fn a_claimed_row_is_reidentified_and_repriced() {
+        let overlay = overlay(vec![record("selector")]);
+        overlay.park(message("selector"), None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].model_id, "served-model");
+        assert_eq!(released[0].provider_id, "provider");
+        assert_eq!(released[0].cost, 0.0);
+        assert_eq!(released[0].cost_source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn a_row_with_two_candidate_records_stays_unresolved() {
+        let overlay = overlay(vec![record("selector"), record("selector")]);
+        overlay.park(message("selector"), None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].model_id, "selector");
+        assert_eq!(released[0].cost, 5.0);
+    }
+
+    #[test]
+    fn two_rows_claiming_one_record_both_stay_unattributed() {
+        let overlay = overlay(vec![record("selector")]);
+        overlay.park(message("selector"), None).unwrap();
+        overlay.park(message("selector"), None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released.len(), 2);
+        assert!(released
+            .iter()
+            .all(|message| message.model_id == "selector"));
+    }
+
+    /// Exceeding the park cap is a resource limit, not evidence. Attributing
+    /// only the rows that fit would make the result depend on lane order, so
+    /// the whole scan fails closed -- including the row that caused the
+    /// overflow, which is released through the ordinary tail.
+    #[test]
+    fn exceeding_the_park_cap_attributes_nothing_in_this_scan() {
+        GatewayOverlay::set_park_cap_for_test(Some(1));
+        let overlay = overlay(vec![record("selector")]);
+
+        overlay.park(message("selector"), None).unwrap();
+        let returned = overlay.park(message("selector"), None);
+        assert!(returned.is_err(), "the cap must return the row");
+        let returned = *returned.unwrap_err();
+        assert_eq!(returned.model_id, "selector");
+
+        let released = finish(&overlay);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].model_id, "selector", "no partial attribution");
+        GatewayOverlay::set_park_cap_for_test(None);
+    }
+
+    #[test]
+    fn a_row_no_ledger_can_claim_is_never_parked() {
+        let overlay = overlay(vec![record("other-selector")]);
+        assert!(!overlay.could_claim(&message("selector")));
+        assert!(overlay.could_claim(&message("other-selector")));
+    }
+
+    #[test]
+    fn a_row_a_parser_already_marked_conflicted_is_never_reidentified() {
+        let overlay = overlay(vec![record("selector")]);
+        let mut message = message("selector");
+        message.model_attribution_conflicted = true;
+        message.cost = 1.0;
+        overlay.park(message, None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released[0].model_id, "selector");
+        assert!(released[0].model_attribution_conflicted);
+    }
+
+    #[test]
+    fn a_multi_call_aggregate_is_never_reidentified() {
+        let overlay = overlay(vec![record("selector")]);
+        let mut message = message("selector");
+        message.message_count = 4;
+        overlay.park(message, None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released[0].model_id, "selector");
+    }
+
+    #[test]
+    fn the_resolved_strength_comes_from_the_strongest_evidence() {
+        // The same physical model, established only by a confirmed selection
+        // in the upstream adapter and reported by the downstream response.
+        let mut weaker = record("selector");
+        weaker.served_model = None;
+        weaker.selected_model = Some("served-model".into());
+        weaker.allow_selected_fallback = true;
+        let overlay = GatewayOverlay {
+            indexes: vec![
+                (
+                    1,
+                    Arc::new(GatewayIndex::new(MatchPolicy::opencodex(), vec![weaker])),
+                ),
+                (
+                    2,
+                    Arc::new(GatewayIndex::new(
+                        MatchPolicy::opencodex(),
+                        vec![record("selector")],
+                    )),
+                ),
+            ],
+            parked: RefCell::new(Vec::new()),
+            exhausted: std::cell::Cell::new(false),
+        };
+        overlay.park(message("selector"), None).unwrap();
+
+        let released = finish(&overlay);
+        assert_eq!(released[0].model_id, "served-model");
+        assert_eq!(released[0].provider_id, "provider");
+        let decision = crate::model_attribution::diagnostics::lookup(&released[0])
+            .expect("a changed row records its evidence");
+        let (_, _, _, strength) = decision.resolved_target().expect("the decision resolved");
+        assert_eq!(
+            strength,
+            EvidenceStrength::ResponseReported,
+            "the response-reported observation must supply the strength"
+        );
     }
 }

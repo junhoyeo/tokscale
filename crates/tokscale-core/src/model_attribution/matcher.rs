@@ -192,10 +192,11 @@ pub(crate) struct GatewayRecord {
     pub(crate) service_tier: Option<String>,
     /// Native client session identifiers the gateway recorded.
     pub(crate) session_ids: Vec<String>,
-    /// Stable request identifiers.
-    pub(crate) request_ids: Vec<String>,
-    /// Stable response identifiers.
-    pub(crate) response_ids: Vec<String>,
+    /// Stable identifiers the record and the client can both name: the
+    /// response id the gateway returned, and the vendor request id when the
+    /// ledger kept one. A client parser exposes the same strings in its dedup
+    /// key, so a match proves the two describe one call.
+    pub(crate) stable_ids: Vec<String>,
     /// Request start, epoch milliseconds.
     pub(crate) start_ms: i64,
     /// Recorded request duration, when the source establishes one.
@@ -297,15 +298,10 @@ pub(crate) struct GatewayIndex {
 }
 
 impl GatewayIndex {
-    pub(crate) fn new(
-        adapter: &'static str,
-        policy: MatchPolicy,
-        mut records: Vec<GatewayRecord>,
-    ) -> Self {
+    pub(crate) fn new(policy: MatchPolicy, mut records: Vec<GatewayRecord>) -> Self {
         if records.len() > MAX_GATEWAY_RECORDS {
             records.drain(..records.len() - MAX_GATEWAY_RECORDS);
         }
-        let _ = adapter;
         let mut index = Self {
             policy,
             records,
@@ -342,7 +338,7 @@ impl GatewayIndex {
                         .push(slot);
                 }
             }
-            for id in record.request_ids.iter().chain(&record.response_ids) {
+            for id in &record.stable_ids {
                 if !id.is_empty() {
                     self.by_id.entry(id.clone()).or_default().push(slot);
                 }
@@ -576,8 +572,7 @@ mod tests {
             provider: Some("provider".into()),
             service_tier: None,
             session_ids: Vec::new(),
-            request_ids: Vec::new(),
-            response_ids: Vec::new(),
+            stable_ids: Vec::new(),
             start_ms: START,
             duration_ms: Some(1_000),
             signatures: vec![signature],
@@ -603,7 +598,6 @@ mod tests {
         // including reasoning; the client stored the same buckets additively.
         let tokens = tokens();
         let index = GatewayIndex::new(
-            "fixture",
             MatchPolicy::opencodex(),
             vec![record("selector", signature(&tokens))],
         );
@@ -620,11 +614,7 @@ mod tests {
         let tokens = tokens();
         let mut gateway = signature(&tokens);
         gateway.reasoning = 4;
-        let index = GatewayIndex::new(
-            "fixture",
-            MatchPolicy::opencodex(),
-            vec![record("selector", gateway)],
-        );
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![record("selector", gateway)]);
         let mut message = message("selector", tokens);
         message.duration_ms = Some(1_000);
 
@@ -636,7 +626,7 @@ mod tests {
         let tokens = tokens();
         let mut row = record("selector", signature(&tokens));
         row.start_ms += 600_000;
-        let index = GatewayIndex::new("fixture", MatchPolicy::opencodex(), vec![row]);
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![row]);
         let mut message = message("selector", tokens);
         message.duration_ms = Some(1_000);
 
@@ -647,8 +637,8 @@ mod tests {
     fn identifier_matches_are_recovered_from_response_dedup_keys() {
         let tokens = tokens();
         let mut row = record("other-selector", signature(&tokens));
-        row.response_ids = vec!["resp-fixture".into()];
-        let index = GatewayIndex::new("fixture", MatchPolicy::opencodex(), vec![row]);
+        row.stable_ids = vec!["resp-fixture".into()];
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![row]);
         let mut message = message("selector", tokens);
         message.duration_ms = Some(1_000);
         message.dedup_key = Some("pi:response:resp-fixture".into());
@@ -663,7 +653,7 @@ mod tests {
         let tokens = tokens();
         let mut row = record("other-selector", signature(&tokens));
         row.session_ids = vec!["session".into()];
-        let index = GatewayIndex::new("fixture", MatchPolicy::opencodex(), vec![row]);
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![row]);
         let mut message = message("selector", TokenBreakdown::default());
         message.duration_ms = Some(1_000);
 
@@ -696,7 +686,6 @@ mod tests {
     fn a_multi_call_aggregate_is_never_a_claim() {
         let tokens = tokens();
         let index = GatewayIndex::new(
-            "fixture",
             MatchPolicy::opencodex(),
             vec![record("selector", signature(&tokens))],
         );
@@ -712,7 +701,6 @@ mod tests {
     fn an_unknown_selector_is_never_a_claim() {
         let tokens = tokens();
         let index = GatewayIndex::new(
-            "fixture",
             MatchPolicy::opencodex(),
             vec![record("selector", signature(&tokens))],
         );

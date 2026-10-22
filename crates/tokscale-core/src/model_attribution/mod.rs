@@ -54,9 +54,27 @@ pub(crate) const MAX_LEDGER_LINE_BYTES: usize = 1024 * 1024;
 const MAX_LEDGER_RECORDS: usize = 1_000_000;
 
 /// Bound on messages parked for cross-lane one-to-one claim resolution. A
-/// scan beyond it releases the remaining messages unattributed, which is the
-/// same fail-closed outcome as a missing record.
+/// scan beyond it attributes nothing at all: attributing the rows that happen
+/// to fit would make the result depend on lane order. Reaching the cap is a
+/// resource limit, not evidence, so no row is silently preferred.
 const MAX_PARKED_MESSAGES: usize = 250_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override so the cap's fail-closed behavior can be exercised
+    /// without parking a quarter million rows.
+    static PARK_CAP_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn park_cap() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(cap) = PARK_CAP_OVERRIDE.with(|value| value.get()) {
+            return cap;
+        }
+    }
+    MAX_PARKED_MESSAGES
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoundedLine {
@@ -168,7 +186,6 @@ static LEDGER_INDEX_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedIndex>>> =
 
 pub(crate) fn cached_index(
     path: &Path,
-    adapter: &'static str,
     policy: MatchPolicy,
     decode: impl FnOnce(&Path) -> Option<Vec<GatewayRecord>>,
 ) -> Option<Arc<GatewayIndex>> {
@@ -190,7 +207,7 @@ pub(crate) fn cached_index(
     }
 
     let records = decode(path)?;
-    let index = Arc::new(GatewayIndex::new(adapter, policy, records));
+    let index = Arc::new(GatewayIndex::new(policy, records));
     let mut cache = LEDGER_INDEX_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

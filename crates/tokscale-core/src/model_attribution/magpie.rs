@@ -142,7 +142,11 @@ fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
         .filter_map(non_empty)
         .map(str::to_string)
         .collect();
-    let response_ids: Vec<String> = [row.response_id.as_deref(), row.rid.as_deref()]
+    // `response_id` is the response object id the client received; `rid` is
+    // the vendor's request id. Both are stable identifiers a client parser can
+    // repeat in its dedup key, so either can establish that a record and a
+    // message describe one call.
+    let stable_ids: Vec<String> = [row.response_id.as_deref(), row.rid.as_deref()]
         .into_iter()
         .filter_map(non_empty)
         .map(str::to_string)
@@ -156,8 +160,7 @@ fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
         provider: Some(provider),
         service_tier: non_empty(row.tier_served.as_deref()).map(str::to_string),
         session_ids,
-        request_ids: Vec::new(),
-        response_ids,
+        stable_ids,
         start_ms: timestamp,
         duration_ms,
         signatures,
@@ -171,7 +174,7 @@ fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
 /// env-derived roots are enabled. Returns `None` when Magpie has no ledger.
 pub(crate) fn load_index(home_dir: &str, use_env_roots: bool) -> Option<Arc<GatewayIndex>> {
     let path = ledger_path(home_dir, use_env_roots);
-    cached_index(&path, "magpie", MatchPolicy::magpie(), |path| {
+    cached_index(&path, MatchPolicy::magpie(), |path| {
         read_ledger(path, decode_row).ok()
     })
 }
@@ -286,6 +289,27 @@ mod tests {
                 "row must not become evidence"
             );
         }
+    }
+
+    /// A router that answers `served` with the selector it was asked for has
+    /// named no physical model. The record must fall back to the confirmed
+    /// selection instead of promoting the routing label to a model identity.
+    #[test]
+    fn an_echoed_selector_is_not_response_evidence() {
+        let home = tempfile::TempDir::new().unwrap();
+        let mut value = row();
+        value["served"] = json!(SELECTOR);
+        write(home.path(), &[value]);
+        let index = index_for(home.path());
+
+        let candidates = index.candidates(&message());
+        assert_eq!(candidates.len(), 1);
+        let target = index.record(candidates[0].record).target().unwrap();
+        assert_eq!(target.model, "provider-a/wire-model");
+        assert_eq!(
+            target.strength,
+            crate::model_attribution::matcher::EvidenceStrength::ConfirmedSelection
+        );
     }
 
     #[test]
