@@ -199,6 +199,62 @@ mod tests {
         ));
     }
 
+    /// An explicit zero-rate rule is a priced row, not a missing one. The
+    /// distinction has to survive re-attribution: after the model changes, the
+    /// new identity is looked up again, and an explicit free rate must still
+    /// read as covered rather than as absent pricing.
+    #[test]
+    fn an_explicit_free_rate_stays_distinct_from_missing_pricing() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "served-model".to_string(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_read_input_token_cost: Some(0.0),
+                cache_creation_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new_with_custom(
+            crate::pricing::custom::CustomPricing::from_models(custom),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let mut free = message();
+        assert!(apply_target(
+            &mut free,
+            &target(
+                "served-model",
+                "provider-a",
+                EvidenceStrength::ResponseReported
+            ),
+            Some(&pricing),
+        ));
+        assert_eq!(free.cost, 0.0);
+        assert!(
+            free.estimate_status == EstimateStatus::CurrentEstimate,
+            "an explicit zero rate is complete evidence, got {:?}",
+            free.estimate_status
+        );
+
+        // The same row, attributed to a model with no rate at all, must not
+        // inherit that completeness.
+        let mut unknown = message();
+        apply_target(
+            &mut unknown,
+            &target(
+                "unpriced-model",
+                "provider-a",
+                EvidenceStrength::ResponseReported,
+            ),
+            Some(&pricing),
+        );
+        assert_eq!(unknown.cost, 0.0);
+        assert_eq!(unknown.estimate_status, EstimateStatus::Unpriced);
+    }
+
     #[test]
     fn conflict_drops_an_estimate_but_keeps_the_reported_amount() {
         let mut estimated = message();

@@ -47,12 +47,21 @@ A provider-reported amount, including zero, survives attribution untouched. Ever
 
 ## Supported adapters
 
-| Adapter | Ledger | Model evidence | Notes |
-|---|---|---|---|
-| OpenCodex | `~/.opencodex/usage.jsonl` (`OPENCODEX_HOME` override) | `servedModel` only, from the single successful reported Responses attempt | Requests, `combo` provider, `responses` protocol |
-| Magpie | `~/.config/magpie/usage.jsonl` | `served` when it is not an echo of the selector, else `model` | Excludes locally refused rows, `handed_on` retries, client-reported backfills, and rows synced from another computer |
+| Adapter | Ledger | Selector | Selected | Served | Provider | Tier | Stable ids | Sessions | Tokens | Timing |
+|---|---|---|---|---|---|---|---|---|---|---|
+| OpenCodex | `~/.opencodex/usage.jsonl` (`OPENCODEX_HOME` override) | `requestedModel`, required | not read | `servedModel`, only from the single eligible attempt | eligible attempt's `provider` | `tierOutcome` when `responseTierAuthoritative` | none | none | the eligible attempt's reported usage | row start + row duration |
+| Magpie | `~/.config/magpie/usage.jsonl` (XDG-aware) | `req` | `model` | `served`, unless it echoes the selector | `provider` | `tier_served` | `response_id`, `rid` | `session`, `native_session` | `in`, `out`, `cache_read`, `cache_write`, `reasoning` | row `t` + `ms` |
 
-Adding a gateway means decoding its records into the shared evidence shape and registering the adapter; correlation, precedence and application are shared.
+Neither adapter reads a field it cannot justify. Every row must also be a completed 2xx call:
+
+| Adapter | Rejected rows |
+|---|---|
+| OpenCodex | not `combo`; not `responses`; no requested selector; no start; no duration; an attempt that is unreported, estimated, locally answered, stream aborted, or missing ordinal/provider/model/adapter/status/send count |
+| Magpie | locally refused; `handed_on` (a retried failure, not the outcome); `source: reported` (a client backfill the gateway never served); a `computer` id (synced from another machine); no provider; no parseable time |
+
+`allow_selected_fallback` is the one per-adapter policy that is not a field: OpenCodex requires a response-reported model, so a row whose `servedModel` is empty stays unclaimed. Magpie accepts `model` as a confirmed selection because its ledger only records a call after the chosen provider answered.
+
+Adding a gateway means decoding its records into the shared evidence shape and registering the adapter; correlation, precedence, application, and diagnostics are shared.
 
 ## Local diagnostics
 
