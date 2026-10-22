@@ -663,22 +663,33 @@ mod tests {
     /// A gateway selection must never overwrite a model the client's own
     /// response field reported. The row keeps its identity and evidence tier.
     #[test]
-    fn native_response_evidence_survives_a_gateway_selection() {
-        let mut weaker = named_record("magpie", "selector", "gateway-guess");
-        weaker.served_model = None;
-        weaker.selected_model = Some("gateway-guess".into());
-        weaker.allow_selected_fallback = true;
-        let overlay = overlay_of(vec![("magpie", vec![weaker])]);
+    fn native_response_evidence_survives_a_claiming_gateway_record() {
+        // The ledger correlates by native session id and names a different
+        // served model, so the row would be re-identified without the tier.
+        let mut record = named_record("magpie", "selector", "gateway-guess");
+        record.session_ids = vec!["native-session".into()];
+        let overlay = overlay_of(vec![("magpie", vec![record])]);
 
         let mut message = message("selector");
         message.model_id = "native-model".into();
+        message.session_id = "native-session".into();
         message.model_evidence = ModelEvidence::ResponseReported;
         message.cost = 0.0;
-        overlay.park(message, None).unwrap();
 
+        // Prove the record really can claim this row, so the survival below is
+        // caused by the evidence tier and not by a correlation miss.
+        let mut probe = message.clone();
+        probe.model_evidence = ModelEvidence::Requested;
+        assert!(
+            overlay.indexes[0].index.could_claim(&probe),
+            "the ledger must be able to claim this row"
+        );
+
+        overlay.park(message, None).unwrap();
         let released = finish(&overlay);
         assert_eq!(released[0].model_id, "native-model");
         assert_eq!(released[0].model_evidence, ModelEvidence::ResponseReported);
+        assert!(!released[0].model_attribution_conflicted);
     }
 
     /// The resolved strength comes from the strongest observation. A
