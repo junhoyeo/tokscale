@@ -167,10 +167,15 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
                 return Ok(());
             }
 
-            let model = non_blank(response_model)
+            let model = non_blank(response_model.clone())
                 .or_else(|| non_blank(requested_model))
                 .or_else(|| non_blank(thread_model))
                 .unwrap_or_else(|| "unknown".to_string());
+            let model_evidence = if non_blank(response_model).is_some() {
+                crate::sessions::ModelEvidence::ResponseReported
+            } else {
+                crate::sessions::ModelEvidence::Requested
+            };
             let billing_provider = provider_type.clone();
             let (provider, authoritative_zero_cost) = provider_for_pricing(provider_type);
             let session_id = if thread_id.trim().is_empty() {
@@ -194,6 +199,7 @@ fn parse_internal_chat_usage(db_path: &Path, conn: &Connection) -> Vec<UnifiedMe
             );
             message.agent = Some(STUDIO_AGENT.to_string());
             message.is_turn_start = true;
+            message.model_evidence = model_evidence;
             if authoritative_zero_cost {
                 message.mark_provider_reported_cost();
             }
@@ -400,6 +406,11 @@ mod tests {
 
         let chat = &messages[0];
         assert_eq!(chat.model_id, "claude-sonnet-4-6");
+        assert_eq!(
+            chat.model_evidence,
+            crate::sessions::ModelEvidence::ResponseReported,
+            "responseDetails.responseModelId names the responding model"
+        );
         assert_eq!(chat.provider_id, "anthropic");
         assert_eq!(chat.session_id, "thread-1");
         assert_eq!(chat.timestamp, 1_788_000_000_123);
@@ -417,6 +428,11 @@ mod tests {
 
         let api = &messages[1];
         assert_eq!(api.model_id, "unsloth/local-api-model");
+        assert_eq!(
+            api.model_evidence,
+            crate::sessions::ModelEvidence::Requested,
+            "the api_usage_events table records the requested model only"
+        );
         assert_eq!(api.timestamp, 1_788_000_100_000);
         assert_eq!(api.tokens.input, 20);
         assert_eq!(api.tokens.output, 7);
@@ -454,6 +470,11 @@ mod tests {
         let messages = parse_unsloth_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "fallback-model");
+        assert_eq!(
+            messages[0].model_evidence,
+            crate::sessions::ModelEvidence::Requested,
+            "a thread fallback is not a response-reported identity"
+        );
         assert_eq!(messages[0].provider_id, "unpriced:unknown");
         assert_eq!(messages[0].tokens.total(), 8);
     }

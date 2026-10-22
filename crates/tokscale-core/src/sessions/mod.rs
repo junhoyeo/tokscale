@@ -126,6 +126,26 @@ pub enum EstimateStatus {
     Unpriced,
 }
 
+/// What a parser actually established about `UnifiedMessage::model_id`.
+///
+/// A client transcript usually names the model the request asked for. Some
+/// parsers read a native response field that names the model the provider
+/// reported serving, which is authoritative evidence of the weights behind the
+/// call. The tier must be recorded by the parser that read the field: deciding
+/// it later by inspecting the model string would be a guess about how specific
+/// a name looks, and a cached row would lose the distinction entirely.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelEvidence {
+    /// Whoever wrote this row named a model; nothing here proves what served
+    /// the request.
+    #[default]
+    Requested,
+    /// The parser read the model the completed provider response reported
+    /// serving, so `model_id` is already the observed identity.
+    ResponseReported,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
@@ -171,6 +191,13 @@ pub struct UnifiedMessage {
     /// Such rows must remain unpriced rather than accepting fallback attribution.
     #[serde(default)]
     pub model_attribution_conflicted: bool,
+    /// Which tier of evidence established `model_id`. A parser that read a
+    /// native response-reported model records
+    /// [`ModelEvidence::ResponseReported`]; every other row stays
+    /// [`ModelEvidence::Requested`], and a weaker gateway observation may not
+    /// replace one with the other.
+    #[serde(default)]
+    pub model_evidence: ModelEvidence,
     #[serde(default)]
     pub billing_identity: BillingIdentity,
     /// Original model before display/grouping normalization, when different.
@@ -469,6 +496,7 @@ impl UnifiedMessage {
             parent_session_id: None,
             is_turn_start: false,
             model_attribution_conflicted: false,
+            model_evidence: ModelEvidence::Requested,
             copilot_context: None,
             machine_label: None,
             billing_identity: BillingIdentity::Unknown,

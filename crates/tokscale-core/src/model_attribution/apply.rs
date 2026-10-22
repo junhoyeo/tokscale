@@ -21,6 +21,13 @@ pub(crate) fn apply_target(
     target: &ResolvedTarget,
     pricing: Option<&PricingService>,
 ) -> bool {
+    // A parser that read the provider's own response model has the strongest
+    // evidence there is. A gateway selection describes what the gateway asked
+    // for, which a router may still redirect, so it must never replace the
+    // model the response reported.
+    if message.model_evidence == crate::sessions::ModelEvidence::ResponseReported {
+        return false;
+    }
     let tier_changed = target
         .service_tier
         .as_ref()
@@ -158,6 +165,32 @@ mod tests {
         assert_eq!(message.dedup_key, before.dedup_key);
         assert_eq!(message.message_count, before.message_count);
         assert_eq!(message.session_id, before.session_id);
+    }
+
+    /// Native response evidence outranks any gateway observation, so the
+    /// application step itself refuses to rewrite such a row even if a caller
+    /// somehow hands it a resolved target.
+    #[test]
+    fn never_replaces_a_response_reported_identity() {
+        let mut message = message();
+        message.model_id = "native-model".into();
+        message.model_evidence = crate::sessions::ModelEvidence::ResponseReported;
+        let before = message.clone();
+
+        assert!(!apply_target(
+            &mut message,
+            &target(
+                "served-model",
+                "provider-a",
+                EvidenceStrength::ResponseReported
+            ),
+            None,
+        ));
+
+        assert_eq!(message.model_id, "native-model");
+        assert_eq!(message.provider_id, before.provider_id);
+        assert_eq!(message.cost, before.cost);
+        assert_eq!(message.model_evidence, before.model_evidence);
     }
 
     #[test]

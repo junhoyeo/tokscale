@@ -4,15 +4,19 @@
 //! resulting message, but attribution evidence is not part of the message
 //! layout: adding serialized provenance fields to every `UnifiedMessage` would
 //! change the cache format and the submission DTO for one local view. Instead
-//! the overlay records what it decided in a bounded side table keyed by the
-//! stable, post-attribution identity of the row, and `explain` looks that up.
+//! the overlay returns what it decided beside the parsed rows, and `explain`
+//! looks a row up in that value.
+//!
+//! The table belongs to one scan. A process-global table would make two
+//! concurrent parses clear or read each other's decisions, so the overlay owns
+//! its own diagnostics and the parse API hands them to the caller. Nothing
+//! persists beyond the scan that produced it.
 //!
 //! The table is local-only. No entry names a credential, a request body, or a
 //! remote host; it carries model/provider identities and the adapter that
 //! supplied them.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 
 use crate::model_attribution::matcher::EvidenceStrength;
 use crate::sessions::UnifiedMessage;
@@ -57,7 +61,7 @@ pub(crate) enum AttributionOutcome {
         provider: String,
         model: String,
     },
-    /// Independent adapters disagreed about the served model.
+    /// Independent adapters disagreed about the served model or provider.
     Conflicted,
     /// The row matched gateway records but they did not establish one model.
     Unresolved,
@@ -69,6 +73,11 @@ pub(crate) struct Decision {
     pub(crate) requested_provider: String,
     /// Strongest correlation rule that matched, when a record did match.
     pub(crate) matched_by: Option<&'static str>,
+    /// Every adapter whose ledger produced at least one feasible candidate for
+    /// this row, sorted and deduplicated. Local diagnostics only; it exists so
+    /// a nested-gateway test can assert that both ledgers participated instead
+    /// of only the one that happened to supply the winning observation.
+    pub(crate) participating_adapters: Vec<&'static str>,
     pub(crate) outcome: AttributionOutcome,
 }
 
@@ -104,32 +113,25 @@ impl EvidenceStrength {
     }
 }
 
-static DECISIONS: LazyLock<Mutex<HashMap<RowKey, Decision>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn lock() -> std::sync::MutexGuard<'static, HashMap<RowKey, Decision>> {
-    // Diagnostics are side metadata. A poisoned lock degrades the explanation
-    // to "no attribution detail"; making it fatal would turn one panicked
-    // worker into a failed scan over a debug view.
-    DECISIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Attribution decisions produced by one parse.
+///
+/// Returned beside the messages it describes. Lookups are read-only, so a
+/// concurrent scan with its own diagnostics can never clear or contaminate
+/// this one.
+#[derive(Debug, Clone, Default)]
+pub struct AttributionDiagnostics {
+    decisions: HashMap<RowKey, Decision>,
 }
 
-/// Begin a new attribution pass. Callers clear before parsing so a lookup
-/// reflects the scan being explained rather than a previous one.
-pub(crate) fn clear() {
-    lock().clear();
-}
-
-pub(crate) fn record(message: &UnifiedMessage, decision: Decision) {
-    let mut decisions = lock();
-    if decisions.len() >= MAX_DECISIONS {
-        return;
+impl AttributionDiagnostics {
+    pub(crate) fn record(&mut self, message: &UnifiedMessage, decision: Decision) {
+        if self.decisions.len() >= MAX_DECISIONS {
+            return;
+        }
+        self.decisions.insert(RowKey::of(message), decision);
     }
-    decisions.insert(RowKey::of(message), decision);
-}
 
-pub(crate) fn lookup(message: &UnifiedMessage) -> Option<Decision> {
-    lock().get(&RowKey::of(message)).cloned()
+    pub(crate) fn lookup(&self, message: &UnifiedMessage) -> Option<Decision> {
+        self.decisions.get(&RowKey::of(message)).cloned()
+    }
 }

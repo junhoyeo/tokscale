@@ -3927,21 +3927,26 @@ fn run_pricing_lookup(
                 std::collections::HashMap::new(),
             )
         });
-        let messages = Runtime::new()?
-            .block_on(tokscale_core::parse_local_unified_messages_with_pricing(
-                tokscale_core::LocalParseOptions {
-                    use_env_roots: true,
-                    ..Default::default()
-                },
-                Some(&svc),
-            ))
+        // Attribution decisions are scan-scoped side metadata: the parse hands
+        // them back with the rows so explain reports the same identity the row
+        // carries, without a global table two scans could clear.
+        let (messages, attribution) = Runtime::new()?
+            .block_on(
+                tokscale_core::parse_local_unified_messages_with_pricing_and_attribution(
+                    tokscale_core::LocalParseOptions {
+                        use_env_roots: true,
+                        ..Default::default()
+                    },
+                    Some(&svc),
+                ),
+            )
             .map_err(anyhow::Error::msg)?;
         let explanations: Vec<_> = messages
             .iter()
             .filter(|message| {
                 billing_provider.is_none_or(|id| message.billing_identity.id() == Some(id))
             })
-            .map(|message| svc.explain_message(message))
+            .map(|message| svc.explain_message_with_attribution(message, Some(&attribution)))
             .collect();
         if json {
             println!("{}", serde_json::to_string_pretty(&explanations)?);

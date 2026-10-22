@@ -36,7 +36,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 pub(crate) mod apply;
-pub(crate) mod diagnostics;
+pub mod diagnostics;
 pub(crate) mod magpie;
 pub(crate) mod matcher;
 pub(crate) mod overlay;
@@ -52,6 +52,39 @@ pub(crate) const MAX_LEDGER_LINE_BYTES: usize = 1024 * 1024;
 /// corrupt log cannot consume unbounded memory. Attribution then fails closed
 /// for records that were dropped.
 const MAX_LEDGER_RECORDS: usize = 1_000_000;
+
+/// Trim the retained ledger in batches instead of after every appended row.
+///
+/// Once the cap is reached, dropping one element per append from the front of
+/// a million-entry `Vec` is a quadratic scan of the whole ledger. Instead the
+/// buffer is allowed to grow by this many records past the cap and the oldest
+/// batch is removed in one shift, which makes the amortized cost per line
+/// constant and keeps memory bounded by `cap + this`.
+const LEDGER_TRIM_BATCH: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override so the trim path can be exercised with a small log.
+    static LEDGER_CAP_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// Number of front drains performed by [`read_ledger`] on this thread.
+    /// Batching makes this proportional to rows/batch, not to rows.
+    static LEDGER_DRAINS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn ledger_record_cap() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(cap) = LEDGER_CAP_OVERRIDE.with(|value| value.get()) {
+            return cap;
+        }
+    }
+    MAX_LEDGER_RECORDS
+}
+
+/// Retained-record cap with the batching slack applied.
+fn ledger_record_limit() -> usize {
+    ledger_record_cap().saturating_add(LEDGER_TRIM_BATCH.min(ledger_record_cap()))
+}
 
 /// Bound on messages parked for cross-lane one-to-one claim resolution. A
 /// scan beyond it attributes nothing at all: attributing the rows that happen
@@ -159,10 +192,23 @@ pub(crate) fn read_ledger<T>(
         }
         if let Some(record) = decode(&line) {
             records.push(record);
-            if records.len() > MAX_LEDGER_RECORDS {
-                records.drain(..records.len() - MAX_LEDGER_RECORDS);
+            let limit = ledger_record_limit();
+            if records.len() > limit {
+                // Amortized: this branch removes at least one batch, so the
+                // following batch of appends pays no shift at all.
+                let excess = records.len() - ledger_record_cap();
+                records.drain(..excess);
+                #[cfg(test)]
+                LEDGER_DRAINS.with(|count| count.set(count.get() + 1));
             }
         }
+    }
+    let cap = ledger_record_cap();
+    if records.len() > cap {
+        let excess = records.len() - cap;
+        records.drain(..excess);
+        #[cfg(test)]
+        LEDGER_DRAINS.with(|count| count.set(count.get() + 1));
     }
     Ok(records)
 }
@@ -227,4 +273,99 @@ pub(crate) fn clear_index_cache() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    struct CapReset;
+
+    impl Drop for CapReset {
+        fn drop(&mut self) {
+            LEDGER_CAP_OVERRIDE.with(|value| value.set(None));
+        }
+    }
+
+    /// The trim path must keep the newest `cap` records and stay linear. With
+    /// a tiny cap this exercises the batched drain repeatedly instead of
+    /// requiring a million-row fixture.
+    #[test]
+    fn an_oversized_ledger_keeps_only_its_newest_records() {
+        let _reset = CapReset;
+        LEDGER_CAP_OVERRIDE.with(|value| value.set(Some(100)));
+        assert_eq!(ledger_record_cap(), 100);
+        // With a cap smaller than the batch size, the batch is clamped so the
+        // buffer never grows past twice the cap.
+        assert_eq!(ledger_record_limit(), 200);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let total = 10_000i64;
+        for index in 0..total {
+            writeln!(file, "{index}").unwrap();
+        }
+        drop(file);
+
+        let records = read_ledger(&path, |line| {
+            std::str::from_utf8(line).ok()?.parse::<i64>().ok()
+        })
+        .unwrap();
+        assert_eq!(records.len(), 100);
+        assert_eq!(records.first().copied(), Some(total - 100));
+        assert_eq!(records.last().copied(), Some(total - 1));
+    }
+
+    /// Batching is what keeps the amortized cost per appended row constant:
+    /// the number of drains must be proportional to `records / batch`, never
+    /// to the number of appended records.
+    #[test]
+    fn ledger_trimming_drains_in_batches_not_once_per_row() {
+        let _reset = CapReset;
+        LEDGER_CAP_OVERRIDE.with(|value| value.set(Some(64)));
+        LEDGER_DRAINS.with(|count| count.set(0));
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let total = 20_000i64;
+        for index in 0..total {
+            writeln!(file, "{index}").unwrap();
+        }
+        drop(file);
+
+        let records = read_ledger(&path, |line| {
+            std::str::from_utf8(line).ok()?.parse::<i64>().ok()
+        })
+        .unwrap();
+        let drains = LEDGER_DRAINS.with(std::cell::Cell::get);
+        assert_eq!(records.len(), 64);
+        assert_eq!(records.last().copied(), Some(total - 1));
+        // A one-per-row drain at 20k rows would need ~20k shifts. Batching
+        // removes a whole batch at a time, so the observed count is the number
+        // of batches, not the number of rows.
+        let batches = (total / 64) as usize;
+        assert!(
+            drains <= batches && drains >= batches / 2,
+            "expected one drain per batch near {batches}, observed {drains}"
+        );
+        assert!(
+            drains < total as usize / 8,
+            "batch trimming must not degrade to per-row drains, observed {drains}"
+        );
+    }
+
+    /// A malformed or oversized row never hides valid rows after it.
+    #[test]
+    fn ledger_reading_skips_noise_without_dropping_valid_rows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        std::fs::write(&path, "{bad}\n\n  \n7\n").unwrap();
+        let records = read_ledger(&path, |line| {
+            std::str::from_utf8(line).ok()?.parse::<i64>().ok()
+        })
+        .unwrap();
+        assert_eq!(records, vec![7]);
+    }
 }

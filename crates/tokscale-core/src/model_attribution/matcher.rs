@@ -246,6 +246,21 @@ impl GatewayRecord {
             return None;
         }
         let selected = non_empty(self.selected_model.as_deref())?;
+        // A gateway may report that it "selected" the same virtual label the
+        // client asked for, a routing group, or a router marker such as
+        // `provider/auto`. None of those names weights, so promoting one would
+        // turn a router label into a confirmed physical identity. The record
+        // still reserves its request: an unprovable selection is not evidence
+        // for any other candidate.
+        if self
+            .selector
+            .as_deref()
+            .and_then(|selector| non_empty(Some(selector)))
+            .is_some_and(|selector| selector.eq_ignore_ascii_case(selected))
+            || is_virtual_model(selected)
+        {
+            return None;
+        }
         Some(ResolvedTarget {
             provider: provider.to_string(),
             model: selected.to_string(),
@@ -257,11 +272,11 @@ impl GatewayRecord {
 }
 
 impl GatewayRecord {
-    /// The response-reported model, unless it merely echoes the selector.
+    /// The response-reported model, unless it names no physical model.
     ///
-    /// A router can answer with the virtual selector it was asked for instead
-    /// of the weights that produced the reply. That string names no physical
-    /// model, so it is not response evidence; the record falls back to its
+    /// A router can answer with the virtual selector it was asked for, or with
+    /// another routing label, instead of the weights that produced the reply.
+    /// Such a string is not response evidence; the record falls back to its
     /// confirmed selection instead. A served value equal to the *selected*
     /// model is real evidence: the gateway contacted exactly that model and
     /// the response confirmed it.
@@ -272,8 +287,24 @@ impl GatewayRecord {
             .as_deref()
             .and_then(|selector| non_empty(Some(selector)))
             .is_some_and(|selector| selector.eq_ignore_ascii_case(served));
-        (!echoes_selector).then_some(served)
+        (!echoes_selector && !is_virtual_model(served)).then_some(served)
     }
+}
+
+/// Whether a model string names a router rather than weights.
+///
+/// This is field evidence, not a guess about how specific a name looks: the
+/// shared routing-label predicate is the same one pricing refuses, and a
+/// `<router>/auto` spelling is that same label as the model segment. The
+/// caller additionally rejects a value equal to the requested selector.
+pub(crate) fn is_virtual_model(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || crate::pricing::lookup::is_routing_label(value) {
+        return true;
+    }
+    value
+        .rsplit_once('/')
+        .is_some_and(|(_, model)| crate::pricing::lookup::is_routing_label(model))
 }
 
 pub(crate) fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -374,6 +405,12 @@ impl GatewayIndex {
         if message.model_attribution_conflicted {
             return false;
         }
+        // A row whose parser read the provider's own response model already
+        // carries the strongest evidence there is. A gateway selection may
+        // confirm it, but the overlay never needs to park it.
+        if message.model_evidence == crate::sessions::ModelEvidence::ResponseReported {
+            return false;
+        }
         if self.by_selector.contains_key(&message.model_id) {
             return true;
         }
@@ -394,7 +431,10 @@ impl GatewayIndex {
         // record: there is no per-model decomposition to apply, and choosing
         // the record's model would attribute every call in the turn to it.
         // Zero marks a supplemental row that is not counted as a call.
-        if message.message_count != 1 || message.model_attribution_conflicted {
+        if message.message_count != 1
+            || message.model_attribution_conflicted
+            || message.model_evidence == crate::sessions::ModelEvidence::ResponseReported
+        {
             return Vec::new();
         }
 
@@ -672,6 +712,76 @@ mod tests {
 
         row.allow_selected_fallback = false;
         assert!(row.target().is_none());
+    }
+
+    /// A selected model that only repeats the virtual selector, or that is a
+    /// routing label in its own right, names no weights. Promoting it would
+    /// turn a router into a "confirmed" physical identity, so it stays
+    /// unclaimed and reserves the request for nothing.
+    #[test]
+    fn a_virtual_selection_is_never_a_confirmed_identity() {
+        for (selector, selected) in [
+            ("group/auto", "group/auto"),
+            ("combo/auto", "combo/auto"),
+            ("some-selector", "auto"),
+            ("some-selector", "AGENT_REVIEW"),
+            ("some-selector", "openrouter/auto"),
+            ("some-selector", "   "),
+        ] {
+            let tokens = tokens();
+            let mut row = record(selector, signature(&tokens));
+            row.served_model = None;
+            row.selected_model = Some(selected.into());
+            row.allow_selected_fallback = true;
+            assert!(
+                row.target().is_none(),
+                "{selector} -> {selected} must not become a physical identity"
+            );
+        }
+    }
+
+    /// A served value equal to the *selected* model is real evidence: the
+    /// gateway contacted exactly that model and the response confirmed it.
+    #[test]
+    fn a_served_value_matching_the_selection_is_response_evidence() {
+        let tokens = tokens();
+        let mut row = record("group/auto", signature(&tokens));
+        row.selected_model = Some("glm-5.2".into());
+        row.served_model = Some("glm-5.2".into());
+        let target = row.target().expect("the response named the served model");
+        assert_eq!(target.model, "glm-5.2");
+        assert_eq!(target.strength, EvidenceStrength::ResponseReported);
+    }
+
+    /// A response that only echoes the requested selector is not response
+    /// evidence, but it must not hide a usable selection either.
+    #[test]
+    fn a_served_echo_of_the_selector_falls_back_to_the_selection() {
+        let tokens = tokens();
+        let mut row = record("group/auto", signature(&tokens));
+        row.selected_model = Some("glm-5.2".into());
+        row.served_model = Some("group/auto".into());
+        row.allow_selected_fallback = true;
+        let target = row.target().expect("the selection is still usable");
+        assert_eq!(target.model, "glm-5.2");
+        assert_eq!(target.strength, EvidenceStrength::ConfirmedSelection);
+    }
+
+    /// A response-reported row is never a parking candidate: its evidence is
+    /// stronger than anything a ledger can add.
+    #[test]
+    fn a_response_reported_row_is_never_a_claim() {
+        let tokens = tokens();
+        let index = GatewayIndex::new(
+            MatchPolicy::opencodex(),
+            vec![record("selector", signature(&tokens))],
+        );
+        let mut message = message("selector", tokens);
+        message.duration_ms = Some(1_000);
+        message.model_evidence = crate::sessions::ModelEvidence::ResponseReported;
+
+        assert!(!index.could_claim(&message));
+        assert!(index.candidates(&message).is_empty());
     }
 
     #[test]

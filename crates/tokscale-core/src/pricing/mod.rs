@@ -840,6 +840,20 @@ impl PricingService {
 
     /// Local diagnostics only. This type is never part of a submission DTO.
     pub fn explain_message(&self, message: &crate::UnifiedMessage) -> PricingExplanation {
+        self.explain_message_with_attribution(message, None)
+    }
+
+    /// Explain one row, optionally using the attribution decisions from the
+    /// scan that produced it.
+    ///
+    /// Attribution is scan-scoped side metadata, so the caller supplies the
+    /// table it got back from the parse. Without it, `attribution` is `None`
+    /// even when the row was re-identified.
+    pub fn explain_message_with_attribution(
+        &self,
+        message: &crate::UnifiedMessage,
+        attribution: Option<&crate::AttributionDiagnostics>,
+    ) -> PricingExplanation {
         let estimate = self.estimate_message(message);
         let authoritative = message.has_authoritative_cost();
         let status = if authoritative {
@@ -902,7 +916,7 @@ impl PricingService {
             },
             coverage: authoritative || estimate.coverage,
             estimate_status: status,
-            attribution: attribution_explanation(message),
+            attribution: attribution_explanation(message, attribution),
         }
     }
 
@@ -3525,8 +3539,9 @@ impl PricingEstimate {
 
 fn attribution_explanation(
     message: &crate::UnifiedMessage,
+    attribution: Option<&crate::AttributionDiagnostics>,
 ) -> Option<PricingAttributionExplanation> {
-    let decision = crate::model_attribution::diagnostics::lookup(message)?;
+    let decision = attribution?.lookup(message)?;
     let (adapter, evidence, served_provider, served_model) = match decision.resolved_target() {
         Some((adapter, provider, model, strength)) => (
             Some(adapter),
