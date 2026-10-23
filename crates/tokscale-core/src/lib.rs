@@ -58,6 +58,22 @@ static RETENTION_PROVENANCE_REBUILDS: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static CLAUDE_RESUMED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+/// Runs between a SQLite lane's scan and its stability re-check, so a test can
+/// commit a write exactly where a live client does: after the scan has read
+/// the database, before the loader decides whether that read was stable.
+#[cfg(test)]
+static AFTER_SQLITE_SCAN_HOOK: Mutex<Option<fn(&Path)>> = Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_sqlite_scan_hook(path: &Path) {
+    let hook = *AFTER_SQLITE_SCAN_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
 ///
 /// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
@@ -2605,6 +2621,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
         let source = sessions::micode::parse_micode_source(path);
+        #[cfg(test)]
+        run_after_sqlite_scan_hook(path);
         // A concurrent writer can commit after the read snapshot began. Never
         // label that older pair with a newer database/WAL fingerprint.
         let stable = before.as_ref().is_some_and(|fingerprint| {
@@ -2629,10 +2647,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
             None
         };
         let invalidate = !stable || !source.complete || source.messages.is_empty();
-        let preserve_legacy_bytes = cached
+        let legacy = cached
             .as_ref()
             .is_some_and(|entry| entry.billing_identity_generation == 0);
-        if (!stable || !source.complete) && preserve_legacy_bytes {
+        // A failed identity migration must not discard an old amount, so a
+        // read that stopped partway replays the legacy entry. A complete read
+        // is returned even when MiMo wrote during it: it reflects the database
+        // at least as recently as the legacy entry does, and the write only
+        // keeps it out of the cache. Replaying the legacy entry there instead
+        // would freeze usage for as long as MiMo keeps writing.
+        if !source.complete && legacy {
             if let Some(mut entry) = cached {
                 for message in &mut entry.messages {
                     message.refresh_derived_fields();
@@ -2648,7 +2672,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 );
             }
         }
-        (source, cache_entry, invalidate && !preserve_legacy_bytes)
+        // A stable read that could not replace the legacy entry (one that found
+        // no rows) keeps it; a read that raced a write retires it like any
+        // other entry the database has moved past.
+        (source, cache_entry, invalidate && !(legacy && stable))
     }
 
     /// OpenCode's SQLite lane, where a warm scan reads only the rows that
@@ -2673,13 +2700,24 @@ fn parse_all_messages_streaming<S: MessageSink>(
             pricing: Option<&pricing::PricingService>,
             fallback: Option<message_cache::CachedSourceEntry>,
         ) -> CachedParseOutcome {
+            #[cfg(test)]
+            run_after_sqlite_scan_hook(path);
             let stable = fingerprint.as_ref().is_some_and(|f| {
                 matches!(
                     message_cache::SourceFingerprint::check_sqlite_path(path, Some(f)),
                     Some(message_cache::FingerprintStatus::Unchanged)
                 )
             });
-            if !scan.complete || !stable {
+            // Only a scan that stopped partway replays a legacy entry, which
+            // may hold usage the readable prefix does not. A complete scan
+            // reflects the database at least as recently as that entry, so it
+            // is returned even when OpenCode wrote while it ran. The write only
+            // keeps it out of the cache: the scan reads its metadata high-water
+            // (which detects session renames) after the rows, so that mark
+            // could record a change the parsed messages do not reflect. A
+            // database in active use can be written during every scan, so
+            // replaying the entry there would freeze its usage indefinitely.
+            if !scan.complete {
                 if let Some(entry) = fallback.filter(|entry| entry.billing_identity_generation == 0)
                 {
                     return CachedParseOutcome {
@@ -25297,6 +25335,198 @@ mod tests {
                 .get(identity, &path)
                 .is_some());
         }
+    }
+
+    /// Installs [`crate::AFTER_SQLITE_SCAN_HOOK`] for one test and clears it again
+    /// even if the test panics, so no later scan inherits the write.
+    struct AfterSqliteScanHook;
+
+    impl AfterSqliteScanHook {
+        fn set(hook: fn(&std::path::Path)) -> Self {
+            *crate::AFTER_SQLITE_SCAN_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+            Self
+        }
+    }
+
+    impl Drop for AfterSqliteScanHook {
+        fn drop(&mut self) {
+            *crate::AFTER_SQLITE_SCAN_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    /// Downgrades the cached entry for `path` to one written before billing
+    /// identity existed, which is what an upgrade from an older build leaves.
+    fn mark_cache_entry_legacy(client: ClientId, path: &std::path::Path) {
+        let identity = message_cache::CacheIdentity::for_client(client);
+        let mut cache = message_cache::SourceMessageCache::load();
+        let mut entry = cache
+            .take(identity, path)
+            .expect("the first scan caches the database");
+        entry.billing_identity_generation = 0;
+        cache.insert(entry);
+        cache.save_if_dirty();
+    }
+
+    /// Stands in for OpenCode committing a message while a scan is reading.
+    fn commit_opencode_row_during_scan(path: &std::path::Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES ('msg-during-scan', 'session-1', 9900, 9900, ?1)",
+                [timed_opencode_payload("msg-during-scan", 40)],
+            )
+            .unwrap();
+    }
+
+    /// An OpenCode database in active use can be written during every scan. A
+    /// legacy cache entry must not be replayed over a complete scan for that
+    /// reason alone: the entry never gets replaced, and every report and
+    /// submission freezes at the usage it held.
+    #[test]
+    #[serial_test::serial]
+    fn opencode_complete_scan_that_raced_a_write_replaces_a_legacy_cache_entry() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let db_dir = source_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        let conn = create_timed_opencode_db(&db_path);
+        insert_timed_opencode_row(&conn, "msg-old", 1_000, 50);
+        let scan = || {
+            parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            )
+        };
+        assert_eq!(total_output_tokens(&scan()), 50);
+        mark_cache_entry_legacy(ClientId::OpenCode, &db_path);
+
+        // Usage recorded after the legacy entry was written, then a scan that
+        // OpenCode writes into while it runs.
+        insert_timed_opencode_row(&conn, "msg-new", 2_000, 60);
+        let hook = AfterSqliteScanHook::set(commit_opencode_row_during_scan);
+        let raced = scan();
+        drop(hook);
+        assert_eq!(
+            total_output_tokens(&raced),
+            110,
+            "the complete scan, not the legacy entry, must be reported"
+        );
+        let identity = message_cache::CacheIdentity::for_client(ClientId::OpenCode);
+        assert!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .is_none(),
+            "the legacy entry the database moved past must be retired"
+        );
+
+        // Once the database is quiet, a scan sees every row and caches it
+        // under the current generation.
+        assert_eq!(total_output_tokens(&scan()), 150);
+        assert_eq!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .expect("a stable scan caches the database")
+                .billing_identity_generation,
+            1
+        );
+    }
+
+    fn micode_row_payload(output: i64) -> String {
+        format!(
+            r#"{{
+                "role": "assistant",
+                "modelID": "mimo-v2.5-pro",
+                "providerID": "mimo",
+                "cost": 0.05,
+                "tokens": {{ "input": 100, "output": {output}, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                "time": {{ "created": 1700000000000.0 }}
+            }}"#
+        )
+    }
+
+    /// Stands in for MiMo Code committing a message while a scan is reading.
+    fn commit_micode_row_during_scan(path: &std::path::Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO message (id, session_id, data)
+                 VALUES ('msg-during-scan', 'ses_1', ?1)",
+                [micode_row_payload(40)],
+            )
+            .unwrap();
+    }
+
+    /// MiMo Code's lane has the same legacy fallback as OpenCode's, so a
+    /// database written during the scan must not freeze its usage either.
+    #[test]
+    #[serial_test::serial]
+    fn micode_complete_scan_that_raced_a_write_replaces_a_legacy_cache_entry() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let micode_dir = source_home.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(&micode_dir).unwrap();
+        let db_path = micode_dir.join("mimocode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let insert = |id: &str, output: i64| {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, 'ses_1', ?2)",
+                rusqlite::params![id, micode_row_payload(output)],
+            )
+            .unwrap();
+        };
+        insert("msg-old", 50);
+        let scan = || {
+            parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["micode".to_string()],
+                None,
+            )
+        };
+        assert_eq!(total_output_tokens(&scan()), 50);
+        mark_cache_entry_legacy(ClientId::MiMoCode, &db_path);
+
+        insert("msg-new", 60);
+        let hook = AfterSqliteScanHook::set(commit_micode_row_during_scan);
+        let raced = scan();
+        drop(hook);
+        assert_eq!(
+            total_output_tokens(&raced),
+            110,
+            "the complete scan, not the legacy entry, must be reported"
+        );
+        let identity = message_cache::CacheIdentity::for_client(ClientId::MiMoCode);
+        assert!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .is_none(),
+            "the legacy entry the database moved past must be retired"
+        );
+
+        assert_eq!(total_output_tokens(&scan()), 150);
+        assert_eq!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .expect("a stable scan caches the database")
+                .billing_identity_generation,
+            1
+        );
     }
 
     #[cfg(unix)]
