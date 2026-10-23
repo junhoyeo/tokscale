@@ -7,6 +7,7 @@ pub mod antigravity;
 pub mod antigravity_cli;
 pub mod aside;
 pub mod augment;
+pub mod broca;
 pub mod cherrystudio;
 pub mod claudecode;
 pub mod cline;

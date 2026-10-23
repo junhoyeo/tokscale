@@ -1124,6 +1124,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Broca writes one immutable metering fact per completed run to a live
+    // SQLite database under its state root.
+    Broca = 58 => {
+        id: "broca",
+        display: "Broca",
+        logo: None,
+        root: PathRoot::EnvVar {
+            var: "BROCA_STATE_ROOT",
+            fallback_relative: ".local/share/cortexkit/broca",
+        },
+        relative: "run-index.db",
+        pattern: "run-index.db",
+        headless: true,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1239,7 +1255,26 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 58);
+        assert_eq!(ClientId::COUNT, 59);
+    }
+
+    #[test]
+    #[serial]
+    fn test_broca_state_root_env_wins_over_home_fallback() {
+        let state_root = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&["BROCA_STATE_ROOT"]);
+        env.set("BROCA_STATE_ROOT", state_root.path());
+
+        let client = ClientId::Broca.data();
+        assert_eq!(
+            client.resolve_path_with_env_strategy(home.path().to_str().unwrap(), true),
+            native_join(state_root.path(), "run-index.db")
+        );
+        assert_eq!(
+            client.resolve_path_with_env_strategy(home.path().to_str().unwrap(), false),
+            native_join(home.path(), ".local/share/cortexkit/broca/run-index.db")
+        );
     }
 
     #[test]

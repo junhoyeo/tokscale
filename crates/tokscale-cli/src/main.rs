@@ -1198,6 +1198,7 @@ pub enum ClientFilter {
     AntigravityExtension,
     Aside,
     Vibe,
+    Broca,
     Synthetic,
 }
 
@@ -1266,6 +1267,7 @@ impl ClientFilter {
             Self::Muse => "muse",
             Self::Aside => "aside",
             Self::Vibe => "vibe",
+            Self::Broca => "broca",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1337,6 +1339,7 @@ impl ClientFilter {
             Self::Muse => Some(ClientId::Muse),
             Self::Aside => Some(ClientId::Aside),
             Self::Vibe => Some(ClientId::Vibe),
+            Self::Broca => Some(ClientId::Broca),
             Self::Synthetic => None,
         }
     }
@@ -1404,6 +1407,7 @@ impl ClientFilter {
             ClientId::Muse => Self::Muse,
             ClientId::Aside => Self::Aside,
             ClientId::Vibe => Self::Vibe,
+            ClientId::Broca => Self::Broca,
         }
     }
 

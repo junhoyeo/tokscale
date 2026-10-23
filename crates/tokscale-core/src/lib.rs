@@ -3937,6 +3937,26 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    let broca_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Broca)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_sqlite_source(
+                message_cache::CacheIdentity::for_client(ClientId::Broca),
+                path,
+                &source_cache,
+                pricing,
+                sessions::broca::parse_broca_sqlite,
+            )
+        })
+        .collect();
+    for outcome in broca_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // Senpi and Omp share the Pi record format and its fork-copy behavior
     // (#1306); dedup the same way as the Pi lane.
     parse_cached_lane_deduped(
@@ -7560,6 +7580,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     counts.set(ClientId::Reasonix, reasonix_count);
     messages.extend(reasonix_msgs);
+
+    let broca_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Broca)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::broca::parse_broca_sqlite(path)
+                .into_iter()
+                .map(|message| unified_to_parsed(&message))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let broca_count = broca_msgs.len() as i32;
+    counts.set(ClientId::Broca, broca_count);
+    messages.extend(broca_msgs);
 
     let senpi_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Senpi)
