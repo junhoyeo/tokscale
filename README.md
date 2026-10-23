@@ -120,6 +120,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl` (same XDG-style path on Windows; subagent transcripts under `subagent/<uuid>/` included) |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json` (same path on Windows; override the root via `VIBE_HOME`) |
+| <img width="48px" src="https://github.com/cortexkit.png" alt="Broca" /> | [Broca](https://github.com/cortexkit/broca) | `$BROCA_STATE_ROOT/run-index.db` (fallback: `~/.local/share/cortexkit/broca/run-index.db`) |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 
@@ -192,7 +193,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, and Mistral Vibe
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, and Broca
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -461,7 +462,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `broca`.
 
 > **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
@@ -1204,7 +1205,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Broca)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1635,6 +1636,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | Same XDG-style path on all platforms; parses `session.jsonl` `model_completed` usage events plus `subagent/` transcripts |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | Native browser session usage across accounts; only `messages.jsonl`, excluding artifacts, memory and passwords. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (fallback: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (fallback: `%USERPROFILE%\.vibe\logs\session\`) | Same `~/.vibe` root on all platforms; reads each session directory's `meta.json` cumulative `stats`, never the `messages.jsonl` transcript |
+| Broca | `$BROCA_STATE_ROOT/run-index.db` (fallback: `~/.local/share/cortexkit/broca/run-index.db`) | `%BROCA_STATE_ROOT%\run-index.db` (fallback: `%USERPROFILE%\.local\share\cortexkit\broca\run-index.db`) | Reads the `export_facts` table of Broca's SQLite run index: one immutable metering fact per completed run |
 | MiniMax Code | `~/.config/tokscale/headless/mcode/` | `%APPDATA%\tokscale\headless\mcode\` | Headless capture only; Tokscale reads its own capture directory rather than MiniMax Code's shared Desktop/Runtime store, which does not identify the originating surface. Override the root with `TOKSCALE_HEADLESS_DIR` |
 
 > **Devin Desktop agent support**: Local usage parsing works for ACP-connected agents (e.g. Cascade/Windsurf, claude-code, opencode) that emit `usage_update` events in the NDJSON stream. The default **devin-cloud** agent does not emit local `usage_update` events — its usage stays server-side and cannot be tracked by tokscale without an account-level API.
@@ -2185,6 +2187,14 @@ Location: `~/.vibe/logs/session/<prefix>_<YYYYMMDD_HHMMSS>_<short-id>/meta.json`
 Vibe writes a directory per session holding `meta.json` and a `messages.jsonl` transcript. Usage is session-granular: the transcript carries no per-message model, timestamp, or token counts, so Tokscale reads only the cumulative `stats` block in `meta.json` (`session_prompt_tokens`, `session_completion_tokens`, `session_cached_tokens`) and never the conversation content. `session_cached_tokens` is a *subset* of `session_prompt_tokens` rather than an addition to it, so cached reads are split out of the input count before pricing — the same arithmetic Vibe's own cost display uses. One message per session is therefore the finest row the format supports; `steps` becomes the session's message count, and `end_time` (ISO-8601, falling back to `start_time`) its timestamp. Pre-2.0 sessions stored one flat `<prefix>_*.json` per session with the same fields under a `metadata` key; those are still read.
 
 The model comes from `config.active_model` in `meta.json`, which holds the alias the session was pinned to. A session that was never pinned records the empty string — Vibe's documented "follow the configured default" sentinel — so Tokscale resolves it from the session's own `config.models` table, then from Mistral's published default alias, rather than attributing the usage to a blank model. Note that the alias (`mistral-medium-3.5`) is not the wire id: Vibe sends a CLI-routed endpoint name (`mistral-vibe-cli-latest`) that no public pricing dataset carries, so the alias is what pricing resolves against. Workspace labels come from `environment.working_directory`, falling back to `origin_directory`.
+
+### Broca
+
+Location: `$BROCA_STATE_ROOT/run-index.db` (fallback: `~/.local/share/cortexkit/broca/run-index.db`)
+
+Broca appends one immutable metering fact per completed run to the `export_facts` table of its SQLite run index. Tokscale opens the database read-only while Broca is running, including facts still held in the write-ahead log, reads each fact's `segment_json`, and uses `fact_id` as the dedup key, so a fact is counted once however often the database is rescanned.
+
+`input_tokens` is already non-cached input, and `cached_input_tokens` is the cache read. `cache_write_tokens` is the cache write; Broca reports it without a TTL split, so writes are priced at the default cache-write rate. `output_tokens` includes reasoning, so visible output is `output_tokens` minus `reasoning_tokens`. Each fact becomes one message dated by `occurred_at_ms`; facts without a timestamp are skipped. Workspace labels come from the session's `project_root`.
 
 ## Pricing
 
