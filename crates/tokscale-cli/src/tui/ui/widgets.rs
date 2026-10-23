@@ -876,6 +876,7 @@ pub fn get_client_color(client: &str) -> Color {
         "unsloth" => Color::Rgb(88, 204, 2), // #58CC02 Unsloth green
         "muse" => Color::Rgb(0, 100, 224),   // #0064E0 Muse brand blue
         "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
+        "broca" => Color::Rgb(91, 107, 127), // #5B6B7F CortexKit slate
         _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }
