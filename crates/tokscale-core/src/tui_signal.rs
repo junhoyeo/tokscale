@@ -15,12 +15,14 @@ static DEFERRED_STDERR: OnceLock<Mutex<DeferredStderr>> = OnceLock::new();
 struct DeferredStderr {
     messages: Vec<String>,
     codex_scan_warnings: Vec<String>,
+    dsh_scan_warnings: Vec<String>,
 }
 
 impl DeferredStderr {
     fn take(&mut self) -> Vec<String> {
         let mut messages = std::mem::take(&mut self.messages);
         messages.append(&mut self.codex_scan_warnings);
+        messages.append(&mut self.dsh_scan_warnings);
         messages
     }
 }
@@ -73,24 +75,41 @@ pub(crate) fn emit_or_defer_stderr(message: String) {
     }
 }
 
-// Codex source diagnostics describe the latest scan. Keep them separate
-// from event diagnostics so refreshes replace the complete set and a resolved
-// scan clears it.
-fn route_codex_scan_warnings(messages: Vec<String>) -> Vec<String> {
+// Source diagnostics describe the latest scan. Keep them separate from event
+// diagnostics so refreshes replace the complete set and a resolved scan clears
+// it. Each lane owns its own slot, so one lane's scan never clears another's.
+fn route_scan_warnings(
+    messages: Vec<String>,
+    slot: fn(&mut DeferredStderr) -> &mut Vec<String>,
+) -> Vec<String> {
     let mut deferred = deferred_stderr()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if is_tui_active() {
-        deferred.codex_scan_warnings = messages;
+        *slot(&mut deferred) = messages;
         Vec::new()
     } else {
-        deferred.codex_scan_warnings.clear();
+        slot(&mut deferred).clear();
         messages
     }
 }
 
+fn route_codex_scan_warnings(messages: Vec<String>) -> Vec<String> {
+    route_scan_warnings(messages, |deferred| &mut deferred.codex_scan_warnings)
+}
+
+fn route_dsh_scan_warnings(messages: Vec<String>) -> Vec<String> {
+    route_scan_warnings(messages, |deferred| &mut deferred.dsh_scan_warnings)
+}
+
 pub(crate) fn update_codex_scan_warnings(messages: Vec<String>) {
     for message in route_codex_scan_warnings(messages) {
+        eprintln!("{message}");
+    }
+}
+
+pub(crate) fn update_dsh_scan_warnings(messages: Vec<String>) {
+    for message in route_dsh_scan_warnings(messages) {
         eprintln!("{message}");
     }
 }
@@ -223,6 +242,26 @@ mod tests {
         assert!(route_codex_scan_warnings(vec!["resolved source warning".to_string()]).is_empty());
         assert!(route_codex_scan_warnings(Vec::new()).is_empty());
         assert_eq!(transition_tui_active(false), vec!["unrelated cache error"]);
+        assert!(transition_tui_active(false).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn dsh_and_codex_scan_warnings_do_not_replace_each_other() {
+        let _restore = TuiActiveGuard::capture();
+        let _discarded = transition_tui_active(false);
+        assert!(transition_tui_active(true).is_empty());
+        assert!(route_dsh_scan_warnings(vec!["dsh skipped".to_string()]).is_empty());
+        assert!(route_codex_scan_warnings(Vec::new()).is_empty());
+        assert!(route_codex_scan_warnings(vec!["codex skipped".to_string()]).is_empty());
+        assert_eq!(
+            transition_tui_active(false),
+            vec!["codex skipped", "dsh skipped"]
+        );
+
+        assert!(transition_tui_active(true).is_empty());
+        assert!(route_dsh_scan_warnings(vec!["stale dsh".to_string()]).is_empty());
+        assert!(route_dsh_scan_warnings(Vec::new()).is_empty());
         assert!(transition_tui_active(false).is_empty());
     }
 
