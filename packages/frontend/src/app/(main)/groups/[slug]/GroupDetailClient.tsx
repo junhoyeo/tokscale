@@ -48,6 +48,16 @@ interface GroupDetail {
   membership: { role: GroupRole } | null;
 }
 
+interface ManagedInvite {
+  id: string;
+  role: "admin" | "member";
+  invitedUsername: string | null;
+  status: string;
+  maxUses: number;
+  useCount: number;
+  expiresAt: string;
+}
+
 interface GroupDetailClientProps {
   group: GroupDetail;
   currentUser: SessionUser | null;
@@ -155,12 +165,27 @@ const InviteDescription = styled.p`
 
 const InviteForm = styled.div`
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 140px auto;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
 
   @media (max-width: 720px) {
     grid-template-columns: 1fr;
   }
+`;
+
+const InviteField = styled.label`
+  display: grid;
+  gap: 6px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+`;
+
+const InviteList = styled.ul`
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--service-border); }
+  span { overflow-wrap: anywhere; }
 `;
 
 const Input = styled.input`
@@ -495,10 +520,52 @@ export default function GroupDetailClient({
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [maxUses, setMaxUses] = useState("1");
+  const [expiresInDays, setExpiresInDays] = useState("14");
+  const [invites, setInvites] = useState<ManagedInvite[]>([]);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteListError, setInviteListError] = useState<string | null>(null);
+  const [createdInviteId, setCreatedInviteId] = useState<string | null>(null);
   const didMountLeaderboard = useRef(false);
   const leaderboardRequestId = useRef(0);
+  const inviteRequestId = useRef(0);
 
   const canInvite = isAdminRole(group.membership?.role);
+
+  const loadInvites = useCallback(async (signal?: AbortSignal) => {
+    const requestId = ++inviteRequestId.current;
+    try {
+      const response = await fetch(`/api/groups/${group.slug}/invite`, { cache: "no-store", signal });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Failed to load invites");
+      if (!signal?.aborted && requestId === inviteRequestId.current) { setInvites(payload.invites); setInviteListError(null); }
+    } catch (err) {
+      if (!signal?.aborted && requestId === inviteRequestId.current) setInviteListError(err instanceof Error ? err.message : "Failed to load invites");
+    }
+  }, [group.slug]);
+
+  useEffect(() => {
+    if (!canInvite) return;
+    const controller = new AbortController();
+    void loadInvites(controller.signal);
+    return () => controller.abort();
+  }, [canInvite, group.membership?.role, loadInvites]);
+
+  async function revokeInvite(inviteId: string) {
+    if (inviteBusy) return;
+    setInviteBusy(true);
+    setInviteError(null);
+    try {
+      const response = await fetch(`/api/groups/${group.slug}/invite`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ inviteId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Failed to revoke invite");
+      if (createdInviteId === inviteId) { setInviteUrl(null); setCreatedInviteId(null); }
+      await loadInvites();
+    } catch (err) { setInviteError(err instanceof Error ? err.message : "Failed to revoke invite"); }
+    finally { setInviteBusy(false); }
+  }
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -565,8 +632,11 @@ export default function GroupDetailClient({
   }
 
   async function createInvite() {
+    if (inviteBusy) return;
     setInviteError(null);
     setInviteUrl(null);
+    setCopied(false);
+    setInviteBusy(true);
 
     try {
       const response = await fetch(`/api/groups/${group.slug}/invite`, {
@@ -575,6 +645,8 @@ export default function GroupDetailClient({
         body: JSON.stringify({
           role: group.membership?.role === "owner" ? inviteRole : "member",
           invitedUsername: inviteUsername.trim() || null,
+          maxUses: inviteUsername.trim() ? 1 : Number(maxUses),
+          expiresInDays: Number(expiresInDays),
         }),
       });
       const payload = await response.json();
@@ -585,10 +657,12 @@ export default function GroupDetailClient({
 
       const absoluteUrl = `${window.location.origin}${payload.joinUrl}`;
       setInviteUrl(absoluteUrl);
+      setCreatedInviteId(payload.invite.id);
       setInviteUsername("");
+      await loadInvites();
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : "Failed to create invite");
-    }
+    } finally { setInviteBusy(false); }
   }
 
   async function copyInvite() {
@@ -794,19 +868,19 @@ export default function GroupDetailClient({
           <InviteHeading>
             <InviteTitle>Invite members</InviteTitle>
             <InviteDescription>
-              Create a scoped link, optionally restricted to one GitHub username.
+              Choose how many accounts can join. Each account can use a link once, even after leaving. Account-specific links allow one join.
             </InviteDescription>
           </InviteHeading>
           <InviteForm>
-            <Input
+            <InviteField>GitHub username (optional)<Input
               type="text"
               name="invite-username"
               aria-label="Invitee GitHub username"
               value={inviteUsername}
               onChange={(event) => setInviteUsername(event.target.value)}
-              placeholder="GitHub username (optional)"
-            />
-            <Select
+              placeholder="Any account"
+            /></InviteField>
+            <InviteField>Role<Select
               name="invite-role"
               aria-label="Invite role"
               value={group.membership?.role === "owner" ? inviteRole : "member"}
@@ -814,8 +888,13 @@ export default function GroupDetailClient({
             >
               <option value="member">Member</option>
               {group.membership?.role === "owner" && <option value="admin">Admin</option>}
-            </Select>
-            <Button type="button" onClick={createInvite}>Create invite</Button>
+            </Select></InviteField>
+            <InviteField>Maximum joins<Input type="number" min={1} max={1000} step={1}
+              value={inviteUsername.trim() ? "1" : maxUses} disabled={!!inviteUsername.trim()}
+              onChange={(event) => setMaxUses(event.target.value)} /></InviteField>
+            <InviteField>Expires in days<Input type="number" min={1} max={30} step={1}
+              value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)} /></InviteField>
+            <Button type="button" disabled={inviteBusy} onClick={createInvite}>{inviteBusy ? "Saving..." : "Create invite"}</Button>
           </InviteForm>
           {inviteError && <ErrorText role="alert">{inviteError}</ErrorText>}
           {inviteUrl && (
@@ -827,6 +906,20 @@ export default function GroupDetailClient({
               </Button>
             </LinkBox>
           )}
+          <InviteDescription>Save the link now; it cannot be retrieved later. Showing the latest 100 invites.</InviteDescription>
+          <SecondaryButton type="button" onClick={() => void loadInvites()} disabled={inviteBusy}>Refresh invites</SecondaryButton>
+          {inviteListError && <ErrorText role="alert">{inviteListError}</ErrorText>}
+          <InviteList aria-label="Recent invites">
+            {invites.map((invite) => {
+              const expired = new Date(invite.expiresAt).getTime() <= Date.now();
+              const active = invite.status === "pending" && !expired;
+              return <li key={invite.id}>
+                <span>{invite.invitedUsername ? `@${invite.invitedUsername}` : "Any account"} · {invite.role} · {invite.useCount}/{invite.maxUses} joined<br />
+                  {invite.status === "pending" && expired ? "expired" : invite.status} · expires {new Date(invite.expiresAt).toLocaleString()}</span>
+                {active && <SecondaryButton type="button" disabled={inviteBusy} onClick={() => void revokeInvite(invite.id)}>Revoke</SecondaryButton>}
+              </li>;
+            })}
+          </InviteList>
         </InvitePanel>
       )}
       {canInvite && currentUser && group.membership && (

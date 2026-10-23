@@ -18,13 +18,13 @@ function errorResponse(error: GroupInviteError) {
     return NextResponse.json({ error: error.message }, { status: 404 });
   }
 
-  return NextResponse.json({ error: error.message }, { status: error.code === "invalid" ? 400 : 403 });
+  return NextResponse.json({ error: error.message }, { status: error.code === "invalid" ? 400 : error.code === "conflict" ? 409 : 403 });
 }
 
 export async function GET(_request: Request, { params }: RouteParams) {
   try {
     const { token } = await params;
-    return NextResponse.json(await getGroupInvitePreview(token));
+    return NextResponse.json(await getGroupInvitePreview(token), { headers: { "Cache-Control": "no-store, private" } });
   } catch (error) {
     if (error instanceof GroupInviteError) {
       return errorResponse(error);

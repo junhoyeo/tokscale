@@ -14,6 +14,7 @@ interface InvitePreview {
   role: "admin" | "member";
   invitedUsername: string | null;
   expiresAt: string;
+  remainingUses: number;
 }
 
 const Shell = styled.section`
@@ -198,7 +199,7 @@ export default function JoinGroupClient({ token }: { token: string }) {
   return (
     <Shell>
       <Title>Join {preview.group.name}</Title>
-      <Text>You were invited to join this group leaderboard.</Text>
+      <Text>You were invited to join this group leaderboard. Each account can use this link once.</Text>
       <Meta>
         <MetaLabel>Role</MetaLabel>
         <MetaValue>{formatRole(preview.role)}</MetaValue>
@@ -210,6 +211,8 @@ export default function JoinGroupClient({ token }: { token: string }) {
             <MetaValue>@{preview.invitedUsername}</MetaValue>
           </>
         )}
+        <MetaLabel>Joins remaining</MetaLabel>
+        <MetaValue>{preview.remainingUses}</MetaValue>
         <MetaLabel>Expires</MetaLabel>
         <MetaValue>
           {new Date(preview.expiresAt).toLocaleString(undefined, {
