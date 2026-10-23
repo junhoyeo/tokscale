@@ -8234,3 +8234,55 @@ fn test_codex_invalid_max_decoded_bytes_env_warns_and_uses_default() {
         "stderr: {valid_stderr}"
     );
 }
+
+#[test]
+fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    let native_root = tmp.path().join(".proma/sdk-config/sessions/project");
+    let display_root = tmp.path().join(".proma/agent-sessions");
+    fs::create_dir_all(&native_root).unwrap();
+    fs::create_dir_all(&display_root).unwrap();
+    for session in ["parent", "fork"] {
+        let header = serde_json::json!({"type":"session","version":3,"id":session,"timestamp":"2026-05-05T12:00:00Z"});
+        let entry = serde_json::json!({"type":"message","id":"shared-entry","timestamp":"2026-05-05T12:01:00Z",
+            "message":{"role":"assistant","model":"private-proma-model","provider":"proma-channel",
+                "usage":{"input":100,"output":20,"cacheRead":30,"cacheWrite":10,"cost":{"total":0.5}}}});
+        fs::write(
+            native_root.join(format!("{session}.jsonl")),
+            format!("{header}\n{entry}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(display_root.join("ui.jsonl"),serde_json::json!({
+        "type":"assistant","uuid":"ui-entry","session_id":"parent","_createdAt":1777982460000i64,
+        "message":{"model":"private-proma-model","usage":{"input_tokens":100,"output_tokens":20,
+            "cache_read_input_tokens":30,"cache_creation_input_tokens":10}}
+    }).to_string()).unwrap();
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "models",
+                "--json",
+                "--client",
+                "proma",
+                "--no-spinner",
+                "--year",
+                "2026",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass}");
+        assert_eq!(json["totalInput"].as_i64(), Some(100), "{pass}");
+        assert_eq!(json["totalOutput"].as_i64(), Some(20), "{pass}");
+        assert_eq!(json["totalCost"].as_f64(), Some(0.5), "{pass}");
+        assert_eq!(json["entries"][0]["client"].as_str(), Some("proma"));
+        assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(30));
+        assert_eq!(json["entries"][0]["cacheWrite"].as_i64(), Some(10));
+    }
+}

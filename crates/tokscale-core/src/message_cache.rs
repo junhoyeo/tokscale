@@ -1563,6 +1563,7 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1 more: billed operations, as for Pi.
             (ClientId::Omp, 2),
             (ClientId::Senpi, 2),
+            (ClientId::Proma, 0),
             // +3 for Prime Agent's independent history. v1->v2 strips a
             // leading BOM and recovers records containing undecodable
             // bytes; its accounting scan also continues past those records
@@ -2050,6 +2051,7 @@ fn parser_version(client: ClientId) -> u32 {
         | ClientId::Omp
         | ClientId::Senpi
         | ClientId::PrimeAgent
+        | ClientId::Proma
         | ClientId::RooCode
         | ClientId::KiloCode
         | ClientId::Cline
@@ -8460,6 +8462,7 @@ mod tests {
                     (ClientId::Kimchi, 2),
                     (ClientId::Omp, 2),
                     (ClientId::Senpi, 2),
+                    (ClientId::Proma, 0),
                     (ClientId::PrimeAgent, 4),
                 ],
             ),

@@ -3959,6 +3959,30 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::omp::parse_omp_file,
     );
 
+    let proma_outcomes: Vec<_> = scan_result
+        .get(ClientId::Proma)
+        .par_iter()
+        .map(|path| {
+            let mut outcome = load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Proma),
+                path,
+                &source_cache,
+                pricing,
+                sessions::proma::parse_proma_file,
+            );
+            machine_labeler.label_messages(path, &mut outcome.messages);
+            (path.clone(), outcome)
+        })
+        .collect();
+    let mut proma_sources = Vec::new();
+    for (path, outcome) in proma_outcomes {
+        proma_sources.push((path, outcome.messages));
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    all_messages.extend(sessions::proma::reconcile_sources(proma_sources));
+
     let augment_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Augment)
         .par_iter()
@@ -7591,6 +7615,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Omp, omp_count);
     messages.extend(omp_msgs);
 
+    let proma_sources = scan_result
+        .get(ClientId::Proma)
+        .par_iter()
+        .map(|path| (path.clone(), sessions::proma::parse_proma_file(path)))
+        .collect();
+    let proma_messages = sessions::proma::reconcile_sources(proma_sources);
+    counts.set(
+        ClientId::Proma,
+        proma_messages.len().min(i32::MAX as usize) as i32,
+    );
+    messages.extend(proma_messages.iter().map(unified_to_parsed));
+
     let augment_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Augment)
         .par_iter()
@@ -8867,6 +8903,71 @@ mod tests {
         assert_eq!(copilot.len(), 1, "the Copilot snapshots still coalesce");
         assert_eq!(copilot[0].tokens.input, 1000);
         assert_eq!(copilot[0].tokens.output, 20);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn proma_reconciles_current_index_and_live_sources_on_cold_warm_and_direct_scans() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let root = source_home.path().join(".proma");
+        let sdk = root.join("sdk-config/sessions/native.jsonl");
+        let ui = root.join("agent-sessions/ui.jsonl");
+        std::fs::create_dir_all(sdk.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(ui.parent().unwrap()).unwrap();
+        std::fs::write(&sdk, concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"fork\",\"timestamp\":\"2026-05-05T12:00:00Z\"}\n",
+            "{\"type\":\"message\",\"id\":\"entry\",\"timestamp\":\"2026-05-05T12:01:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"mimo-v2.5-pro\",\"usage\":{\"input\":100,\"output\":20,\"cost\":{\"total\":0.5}}}}\n"
+        )).unwrap();
+        std::fs::write(
+            &ui,
+            serde_json::json!({
+                "type":"assistant", "uuid":"copied-ui-entry", "session_id":"deleted-parent",
+                "_createdAt":1778000000123i64,
+                "message":{"model":"mimo-v2.5-pro","usage":{"input_tokens":100,"output_tokens":20}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let clients = ["proma".to_string()];
+        for (phase, expected_count) in [(0, 2), (1, 1), (2, 1), (3, 1)] {
+            if phase == 1 {
+                std::fs::write(root.join("agent-sessions.json"),serde_json::json!({
+                    "sessions":[{"id":"ui", "sdkSessionId":"fork", "piEntryBindings":{"copied-ui-entry":"entry"}}]
+                }).to_string()).unwrap();
+            }
+            if phase == 3 {
+                std::fs::remove_file(&sdk).unwrap();
+            }
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), expected_count, "phase {phase}");
+            assert_eq!(
+                messages.iter().map(|m| m.tokens.total()).sum::<i64>(),
+                120 * expected_count as i64
+            );
+            assert!(messages
+                .iter()
+                .all(|m| !m.dedup_key.as_deref().unwrap().starts_with('{')));
+            let direct = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().into()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(direct.messages.len(), expected_count);
+            assert_eq!(direct.counts.get(ClientId::Proma), expected_count as i32);
+        }
     }
 
     #[test]

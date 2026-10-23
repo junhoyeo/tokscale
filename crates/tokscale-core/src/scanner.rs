@@ -567,6 +567,14 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "proma-session" => {
+                    file_name.ends_with(".jsonl")
+                        && file_type.is_file()
+                        && (Path::new(root)
+                            .file_name()
+                            .is_none_or(|n| n != "agent-sessions")
+                            || path.parent() == Some(Path::new(root)))
+                }
                 "prime-agent-session" => {
                     file_name.ends_with(".jsonl") && file_name != "rlm-subagents.jsonl"
                 }
@@ -2167,6 +2175,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::DevinCli
                 | ClientId::Grok
                 | ClientId::PrimeAgent
+                | ClientId::Proma
         ) {
             continue;
         }
@@ -2189,7 +2198,11 @@ fn scan_all_clients_with_env_strategy_inner(
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_lookups) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
-        if client_id == ClientId::DevinCli {
+        if client_id == ClientId::Proma {
+            for root in crate::sessions::proma::session_roots(&path) {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, root);
+            }
+        } else if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
@@ -2537,6 +2550,16 @@ fn scan_all_clients_with_env_strategy_inner(
                 ClientId::OpenClaw,
                 legacy_path,
             );
+        }
+    }
+
+    if enabled.contains(&ClientId::Proma) {
+        for relative in [".proma", ".proma-dev"] {
+            for path in crate::sessions::proma::session_roots(&PathBuf::from(join_native(
+                home_dir, relative,
+            ))) {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Proma, path);
+            }
         }
     }
 
