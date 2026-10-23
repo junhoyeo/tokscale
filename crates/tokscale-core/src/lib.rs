@@ -1611,6 +1611,38 @@ fn emit_codex_scan_warnings(
     tui_signal::update_codex_scan_warnings(warnings);
 }
 
+fn parse_dsh_source(
+    path: &Path,
+    warnings: &Mutex<Vec<(PathBuf, String)>>,
+) -> sessions::dsh::DshParseResult {
+    let mut parsed = sessions::dsh::parse_dsh_file_with_cache_status(path);
+    if let Some(warning) = parsed.warning.take() {
+        warnings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((path.to_path_buf(), warning));
+    }
+    parsed
+}
+
+fn emit_dsh_scan_warnings(warnings: Mutex<Vec<(PathBuf, String)>>) {
+    let mut warnings = warnings.into_inner().unwrap_or_else(|p| p.into_inner());
+    warnings.sort();
+    warnings.dedup_by(|a, b| a.0 == b.0);
+    let messages = if warnings.is_empty() {
+        Vec::new()
+    } else {
+        let examples = warnings
+            .iter()
+            .take(2)
+            .map(|(path, reason)| format!("{path:?} ({})", reason.escape_debug()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        vec![format!("Warning: {} incomplete DSH transcript(s). Only complete readable records are counted; totals may omit usage. These sources will be retried on the next scan. Examples: {examples}.", warnings.len())]
+    };
+    tui_signal::update_dsh_scan_warnings(messages);
+}
+
 fn parse_all_messages_streaming<S: MessageSink>(
     home_dir: &str,
     clients: &[String],
@@ -4149,21 +4181,45 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    // DeepSeek Harness (DSH) zstd JSONL transcripts. Every `assistant/message`
-    // carries authoritative usage but never a cost, so pricing is the only cost
-    // source — the generic source cache (which reprices unconditionally) is
-    // safe here, same as opencodereview. Forking copies the parent's completed
-    // prefix into the child transcript verbatim, so the lane also needs one
-    // cross-file dedup pass on the per-call `message.id`.
-    parse_cached_lane_deduped(
-        &scan_result,
-        &mut source_cache,
-        pricing,
-        &mut all_messages,
-        &machine_labeler,
-        ClientId::Dsh,
-        sessions::dsh::parse_dsh_file,
-    );
+    // Keep the whole source's accounting state while streaming its records.
+    // Partial input must not become a warm cache that suppresses future retries.
+    let dsh_warnings = Mutex::new(Vec::new());
+    let dsh_identity = message_cache::CacheIdentity::for_client(ClientId::Dsh);
+    let dsh_outcomes: Vec<_> = scan_result
+        .get(ClientId::Dsh)
+        .par_iter()
+        .map(|path| {
+            let mut outcome = load_or_parse_source_with_fingerprint_and_policy(
+                dsh_identity,
+                path,
+                &source_cache,
+                pricing,
+                HistoryRetention::LiveFileOnly,
+                message_cache::SourceFingerprint::check_path_samples_only,
+                |path, _| {
+                    let parsed = parse_dsh_source(path, &dsh_warnings);
+                    (parsed.messages, parsed.cacheable)
+                },
+            );
+            machine_labeler.label_messages(path, &mut outcome.messages);
+            (path, outcome)
+        })
+        .collect();
+    let mut dsh_seen = HashSet::new();
+    for (path, outcome) in dsh_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut dsh_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        } else if outcome.invalidate_cache {
+            source_cache.remove(dsh_identity, path);
+        }
+    }
+    emit_dsh_scan_warnings(dsh_warnings);
 
     // LM Studio local-server logs can retain or repeat the same final response
     // across files. Response IDs provide a stable cross-file dedup key, while
@@ -7716,11 +7772,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.
+    let dsh_warnings = Mutex::new(Vec::new());
     let dsh_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Dsh)
         .par_iter()
-        .flat_map(|path| sessions::dsh::parse_dsh_file(path))
+        .flat_map(|path| parse_dsh_source(path, &dsh_warnings).messages)
         .collect();
+    emit_dsh_scan_warnings(dsh_warnings);
     let mut dsh_seen: HashSet<String> = HashSet::new();
     let dsh_msgs: Vec<ParsedMessage> = dsh_msgs_raw
         .into_iter()
