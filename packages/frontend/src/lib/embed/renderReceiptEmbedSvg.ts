@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { formatCurrency, formatNumber } from "../format";
 import {
@@ -79,7 +80,7 @@ export function renderReceiptEmbedSvg(
     [
       periodLabel === "lifetime"
         ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`
-        : `Rank · ${periodLabel}`,
+        : `Rank · ${periodLabel} UTC`,
       rank,
       getRankColor(data.stats.rank, palette),
     ],
@@ -110,6 +111,7 @@ export function renderReceiptEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="receipt" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale compact ledger for @${escapeXml(data.user.username)}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
   ${cardHeader({

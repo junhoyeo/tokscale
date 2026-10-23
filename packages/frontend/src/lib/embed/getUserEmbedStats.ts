@@ -1,3 +1,4 @@
+import { getProfileDateRange, type ReportDateRange } from "@/lib/reportingPeriods";
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import {
@@ -27,6 +28,7 @@ export interface EmbedContributionDay {
 export interface UserEmbedStats {
   period: EmbedPeriod;
   dateRange: EmbedPeriodDateRange | null;
+  rankDateRange?: ReportDateRange | null;
   user: {
     id: string;
     username: string;
@@ -50,6 +52,7 @@ async function fetchUserEmbedStats(
   username: string,
   sortBy: EmbedSortBy,
   period: EmbedPeriod,
+  now: Date,
 ): Promise<UserEmbedStats | null> {
   const matchingUsers = await db
     .select({
@@ -76,7 +79,8 @@ async function fetchUserEmbedStats(
 
   let rank: number | null = null;
   let rankTotal: number | null = null;
-  const dateRange = getEmbedPeriodDateRange(period, result.latestDate);
+  const dateRange = getEmbedPeriodDateRange(period, result.latestDate, now);
+  const rankDateRange = getProfileDateRange(period, now);
 
   let totalTokens = Number(result.totalTokens) || 0;
   let totalCost = Number(result.totalCost) || 0;
@@ -102,7 +106,7 @@ async function fetchUserEmbedStats(
 
   const rankingValue = sortBy === "cost" ? totalCost : totalTokens;
 
-  if (rankingValue > 0) {
+  if (rankDateRange || rankingValue > 0) {
     // Both the rank and the "of N" denominator count rankable users only, so a
     // hidden account neither holds a position nor inflates the total. A hidden
     // user is absent from the CTE, so this returns no row and rank stays null.
@@ -111,7 +115,7 @@ async function fetchUserEmbedStats(
     // sequential ROW_NUMBER with the same tie-breakers — so two users on the
     // same total read the same distinct positions on both surfaces. The
     // lifetime window keeps shared RANK to match the all-time tab.
-    const rankResult = dateRange
+    const rankResult = rankDateRange
       ? await db.execute<{ rank: number; total: number }>(sql`
           WITH rankable AS (
             SELECT
@@ -123,8 +127,8 @@ async function fetchUserEmbedStats(
             INNER JOIN submissions s ON d.submission_id = s.id
             INNER JOIN users u ON u.id = s.user_id
             WHERE u.leaderboard_hidden = false
-              AND d.date >= ${dateRange.start}
-              AND d.date <= ${dateRange.end}
+              AND d.date >= ${rankDateRange.start}
+              AND d.date <= ${rankDateRange.end}
             GROUP BY s.user_id, u.username
           ),
           ranked AS (
@@ -180,6 +184,7 @@ async function fetchUserEmbedStats(
   return {
     period,
     dateRange,
+    rankDateRange,
     user: {
       id: result.id,
       username: result.username,
@@ -204,12 +209,15 @@ export function getUserEmbedStats(
   period: EmbedPeriod = "all",
 ): Promise<UserEmbedStats | null> {
   const usernameCacheKey = normalizeUsernameCacheKey(username);
+  const now = new Date();
+  const utcDateKey = period === "all" ? "all" : now.toISOString().slice(0, 10);
 
   return unstable_cache(
-    () => fetchUserEmbedStats(username, sortBy, period),
-    [`embed-user:${usernameCacheKey}:${sortBy}:${period}`],
+    () => fetchUserEmbedStats(username, sortBy, period, now),
+    [`embed-user:${usernameCacheKey}:${sortBy}:${period}:${utcDateKey}`],
     {
       tags: [
+        "leaderboard",
         `user:${usernameCacheKey}`,
         `embed-user:${usernameCacheKey}`,
         `embed-user:${usernameCacheKey}:${sortBy}`,

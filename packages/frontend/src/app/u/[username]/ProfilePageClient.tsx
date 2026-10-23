@@ -42,6 +42,7 @@ export interface ProfileData {
     avatarUrl: string | null;
     createdAt: string;
     rank: number | null;
+    rankDateRange?: { start: string; end: string } | null;
   };
   stats: {
     totalTokens: number;
@@ -238,6 +239,7 @@ export default function ProfilePageClient({
       avatarUrl: data.user.avatarUrl,
       createdAt: data.user.createdAt,
       rank: data.user.rank,
+      rankDateRange: data.user.rankDateRange,
     }),
     [data.user],
   );

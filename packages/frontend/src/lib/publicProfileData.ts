@@ -11,7 +11,7 @@ import {
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import { calculateIntensity } from "@/lib/utils";
-import { PROFILE_PERIODS, getCalendarDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
+import { PROFILE_PERIODS, getProfileDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -71,28 +71,6 @@ function getProfileRangeAnchor(
   return latest && latest > utcToday ? latest : utcToday;
 }
 
-/** Resolve a rolling or UTC calendar period; null for lifetime. */
-function getProfilePeriodDateRange(
-  period: ProfilePeriod,
-  end: Date,
-): ProfilePeriodDateRange | null {
-  if (period === "all") {
-    return null;
-  }
-
-  if (period === "this-month" || period === "last-month") {
-    return getCalendarDateRange(period === "this-month" ? "month" : period, end);
-  }
-
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
-
-  return {
-    start: toUtcDateString(start),
-    end: toUtcDateString(end),
-  };
-}
-
 /** Rolling twelve-month window for the lifetime chart, ending on `end`. */
 function getRollingProfileDateRange(end: Date): ProfilePeriodDateRange {
   const targetYear = end.getUTCFullYear() - 1;
@@ -142,10 +120,8 @@ export async function getPublicProfileResponse(
     // today, so a window measured back from UTC today starts on or before the
     // real one — fetching from there is a superset that `scopedContributions`
     // trims to the anchored window.
-    const periodFetchStart = getProfilePeriodDateRange(
-      period,
-      getUtcToday(now),
-    )?.start;
+    const rankingRange = getProfileDateRange(period, now);
+    const periodFetchStart = rankingRange?.start;
 
     // Find user
     const matchingUsers = await db
@@ -278,7 +254,7 @@ export async function getPublicProfileResponse(
     const [latestSubmission] = latestSubmissionResult;
     // Calendar months stay anchored to UTC today; ahead-of-UTC day buckets remain in their month.
     const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
-    const periodRange = getProfilePeriodDateRange(
+    const periodRange = getProfileDateRange(
       period,
       period === "this-month" || period === "last-month" ? now : rangeAnchor,
     );
@@ -287,27 +263,15 @@ export async function getPublicProfileResponse(
       periodRange.end = toUtcDateString(new Date(Math.min(rangeAnchor.getTime(), monthEnd.getTime())));
     }
     const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
-    // Ranks over rankable users only. A hidden user is absent from the CTE
-    // entirely, so this returns no row and the profile reports rank null. The
-    // finite query uses the exact same anchored window as the visible profile
-    // totals and chart.
-    //
-    // The two windows deliberately differ, because the two leaderboard tabs
-    // they have to agree with do: the finite query mirrors the leaderboard's
-    // period path (sequential ROW_NUMBER with the same tie-breakers, so tied
-    // users get distinct positions in the same order), and the lifetime query
-    // mirrors the all-time path (shared RANK, so tied users share a position).
-    //
-    // The scan ranks every rankable user's daily rows, so it is cached for a
-    // minute per user and window instead of running on every request. A user
-    // with no daily rows in the window has no row in the CTE either, so the
-    // scan is skipped outright and the rank reported null directly.
+    // Cross-user comparisons use one UTC window for every viewer. Personal
+    // totals and charts retain their newest submitted local dates separately.
+    // Fetching daily rows from the UTC start above covers both windows.
     const hasPeriodRows =
-      periodRange !== null &&
+      rankingRange !== null &&
       dailyData.some(
-        (day) => day.date >= periodRange.start && day.date <= periodRange.end,
+        (day) => day.date >= rankingRange.start && day.date <= rankingRange.end,
       );
-    const scopedRankResult = periodRange
+    const scopedRankResult = rankingRange
       ? hasPeriodRows
         ? await unstable_cache(
             () =>
@@ -322,8 +286,8 @@ export async function getPublicProfileResponse(
                   INNER JOIN submissions s ON d.submission_id = s.id
                   INNER JOIN users u ON u.id = s.user_id
                   WHERE u.leaderboard_hidden = false
-                    AND d.date >= ${periodRange.start}
-                    AND d.date <= ${periodRange.end}
+                    AND d.date >= ${rankingRange.start}
+                    AND d.date <= ${rankingRange.end}
                   GROUP BY s.user_id, u.username
                 ),
                 ranked AS (
@@ -337,8 +301,8 @@ export async function getPublicProfileResponse(
             [
               "profile-period-rank",
               user.id,
-              periodRange.start,
-              periodRange.end,
+              rankingRange.start,
+              rankingRange.end,
             ],
             {
               revalidate: 60,
@@ -746,6 +710,7 @@ export async function getPublicProfileResponse(
         avatarUrl: user.avatarUrl,
         createdAt: user.createdAt,
         rank,
+        rankDateRange: rankingRange,
       },
       stats: {
         totalTokens: isPeriodFiltered

@@ -1,5 +1,7 @@
 "use client";
 
+import { describeRankingWindow } from "@/lib/reportingPeriods";
+
 import { useMemo, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import styled, { css } from "styled-components";
@@ -27,9 +29,9 @@ export interface ProfileOverviewProps {
 export function getProfileRankLabel(
   period: NonNullable<ProfileOverviewProps["period"]>,
 ): string {
-  if (period === "month") return "30d rank";
-  if (period === "week") return "7d rank";
-  if (period === "this-month" || period === "last-month") return `${PROFILE_PERIOD_LABELS[period]} rank`;
+  if (period === "month") return "30d rank (UTC)";
+  if (period === "week") return "7d rank (UTC)";
+  if (period === "this-month" || period === "last-month") return `${PROFILE_PERIOD_LABELS[period]} rank (UTC)`;
   return "All-time rank";
 }
 
@@ -452,7 +454,7 @@ export function ProfileOverview({
             {(user.rank != null || joined || formattedLastUpdated) && (
               <Metadata aria-label="Profile details">
                 {user.rank != null && (
-                  <RankItem>
+                  <RankItem title={describeRankingWindow(user.rankDateRange)}>
                     <span>{getProfileRankLabel(period)}</span>
                     <strong>#{user.rank.toLocaleString("en-US")}</strong>
                   </RankItem>
