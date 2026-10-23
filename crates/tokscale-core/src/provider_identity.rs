@@ -13,7 +13,13 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "x_ai" | "xai" => "xai",
         "z_ai" | "zai" => "zai",
         "moonshot" | "moonshotai" => "moonshotai",
-        "kimi_for_coding" => "moonshotai",
+        // Kimi's coding subscription is billed by the plan, so usage under it
+        // is valued at Moonshot's own API rates. `kimi-code-plan-global` is the
+        // newer name clients report for the same plan. The China plan
+        // (`kimi-code-plan-cn`) is deliberately absent: a `-cn` endpoint has
+        // its own price sheet (see the note below), so it must not borrow the
+        // global rates.
+        "kimi_for_coding" | "kimi_code_plan_global" => "moonshotai",
         "meta" | "meta_llama" => "meta_llama",
         "azure" | "azure_ai" => "azure_ai",
         "anthropic" | "vertex" | "vertex_ai" => "anthropic",
@@ -384,6 +390,8 @@ mod tests {
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
             ("kimi_for_coding", vec!["moonshotai"]),
+            ("kimi-code-plan-global", vec!["moonshotai"]),
+            ("kimi-code-plan-cn", vec!["kimi_code_plan_cn"]),
         ];
 
         for (raw, expected) in cases {
