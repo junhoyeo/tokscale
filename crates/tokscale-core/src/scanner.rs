@@ -772,6 +772,13 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                // Shelley names its one database after the `-db` flag
+                // (default `shelley.db`). Like the other literal `*.db` arms
+                // this is load-bearing: `scan_directory` has no glob fallback
+                // for a bare filename, so the registered pattern matches
+                // nothing without it — at the default root and under an
+                // `extraScanPaths` directory alike.
+                "shelley.db" => file_name == "shelley.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
                 // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
                 // sidecars SQLite writes alongside the main file.

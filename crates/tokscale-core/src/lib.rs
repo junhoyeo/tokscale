@@ -4149,6 +4149,38 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    // Shelley keeps every conversation in one live SQLite database that its own
+    // server process holds open in WAL mode. A fingerprint over the main file
+    // alone would serve stale results for as long as the writer does not
+    // checkpoint, so this lane fingerprints the `-wal` sidecar through
+    // `SourceFingerprint::check_sqlite_path`, and the parse reports whether the
+    // database was read to the end so a schema it cannot answer is never cached
+    // as an empty result.
+    let shelley_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Shelley)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source_with_fingerprint_and_policy(
+                message_cache::CacheIdentity::for_client(ClientId::Shelley),
+                path,
+                &source_cache,
+                pricing,
+                HistoryRetention::LiveFileOnly,
+                message_cache::SourceFingerprint::check_sqlite_path,
+                |path, _| {
+                    let scan = sessions::shelley::scan_shelley_sqlite(path);
+                    (scan.messages, scan.complete)
+                },
+            )
+        })
+        .collect();
+    for outcome in shelley_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // DeepSeek Harness (DSH) zstd JSONL transcripts. Every `assistant/message`
     // carries authoritative usage but never a cost, so pricing is the only cost
     // source — the generic source cache (which reprices unconditionally) is
@@ -7713,6 +7745,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
+
+    // Shelley: one live SQLite database, one row per Shelley row that carries
+    // usage. The cached lane fingerprints the `-wal` sidecar; this path builds
+    // `ParsedMessage` straight from the parser, like every other SQLite client
+    // here, and its consumers price through `compute_msg_cost`.
+    let shelley_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Shelley)
+        .par_iter()
+        .flat_map(|path| sessions::shelley::parse_shelley_sqlite(path))
+        .map(|msg| unified_to_parsed(&msg))
+        .collect();
+    let shelley_count = summed_parsed_message_count(&shelley_msgs);
+    counts.set(ClientId::Shelley, shelley_count);
+    messages.extend(shelley_msgs);
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.

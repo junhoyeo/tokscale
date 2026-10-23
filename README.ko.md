@@ -119,6 +119,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl` (Windows 포함 전 플랫폼 공통 XDG 경로, `subagent/<uuid>/` 하위 서브에이전트 기록 포함) |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json` (Windows 포함 전 플랫폼 공통 경로, 루트는 `VIBE_HOME`으로 변경 가능) |
+| <img width="48px" src=".github/assets/client-shelley.png" alt="Shelley" /> | [Shelley](https://shelley.dev) | `~/.config/shelley/shelley.db` (경로를 옮겼다면 `scanner.extraScanPaths.shelley`로 지정) |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
 
@@ -192,7 +193,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Shelley 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -427,7 +428,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `shelley`.
 
 > **Breaking change (v4.0.0):** 클라이언트별 boolean 플래그(`--opencode`, `--claude`, `--codex` 등)는 제거되었으며 이제 오류를 발생시킵니다. 대신 정식 `--client`/`-c` 플래그를 사용하세요 — 예: `tokscale --client opencode,claude`.
 
@@ -1126,7 +1127,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Shelley)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1552,6 +1553,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 전 플랫폼 공통 XDG 경로; `session.jsonl`의 `model_completed` 사용량 이벤트와 `subagent/` 기록 파싱 |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 계정별 네이티브 브라우저 사용량; `messages.jsonl`만 읽고 artifacts, memory, passwords 제외. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (기본값: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (기본값: `%USERPROFILE%\.vibe\logs\session\`) | 전 플랫폼 공통 `~/.vibe` 루트; 각 세션 디렉터리의 `meta.json` 누적 `stats`만 읽고 `messages.jsonl` 대화 내용은 읽지 않음 |
+| Shelley | `~/.config/shelley/shelley.db` | — | macOS와 Linux만 지원. 경로를 옮겼다면 `scanner.extraScanPaths.shelley`로 지정 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 일부 도구는 크로스 플랫폼 일관성을 위해 Unix 스타일 경로(`.local/share` 등)를 사용하고, Goose를 포함한 다른 도구는 위 표의 Windows 기본 경로(`%APPDATA%` 등)를 사용합니다.
 
@@ -2075,6 +2077,16 @@ Muse Spark 모델은 업스트림 데이터셋에서 가격이 책정됩니다. 
 Vibe는 세션마다 디렉터리를 만들어 `meta.json`과 `messages.jsonl` 대화 기록을 저장합니다. 사용량은 세션 단위입니다. 대화 기록에는 메시지별 모델, 타임스탬프, 토큰 수가 없으므로 Tokscale은 `meta.json`의 누적 `stats` 블록(`session_prompt_tokens`, `session_completion_tokens`, `session_cached_tokens`)만 읽고 대화 내용은 읽지 않습니다. `session_cached_tokens`는 `session_prompt_tokens`에 더해지는 값이 아니라 그 *부분집합*이므로, 가격 계산 전에 캐시 읽기를 입력 토큰에서 분리합니다 — Vibe 자체 비용 표시와 동일한 계산입니다. 따라서 세션당 메시지 1건이 이 포맷이 지원하는 가장 세밀한 단위이며, `steps`가 메시지 수, `end_time`(ISO-8601, 없으면 `start_time`)이 타임스탬프가 됩니다. 2.0 이전 세션은 같은 필드를 `metadata` 키 아래 담은 플랫 `<prefix>_*.json` 파일로 저장했고, 이 형식도 계속 읽습니다.
 
 모델은 `meta.json`의 `config.active_model`에서 가져오며, 이는 세션에 고정된 별칭입니다. 한 번도 고정하지 않은 세션은 빈 문자열을 기록하는데 이는 Vibe가 문서화한 "설정된 기본값을 따름" 센티널이므로, Tokscale은 빈 모델로 사용량을 집계하지 않고 세션 자체의 `config.models` 테이블, 다음으로 Mistral이 공개한 기본 별칭에서 해석합니다. 별칭(`mistral-medium-3.5`)은 실제 전송 ID가 아닙니다. Vibe는 공개 가격 데이터셋에 없는 CLI 전용 엔드포인트 이름(`mistral-vibe-cli-latest`)을 전송하므로 가격은 별칭으로 조회합니다. 워크스페이스 레이블은 `environment.working_directory`에서, 없으면 `origin_directory`에서 가져옵니다.
+
+### Shelley
+
+위치: `~/.config/shelley/shelley.db` (Shelley의 기본값이 아니라 서비스로 운영할 때 쓰는 일반적인 배치입니다. `-db`의 `shelley.db`는 서버 프로세스의 작업 디렉터리 기준으로 해석되며, 다른 곳에 있는 데이터베이스는 `scanner.extraScanPaths.shelley` 또는 `TOKSCALE_EXTRA_DIRS`로 지정합니다)
+
+Shelley는 모든 대화를 트랜스크립트 트리가 아니라 하나의 SQLite 데이터베이스에 보관하므로, 원본은 다른 프로세스가 기록하는 라이브 WAL 모드 데이터베이스입니다. 파일은 엄격하게 읽기 전용으로 열지만, 그렇게 해도 `-wal` 사이드카는 재생되므로 커밋되었지만 체크포인트되지 않은 턴까지 보입니다. 본체 파일의 수정 시각은 `-wal`보다 몇 분씩 늦을 수 있어 캐시 무효화 판정은 사이드카까지 포함합니다. 이것이 없으면 오래 실행되는 Shelley는 체크포인트할 때까지 계속 낡은 집계를 돌려줍니다.
+
+사용량은 두 개의 JSON 열에 들어 있습니다. `messages.usage_data`에는 직접 호출이, `messages.other_usage_data`에는 간접 호출(슬러그 생성, 컴팩션, LLM을 쓰는 도구)의 JSON 배열이 들어가며 둘 다 집계합니다. 한 메시지가 둘 다 가지면 두 행이 되고, 간접 호출만 있는 메시지도 그 자체로 한 행입니다. 호출이 아닌 행은 제외합니다. Shelley는 그런 행에도 `usage_data`를 모두 0으로 기록하며 `type = 'agent'`인 행도 포함됩니다. 대화 포크로 복제된 행(`forked_from_message_id`)은 원본 행이 같은 호출을 이미 갖고 있으므로 건너뜁니다.
+
+모델은 메시지의 원본 전송 ID를 쓰며 대화 쪽의 가변 `model` 열은 쓰지 않습니다. 비용은 그 행의 모든 호출이 `cost_usd`를 보고한 경우에만 그 값을 쓰고, 아니면 로컬에서 계산합니다. `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`가 `TokenBreakdown`의 네 버킷에 대응하고, 타임스탬프는 `created_at`(호출 종료 시점)보다 `start_time`(요청 시작 시점)을 우선합니다. 대화는 아카이브되었거나 아직 초안이어도 집계하며, 서브에이전트 대화(`user_initiated = 0`)는 `Shelley Subagent`라는 에이전트로 계상하고 부모에 연결합니다.
 
 ## 가격
 

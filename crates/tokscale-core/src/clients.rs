@@ -1124,6 +1124,26 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Shelley: Go coding agent by Bold Software. It keeps every conversation in
+    // one SQLite database instead of a transcript tree, so it is the first
+    // client whose only source is a live, WAL-mode database owned by another
+    // process. Shelley's own `-db` default is `shelley.db` relative to the
+    // server process's working directory, so the registered path is instead the
+    // layout service deployments use — `~/.config/shelley/shelley.db`, where the
+    // exe.dev image's unit points it. Shelley defines no environment variable of
+    // its own, so a database elsewhere is reached through
+    // `scanner.extraScanPaths.shelley` rather than a client-specific variable.
+    Shelley = 58 => {
+        id: "shelley",
+        display: "Shelley",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-shelley.png"),
+        root: PathRoot::Home,
+        relative: ".config/shelley/shelley.db",
+        pattern: "shelley.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1239,7 +1259,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 58);
+        assert_eq!(ClientId::COUNT, 59);
     }
 
     #[test]

@@ -2039,6 +2039,7 @@ fn parser_version(client: ClientId) -> u32 {
         // metadata when a persisted reset/sentinel snapshot removes it.
         ClientId::Muse => 3,
         ClientId::Vibe => 1,
+        ClientId::Shelley => 1,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -8410,6 +8411,11 @@ mod tests {
     #[test]
     fn test_vibe_parser_version() {
         assert_eq!(parser_version(ClientId::Vibe), 1);
+    }
+
+    #[test]
+    fn test_shelley_parser_version() {
+        assert_eq!(parser_version(ClientId::Shelley), 1);
     }
 
     #[test]

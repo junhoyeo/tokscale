@@ -5348,6 +5348,53 @@ mod tests {
         );
     }
 
+    /// A scoped-vendor path is only resolvable while the provider hint agrees
+    /// with the vendor named *in the path*. `accounts/fireworks/models/<id>` is
+    /// a Fireworks reseller path, but `inferred_provider_from_model` reads the
+    /// model *family* out of it (`deepseek`), whose tags do not intersect the
+    /// scoped vendor's `{fireworks_ai}` — so family inference alone silently
+    /// disables provider-scoped pricing for these ids. A parser that keeps the
+    /// raw wire model id must therefore canonicalize the scoped vendor segment
+    /// before falling back to family inference.
+    #[test]
+    fn test_provider_scoped_path_rejects_non_intersecting_family_hint() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "fireworks_ai/accounts/fireworks/models/deepseek-v4-pro".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0000003),
+                output_cost_per_token: Some(0.0000004),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let scoped = lookup
+            .lookup_with_source_and_provider(
+                "accounts/fireworks/models/deepseek-v4-pro",
+                None,
+                Some("fireworks_ai"),
+            )
+            .expect("the scoped vendor hint should resolve the reseller key");
+        assert_eq!(
+            scoped.matched_key,
+            "fireworks_ai/accounts/fireworks/models/deepseek-v4-pro"
+        );
+        assert_eq!(scoped.evidence.kind, ResolutionKind::ProviderScoped);
+
+        assert!(
+            lookup
+                .lookup_with_source_and_provider(
+                    "accounts/fireworks/models/deepseek-v4-pro",
+                    None,
+                    Some("deepseek"),
+                )
+                .is_none(),
+            "family inference must not be able to price a scoped vendor path"
+        );
+    }
+
     // =========================================================================
     // BASELINE / LEGACY TESTS
     // =========================================================================
