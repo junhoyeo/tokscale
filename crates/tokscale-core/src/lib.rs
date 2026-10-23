@@ -13,6 +13,7 @@ pub mod machine_label;
 pub mod mcp;
 mod message_cache;
 pub mod model_alias;
+pub mod network;
 pub mod opencode_model_name;
 mod parser;
 pub mod paths;
@@ -6878,6 +6879,9 @@ where
 }
 
 async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    if network::is_offline() {
+        return pricing::PricingService::get_or_init().await.ok();
+    }
     if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)

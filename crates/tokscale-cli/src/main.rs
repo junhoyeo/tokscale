@@ -35,6 +35,13 @@ struct Cli {
     #[arg(short, long)]
     theme: Option<String>,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Use local data and cached pricing without network requests"
+    )]
+    offline: bool,
+
     #[arg(short, long, default_value = "0")]
     refresh: u64,
 
@@ -198,7 +205,7 @@ enum Commands {
     #[command(about = "Show pricing for a model")]
     Pricing {
         #[arg(
-            help = "Model ID, `list-overrides`, `validate-overrides`, or `explain` (local per-message pricing report)"
+            help = "Model ID, `refresh` (download catalogs), `list-overrides`, `validate-overrides`, or `explain` (local per-message pricing report)"
         )]
         model_id: String,
         #[arg(long, help = "Output as JSON")]
@@ -660,10 +667,30 @@ enum HindsightSubcommand {
     },
 }
 
+// A deny-by-default command boundary prevents auth, submission and helper
+// processes from becoming accidental network side effects of --offline.
+fn validate_offline_command(command: Option<&Commands>) -> Result<()> {
+    match command {
+        None | Some(Commands::Models { .. } | Commands::Monthly { .. }
+            | Commands::Hourly { .. } | Commands::Clients { .. } | Commands::Graph { .. }
+            | Commands::Tui { .. } | Commands::TimeMetrics { .. } | Commands::WarmTuiCache
+            | Commands::Wrapped { .. } | Commands::Config { .. }) => Ok(()),
+        Some(Commands::Pricing { model_id, .. }) if !model_id.eq_ignore_ascii_case("refresh") => Ok(()),
+        Some(Commands::Import { submit: false, .. }) => Ok(()),
+        Some(Commands::Report { no_summarize: true, .. }) => Ok(()),
+        Some(Commands::Report { .. }) => anyhow::bail!("--offline report requires --no-summarize; summarizers may launch network-capable helpers"),
+        _ => anyhow::bail!("This command requires online mode; omit --offline. Offline mode supports local reports, TUI, cached pricing and local imports"),
+    }
+}
+
 fn main() -> Result<()> {
     use std::io::IsTerminal;
 
     let cli = Cli::parse();
+    if cli.offline {
+        validate_offline_command(cli.command.as_ref())?;
+        tokscale_core::network::go_offline();
+    }
     // Install user-configured model aliases once, before any report/graph/TUI
     // path runs, so model-name variants fold consistently across every command.
     // Honors the global `--home` override exactly like scanner settings; an
@@ -1782,7 +1809,9 @@ fn should_auto_sync_cursor_for_local_report(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> bool {
-    home_dir.is_none() && client_filter_includes_cursor(clients)
+    !tokscale_core::network::is_offline()
+        && home_dir.is_none()
+        && client_filter_includes_cursor(clients)
 }
 
 fn auto_sync_amp_for_local_report(
@@ -3877,6 +3906,34 @@ fn run_pricing_lookup(
     use indicatif::ProgressStyle;
     use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
+
+    if model_id.eq_ignore_ascii_case("refresh") {
+        if provider.is_some() || billing_provider.is_some() || strict {
+            anyhow::bail!(
+                "pricing refresh does not accept model query or override-validation options"
+            );
+        }
+        let report = Runtime::new()?
+            .block_on(PricingService::refresh())
+            .map_err(anyhow::Error::msg)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            for source in &report.sources {
+                if let Some(error) = &source.error {
+                    eprintln!("{}: {}", source.source, error);
+                } else {
+                    println!("{}: cached {} models", source.source, source.models);
+                }
+            }
+        }
+        if !report.succeeded() {
+            anyhow::bail!(
+                "Some pricing catalogs could not be refreshed; previous caches were retained"
+            );
+        }
+        return Ok(());
+    }
 
     // An explicitly supplied invalid channel must not become "no filter".
     // Validate before loading configuration or enumerating local usage rows.

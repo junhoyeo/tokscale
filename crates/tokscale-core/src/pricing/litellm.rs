@@ -631,6 +631,10 @@ pub fn load_cached_any_age() -> Option<PricingDataset> {
     cache::load_cache_any_age(CACHE_FILENAME)
 }
 
+pub(super) async fn fetch_uncached() -> Result<PricingDataset, String> {
+    fetch_inner(PRICING_URL, false).await
+}
+
 pub async fn fetch() -> Result<PricingDataset, String> {
     fetch_inner(PRICING_URL, true).await
 }
@@ -650,8 +654,8 @@ pub async fn fetch() -> Result<PricingDataset, String> {
 /// opt-out total and local — the caller that declined the cache cannot write to
 /// it by construction. The override still earns its keep in the regression
 /// test, where it is the only way to observe the write without touching the
-/// developer's real cache. No production caller wants read-bypass-with-write:
-/// `fetch()` is the sole one and it passes `true`.
+/// developer's real cache. The explicit refresh command also disables both here, then persists successful
+/// datasets separately so cache write failures are reported to the caller.
 async fn fetch_inner(url: &str, use_disk_cache: bool) -> Result<PricingDataset, String> {
     if use_disk_cache {
         if let Some(cached) = load_cached() {
