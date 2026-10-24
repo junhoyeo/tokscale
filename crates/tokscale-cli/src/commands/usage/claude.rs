@@ -718,7 +718,7 @@ fn fetch_blocking_in(
             }
         });
 
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let resp = fetch_usage(&client, usage_url, access_token, &cooldown_file).await?;
 
         let metrics = usage_metrics(&resp);

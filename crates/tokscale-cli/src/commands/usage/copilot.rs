@@ -756,7 +756,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let resp = fetch_api(&client, &api_host, &token).await.map_err(|e| {
             if e.to_string().contains("NEEDS_AUTH") {
                 {

@@ -305,7 +305,7 @@ fn fetch_via_api(api_key: &str) -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     let display_text = rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let resp = client
             .post("https://ampcode.com/api/internal")
             .header("Authorization", format!("Bearer {api_key}"))
