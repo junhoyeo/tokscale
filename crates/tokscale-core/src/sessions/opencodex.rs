@@ -1,34 +1,23 @@
-use std::collections::HashMap;
+//! OpenCodex gateway adapter.
+//!
+//! Codex rollouts only know the caller-facing selector, while OpenCodex's
+//! durable usage ledger records the physical attempts. This adapter turns that
+//! ledger into normalized [`GatewayRecord`]s; the shared matcher correlates
+//! them with Codex usage rows and the shared resolver applies the result.
+//!
+//! A row qualifies only when it is a successful Responses-protocol combo
+//! request with a requested selector, a start time, and a recorded duration.
+//! Its physical identity comes from `servedModel`, the model the upstream
+//! response reported serving — never from the wire model a route intended to
+//! send. The row must have exactly one successful reported attempt; anything
+//! else leaves the row reserved with no target, so it blocks attribution
+//! rather than yielding to a weaker candidate.
+
 use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::path::PathBuf;
 
-use once_cell::sync::Lazy;
-
-use super::{CostSource, UnifiedMessage};
-
-const MAX_END_SKEW_MS: u64 = 2_000;
-// Codex can persist its token_count after OpenCodex records the response end.
-// Only allow a wider skew when Codex is late; early events keep the 2s bound.
-const MAX_LATE_END_SKEW_MS: i64 = 30_000;
-const MAX_START_SKEW_MS: u64 = 120_000;
-/// Bounds how far a response's recorded end can sit after its start while a
-/// start-less Codex record is still correlated through its end anchor. Longer
-/// responses keep the virtual selector (fail closed) instead of widening the
-/// scan without limit.
-const MAX_RESPONSE_DURATION_MS: i64 = 600_000;
-/// One hand-edited or truncated ledger line must not allocate without bound.
-const MAX_LEDGER_LINE_BYTES: usize = 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PhysicalTarget {
-    provider: String,
-    model: String,
-    service_tier: Option<String>,
-}
+use crate::model_attribution::matcher::{GatewayIndex, GatewayRecord, MatchPolicy, TokenSignature};
+use crate::model_attribution::{cached_index, read_ledger};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +27,7 @@ struct PersistedUsage {
     total_tokens: Option<i64>,
     cached_input_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
+    cache_write_input_tokens: Option<i64>,
     reasoning_output_tokens: Option<i64>,
     estimated: Option<bool>,
 }
@@ -79,235 +69,64 @@ struct PersistedUsageRow {
     attempts: Option<Vec<PersistedAttempt>>,
 }
 
-#[derive(Debug, Clone)]
-struct IndexedRow {
-    timestamp: i64,
-    duration_ms: i64,
-    /// Resolved once at load: the observed upstream identity behind the row's
-    /// single successful reported attempt. `None` still claims the row so an
-    /// unclear request blocks attribution instead of yielding to another.
-    target: Option<PhysicalTarget>,
-    attempts: Vec<PersistedAttempt>,
-}
-
-/// One possible ledger row; an unknown target still claims that row.
-struct CandidateMatch {
-    row_index: usize,
-    target: Option<PhysicalTarget>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BoundedLine {
-    Eof,
-    Line,
-    Oversized,
-}
-
-/// Read and consume one JSONL row without allocating beyond the row cap. An
-/// oversized row is discarded through its newline and parsing continues.
-fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> io::Result<BoundedLine> {
-    line.clear();
-    let mut consumed = 0usize;
-    let mut oversized = false;
-
-    loop {
-        let (take, has_newline) = {
-            let available = reader.fill_buf()?;
-            if available.is_empty() {
-                return Ok(if consumed == 0 {
-                    BoundedLine::Eof
-                } else if oversized {
-                    BoundedLine::Oversized
-                } else {
-                    BoundedLine::Line
-                });
-            }
-            let take = available
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(available.len(), |index| index + 1);
-            if !oversized {
-                if line.len().saturating_add(take) > MAX_LEDGER_LINE_BYTES {
-                    oversized = true;
-                    line.clear();
-                } else {
-                    line.extend_from_slice(&available[..take]);
-                }
-            }
-            (take, available[take - 1] == b'\n')
-        };
-        reader.consume(take);
-        consumed = consumed.saturating_add(take);
-        if has_newline {
-            if !oversized {
-                if line.last() == Some(&b'\n') {
-                    line.pop();
-                    if line.last() == Some(&b'\r') {
-                        line.pop();
-                    }
-                }
-                return Ok(BoundedLine::Line);
-            }
-            return Ok(BoundedLine::Oversized);
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct AttributionIndex {
-    by_selector: HashMap<String, Vec<IndexedRow>>,
-}
-
-impl AttributionIndex {
-    fn load(path: &Path) -> Option<Self> {
-        let file = File::open(path).ok()?;
-        let mut reader = BufReader::new(file);
-        let mut line = Vec::new();
-        let mut index = Self::default();
-
-        loop {
-            match read_bounded_line(&mut reader, &mut line).ok()? {
-                BoundedLine::Eof => break,
-                BoundedLine::Oversized => continue,
-                BoundedLine::Line => {}
-            }
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-
-            let Ok(row) = serde_json::from_slice::<PersistedUsageRow>(&line) else {
-                continue;
-            };
-            if row.provider.as_deref() != Some("combo")
-                || row.inbound_protocol.as_deref() != Some("responses")
-                || !row
-                    .status
-                    .is_some_and(|status| (200..300).contains(&status))
-            {
-                continue;
-            }
-
-            // The selector is required evidence: a row that cannot name what
-            // Codex asked for cannot correlate anything and is not a claim.
-            let Some(selector) = row
-                .requested_model
-                .as_deref()
-                .filter(|selector| !selector.is_empty())
-            else {
-                continue;
-            };
-            let Some(timestamp) = row.timestamp.filter(|timestamp| *timestamp > 0) else {
-                continue;
-            };
-            let Some(duration_ms) = row.duration_ms.filter(|duration| *duration >= 0) else {
-                continue;
-            };
-
-            let target = resolve_row_target(&row);
-            index
-                .by_selector
-                .entry(selector.to_string())
-                .or_default()
-                .push(IndexedRow {
-                    timestamp,
-                    duration_ms,
-                    target,
-                    attempts: row.attempts.unwrap_or_default(),
-                });
-        }
-
-        for rows in index.by_selector.values_mut() {
-            rows.sort_unstable_by_key(|row| row.timestamp);
-        }
-        Some(index)
+/// Decode one ledger row into normalized evidence, or nothing when the row
+/// cannot describe a successful Responses combo call.
+fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
+    let row: PersistedUsageRow = serde_json::from_slice(line).ok()?;
+    if row.provider.as_deref() != Some("combo")
+        || row.inbound_protocol.as_deref() != Some("responses")
+        || !row
+            .status
+            .is_some_and(|status| (200..300).contains(&status))
+    {
+        return None;
     }
 
-    /// Inspect only the selector's bounded time window. Candidates with
-    /// unknown or conflicting physical targets still reserve their ledger row.
-    fn candidates(&self, message: &UnifiedMessage) -> Vec<CandidateMatch> {
-        if message.timestamp <= 0 {
-            return Vec::new();
-        }
-        let Some(rows) = self.by_selector.get(&message.model_id) else {
-            return Vec::new();
-        };
-        // The ledger row is stamped at its request start, which sits within
-        // the start skew of a timed message and anywhere inside the response
-        // span of a start-less record. End anchors bound both windows.
-        let span = message
-            .duration_ms
-            .filter(|duration| *duration >= 0)
-            .unwrap_or(MAX_RESPONSE_DURATION_MS);
-        let back = if message.duration_ms.is_some_and(|duration| duration >= 0) {
-            MAX_START_SKEW_MS as i64
-        } else {
-            MAX_LATE_END_SKEW_MS + MAX_RESPONSE_DURATION_MS
-        };
-        let first =
-            rows.partition_point(|row| row.timestamp < message.timestamp.saturating_sub(back));
-        let end = rows.partition_point(|row| {
-            row.timestamp
-                <= message
-                    .timestamp
-                    .saturating_add(span)
-                    .saturating_add(MAX_END_SKEW_MS as i64)
-        });
-        let mut candidates = Vec::new();
-
-        for (offset, row) in rows[first..end].iter().enumerate() {
-            if !timing_matches(message, row) {
-                continue;
-            }
-            let matched = row.attempts.iter().any(|attempt| {
-                attempt_eligible(attempt)
-                    && attempt
-                        .usage
-                        .as_ref()
-                        .is_some_and(|usage| usage_matches(message, usage))
-            });
-            if matched {
-                candidates.push(CandidateMatch {
-                    row_index: first + offset,
-                    target: row.target.clone(),
-                });
-            }
-        }
-        candidates
-    }
-}
-
-/// One reported success per row, fully validated against the upstream attempt
-/// contract. The observed `servedModel` — not the wire model a route intended
-/// to send — is the only accepted physical identity, and only when exactly one
-/// successful reported attempt can claim it. Anything else leaves the row
-/// reserved with no target.
-fn resolve_row_target(row: &PersistedUsageRow) -> Option<PhysicalTarget> {
-    let served_model = row
-        .served_model
+    // The selector is required evidence: a row that cannot name what Codex
+    // asked for cannot correlate anything and is not a claim.
+    let selector = row
+        .requested_model
         .as_deref()
-        .filter(|model| !model.is_empty())?;
-    let eligible: Vec<&PersistedAttempt> = row
-        .attempts
-        .as_ref()?
+        .filter(|selector| !selector.is_empty())?
+        .to_string();
+    let timestamp = row.timestamp.filter(|timestamp| *timestamp > 0)?;
+    let duration_ms = row.duration_ms.filter(|duration| *duration >= 0)?;
+
+    let attempts = row.attempts.unwrap_or_default();
+    let eligible: Vec<&PersistedAttempt> = attempts
         .iter()
         .filter(|attempt| attempt_eligible(attempt))
         .collect();
-    if eligible.len() != 1 {
-        return None;
-    }
-    let attempt = eligible[0];
-    let provider = attempt.provider.as_deref()?;
-    let service_tier = attempt
-        .tier_outcome
-        .as_ref()
+    let signatures = eligible
+        .iter()
+        .filter_map(|attempt| attempt.usage.as_ref().and_then(usage_signature))
+        .collect::<Vec<_>>();
+    let unique_target = (eligible.len() == 1).then(|| &eligible[0]);
+    let provider = unique_target.and_then(|attempt| attempt.provider.clone());
+    let served_model = row.served_model.clone().filter(|model| !model.is_empty());
+    let service_tier = unique_target
+        .and_then(|attempt| attempt.tier_outcome.as_ref())
         .filter(|tier| tier.response_tier_authoritative == Some(true))
-        .and_then(|tier| tier.response_service_tier.as_deref())
-        .filter(|tier| !tier.is_empty())
-        .map(str::to_string);
-    Some(PhysicalTarget {
-        provider: provider.to_string(),
-        model: served_model.to_string(),
+        .and_then(|tier| tier.response_service_tier.clone())
+        .filter(|tier| !tier.is_empty());
+
+    Some(GatewayRecord {
+        adapter: "opencodex",
+        selector: Some(selector),
+        selected_model: None,
+        served_model,
+        provider,
         service_tier,
+        session_ids: Vec::new(),
+        stable_ids: Vec::new(),
+        start_ms: timestamp,
+        duration_ms: Some(duration_ms),
+        signatures,
+        completed: true,
+        target_eligible: eligible.len() == 1,
+        // A confirmed selection is not enough here: the row must report the
+        // model the response named.
+        allow_selected_fallback: false,
     })
 }
 
@@ -342,114 +161,39 @@ fn attempt_eligible(attempt: &PersistedAttempt) -> bool {
             .is_some_and(|usage| usage.estimated != Some(true))
 }
 
-fn timing_matches(message: &UnifiedMessage, row: &IndexedRow) -> bool {
-    if message.timestamp <= 0 {
-        return false;
+/// The attempt's counters as a comparable signature.
+///
+/// OpenCodex reports OpenAI-shaped usage: `inputTokens` includes the cache
+/// read, and `outputTokens` includes reasoning. A row whose own counters
+/// contradict each other is malformed evidence, not a candidate. Counter
+/// buckets the row omits stay unreported (`None`), so a ledger written before
+/// a counter existed still matches a client that reports it.
+fn usage_signature(usage: &PersistedUsage) -> Option<TokenSignature> {
+    let input = usage.input_tokens?;
+    let output = usage.output_tokens?;
+    if input < 0 || output < 0 {
+        return None;
     }
-
-    let row_end = row.timestamp.saturating_add(row.duration_ms);
-    let message_end =
-        if let Some(duration_ms) = message.duration_ms.filter(|duration| *duration >= 0) {
-            if message.timestamp.abs_diff(row.timestamp) > MAX_START_SKEW_MS {
-                return false;
-            }
-            message.timestamp.saturating_add(duration_ms)
-        } else {
-            // An unconfirmed `token_usage_record` is timestamped when the response
-            // lands, so its time anchors on the request's end, not its start.
-            message.timestamp
-        };
-    (-(MAX_END_SKEW_MS as i64)..=MAX_LATE_END_SKEW_MS)
-        .contains(&message_end.saturating_sub(row_end))
-}
-
-fn usage_matches(message: &UnifiedMessage, usage: &PersistedUsage) -> bool {
-    let raw_input = message
-        .tokens
-        .input
-        .saturating_add(message.tokens.cache_read);
-    let raw_output = message
-        .tokens
-        .output
-        .saturating_add(message.tokens.reasoning);
-
-    if usage.input_tokens != Some(raw_input) || usage.output_tokens != Some(raw_output) {
-        return false;
+    if usage
+        .total_tokens
+        .is_some_and(|total| total != input.saturating_add(output))
+    {
+        return None;
     }
-
-    if let Some(total_tokens) = usage.total_tokens {
-        if total_tokens != raw_input.saturating_add(raw_output) {
-            return false;
-        }
-    }
-
     // Both spellings of the cache counter are observations; disagreeing
     // counters mean malformed evidence, not a choice between them.
-    if usage
-        .cached_input_tokens
-        .is_some_and(|cached| cached != message.tokens.cache_read)
-        || usage
-            .cache_read_input_tokens
-            .is_some_and(|cached| cached != message.tokens.cache_read)
-    {
-        return false;
-    }
-
-    if usage
-        .reasoning_output_tokens
-        .is_some_and(|reasoning| reasoning != message.tokens.reasoning)
-    {
-        return false;
-    }
-
-    true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LedgerFingerprint {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedAttributionIndex {
-    fingerprint: LedgerFingerprint,
-    index: Arc<AttributionIndex>,
-}
-
-static ATTRIBUTION_CACHE: Lazy<Mutex<HashMap<PathBuf, CachedAttributionIndex>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-fn load_attribution_index(path: &Path) -> Option<Arc<AttributionIndex>> {
-    let metadata = fs::metadata(path).ok()?;
-    let fingerprint = LedgerFingerprint {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
+    let cache_read = match (usage.cached_input_tokens, usage.cache_read_input_tokens) {
+        (Some(left), Some(right)) if left != right => return None,
+        (left, right) => left.or(right),
     };
-
-    {
-        let cache = ATTRIBUTION_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(cached) = cache.get(path) {
-            if cached.fingerprint == fingerprint {
-                return Some(Arc::clone(&cached.index));
-            }
-        }
-    }
-
-    let index = Arc::new(AttributionIndex::load(path)?);
-    let mut cache = ATTRIBUTION_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.insert(
-        path.to_path_buf(),
-        CachedAttributionIndex {
-            fingerprint,
-            index: Arc::clone(&index),
-        },
-    );
-    Some(index)
+    let cache_write = usage.cache_write_input_tokens.filter(|value| *value >= 0);
+    Some(TokenSignature::from_wire_totals(
+        input,
+        output,
+        cache_read.filter(|value| *value >= 0),
+        cache_write,
+        usage.reasoning_output_tokens.filter(|value| *value >= 0),
+    ))
 }
 
 fn expand_opencodex_home(raw: &OsStr, home_dir: &str) -> PathBuf {
@@ -474,100 +218,81 @@ fn usage_log_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
         .join("usage.jsonl")
 }
 
-/// Replace Codex's virtual OpenCodex combo selector with the physical target
-/// that actually served the request.
-///
-/// Codex rollouts only know the caller-facing selector. OpenCodex's durable
-/// usage ledger records the physical attempts. We correlate the two without
-/// adding any new usage rows, so total tokens remain unchanged and the overlay
-/// cannot double count Codex traffic.
-///
-/// Matching deliberately fails closed. A row must be a successful Responses
-/// combo request, the requested selector must match exactly, a successful
-/// reported attempt must match Codex's token signature, and request timing
-/// must line up. Each ledger row may serve at most one Codex usage row.
-/// Ambiguity retains the original selector.
-pub(crate) fn attribute_codex_messages(
+/// Load OpenCodex's ledger as a gateway index. Returns `None` when no ledger
+/// exists or it holds no usable row.
+pub(crate) fn load_index(
     home_dir: &str,
     use_env_roots: bool,
-    messages: &mut [UnifiedMessage],
-) -> usize {
-    if !messages.iter().any(|message| message.client == "codex") {
-        return 0;
-    }
-
+) -> Option<std::sync::Arc<GatewayIndex>> {
     let path = usage_log_path(home_dir, use_env_roots);
-    let Some(index) = load_attribution_index(&path) else {
-        return 0;
-    };
-
-    // Collect every feasible ledger claim before changing any model IDs.
-    // Even a message with multiple candidates prevents another message from
-    // claiming its shared row: uncertain attribution must fail closed.
-    let candidates: Vec<Vec<CandidateMatch>> = messages
-        .iter()
-        .map(|message| {
-            if message.client == "codex" {
-                index.candidates(message)
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-    let mut claims: HashMap<(String, usize), usize> = HashMap::new();
-    for (message, matches) in messages.iter().zip(&candidates) {
-        for candidate in matches {
-            *claims
-                .entry((message.model_id.clone(), candidate.row_index))
-                .or_default() += 1;
-        }
-    }
-
-    let mut attributed = 0;
-    for (message, matches) in messages.iter_mut().zip(candidates) {
-        if message.client != "codex" || matches.len() != 1 {
-            continue;
-        }
-        let candidate = matches.into_iter().next().unwrap();
-        if claims.get(&(message.model_id.clone(), candidate.row_index)) != Some(&1) {
-            continue;
-        }
-        let Some(target) = candidate.target else {
-            continue;
-        };
-        let tier_changed = target
-            .service_tier
-            .as_ref()
-            .is_some_and(|tier| message.service_tier.as_ref() != Some(tier));
-        if message.provider_id == target.provider
-            && message.model_id == target.model
-            && !tier_changed
-        {
-            continue;
-        }
-
-        message.provider_id = target.provider;
-        message.model_id = target.model;
-        if let Some(service_tier) = target.service_tier {
-            message.service_tier = Some(service_tier);
-        }
-        // Estimates for the virtual selector cannot price the physical model.
-        message.cost = 0.0;
-        message.cost_source = CostSource::Unknown;
-        attributed += 1;
-    }
-
-    attributed
+    cached_index(&path, MatchPolicy::opencodex(), |path| {
+        read_ledger(path, decode_row).ok()
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::sessions::CostSource;
+    use crate::sessions::UnifiedMessage;
     use crate::TokenBreakdown;
     use serde_json::{json, Value};
     use serial_test::serial;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
+
+    /// Drive the production attribution path over a slice of parsed rows.
+    ///
+    /// The adapter itself only decodes evidence; correlation, conflict
+    /// detection, and application are shared with every other gateway, so a
+    /// regression test here exercises the same code a real scan runs.
+    fn attribute_codex_messages(
+        home_dir: &str,
+        use_env_roots: bool,
+        messages: &mut [UnifiedMessage],
+    ) -> usize {
+        crate::model_attribution::clear_index_cache();
+        let Some(overlay) = crate::model_attribution::GatewayOverlay::load(home_dir, use_env_roots)
+        else {
+            return 0;
+        };
+
+        let mut slots: Vec<Option<UnifiedMessage>> = messages
+            .iter()
+            .map(|message| Some(message.clone()))
+            .collect();
+        for slot in &mut slots {
+            let is_codex = slot
+                .as_ref()
+                .is_some_and(|message| message.client == "codex");
+            if !is_codex {
+                continue;
+            }
+            let message = slot.take().expect("checked above");
+            overlay
+                .park(message, None)
+                .expect("a fixture never approaches the park cap");
+        }
+
+        let mut released = Vec::new();
+        overlay.finish(None, |message, _| released.push(message));
+        let mut released = released.into_iter();
+        let mut attributed = 0;
+        for slot in &mut slots {
+            if slot.is_none() {
+                *slot = Some(released.next().expect("every parked row is released"));
+            }
+        }
+
+        for (message, slot) in messages.iter_mut().zip(slots) {
+            let next = slot.expect("every fixture row is accounted for");
+            if next.model_id != message.model_id {
+                attributed += 1;
+            }
+            *message = next;
+        }
+        attributed
+    }
 
     const SELECTOR: &str = "combo/test-fixture";
     const START: i64 = 1_700_000_000_000;
@@ -591,8 +316,8 @@ mod tests {
                 output: 20,
                 cache_read: 400,
                 cache_write: 0,
-                cache_write_1h: 0,
                 reasoning: 5,
+                ..Default::default()
             },
             7.0,
         );
@@ -685,7 +410,10 @@ mod tests {
         let dir = home.path().join(".opencodex");
         fs::create_dir_all(&dir).unwrap();
         let mut body = b"{ definitely-not-json }\n".to_vec();
-        body.extend(std::iter::repeat_n(b'x', MAX_LEDGER_LINE_BYTES + 1));
+        body.extend(std::iter::repeat_n(
+            b'x',
+            crate::model_attribution::MAX_LEDGER_LINE_BYTES + 1,
+        ));
         body.push(b'\n');
         body.extend(serde_json::to_vec(&row(200, 200, Some(usage()))).unwrap());
         body.push(b'\n');

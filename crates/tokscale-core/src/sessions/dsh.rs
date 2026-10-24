@@ -392,10 +392,16 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 let message_timestamp = duration_ms.and(started_at).unwrap_or(timestamp);
 
                 let source = value.pointer("/data/message/source");
+                let reported_model = response_reported_model(source);
                 let model_id = served_model(source)
                     .or(fallback_model.as_deref())
                     .unwrap_or("unknown")
                     .to_string();
+                let model_evidence = if reported_model.is_some() {
+                    crate::sessions::ModelEvidence::ResponseReported
+                } else {
+                    crate::sessions::ModelEvidence::Requested
+                };
                 let record_provider = source
                     .and_then(|source| source.get("provider"))
                     .and_then(non_empty_string);
@@ -541,6 +547,7 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                     },
                 );
                 message.is_turn_start = is_turn_start;
+                message.model_evidence = model_evidence;
                 if let Some(cwd) = &workspace_key {
                     if let Some(key) = super::normalize_workspace_key(cwd) {
                         let label = workspace_label_from_key(&key);
@@ -669,14 +676,23 @@ fn stream_settled_ms(value: &Value) -> Option<i64> {
 /// and the model slot in the dedup key. Rows without it keep the configured
 /// source model, then the caller falls back to the latest request header.
 fn served_model(source: Option<&Value>) -> Option<&str> {
+    response_reported_model(source).or_else(|| {
+        source
+            .and_then(|value| value.get("model"))
+            .and_then(non_empty_string)
+    })
+}
+
+/// The model the provider reported serving, when the transcript recorded one.
+///
+/// This is the strongest evidence a client transcript can carry: it names the
+/// weights that answered, not the request the user configured. Parsers record
+/// [`crate::sessions::ModelEvidence::ResponseReported`] only when this returns
+/// a value, so a row's tier reflects the field that was actually read.
+fn response_reported_model(source: Option<&Value>) -> Option<&str> {
     source
         .and_then(|value| value.pointer("/replayState/response/responseModel"))
         .and_then(non_empty_string)
-        .or_else(|| {
-            source
-                .and_then(|value| value.get("model"))
-                .and_then(non_empty_string)
-        })
 }
 
 fn non_empty_string(value: &Value) -> Option<&str> {
@@ -1050,6 +1066,11 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "glm-5.3");
+        assert_eq!(
+            messages[0].model_evidence,
+            crate::sessions::ModelEvidence::ResponseReported,
+            "the parser read replayState.response.responseModel"
+        );
         assert_eq!(messages[0].provider_id, "zai-coding-cn");
         assert_eq!(
             messages[0].billing_identity,

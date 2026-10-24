@@ -68,7 +68,11 @@ use std::path::Path;
 
 /// Bump when parsing behavior for Antigravity generation databases changes.
 /// The CLI and IDE extension clients share this parser and cache generation.
-pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 1;
+// v1->v2: generation rows now record whether field `#19` (the provider's
+// response model) supplied the identity, so attribution can tell native
+// response evidence from a recovered display label. Agy databases are
+// append-only and keep their fingerprint, so only this bump replaces v1 rows.
+pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 2;
 
 /// Parse an Antigravity CLI conversation database.
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
@@ -370,8 +374,16 @@ fn parse_gen_metadata(
     let provider_id = provider_identity::inferred_provider_from_model(&model_id)
         .unwrap_or("antigravity")
         .to_string();
+    // Field `#19` is the provider's own response model. When it (not a
+    // recovered display label or routing fallback) supplied the identity, the
+    // row carries response evidence rather than the requested model.
+    let model_evidence = if response_model.is_some_and(|m| !is_antigravity_routing_label(m)) {
+        crate::sessions::ModelEvidence::ResponseReported
+    } else {
+        crate::sessions::ModelEvidence::Requested
+    };
 
-    Some(UnifiedMessage::new_with_dedup(
+    let mut message = UnifiedMessage::new_with_dedup(
         ctx.client,
         model_id,
         provider_id,
@@ -387,7 +399,9 @@ fn parse_gen_metadata(
         },
         0.0,
         dedup_key,
-    ))
+    );
+    message.model_evidence = model_evidence;
+    Some(message)
 }
 
 /// Session-level facts read from the single `trajectory_metadata_blob` row.
@@ -1286,6 +1300,11 @@ mod tests {
 
         assert_eq!(message.model_id, "gemini-3.5-flash-high");
         assert_eq!(message.provider_id, "google");
+        assert_eq!(
+            message.model_evidence,
+            crate::sessions::ModelEvidence::ResponseReported,
+            "field #19 is the provider's response model"
+        );
     }
 
     // The generic routing label is preserved verbatim. It is not a concrete
@@ -1299,6 +1318,11 @@ mod tests {
 
         assert_eq!(message.model_id, "gemini-default");
         assert_eq!(message.provider_id, "google");
+        assert_eq!(
+            message.model_evidence,
+            crate::sessions::ModelEvidence::Requested,
+            "a routing label names no physical model, so it is not response evidence"
+        );
     }
 
     // Antigravity CLI omits `#19` on some continuation turns while still

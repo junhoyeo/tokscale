@@ -7938,6 +7938,73 @@ fn create_billing_explain_fixture() -> TempDir {
     tmp
 }
 
+/// `pricing explain` must report the same identity and price the scan applied,
+/// including the attribution block that explains a gateway resolution.
+#[test]
+fn billing_explain_reports_attribution_from_the_same_scan() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+
+    let project = tmp.path().join(".claude/projects/gateway-explain");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-explain.jsonl"),
+        r#"{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","message":{"id":"msg-explain","model":"glm-5.2","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+    )
+    .unwrap();
+    let ledger = tmp.path().join(".config/magpie");
+    fs::create_dir_all(&ledger).unwrap();
+    fs::write(
+        ledger.join("usage.jsonl"),
+        serde_json::json!({
+            "t": "2024-12-01T10:00:00.000Z",
+            "provider": "zai-coding-cn",
+            "model": "glm-5.2",
+            "req": "glm-5.2",
+            "served": "glm-5.3",
+            "in": 100,
+            "out": 50,
+            "cache_read": 0,
+            "cache_write": 0,
+            "ms": 3_000,
+            "status": 200,
+            "session": "session-explain",
+            "tier_served": "priority"
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(30))
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    let analysis: Vec<_> = rows
+        .iter()
+        .filter(|row| row["client"] == "claude")
+        .collect();
+    assert_eq!(analysis.len(), 1, "the library transcript is one row");
+
+    let row = analysis[0];
+    assert_eq!(row["modelId"], "glm-5.3");
+    assert_eq!(row["providerId"], "zai-coding-cn");
+    assert_eq!(row["rawModelId"], "glm-5.3");
+    let attribution = &row["attribution"];
+    assert_eq!(attribution["outcome"], "resolved");
+    assert_eq!(attribution["requestedModel"], "glm-5.2");
+    assert_eq!(attribution["servedModel"], "glm-5.3");
+    assert_eq!(attribution["servedProvider"], "zai-coding-cn");
+    assert_eq!(attribution["adapter"], "magpie");
+    assert_eq!(attribution["evidence"], "response-reported");
+}
+
 #[test]
 fn billing_explain_rejects_unknown_and_blank_filters() {
     let tmp = create_billing_explain_fixture();

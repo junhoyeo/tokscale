@@ -52,21 +52,29 @@ use std::time::UNIX_EPOCH;
 // 11: Billing identity, raw pricing model and estimate state are retained on
 // messages. Entries record a one-time identity backfill generation; released
 // v10/v11 MiCode wire migrations preserve all messages and row provenance.
-const CACHE_FORMAT_VERSION: u32 = 11;
+// 12: UnifiedMessage gained `model_evidence`, recording whether a parser read a
+// native response-reported model. Version-11 shards have a wire migration
+// below, so no cached message is discarded. MiMo and Claude envelopes move
+// with it.
+const CACHE_FORMAT_VERSION: u32 = 12;
 // MiMo stores exact per-row provenance beside each cached entry. Its envelope
 // version moves too because those entries also serialize UnifiedMessage, so
 // it stays one ahead of CACHE_FORMAT_VERSION as both move together.
-const MICODE_CACHE_FORMAT_VERSION: u32 = 12;
+const MICODE_CACHE_FORMAT_VERSION: u32 = 13;
 const LEGACY_CACHE_FORMAT_VERSION_V10: u32 = 10;
+const LEGACY_CACHE_FORMAT_VERSION_V11: u32 = 11;
+const LEGACY_MICODE_CACHE_FORMAT_VERSION_V12: u32 = 12;
 const LEGACY_MICODE_CACHE_FORMAT_VERSION_V11: u32 = 11;
 // Claude checkpoints are a namespace-specific sidecar. Billing changes the
 // entry layout and persisted parser state, so retain a decoder for main's v12.
-const CLAUDE_CACHE_FORMAT_VERSION: u32 = 13;
+const CLAUDE_CACHE_FORMAT_VERSION: u32 = 14;
+const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13: u32 = 13;
 const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V12: u32 = 12;
 // Billing fields change CachedSourceEntry's positional layout. Copilot's
 // released v12 envelope must reparse rather than decode it as the new layout.
 // Copilot is dispatched by namespace before the other envelope versions.
-const COPILOT_CACHE_FORMAT_VERSION: u32 = 13;
+const COPILOT_CACHE_FORMAT_VERSION: u32 = 14;
+const LEGACY_COPILOT_CACHE_FORMAT_VERSION_V13: u32 = 13;
 const _: () = assert!(COPILOT_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION);
 const _: () = assert!(MICODE_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION);
 const _: () = assert!(CLAUDE_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION);
@@ -1906,7 +1914,9 @@ fn parser_version(client: ClientId) -> u32 {
         // route from scalar responseDetails fields. Reparse cached rows so
         // local usage stays authoritatively free, metered providers receive
         // estimates, and unknown/custom routes remain explicitly unpriced.
-        ClientId::Unsloth => 2,
+        // v2->v3: the same read now records that the model came from the
+        // provider's response field, so warm rows carry real evidence tier.
+        ClientId::Unsloth => 3,
         // v2 added per-turn usage records. v3 adds the canonical unified log,
         // non-overlapping output/cache/reasoning buckets, and session metadata.
         // v4 scopes unified model attribution by PID generation and exact child
@@ -1983,7 +1993,12 @@ fn parser_version(client: ClientId) -> u32 {
         // and would keep the client reporting zero throughput until reparsed.
         // v8->v9: request-header fallback billing evidence is labelled
         // session-level while per-message source evidence remains record-level.
-        ClientId::Dsh => 9,
+        // v9->v10: a row now records whether `model_id` came from
+        // `replayState.response.responseModel` (response-reported) or from the
+        // configured request model (requested). The transcript bytes of a
+        // finished session do not change, so only this bump replaces v9 rows
+        // that carried no evidence tier.
+        ClientId::Dsh => 10,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -2300,6 +2315,7 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             dedup_key: message.dedup_key,
             session_title: message.session_title,
             parent_session_id: None,
+            model_evidence: crate::sessions::ModelEvidence::Requested,
             copilot_context: None,
             machine_label: None,
             is_turn_start: message.is_turn_start,
@@ -2390,6 +2406,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             dedup_key: message.dedup_key,
             session_title: message.session_title,
             parent_session_id: None,
+            model_evidence: crate::sessions::ModelEvidence::Requested,
             copilot_context: None,
             machine_label: None,
             is_turn_start: message.is_turn_start,
@@ -2478,6 +2495,7 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
             dedup_key: message.dedup_key,
             session_title: message.session_title,
             parent_session_id: None,
+            model_evidence: crate::sessions::ModelEvidence::Requested,
             copilot_context: None,
             machine_label: None,
             is_turn_start: message.is_turn_start,
@@ -2639,6 +2657,7 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
             parent_session_id: message.parent_session_id,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
+            model_evidence: crate::sessions::ModelEvidence::Requested,
             copilot_context: None,
             machine_label: None,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
@@ -2671,6 +2690,138 @@ impl From<UnifiedMessage> for LegacyUnifiedMessageV10 {
             parent_session_id: message.parent_session_id,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
+        }
+    }
+}
+
+/// UnifiedMessage wire layout used by cache format 11, before
+/// `model_evidence` was added. Bincode is positional, so a message with the
+/// new field decoded as this layout (or the reverse) would shift every field
+/// after it. Migrated rows keep every identity and pricing field; the tier is
+/// `Requested` because the older cache never recorded one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyUnifiedMessageV11 {
+    client: String,
+    model_id: String,
+    provider_id: String,
+    session_id: String,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+    timestamp: i64,
+    date: String,
+    tokens: crate::TokenBreakdown,
+    cost: f64,
+    cost_source: crate::sessions::CostSource,
+    service_tier: Option<String>,
+    duration_ms: Option<i64>,
+    message_count: i32,
+    agent: Option<String>,
+    dedup_key: Option<String>,
+    session_title: Option<String>,
+    parent_session_id: Option<String>,
+    is_turn_start: bool,
+    model_attribution_conflicted: bool,
+    billing_identity: crate::sessions::BillingIdentity,
+    pricing_model_id: Option<String>,
+    estimate_status: crate::sessions::EstimateStatus,
+}
+
+impl From<LegacyUnifiedMessageV11> for UnifiedMessage {
+    fn from(message: LegacyUnifiedMessageV11) -> Self {
+        Self {
+            client: message.client,
+            model_id: message.model_id,
+            provider_id: message.provider_id,
+            session_id: message.session_id,
+            workspace_key: message.workspace_key,
+            workspace_label: message.workspace_label,
+            timestamp: message.timestamp,
+            date: message.date,
+            tokens: message.tokens,
+            cost: message.cost,
+            cost_source: message.cost_source,
+            service_tier: message.service_tier,
+            duration_ms: message.duration_ms,
+            message_count: message.message_count,
+            agent: message.agent,
+            dedup_key: message.dedup_key,
+            session_title: message.session_title,
+            parent_session_id: message.parent_session_id,
+            is_turn_start: message.is_turn_start,
+            model_attribution_conflicted: message.model_attribution_conflicted,
+            model_evidence: crate::sessions::ModelEvidence::Requested,
+            billing_identity: message.billing_identity,
+            pricing_model_id: message.pricing_model_id,
+            estimate_status: message.estimate_status,
+            copilot_context: None,
+            machine_label: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<UnifiedMessage> for LegacyUnifiedMessageV11 {
+    fn from(message: UnifiedMessage) -> Self {
+        Self {
+            client: message.client,
+            model_id: message.model_id,
+            provider_id: message.provider_id,
+            session_id: message.session_id,
+            workspace_key: message.workspace_key,
+            workspace_label: message.workspace_label,
+            timestamp: message.timestamp,
+            date: message.date,
+            tokens: message.tokens,
+            cost: message.cost,
+            cost_source: message.cost_source,
+            service_tier: message.service_tier,
+            duration_ms: message.duration_ms,
+            message_count: message.message_count,
+            agent: message.agent,
+            dedup_key: message.dedup_key,
+            session_title: message.session_title,
+            parent_session_id: message.parent_session_id,
+            is_turn_start: message.is_turn_start,
+            model_attribution_conflicted: message.model_attribution_conflicted,
+            billing_identity: message.billing_identity,
+            pricing_model_id: message.pricing_model_id,
+            estimate_status: message.estimate_status,
+        }
+    }
+}
+
+/// Released version-11 entry layout, before `model_evidence` joined the
+/// message. Codex state is current: parser 19 already wrote this state under
+/// format 11, and the envelope's parser identity has already been checked.
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyCachedSourceEntryV11 {
+    parser_namespace: String,
+    parser_version: u32,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    messages: Vec<LegacyUnifiedMessageV11>,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+    prime_accounting: Option<crate::sessions::prime_agent::PrimeFileAccounting>,
+    opencode_incremental: Option<crate::sessions::opencode_schema::OpenCodeIncrementalState>,
+    billing_identity_generation: u32,
+}
+
+impl From<LegacyCachedSourceEntryV11> for CachedSourceEntry {
+    fn from(entry: LegacyCachedSourceEntryV11) -> Self {
+        Self {
+            parser_namespace: entry.parser_namespace,
+            parser_version: entry.parser_version,
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            messages: entry.messages.into_iter().map(Into::into).collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices,
+            codex_incremental: entry.codex_incremental,
+            prime_accounting: entry.prime_accounting,
+            opencode_incremental: entry.opencode_incremental,
+            micode_metadata: None,
+            billing_identity_generation: entry.billing_identity_generation,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2713,7 +2864,8 @@ impl<C: Into<CodexIncrementalCache>> From<LegacyCachedSourceEntryV10<C>> for Cac
 
 // Main 68a4324's Claude-v12 checkpoint layout. All values are deliberately
 // discarded after decoding; never substitute the live checkpoint type here.
-#[derive(Debug, Deserialize)]
+// `Serialize` exists only so tests can write the exact released bytes.
+#[derive(Debug, Deserialize, Serialize)]
 struct LegacyClaudeCheckpointV12 {
     _client_id: String,
     _metadata_provider_hint: Option<String>,
@@ -2726,7 +2878,7 @@ struct LegacyClaudeCheckpointV12 {
     _state: LegacyClaudeParseStateV12,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct LegacyClaudeParseStateV12 {
     _session_id: String,
     _provider_confidences: Vec<u8>,
@@ -4034,6 +4186,11 @@ fn read_shard_with_limit_unchecked(
     }
 
     if identity.namespace == ClientId::Copilot.as_str() {
+        if envelope.format_version == LEGACY_COPILOT_CACHE_FORMAT_VERSION_V13 {
+            // Billing and model-evidence fields changed the entry layout.
+            // Reparse rather than decode v13 bytes as the current layout.
+            return ShardReadStatus::Stale;
+        }
         if envelope.format_version != COPILOT_CACHE_FORMAT_VERSION {
             return ShardReadStatus::Stale;
         }
@@ -4117,6 +4274,32 @@ fn read_shard_with_limit_unchecked(
         };
     }
 
+    if envelope.format_version == LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13
+        && identity.namespace == ClientId::Claude.as_str()
+    {
+        type LegacyClaudeWireEntryV13 = (
+            LegacyCachedSourceEntryV11,
+            Option<LegacyClaudeCheckpointV12>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyClaudeWireEntryV13>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries
+                    .into_iter()
+                    .map(|(entry, _)| {
+                        // The old message digest lacks `model_evidence`, and the
+                        // old parser state has no matching memory. Keep every
+                        // retained row but rebuild the checkpoint.
+                        CachedSourceEntry::from(entry)
+                    })
+                    .collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
     if envelope.format_version == LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V12
         && identity.namespace == ClientId::Claude.as_str()
     {
@@ -4136,6 +4319,36 @@ fn read_shard_with_limit_unchecked(
                         // parser state has no billing-conflict memory. Keep every
                         // retained row but rebuild the checkpoint during backfill.
                         CachedSourceEntry::from(entry)
+                    })
+                    .collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
+    if envelope.format_version == LEGACY_MICODE_CACHE_FORMAT_VERSION_V12
+        && identity.namespace == ClientId::MiMoCode.as_str()
+    {
+        type LegacyMiMoWireEntryV12 = (
+            LegacyCachedSourceEntryV11,
+            Option<Vec<crate::sessions::micode::MiMoRowMetadata>>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<LegacyMiMoWireEntryV12>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Migrated(
+                entries
+                    .into_iter()
+                    .map(|(legacy_entry, metadata)| {
+                        let mut entry = CachedSourceEntry::from(legacy_entry);
+                        entry.micode_metadata = metadata;
+                        if !entry.has_valid_micode_metadata() {
+                            // Keep messages available but make the MiMo loader
+                            // rebuild an invalid or absent provenance pair.
+                            entry.micode_metadata = None;
+                        }
+                        entry
                     })
                     .collect(),
             ),
@@ -4294,6 +4507,20 @@ fn read_shard_with_limit_unchecked(
             match bincode::options()
                 .with_limit(max_shard_bytes)
                 .deserialize::<Vec<LegacyCachedSourceEntryV9>>(&envelope.payload)
+            {
+                Ok(entries) => ShardReadStatus::Migrated(
+                    entries.into_iter().map(CachedSourceEntry::from).collect(),
+                ),
+                Err(error) => ShardReadStatus::Invalid(error.to_string()),
+            }
+        }
+        LEGACY_CACHE_FORMAT_VERSION_V11 => {
+            // `model_evidence` joined the message layout. Every entry migrates
+            // with its identity, pricing and provenance intact; only the tier
+            // becomes `Requested`, which is what v11 rows actually knew.
+            match bincode::options()
+                .with_limit(max_shard_bytes)
+                .deserialize::<Vec<LegacyCachedSourceEntryV11>>(&envelope.payload)
             {
                 Ok(entries) => ShardReadStatus::Migrated(
                     entries.into_iter().map(CachedSourceEntry::from).collect(),
@@ -4907,7 +5134,14 @@ mod tests {
             .unwrap()
             .remove("billing_identity_generation");
         for message in actual["messages"].as_array_mut().unwrap() {
-            for field in ["billing_identity", "pricing_model_id", "estimate_status"] {
+            for field in [
+                "billing_identity",
+                "pricing_model_id",
+                "estimate_status",
+                // This entry predates the model-evidence tier, so the frozen
+                // producer output cannot carry it.
+                "model_evidence",
+            ] {
                 message.as_object_mut().unwrap().remove(field);
             }
         }
@@ -6728,7 +6962,7 @@ mod tests {
 
     #[test]
     fn test_unsloth_provider_parser_version_invalidates_v1_entries() {
-        assert_eq!(parser_version(ClientId::Unsloth), 2);
+        assert_eq!(parser_version(ClientId::Unsloth), 3);
     }
 
     #[test]
@@ -7577,7 +7811,7 @@ mod tests {
         // DSH transcript files are append-only, so v6 cache entries keep the
         // old cross-session attempt keys unless the source is reparsed. The
         // v7->v8 bump retires rows parsed without generation durations.
-        assert_eq!(parser_version(ClientId::Dsh), 9);
+        assert_eq!(parser_version(ClientId::Dsh), 10);
     }
 
     /// Names the row that only a served cache can put in a report. No DSH
@@ -7846,7 +8080,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
             parser_version: 7,
@@ -7899,7 +8133,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].timestamp, 1786669450000);
         assert_eq!(cached.messages[0].duration_ms, Some(1_200));
@@ -7922,7 +8156,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         // Pinned at 3, the identity 4.14.0 cached under, rather than derived
         // from the running version: this is the row that release left on disk.
         let stale_identity = CacheIdentity {
@@ -7983,7 +8217,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].model_id, "glm-5.3");
 
@@ -8010,7 +8244,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         // Pinned at 4, the identity 4.15.0 cached under; see the v3 test.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
@@ -8070,7 +8304,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages, scanned);
 
         let warm = scan_dsh(source_home.path());
@@ -9800,27 +10034,61 @@ mod tests {
         assert!(matches!(read_shard(&shard, other), ShardReadStatus::Stale));
     }
 
+    /// Claude shards written before the namespace envelope carried the entry
+    /// alone at the generic format version. Version 11 is the last such
+    /// layout, and it must migrate rather than be mistaken for the current
+    /// generic format or for the Claude-v12 tuple layout.
     #[test]
-    fn test_claude_shard_at_the_shared_format_still_loads_without_a_checkpoint() {
+    fn test_claude_shard_at_the_shared_format_migrates_without_a_checkpoint() {
         let dir = TempDir::new().unwrap();
         let identity = CacheIdentity::for_client(ClientId::Claude);
         let entry = claude_checkpointed_entry(&dir);
-        // The layout every Claude shard had before the envelope: the entries
-        // alone, at CACHE_FORMAT_VERSION.
+        let legacy = LegacyCachedSourceEntryV11 {
+            parser_namespace: entry.parser_namespace.clone(),
+            parser_version: entry.parser_version,
+            path: entry.path.clone(),
+            fingerprint: entry.fingerprint.clone(),
+            messages: entry
+                .messages
+                .clone()
+                .into_iter()
+                .map(LegacyUnifiedMessageV11::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices.clone(),
+            codex_incremental: entry.codex_incremental.clone(),
+            prime_accounting: entry.prime_accounting.clone(),
+            opencode_incremental: entry.opencode_incremental.clone(),
+            billing_identity_generation: entry.billing_identity_generation,
+        };
         let envelope = CachedShardEnvelope {
-            format_version: CACHE_FORMAT_VERSION,
+            format_version: LEGACY_CACHE_FORMAT_VERSION_V11,
             parser_namespace: identity.namespace.to_string(),
             parser_version: identity.parser_version,
-            payload: bincode::options().serialize(&vec![&entry]).unwrap(),
+            payload: bincode::options().serialize(&vec![legacy]).unwrap(),
         };
         let shard = dir.path().join("shard.bin");
         std::fs::write(&shard, bincode::options().serialize(&envelope).unwrap()).unwrap();
 
-        let ShardReadStatus::Loaded(entries) = read_shard(&shard, identity) else {
-            panic!("a format-{CACHE_FORMAT_VERSION} Claude shard still loads");
+        let ShardReadStatus::Migrated(entries) = read_shard(&shard, identity) else {
+            panic!("a format-{LEGACY_CACHE_FORMAT_VERSION_V11} Claude shard must migrate");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].messages, entry.messages);
+        assert_eq!(
+            entries[0].messages.len(),
+            entry.messages.len(),
+            "retained compacted history survives the model-evidence layout change"
+        );
+        for (migrated, original) in entries[0].messages.iter().zip(&entry.messages) {
+            assert_eq!(migrated.model_id, original.model_id);
+            assert_eq!(migrated.provider_id, original.provider_id);
+            assert_eq!(migrated.tokens, original.tokens);
+            assert_eq!(migrated.billing_identity, original.billing_identity);
+            assert_eq!(
+                migrated.model_evidence,
+                crate::sessions::ModelEvidence::Requested,
+                "the older layout never recorded a tier"
+            );
+        }
         assert_eq!(
             entries[0].fallback_timestamp_indices, entry.fallback_timestamp_indices,
             "retention provenance survives"
@@ -10090,6 +10358,141 @@ mod tests {
                     && entries[0].messages[0].tokens.cache_write_1h == 0
                     && entries[0].has_valid_micode_metadata()
         ));
+    }
+
+    /// The released MiMo v12 envelope (billing fields, no model evidence)
+    /// must migrate with its messages and row provenance intact. Losing this
+    /// branch would discard every warm MiMo entry on upgrade, and its rows
+    /// cannot be rebuilt from a database that has since been rotated.
+    #[test]
+    fn test_old_micode_v11_layout_migrates_messages_and_row_provenance() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::MiMoCode);
+        let entry = test_entry(identity, source.path(), "legacy");
+        let legacy = LegacyCachedSourceEntryV11 {
+            parser_namespace: entry.parser_namespace.clone(),
+            parser_version: entry.parser_version,
+            path: entry.path.clone(),
+            fingerprint: entry.fingerprint.clone(),
+            messages: entry
+                .messages
+                .clone()
+                .into_iter()
+                .map(LegacyUnifiedMessageV11::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices.clone(),
+            codex_incremental: entry.codex_incremental.clone(),
+            prime_accounting: entry.prime_accounting.clone(),
+            opencode_incremental: entry.opencode_incremental.clone(),
+            billing_identity_generation: entry.billing_identity_generation,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_MICODE_CACHE_FORMAT_VERSION_V12,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(legacy, Some(vec![micode_test_metadata()]))])
+                .unwrap(),
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.bin");
+        std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
+        let ShardReadStatus::Migrated(entries) = read_shard(&path, identity) else {
+            panic!("a released MiMo v12 envelope must migrate");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].messages[0].session_id, "legacy");
+        assert_eq!(
+            entries[0].messages[0].model_evidence,
+            crate::sessions::ModelEvidence::Requested
+        );
+        assert_eq!(
+            entries[0].messages[0].billing_identity,
+            entry.messages[0].billing_identity
+        );
+        assert_eq!(
+            entries[0].messages[0].estimate_status,
+            entry.messages[0].estimate_status
+        );
+        assert_eq!(
+            entries[0].messages[0].pricing_model_id,
+            entry.messages[0].pricing_model_id
+        );
+        assert!(entries[0].has_valid_micode_metadata());
+    }
+
+    /// The released Claude v13 envelope must migrate too: a compaction may have
+    /// removed turns the cache is the only copy of.
+    #[test]
+    fn test_old_claude_v13_layout_migrates_retained_history() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = test_entry(identity, source.path(), "retained");
+        let legacy = LegacyCachedSourceEntryV11 {
+            parser_namespace: entry.parser_namespace.clone(),
+            parser_version: entry.parser_version,
+            path: entry.path.clone(),
+            fingerprint: entry.fingerprint.clone(),
+            messages: entry
+                .messages
+                .clone()
+                .into_iter()
+                .map(LegacyUnifiedMessageV11::from)
+                .collect(),
+            fallback_timestamp_indices: entry.fallback_timestamp_indices.clone(),
+            codex_incremental: entry.codex_incremental.clone(),
+            prime_accounting: entry.prime_accounting.clone(),
+            opencode_incremental: entry.opencode_incremental.clone(),
+            billing_identity_generation: entry.billing_identity_generation,
+        };
+        let envelope = CachedShardEnvelope {
+            format_version: LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(
+                    legacy,
+                    Some(LegacyClaudeCheckpointV12 {
+                        _client_id: "claude".into(),
+                        _metadata_provider_hint: None,
+                        _consumed_offset: 0,
+                        _prefix_sha256: [0; 32],
+                        _message_count: 1,
+                        _message_digest: [0; 32],
+                        _integrity_digest: [0; 32],
+                        _unclamped_cache_write_1h: Vec::new(),
+                        _state: LegacyClaudeParseStateV12 {
+                            _session_id: "retained".into(),
+                            _provider_confidences: Vec::new(),
+                            _split_reporting_dedup_keys: HashSet::new(),
+                            _pending_turn_start: false,
+                            _pending_request_start_timestamp_ms: None,
+                            _last_model: None,
+                            _last_provider_hint: None,
+                            _suppress_unattributed_tool_results: false,
+                            _sidechain_agent: None,
+                            _sidechain_detected: false,
+                        },
+                    }),
+                )])
+                .unwrap(),
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.bin");
+        std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
+        let ShardReadStatus::Migrated(entries) = read_shard(&path, identity) else {
+            panic!("a released Claude v13 envelope must migrate");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].messages.len(), entry.messages.len());
+        assert_eq!(
+            entries[0].fallback_timestamp_indices,
+            entry.fallback_timestamp_indices
+        );
+        assert!(
+            entries[0].claude_checkpoint.is_none(),
+            "the old checkpoint cannot vouch for the new message layout"
+        );
     }
 
     #[test]
