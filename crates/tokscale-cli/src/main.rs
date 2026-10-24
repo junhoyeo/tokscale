@@ -1934,7 +1934,8 @@ fn emit_client_diagnostics(diagnostics: &[client_diagnostics::ClientDiagnostic])
     for diagnostic in diagnostics {
         eprintln!(
             "{}",
-            format!("  {}: {}", diagnostic.severity, diagnostic.message).yellow()
+            format!("  {}: {}", diagnostic.severity, diagnostic.message)
+                .color(client_diagnostics::severity_color(diagnostic.severity))
         );
         eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
     }
@@ -4995,7 +4996,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
             for diagnostic in &row.diagnostics {
                 println!(
                     "  {}",
-                    format!("{}: {}", diagnostic.severity, diagnostic.message).yellow()
+                    format!("{}: {}", diagnostic.severity, diagnostic.message)
+                        .color(client_diagnostics::severity_color(diagnostic.severity))
                 );
                 println!("  {}", diagnostic.help.bright_black());
             }

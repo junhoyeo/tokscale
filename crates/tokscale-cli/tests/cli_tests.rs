@@ -5657,6 +5657,14 @@ fn test_clients_json_explains_cloud_coverage_without_running_providers() {
         assert_eq!(diagnostic["severity"], "info");
         assert!(diagnostic.get("paths").is_none());
     }
+    let gemini = clients
+        .iter()
+        .find(|row| row["client"] == "gemini")
+        .unwrap();
+    assert!(
+        gemini.get("diagnostics").is_none(),
+        "clients without diagnostics must omit the key: {gemini}"
+    );
     assert!(json.get("codexAccountActivity").is_none());
 }
 

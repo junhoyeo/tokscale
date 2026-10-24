@@ -25,6 +25,16 @@ const CLAUDE_DESKTOP_MESSAGE: &str =
 
 const CLAUDE_DESKTOP_HELP: &str = "All model IDs with recorded usage are accepted. Undated cumulative balances appear only in all-time local totals; truncated trees, counter resets and chats without usage can leave gaps. Dates and tokens are never inferred from chat text.";
 
+/// Terminal color for a diagnostic headline. Informational notes are dimmed so
+/// static coverage notes do not look like setup problems; warnings and any
+/// other severity stay yellow.
+pub fn severity_color(severity: &str) -> colored::Color {
+    match severity {
+        "info" => colored::Color::BrightBlack,
+        _ => colored::Color::Yellow,
+    }
+}
+
 pub fn diagnostics_for_clients_row(
     client: ClientId,
     home_dir: &Path,
@@ -156,4 +166,18 @@ fn diagnostic_paths(claude_root: &Path, desktop_paths: Vec<PathBuf>) -> Vec<Diag
     }
 
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::severity_color;
+    use colored::Color;
+
+    #[test]
+    fn severity_color_dims_info_and_keeps_warning_yellow() {
+        assert_eq!(severity_color("info"), Color::BrightBlack);
+        assert_eq!(severity_color("warning"), Color::Yellow);
+        assert_eq!(severity_color("error"), Color::Yellow);
+        assert_eq!(severity_color(""), Color::Yellow);
+    }
 }
