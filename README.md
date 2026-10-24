@@ -856,7 +856,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Requires Codex CLI installed and authenticated. |
 | `gemini` | `gemini -p` | Requires Gemini CLI installed and authenticated. |
 | `kiro` | `kiro --non-interactive` | Requires Kiro CLI installed and authenticated. |
-| `minimax` | (HTTP API) | OpenAI-compatible chat-completions API, so no CLI is needed. Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN`. Defaults to `MiniMax-M3` on the global endpoint (`https://api.minimax.io/v1`); set `MINIMAX_API_REGION=cn` to use `https://api.minimaxi.com/v1`, and `MINIMAX_MODEL` to select another model (for example `MiniMax-M2.7`). |
+| `minimax` | (HTTP API) | OpenAI-compatible chat-completions API, so no CLI is needed. Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN`. Defaults to `MiniMax-M3.1-Flash` on the global endpoint (`https://api.minimax.io/v1`); set `MINIMAX_API_REGION=cn` to use `https://api.minimaxi.com/v1`, and `MINIMAX_MODEL` to select another model (for example `MiniMax-M3`). |
 
 **How it works:**
 

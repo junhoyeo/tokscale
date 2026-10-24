@@ -926,8 +926,8 @@ fn run_cli_summarizer(
 
 /// Default MiniMax text model used by the `minimax` summarizer backend. Callers
 /// may override it with the `MINIMAX_MODEL` environment variable (for example to
-/// select the smaller `MiniMax-M2.7` model).
-const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3";
+/// select `MiniMax-M3`). Explicit custom and legacy model IDs remain supported.
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3.1-Flash";
 
 /// Global (international) OpenAI-compatible base URL for MiniMax inference.
 const MINIMAX_GLOBAL_BASE_URL: &str = "https://api.minimax.io/v1";
@@ -943,6 +943,28 @@ fn minimax_base_url(region: Option<&str>) -> &'static str {
         Some("cn") | Some("cn_zh") | Some("china") | Some("zh") => MINIMAX_CN_BASE_URL,
         _ => MINIMAX_GLOBAL_BASE_URL,
     }
+}
+
+/// Build the request shared by the report backend and its transport tests.
+fn minimax_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    region: Option<&str>,
+    model: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!("{}/chat/completions", minimax_base_url(region)))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": model.unwrap_or(MINIMAX_DEFAULT_MODEL),
+            "stream": false,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt },
+            ],
+        }))
 }
 
 /// Extract the assistant message text from an OpenAI-compatible chat-completion
@@ -971,9 +993,7 @@ fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
         .or_else(|_| std::env::var("MINIMAX_API_TOKEN"))
         .map_err(|_| anyhow::anyhow!("No MINIMAX_API_KEY or MINIMAX_API_TOKEN set."))?;
     let region = std::env::var("MINIMAX_API_REGION").ok();
-    let base_url = minimax_base_url(region.as_deref());
-    let model =
-        std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| MINIMAX_DEFAULT_MODEL.to_string());
+    let model = std::env::var("MINIMAX_MODEL").ok();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -982,21 +1002,16 @@ fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
         let client = tokscale_core::http::client_builder()
             .timeout(BACKEND_TIMEOUT)
             .build()?;
-        let body = serde_json::json!({
-            "model": model,
-            "stream": false,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt },
-            ],
-        });
-        let resp = client
-            .post(format!("{base_url}/chat/completions"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let resp = minimax_request(
+            &client,
+            &api_key,
+            region.as_deref(),
+            model.as_deref(),
+            system_prompt,
+            user_prompt,
+        )
+        .send()
+        .await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -2541,6 +2556,104 @@ mod tests {
         let entry = entry_for(inner_id, "gemini");
         let content = extract_content_for_session(&entry, &index);
         assert_eq!(content.first_user_message.as_deref(), Some("Hello Gemini"));
+    }
+
+    #[test]
+    fn minimax_requests_default_to_flash_and_preserve_explicit_models() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (region, host) in [(None, "api.minimax.io"), (Some("cn"), "api.minimaxi.com")] {
+            for model in [
+                None,
+                Some("MiniMax-M3.1-Flash"),
+                Some("MiniMax-M3"),
+                Some("MiniMax-M2.7"),
+                Some("custom-model"),
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = std::thread::spawn(move || {
+                    let (stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    assert_eq!(line, "POST /v1/chat/completions HTTP/1.1\r\n");
+                    let mut length = None;
+                    loop {
+                        line.clear();
+                        reader.read_line(&mut line).unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        assert!(!line.is_empty(), "request headers ended prematurely");
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = Some(value.trim().parse::<usize>().unwrap());
+                        }
+                    }
+                    let mut body = vec![0; length.unwrap()];
+                    reader.read_exact(&mut body).unwrap();
+                    let response = r#"{"choices":[{"message":{"content":"[]"}}]}"#;
+                    write!(
+                        reader.get_mut(),
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response.len(),
+                        response
+                    )
+                    .unwrap();
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                });
+                runtime.block_on(async {
+                    let client = tokscale_core::http::client_builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(5))
+                        .build()
+                        .unwrap();
+                    let mut request = minimax_request(
+                        &client,
+                        "test-only",
+                        region,
+                        model,
+                        "Summarize sessions",
+                        "[{\"title\":\"A session\"}]",
+                    )
+                    .build()
+                    .unwrap();
+                    assert_eq!(
+                        request.url().as_str(),
+                        format!("https://{host}/v1/chat/completions")
+                    );
+                    assert_eq!(request.headers()["authorization"], "Bearer test-only");
+                    assert_eq!(request.headers()["content-type"], "application/json");
+                    // Only reroute the destination; send the production request body over HTTP.
+                    *request.url_mut() = format!("http://{address}/v1/chat/completions")
+                        .parse()
+                        .unwrap();
+                    let response = client.execute(request).await.unwrap().text().await.unwrap();
+                    assert_eq!(parse_openai_content(&response).as_deref(), Some("[]"));
+                });
+                assert_eq!(
+                    server.join().unwrap(),
+                    serde_json::json!({
+                        "model": model.unwrap_or("MiniMax-M3.1-Flash"),
+                        "stream": false,
+                        "messages": [
+                            { "role": "system", "content": "Summarize sessions" },
+                            { "role": "user", "content": "[{\"title\":\"A session\"}]" },
+                        ],
+                    })
+                );
+            }
+        }
     }
 
     #[test]
