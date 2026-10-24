@@ -74,6 +74,28 @@ impl TerminalColorMode {
     }
 }
 
+/// Guess whether the terminal has a light background from `COLORFGBG`
+/// (`"fg;bg"` or `"fg;default;bg"`, set by rxvt, Konsole, iTerm2 and others).
+/// Background indices 7 and 9-15 are the light ANSI colors; anything else,
+/// or a missing/unparseable value, keeps the dark default.
+pub(crate) fn terminal_prefers_light<I, K, V>(env: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    env.into_iter()
+        .find(|(key, _)| key.as_ref() == "COLORFGBG")
+        .and_then(|(_, value)| {
+            value
+                .as_ref()
+                .rsplit(';')
+                .next()
+                .and_then(|bg| bg.trim().parse::<u8>().ok())
+        })
+        .is_some_and(|bg| bg == 7 || (9..=15).contains(&bg))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
     Green,
@@ -466,6 +488,10 @@ impl Theme {
         theme
     }
 
+    pub(crate) fn is_light(&self) -> bool {
+        self.light
+    }
+
     pub(crate) fn color(&self, color: Color) -> Color {
         match (self.color_mode, color) {
             (TerminalColorMode::Compatible, Color::Rgb(r, g, b)) => compatible_rgb(r, g, b),
@@ -710,6 +736,22 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn colorfgbg_light_background_is_detected() {
+        assert!(terminal_prefers_light(env(&[("COLORFGBG", "0;15")])));
+        assert!(terminal_prefers_light(env(&[("COLORFGBG", "0;7")])));
+        assert!(terminal_prefers_light(env(&[(
+            "COLORFGBG",
+            "0;default;15"
+        )])));
+
+        assert!(!terminal_prefers_light(env(&[("COLORFGBG", "15;0")])));
+        assert!(!terminal_prefers_light(env(&[("COLORFGBG", "7;8")])));
+        assert!(!terminal_prefers_light(env(&[("COLORFGBG", "15;default")])));
+        assert!(!terminal_prefers_light(env(&[("COLORFGBG", "")])));
+        assert!(!terminal_prefers_light(env(&[("TERM", "xterm-256color")])));
     }
 
     #[test]

@@ -26,7 +26,7 @@ use super::glyph_probe::AmbientWidth;
 use super::i18n::{format_count, tr, MessageKey, TuiLanguage};
 use super::privacy::looks_like_email;
 use super::settings::Settings;
-use super::themes::{Theme, ThemeName};
+use super::themes::{terminal_prefers_light, Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack, LanguagePickerDialog};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 use crate::ui_glyphs::Glyphs;
@@ -453,7 +453,10 @@ impl App {
                 .parse()
                 .unwrap_or_else(|_| settings.theme_name())
         };
-        let theme = if settings.tui_light_mode {
+        let light_mode = settings
+            .tui_light_mode
+            .unwrap_or_else(|| terminal_prefers_light(std::env::vars()));
+        let theme = if light_mode {
             Theme::from_name_for_current_terminal_light(theme_name)
         } else {
             Theme::from_name_for_current_terminal(theme_name)
@@ -2063,7 +2066,7 @@ impl App {
 
     fn cycle_theme(&mut self) {
         let new_theme = self.theme.name.next();
-        self.theme = if self.settings.tui_light_mode {
+        self.theme = if self.theme.is_light() {
             Theme::from_name_for_current_terminal_light(new_theme)
         } else {
             Theme::from_name_for_current_terminal(new_theme)
@@ -2081,20 +2084,16 @@ impl App {
         }
     }
     fn toggle_light_mode(&mut self) {
-        self.settings.tui_light_mode = !self.settings.tui_light_mode;
-        let light_mode = self.settings.tui_light_mode;
+        let light_mode = !self.theme.is_light();
+        self.settings.tui_light_mode = Some(light_mode);
         let name = self.theme.name;
-        self.theme = if self.settings.tui_light_mode {
+        self.theme = if light_mode {
             Theme::from_name_for_current_terminal_light(name)
         } else {
             Theme::from_name_for_current_terminal(name)
         };
         self.dialog_stack.set_theme(self.theme.clone());
-        let state = if self.settings.tui_light_mode {
-            "on"
-        } else {
-            "off"
-        };
+        let state = if light_mode { "on" } else { "off" };
         if let Err(e) = Settings::update_and_save("tuiLightMode", light_mode) {
             self.set_status(&format!("Light mode: {} (save failed: {})", state, e));
         } else {
@@ -4802,6 +4801,7 @@ mod tests {
             ])
             .env(MARKER, test_name)
             .env("TOKSCALE_CONFIG_DIR", temp.path())
+            .env_remove("COLORFGBG")
             .output()
             .unwrap();
         assert!(
@@ -4812,6 +4812,32 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         false
+    }
+
+    #[test]
+    fn tui_follows_terminal_background_without_saved_light_mode() {
+        if !settings_test_runs_in_child("tui_follows_terminal_background_without_saved_light_mode")
+        {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // SAFETY: this body runs alone in a dedicated child test process.
+        unsafe { env::set_var("COLORFGBG", "0;15") };
+
+        fs::write(&path, b"{}").unwrap();
+        assert!(make_app().theme.is_light());
+
+        fs::write(&path, br#"{"tuiLightMode":false}"#).unwrap();
+        assert!(!make_app().theme.is_light());
+
+        unsafe { env::set_var("COLORFGBG", "15;0") };
+        fs::write(&path, b"{}").unwrap();
+        assert!(!make_app().theme.is_light());
+
+        fs::write(&path, br#"{"tuiLightMode":true}"#).unwrap();
+        assert!(make_app().theme.is_light());
     }
 
     #[test]
@@ -5018,7 +5044,7 @@ mod tests {
                 if event.code == KeyCode::Char('p') {
                     assert_eq!(app.theme.name, ThemeName::Blue.next());
                 } else {
-                    assert!(app.settings.tui_light_mode);
+                    assert_eq!(app.settings.tui_light_mode, Some(true));
                 }
             }
         }

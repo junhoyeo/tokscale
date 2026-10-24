@@ -313,7 +313,7 @@ The interactive TUI mode provides:
   - `b`: Toggle subagent session roll-up into parent sessions (Sessions tab)
   - `y`: Copy selected row to clipboard
   - `p`: Cycle through color themes
-  - `L`: Toggle light mode (white background)
+  - `L`: Toggle light mode (white background). Until toggled, the TUI follows the terminal background reported by `COLORFGBG`
   - `r`: Refresh data; `Shift+R` toggles auto-refresh; `+`/`-` adjusts interval
   - `e`: Export to JSON
   - `q` or `Ctrl+C`: Quit
