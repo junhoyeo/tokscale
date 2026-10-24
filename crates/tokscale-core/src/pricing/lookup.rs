@@ -3629,12 +3629,19 @@ fn key_root_is_cross_provider_alias(key: &str, provider_id: &str) -> bool {
 // @keep: these roots look like providers and are not, which is the whole point.
 /// Dataset key roots that name a SUBSCRIPTION PLAN, not a billing endpoint.
 ///
-/// Models.dev publishes every row under `kimi-for-coding/` with explicit
-/// 0.0/0.0 rates because a Kimi coding subscription is billed by the plan, not
-/// by the token. Rows like these are not a price sheet for anything.
+/// Models.dev publishes every Kimi coding-plan row with explicit 0.0/0.0 rates
+/// because the subscription is billed by the plan, not by the token. Rows like
+/// these are not a price sheet for anything. The namespace was first
+/// `kimi-for-coding/` and is now split into `kimi-code-plan-global/` and
+/// `kimi-code-plan-cn/`. The old name stays listed because cached catalogs can
+/// still carry it.
 ///
 /// Underscore-normalized to compare with `normalized_key_root`.
-const ZERO_PRICED_SUBSCRIPTION_NAMESPACES: &[&str] = &["kimi_for_coding"];
+const ZERO_PRICED_SUBSCRIPTION_NAMESPACES: &[&str] = &[
+    "kimi_for_coding",
+    "kimi_code_plan_global",
+    "kimi_code_plan_cn",
+];
 
 /// Whether the key is rooted at a subscription namespace whose rows are
 /// published at $0.00, and so cannot prove a billing identity.
@@ -5600,6 +5607,113 @@ mod tests {
             );
             assert!(moonshot.evidence.is_submission_safe(), "hint: {hint}");
         }
+    }
+
+    /// Clients now report the Kimi plan as `kimi-code-plan-global`, and
+    /// models.dev publishes the plan's rows under that root at $0.00. The
+    /// hint must reach Moonshot's own row exactly as `kimi_for_coding` does,
+    /// and the plan's own row must stay an unpublishable estimate even when
+    /// no alias redirects the model away from it.
+    #[test]
+    fn kimi_code_plan_global_hint_prices_at_moonshot_rates() {
+        let models_dev = HashMap::from([
+            (
+                "kimi-code-plan-global/k3-256k".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "kimi-code-plan-global/k3-flash".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshotai/kimi-k3".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(3e-6),
+                    output_cost_per_token: Some(1.5e-5),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let priced = lookup
+            .lookup_with_provider("k3-256k", Some("kimi-code-plan-global"))
+            .expect("the plan hint must price");
+        assert_eq!(priced.matched_key, "moonshotai/kimi-k3");
+        assert_eq!(priced.pricing.input_cost_per_token, Some(3e-6));
+        assert_eq!(priced.evidence.kind, ResolutionKind::ProviderScoped);
+        assert!(priced.evidence.is_submission_safe());
+
+        let unaliased = lookup
+            .lookup_with_provider("k3-flash", Some("kimi-code-plan-global"))
+            .expect("the plan row stays reachable as an estimate");
+        assert_eq!(unaliased.matched_key, "kimi-code-plan-global/k3-flash");
+        assert_eq!(
+            unaliased.evidence.submission_safety_gap(),
+            Some(SubmissionSafetyGap::UnverifiedProviderIdentity)
+        );
+    }
+
+    /// The China plan's hint is its own root, so its zero-priced rows match
+    /// the hint exactly. Without the namespace guard that exact root match is
+    /// promoted to provider-scoped evidence and real usage is published at
+    /// $0.00. The hint is also not folded into Moonshot's global rows.
+    #[test]
+    fn kimi_code_plan_cn_rows_never_publish_and_do_not_borrow_global_rates() {
+        let models_dev = HashMap::from([
+            (
+                "kimi-code-plan-cn/k3-flash".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshotai/k3-pro".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(1e-6),
+                    output_cost_per_token: Some(2e-6),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let plan_row = lookup
+            .lookup_with_provider("k3-flash", Some("kimi-code-plan-cn"))
+            .expect("the plan row stays reachable as an estimate");
+        assert_eq!(plan_row.matched_key, "kimi-code-plan-cn/k3-flash");
+        assert_eq!(
+            plan_row.evidence.submission_safety_gap(),
+            Some(SubmissionSafetyGap::UnverifiedProviderIdentity)
+        );
+
+        let global = lookup
+            .lookup_with_provider("k3-pro", Some("kimi-code-plan-cn"))
+            .expect("the global row stays reachable as an estimate");
+        assert_eq!(global.matched_key, "moonshotai/k3-pro");
+        assert!(!global.evidence.is_submission_safe());
     }
 
     /// When a model part exists in both places, the zero-priced subscription
