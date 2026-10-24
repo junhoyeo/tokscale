@@ -311,6 +311,14 @@ enum Commands {
             help = "Show what would be submitted without actually submitting"
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            alias = "cursor-timeout",
+            value_name = "SECONDS",
+            value_parser = clap::value_parser!(u64).range(1..=cursor::CURSOR_MAX_SYNC_TIMEOUT_SECS),
+            help = "Cursor sync timeout in seconds, 1-86400 (overrides cursor.syncTimeoutSeconds in settings.json)"
+        )]
+        timeout: Option<u64>,
     },
     #[command(about = "Manage periodic usage submission")]
     Autosubmit {
@@ -915,6 +923,7 @@ fn main() -> Result<()> {
             clients,
             date,
             dry_run,
+            timeout,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
             let (since, until) = build_date_filter(&date, &cli.home);
@@ -925,6 +934,7 @@ fn main() -> Result<()> {
             // defaultClients view filter (which may exclude clients they still want
             // to upload). Pass an explicit empty defaults slice.
             let clients = build_client_filter_with_defaults(clients, &[]);
+            let cursor_timeout = timeout.map(std::time::Duration::from_secs);
             run_submit_command(
                 clients,
                 since,
@@ -932,6 +942,7 @@ fn main() -> Result<()> {
                 year,
                 dry_run,
                 SubmitMode::Interactive,
+                cursor_timeout,
             )
         }
         Some(Commands::Autosubmit { subcommand }) => {
@@ -7012,7 +7023,15 @@ fn run_autosubmit_command(subcommand: commands::autosubmit::AutosubmitSubcommand
             };
 
             let (clients, since, until, year) = commands::autosubmit::submit_filters(&settings);
-            match run_submit_command(clients, since, until, year, false, SubmitMode::Autosubmit) {
+            match run_submit_command(
+                clients,
+                since,
+                until,
+                year,
+                false,
+                SubmitMode::Autosubmit,
+                None,
+            ) {
                 Ok(()) => {
                     commands::autosubmit::record_run_success(
                         chrono::Utc::now().timestamp_millis(),
@@ -7036,6 +7055,7 @@ fn run_submit_command(
     year: Option<String>,
     dry_run: bool,
     mode: SubmitMode,
+    cursor_timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
@@ -7086,7 +7106,8 @@ fn run_submit_command(
     if include_cursor && cursor::ensure_cursor_session_for_sync() {
         println!("{}", "  Syncing Cursor usage data...".bright_black());
         let rt_sync = Runtime::new()?;
-        let sync_result = rt_sync.block_on(async { cursor::sync_cursor_cache(false).await });
+        let sync_result =
+            rt_sync.block_on(async { cursor::sync_cursor_cache_for_submit(cursor_timeout).await });
         if sync_result.synced {
             println!(
                 "{}",
@@ -10896,6 +10917,16 @@ mod tests {
             "18446744073709551615"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn clap_accepts_submit_timeout_options() {
+        assert!(Cli::try_parse_from(["tokscale", "submit"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "submit", "--timeout", "300"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "submit", "--cursor-timeout", "300"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "submit", "--timeout", "0"]).is_err());
+        assert!(Cli::try_parse_from(["tokscale", "submit", "--timeout", "86400"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "submit", "--timeout", "86401"]).is_err());
     }
 
     #[test]
