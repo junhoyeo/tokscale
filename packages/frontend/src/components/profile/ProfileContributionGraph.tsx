@@ -662,14 +662,20 @@ export function createContributionCalendar(
     const inRange = timestamp >= firstTimestamp && timestamp <= lastTimestamp;
     const selectable = inRange && timestamp <= selectableEndTimestamp;
 
+    const tokens = selectable ? (contribution?.tokens ?? 0) : 0;
+    const cost = selectable ? (contribution?.cost ?? 0) : 0;
+    const baseIntensity = getContributionIntensity(tokens, maxTokens);
+    const intensity =
+      selectable && (tokens > 0 || cost > 0)
+        ? (Math.max(baseIntensity, 1) as 1 | 2 | 3 | 4)
+        : 0;
+
     cells.push({
       date,
       inRange,
-      intensity: selectable
-        ? getContributionIntensity(contribution?.tokens ?? 0, maxTokens)
-        : 0,
+      intensity,
       selectable,
-      tokens: selectable ? (contribution?.tokens ?? 0) : 0,
+      tokens,
     });
   }
 
@@ -704,8 +710,9 @@ export function createContributionCalendar(
   }
 
   return {
-    activeDays: selectableContributions.filter(({ tokens }) => tokens > 0)
-      .length,
+    activeDays: selectableContributions.filter(
+      ({ cost, tokens }) => tokens > 0 || cost > 0,
+    ).length,
     cells,
     endDate: toDateKey(lastTimestamp),
     freeTokenDays: selectableContributions.filter(

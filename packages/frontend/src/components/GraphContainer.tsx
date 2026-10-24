@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import type { TokenContributionData, DailyContribution, ViewMode, ClientType, TooltipPosition } from "@/lib/types";
 import { getPalette } from "@/lib/themes";
 import { useSettings } from "@/lib/useSettings";
-import { filterByClient, filterByYear, recalculateIntensity, findBestDay, calculateCurrentStreak, calculateLongestStreak, resolveSelectedDay } from "@/lib/utils";
+import { filterByClient, filterByYear, recalculateIntensity, findBestDay, calculateCurrentStreak, calculateLongestStreak, resolveSelectedDay, dayHasActivity } from "@/lib/utils";
 import { TokenGraph2D } from "./TokenGraph2D";
 
 // Lazy load 3D graph (Three.js) - reduces initial bundle, SSR disabled for WebGL
@@ -103,14 +103,14 @@ export function GraphContainer({ data, totalActiveTimeMs, sessionCount, mcpServe
   const maxTokens = useMemo(() => Math.max(...yearContributions.map((c) => c.totals.tokens), 0), [yearContributions]);
   const totalCost = useMemo(() => yearContributions.reduce((sum, c) => sum + c.totals.cost, 0), [yearContributions]);
   const totalTokens = useMemo(() => yearContributions.reduce((sum, c) => sum + c.totals.tokens, 0), [yearContributions]);
-  const activeDays = useMemo(() => yearContributions.filter((c) => c.totals.tokens > 0).length, [yearContributions]);
+  const activeDays = useMemo(() => yearContributions.filter(dayHasActivity).length, [yearContributions]);
   const bestDay = useMemo(() => findBestDay(yearContributions), [yearContributions]);
   const currentStreak = useMemo(() => calculateCurrentStreak(yearContributions), [yearContributions]);
   const longestStreak = useMemo(() => calculateLongestStreak(yearContributions), [yearContributions]);
 
   const dateRange = useMemo(() => {
     if (yearContributions.length === 0) return { start: "", end: "" };
-    const dates = yearContributions.filter((c) => c.totals.tokens > 0).map((c) => c.date).sort();
+    const dates = yearContributions.filter(dayHasActivity).map((c) => c.date).sort();
     return {
       start: dates[0]?.split("-").slice(1).join("/") || "",
       end: dates[dates.length - 1]?.split("-").slice(1).join("/") || "",
@@ -120,9 +120,9 @@ export function GraphContainer({ data, totalActiveTimeMs, sessionCount, mcpServe
 
   useEffect(() => {
     if (!initializedRef.current && yearContributions.length > 0) {
-      const activeDaysWithTokens = yearContributions.filter((c) => c.totals.tokens > 0);
-      if (activeDaysWithTokens.length > 0) {
-        const latestDay = activeDaysWithTokens[activeDaysWithTokens.length - 1];
+      const activeDays = yearContributions.filter(dayHasActivity);
+      if (activeDays.length > 0) {
+        const latestDay = activeDays[activeDays.length - 1];
         // Intentional one-time initialization on first data load
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setSelectedDate(latestDay.date);

@@ -1545,7 +1545,7 @@ export async function POST(request: Request) {
           // columns used (migrations 0015/0016).
           dateStart: sql<string>`COALESCE(MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MIN(${dailyBreakdown.date}))`,
           dateEnd: sql<string>`COALESCE(MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MAX(${dailyBreakdown.date}))`,
-          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 OR ${dailyBreakdown.cost} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,
           // so completeness composes with AND, not OR (#1044). COALESCE covers
