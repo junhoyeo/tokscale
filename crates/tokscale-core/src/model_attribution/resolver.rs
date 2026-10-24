@@ -61,10 +61,11 @@ pub(crate) fn resolve(observations: Vec<Observation>) -> Resolution {
     // chain relation there is no evidence that one adapter's spelling is the
     // upstream of another's, so choosing between them would be a guess about
     // topology. This holds regardless of tier: a weaker observation that
-    // disagrees about who answered is still a contradiction.
+    // disagrees about who answered is still a contradiction. A case-only
+    // difference names one provider, the same way it names one model.
     if observations
         .iter()
-        .any(|observation| observation.target.provider != first.target.provider)
+        .any(|observation| !same_provider(&observation.target.provider, &first.target.provider))
     {
         return Resolution::Conflict;
     }
@@ -111,8 +112,15 @@ pub(crate) fn resolve(observations: Vec<Observation>) -> Resolution {
         .collect();
 
     // Deterministic reporting adapter once every identity field agrees, so
-    // index registration order can never choose which adapter is named.
-    winning.sort_unstable_by(|left, right| left.target.adapter.cmp(right.target.adapter));
+    // index registration order can never choose which adapter is named. The
+    // provider string is a final tie-break so two case-different spellings of
+    // one provider also resolve to a deterministic one.
+    winning.sort_unstable_by(|left, right| {
+        left.target
+            .adapter
+            .cmp(right.target.adapter)
+            .then_with(|| right.target.provider.cmp(&left.target.provider))
+    });
 
     let mut target = winning[0].target.clone();
     target.strength = strongest;
@@ -123,6 +131,12 @@ pub(crate) fn resolve(observations: Vec<Observation>) -> Resolution {
 /// Model identity comparison. Vendors are case-insensitive about model ids in
 /// practice, and a case-only difference cannot describe different weights.
 fn same_model(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+/// Provider identity comparison, compared the same case-insensitive way
+/// models are: a case-only difference is one provider spelled twice.
+fn same_provider(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
 
@@ -204,6 +218,21 @@ mod tests {
             Resolution::Conflict
         );
         assert_eq!(resolve(vec![right, left]), Resolution::Conflict);
+    }
+
+    /// A case-only provider difference is one provider spelled twice, the
+    /// same way a case-only model difference is one model. The spelling is
+    /// chosen deterministically regardless of observation order.
+    #[test]
+    fn provider_agreement_ignores_case() {
+        let left = observation("ZAI-Coding-CN", "model");
+        let right = observation("zai-coding-cn", "model");
+        let expected = target("zai-coding-cn", "model", EvidenceStrength::ResponseReported);
+        assert_eq!(
+            resolve(vec![left.clone(), right.clone()]),
+            Resolution::Resolved(expected.clone())
+        );
+        assert_eq!(resolve(vec![right, left]), Resolution::Resolved(expected));
     }
 
     #[test]

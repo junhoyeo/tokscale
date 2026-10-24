@@ -3950,6 +3950,12 @@ fn run_pricing_lookup(
             .collect();
         if json {
             println!("{}", serde_json::to_string_pretty(&explanations)?);
+            if attribution.truncated_decisions() > 0 {
+                eprintln!(
+                    "note: {} attribution decisions were dropped after the diagnostics cap; rows above the cap report no attribution block",
+                    attribution.truncated_decisions()
+                );
+            }
         } else {
             for row in explanations {
                 println!("{} / {} billing={} {:?}: ${:.8} source={} scope={} matched={} normalized={} base ×{} coverage={}", row.client, row.raw_model_id, row.billing_provider_id.as_deref().unwrap_or("unknown"), row.estimate_status, row.final_estimate, row.price_source.as_deref().unwrap_or("unpriced"), row.scope, row.matched_model_id.as_deref().unwrap_or("none"), row.normalized, row.effective_multiplier, row.coverage);

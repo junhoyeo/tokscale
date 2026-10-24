@@ -121,11 +121,16 @@ impl EvidenceStrength {
 #[derive(Debug, Clone, Default)]
 pub struct AttributionDiagnostics {
     decisions: HashMap<RowKey, Decision>,
+    /// Decisions dropped because the table hit its cap. Surfaced so
+    /// `pricing explain` can say the block is incomplete instead of silently
+    /// omitting rows.
+    truncated: usize,
 }
 
 impl AttributionDiagnostics {
     pub(crate) fn record(&mut self, message: &UnifiedMessage, decision: Decision) {
         if self.decisions.len() >= MAX_DECISIONS {
+            self.truncated += 1;
             return;
         }
         self.decisions.insert(RowKey::of(message), decision);
@@ -133,5 +138,10 @@ impl AttributionDiagnostics {
 
     pub(crate) fn lookup(&self, message: &UnifiedMessage) -> Option<Decision> {
         self.decisions.get(&RowKey::of(message)).cloned()
+    }
+
+    /// How many decisions were dropped after the table hit its cap.
+    pub fn truncated_decisions(&self) -> usize {
+        self.truncated
     }
 }

@@ -20,7 +20,7 @@ Two things are ordered here, and they are independent.
 
 What a source proves about the model:
 
-1. A native response-reported model. A parser that read the provider's own response field (`responseModel`, `responseModelId`, Antigravity `#19`, OpenCodex `servedModel`, Magpie `served`) records `model_evidence = ResponseReported` on the row. A gateway observation may confirm that identity, but it may never replace it, and a gateway that names a different model contradicts it and fails closed.
+1. A native response-reported model. A parser that read the provider's own response field (`responseModel`, `responseModelId`, Antigravity `#19`) records `model_evidence = ResponseReported` on the row. A gateway observation may confirm that identity, but it may never replace it; such a row is never parked for re-identification in the first place.
 2. A confirmed gateway selection, admissible only when the adapter's own contract allows it and no response-reported value exists.
 3. A requested or configured model is a fallback for display, never proof of the model behind a selector.
 
@@ -38,7 +38,7 @@ Nothing in a ledger proves that one adapter is upstream of another, so no adapte
 - Every client row consumes at most one record from each gateway representation of a call.
 - Multiple matching candidates do not resolve by sorting, adapter order, or recency.
 - Failed retries and handed-on attempts are not the request's outcome; only the completed successful attempt is evidence.
-- Token signatures are normalized per source before comparison: Tokscale buckets are additive, gateway counters may already include cache traffic and reasoning, and a source that does not split reasoning compares on totals alone. No bucket is counted twice.
+- Token signatures are normalized per source before comparison: Tokscale buckets are additive, gateway counters may already include cache traffic and reasoning, and the additive totals must always agree. A per-bucket counter is compared only when both sides reported it — a ledger row that predates a counter must not contradict a client that reports it, and the totals already bind each sum. No bucket is counted twice.
 - A row that aggregates more than one call (`message_count != 1`) is never re-identified by a single gateway record.
 - Incomplete streaming responses and estimated usage are not authoritative matches.
 
@@ -73,7 +73,7 @@ Because attribution runs inside the parse flush, the report graph, JSON output, 
 
 | Adapter | Ledger | Selector | Selected | Served | Provider | Tier | Stable ids | Sessions | Tokens | Timing |
 |---|---|---|---|---|---|---|---|---|---|---|
-| OpenCodex | `~/.opencodex/usage.jsonl` (`OPENCODEX_HOME` override) | `requestedModel`, required | not read | `servedModel`, only from the single eligible attempt | eligible attempt's `provider` | `tierOutcome` when `responseTierAuthoritative` | none | none | the eligible attempt's reported usage | row start + row duration |
+| OpenCodex | `~/.opencodex/usage.jsonl` (`OPENCODEX_HOME` override) | `requestedModel`, required | not read | `servedModel`, only from the single eligible attempt | eligible attempt's `provider` | `tierOutcome` when `responseTierAuthoritative` | none | none | the eligible attempt's reported usage | row start + row duration; the end anchor allows 2s early and 30s late skew, because Codex can persist its token_count after OpenCodex records the response end (#1526) |
 | Magpie | `~/.config/magpie/usage.jsonl` (XDG-aware) | `req` | `model` | `served`, unless it echoes the selector | `provider` | `tier_served` | `response_id`, `rid` | `session`, `native_session` | `in`, `out`, `cache_read`, `cache_write`, `reasoning` | row `t` + `ms` |
 
 Neither adapter reads a field it cannot justify. Every row must also be a completed 2xx call:
@@ -105,12 +105,12 @@ What the code does not claim, deliberately:
 ## Bounds
 
 - A ledger is truncated to its newest records past the cap. Trimming is batched rather than performed after every appended row, so the cost stays linear in the number of lines and memory stays bounded by the cap plus one batch.
-- The parked-message set is capped. Reaching the cap attributes nothing at all for that scan instead of attributing an arbitrary prefix; that is a resource limit, not evidence.
-- The decision table is bounded; past its cap, newer decisions are simply not recorded. Diagnostics are best-effort.
+- The parked-message set is capped. A message is parked only when a loaded ledger holds a record its correlation window can actually reach, so parking stays bounded by the ledger's own time span instead of a shared selector's history. Reaching the cap attributes nothing at all for that scan instead of attributing an arbitrary prefix; that is a resource limit, not evidence.
+- The decision table is bounded; past its cap, newer decisions are simply not recorded and the dropped count is surfaced to `pricing explain`. Diagnostics are best-effort.
 
 ## Limits
 
 - A portable Magpie install keeps its ledger beside the executable, outside the home directory a scan reads; those rows stay unattributed rather than guessed.
 - Current gateway configuration is not evidence of historical routing.
 - Rows aggregated from several calls with only combined counters stay unresolved; no distribution is invented.
-- A gateway whose ledger predates a field (for example, a row without token totals) can still match on a stable identifier, but never on tokens.
+- A gateway whose ledger predates a field (for example, a row without token totals) can still match on a stable identifier, but never on tokens. A row that reports totals but omits a per-bucket counter still matches on tokens: the missing bucket is "unknown", not zero, and only a reported bucket can contradict one.
