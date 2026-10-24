@@ -2018,7 +2018,10 @@ fn parser_version(client: ClientId) -> u32 {
         // reasoning out of `candidatesTokenCount` when the recorded total
         // shows it inside. Unchanged transcripts must not replay the old
         // double-counted buckets.
-        ClientId::Qwen => 2,
+        // v2->v3: an explicit `totalTokenCount: 0` (OpenAI-compatible
+        // provider without `total_tokens`) keeps the reasoning inside the
+        // candidates instead of counting it twice.
+        ClientId::Qwen => 3,
         ClientId::Mux => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
@@ -6353,8 +6356,8 @@ mod tests {
     }
 
     #[test]
-    fn test_qwen_parser_version_invalidates_v1_entries() {
-        assert_eq!(parser_version(ClientId::Qwen), 2);
+    fn test_qwen_parser_version_invalidates_v2_entries() {
+        assert_eq!(parser_version(ClientId::Qwen), 3);
     }
 
     #[test]
