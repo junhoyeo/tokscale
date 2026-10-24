@@ -6257,6 +6257,8 @@ const UNVERIFIED_MODEL_IDENTITY_REASON: &str =
     "model price match does not exactly name the requested model";
 const UNVERIFIED_PROVIDER_IDENTITY_REASON: &str =
     "model price match does not establish the requested provider";
+const ATTRIBUTION_CONFLICT_UNPRICED_REASON: &str =
+    "gateway evidence contradicted the recorded model identity";
 
 /// Routing labels name the router that served the request, never the model
 /// that answered it, so they have no authoritative model-to-price mapping.
@@ -6305,9 +6307,16 @@ fn prepare_submission_pricing(
     let mut incomplete_cost_dates = BTreeSet::new();
 
     for mut message in messages {
+        // A gateway-conflicted row keeps the identity its client reported, so
+        // a price resolved for that requested model would silently price a
+        // call the evidence says something else served. Without an
+        // authoritative amount the row is unpriced regardless of whether the
+        // requested model happens to have a rate, matching the "stays out of
+        // estimated pricing" contract `mark_attribution_conflict` documents.
         let is_unpriced = has_positive_token_usage(&message.tokens)
             && !message.has_authoritative_cost()
-            && !pricing.covers_usage_context(&message.pricing_context(), &message.tokens);
+            && (message.model_attribution_conflicted
+                || !pricing.covers_usage_context(&message.pricing_context(), &message.tokens));
 
         if is_unpriced {
             // Resolution is consulted before the routing-label reason, not
@@ -6321,7 +6330,11 @@ fn prepare_submission_pricing(
             // Nothing regresses for unpriced labels: the resolver refuses
             // routing labels outright, so with no custom entry this returns
             // None and the routing-label reason still applies.
-            let resolution = pricing.resolve_context(&message.pricing_context(), &message.tokens);
+            let resolution = if message.model_attribution_conflicted {
+                None
+            } else {
+                pricing.resolve_context(&message.pricing_context(), &message.tokens)
+            };
             // The gap is read from the resolution that made the row
             // unpublishable rather than restated here: a lookup with a single
             // candidate is unsafe for not naming the model, and reporting it
@@ -6330,7 +6343,9 @@ fn prepare_submission_pricing(
             let safety_gap = resolution
                 .as_ref()
                 .and_then(|result| result.evidence.submission_safety_gap());
-            let reason = if let Some(gap) = safety_gap {
+            let reason = if message.model_attribution_conflicted {
+                ATTRIBUTION_CONFLICT_UNPRICED_REASON
+            } else if let Some(gap) = safety_gap {
                 match gap {
                     SubmissionSafetyGap::PriceDisagreement => AMBIGUOUS_MODEL_PRICING_REASON,
                     SubmissionSafetyGap::UnverifiedModelIdentity => {
@@ -6550,7 +6565,8 @@ fn validate_priced_messages(
     for message in messages {
         let unpriced = has_positive_token_usage(&message.tokens)
             && !message.has_authoritative_cost()
-            && !pricing.covers_usage_context(&message.pricing_context(), &message.tokens);
+            && (message.model_attribution_conflicted
+                || !pricing.covers_usage_context(&message.pricing_context(), &message.tokens));
         if !unpriced {
             continue;
         }
@@ -8696,9 +8712,10 @@ mod tests {
         validate_priced_messages, ClientId, GraphPricingRequirement, GraphSink, GroupBy,
         LocalParseOptions, MessageSink, MonthlyReportV2, MonthlyUsage, MonthlyUsageV2,
         ReportOptions, SourceCachePolicy, TokenBreakdown, UnifiedMessage, UnpricedSubmissionUsage,
-        AMBIGUOUS_MODEL_PRICING_REASON, GRAPH_SINK_BATCH, INCOMPLETE_MODEL_PRICING_REASON,
-        MISSING_MODEL_PRICING_REASON, ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL,
-        UNVERIFIED_MODEL_IDENTITY_REASON, UNVERIFIED_PROVIDER_IDENTITY_REASON,
+        AMBIGUOUS_MODEL_PRICING_REASON, ATTRIBUTION_CONFLICT_UNPRICED_REASON, GRAPH_SINK_BATCH,
+        INCOMPLETE_MODEL_PRICING_REASON, MISSING_MODEL_PRICING_REASON,
+        ROUTING_LABEL_UNPRICED_REASON, UNKNOWN_WORKSPACE_LABEL, UNVERIFIED_MODEL_IDENTITY_REASON,
+        UNVERIFIED_PROVIDER_IDENTITY_REASON,
     };
     // Kept as its own statement rather than folded into the list above: that list
     // is edited by nearly every PR that touches this file, and sharing it made
@@ -14405,11 +14422,12 @@ mod tests {
         .unwrap();
 
         // The ledger claims the row and names a different model. It must lose
-        // on both the cold and the warm scan.
+        // on both the cold and the warm scan. The message's `time` field
+        // (1787122684043) is 2026-08-19T06:58:04Z.
         let mut row = magpie_row("glm-5.3", "glm-5.2");
         row["in"] = serde_json::json!(100);
         row["out"] = serde_json::json!(50);
-        row["t"] = serde_json::json!("2026-08-19T03:38:04.043Z");
+        row["t"] = serde_json::json!("2026-08-19T06:58:04.043Z");
         row["session"] = serde_json::json!("session-dsh");
         write_magpie_ledger(source_home.path(), &[row]);
 
@@ -14701,7 +14719,8 @@ mod tests {
         row["provider"] = serde_json::json!("zai-coding-cn");
         row["in"] = serde_json::json!(100);
         row["out"] = serde_json::json!(50);
-        row["t"] = serde_json::json!("2026-08-19T03:38:04.043Z");
+        // The message's `time` field (1787122684043) is 2026-08-19T06:58:04Z.
+        row["t"] = serde_json::json!("2026-08-19T06:58:04.043Z");
         row["session"] = serde_json::json!("session-dsh");
         write_magpie_ledger(source_home.path(), &[row]);
 
@@ -15622,6 +15641,132 @@ mod tests {
         assert_eq!(messages[0].model_id, "glm-5.2");
         assert!(messages[0].model_attribution_conflicted);
         assert_eq!(messages[0].cost, 0.0);
+    }
+
+    /// A gateway-conflicted row must not be submitted as priced at $0 even
+    /// when the *requested* model has a rate. The row keeps the requested
+    /// identity — the only thing the client proved — so a submission bucket
+    /// that resolves that model to a price would bill a call the evidence says
+    /// something else served, and the day would count as cost-complete. The
+    /// row belongs in `unpriced_submission_usage` with its date incomplete.
+    #[test]
+    #[serial_test::serial]
+    fn a_gateway_conflicted_row_is_unpriced_in_the_submission_graph() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let source_home_dir = source_home.path().to_str().unwrap().to_string();
+
+        // The requested model `glm-5.2` is priceable; the two ledgers disagree
+        // about what served the call.
+        write_claude_transcript(source_home.path(), "glm-5.2", "session-magpie");
+        let opencodex_dir = source_home.path().join(".opencodex");
+        std::fs::create_dir_all(&opencodex_dir).unwrap();
+        std::fs::write(
+            opencodex_dir.join("usage.jsonl"),
+            serde_json::to_string(&serde_json::json!({
+                "timestamp": 1_733_047_200_000i64,
+                "provider": "combo",
+                "requestedModel": "glm-5.2",
+                "servedModel": "other-served-model",
+                "inboundProtocol": "responses",
+                "status": 200,
+                "durationMs": 3_000,
+                "attempts": [{
+                    "ordinal": 1,
+                    "provider": "fixture-provider",
+                    "model": "wire-model",
+                    "adapter": "fixture",
+                    "status": 200,
+                    "durationMs": 3_000,
+                    "sendCount": 1,
+                    "usageStatus": "reported",
+                    "usage": {"inputTokens": 100, "outputTokens": 50}
+                }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        write_magpie_ledger(source_home.path(), &[magpie_row("glm-5.2", "glm-5.3")]);
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "glm-5.2".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let graph = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(generate_graph_with_loaded_pricing(
+                ReportOptions {
+                    home_dir: Some(source_home_dir.clone()),
+                    use_env_roots: false,
+                    clients: Some(vec!["claude".to_string()]),
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    worktree_rollup: WorktreeRollup::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                Some(&pricing),
+                GraphPricingRequirement::Submission,
+                None,
+            ))
+            .expect("the submission graph must build");
+        assert_eq!(
+            graph.summary.total_cost, 0.0,
+            "a conflicted row must not be priced at the requested model's rate"
+        );
+        assert_eq!(graph.unpriced_submission_usage.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_usage[0].model_id, "glm-5.2",
+            "the requested identity is what stays unpriced"
+        );
+        assert_eq!(
+            graph.unpriced_submission_usage[0].message_count, 1,
+            "the usage is still accounted"
+        );
+        assert_eq!(
+            graph.unpriced_submission_usage[0].total_tokens, 150,
+            "100 input + 50 output"
+        );
+        assert_eq!(
+            graph.unpriced_submission_usage[0].reason,
+            ATTRIBUTION_CONFLICT_UNPRICED_REASON
+        );
+        assert_eq!(
+            graph.incomplete_cost_dates.len(),
+            1,
+            "the conflicted day must not count as cost-complete"
+        );
+
+        // The priced slice itself must validate: a conflicted row that leaked
+        // into it would fail this guard.
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            &source_home_dir,
+            &["claude".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].model_attribution_conflicted);
+        let (priced, zeroed, unpriced, incomplete) =
+            prepare_submission_pricing(messages, Some(&pricing));
+        assert!(
+            priced.is_empty(),
+            "a conflicted row must never land in the priced bucket"
+        );
+        assert_eq!(zeroed.len(), 1);
+        assert_eq!(unpriced.len(), 1);
+        assert_eq!(incomplete.len(), 1);
     }
 
     #[test]

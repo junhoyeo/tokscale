@@ -2754,6 +2754,7 @@ impl From<LegacyUnifiedMessageV11> for UnifiedMessage {
             pricing_model_id: message.pricing_model_id,
             estimate_status: message.estimate_status,
             copilot_context: None,
+            machine_label: None,
         }
     }
 }
