@@ -123,15 +123,17 @@ fn decode_row(line: &[u8]) -> Option<GatewayRecord> {
     let duration_ms = row.ms.filter(|duration| *duration >= 0);
 
     // A signature needs both additive totals. Older ledger rows that predate
-    // them can still match on a stable identifier, but never on tokens.
+    // them can still match on a stable identifier, but never on tokens; the
+    // per-bucket counters are passed through as reported, so a row that omits
+    // one does not contradict a client that reports it.
     let signatures = match (row.input, row.out) {
         (Some(input), Some(output)) if input >= 0 && output >= 0 => {
             vec![TokenSignature::from_gateway(
                 input,
                 output,
-                row.cache_read.unwrap_or(0).max(0),
-                row.cache_write.unwrap_or(0).max(0),
-                row.reasoning.unwrap_or(0).max(0),
+                row.cache_read.filter(|value| *value >= 0),
+                row.cache_write.filter(|value| *value >= 0),
+                row.reasoning.filter(|value| *value >= 0),
             )]
         }
         _ => Vec::new(),

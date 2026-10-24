@@ -367,9 +367,9 @@ mod tests {
             signatures: vec![TokenSignature::from_gateway(
                 tokens.input,
                 tokens.output + tokens.reasoning,
-                tokens.cache_read,
-                tokens.cache_write,
-                tokens.reasoning,
+                Some(tokens.cache_read),
+                Some(tokens.cache_write),
+                Some(tokens.reasoning),
             )],
             completed: true,
             target_eligible: true,

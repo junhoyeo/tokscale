@@ -26,17 +26,25 @@ pub(crate) const MAX_GATEWAY_RECORDS: usize = 1_000_000;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MatchPolicy {
     pub(crate) max_start_skew_ms: i64,
+    /// How far *before* the row's end a client's end anchor may sit.
     pub(crate) max_end_skew_ms: i64,
+    /// How far *after* the row's end a client's end anchor may sit. A client
+    /// can persist its usage event after the gateway records the response end,
+    /// so late events get a wider bound than early ones.
+    pub(crate) max_late_end_skew_ms: i64,
     pub(crate) max_response_duration_ms: i64,
 }
 
 impl MatchPolicy {
     /// A start-anchored request with a tight end anchor: the OpenCodex
-    /// adapter's historical policy.
+    /// adapter's historical policy. Codex can persist its token_count after
+    /// OpenCodex records the response end, so a late end skew of up to 30s is
+    /// tolerated while early events keep the 2s bound (#1526).
     pub(crate) const fn opencodex() -> Self {
         Self {
             max_start_skew_ms: 120_000,
             max_end_skew_ms: 2_000,
+            max_late_end_skew_ms: 30_000,
             max_response_duration_ms: 600_000,
         }
     }
@@ -48,13 +56,14 @@ impl MatchPolicy {
         Self {
             max_start_skew_ms: 120_000,
             max_end_skew_ms: 120_000,
+            max_late_end_skew_ms: 120_000,
             max_response_duration_ms: 600_000,
         }
     }
 }
 
-/// Token counters normalized to two additive totals plus the unambiguous
-/// per-bucket counters.
+/// Token counters normalized to two additive totals plus the per-bucket
+/// counters each side actually reported.
 ///
 /// Client tokens and gateway counters use different accounting conventions:
 /// Tokscale's buckets are additive (the prompt total includes cache reads and
@@ -63,6 +72,12 @@ impl MatchPolicy {
 /// already contains reasoning. Both constructors normalize into the same space
 /// explicitly, so a comparison never adds a cache or reasoning bucket twice.
 ///
+/// A bucket is `Some` only when that side's source reported it. A missing
+/// bucket is "unknown", not zero: a ledger written before a counter existed
+/// must not contradict one written after, so `matches` compares a bucket only
+/// when both sides report it. The totals already bind each sum, so an unreported
+/// bucket cannot smuggle tokens past the comparison.
+///
 /// The one-hour cache-write split is a pricing dimension, not an accounting
 /// difference: it never exceeds `cache_write`, so comparing that total already
 /// binds it.
@@ -70,12 +85,15 @@ impl MatchPolicy {
 pub(crate) struct TokenSignature {
     pub(crate) prompt_total: i64,
     pub(crate) completion_total: i64,
-    pub(crate) cache_read: i64,
-    pub(crate) cache_write: i64,
-    pub(crate) reasoning: i64,
+    pub(crate) cache_read: Option<i64>,
+    pub(crate) cache_write: Option<i64>,
+    pub(crate) reasoning: Option<i64>,
 }
 
 impl TokenSignature {
+    /// The client side reports every bucket: a client parser either split the
+    /// counters or never saw them, and `TokenBreakdown` defaults mean zero
+    /// only when the source stores an explicit zero.
     pub(crate) fn from_message(tokens: &TokenBreakdown) -> Self {
         Self {
             prompt_total: tokens
@@ -83,64 +101,75 @@ impl TokenSignature {
                 .saturating_add(tokens.cache_read)
                 .saturating_add(tokens.cache_write),
             completion_total: tokens.output.saturating_add(tokens.reasoning),
-            cache_read: tokens.cache_read,
-            cache_write: tokens.cache_write,
-            reasoning: tokens.reasoning,
+            cache_read: Some(tokens.cache_read),
+            cache_write: Some(tokens.cache_write),
+            reasoning: Some(tokens.reasoning),
         }
     }
 
     /// Build a signature from gateway counters whose input excludes cache
-    /// traffic and whose output already includes reasoning tokens.
+    /// traffic and whose output already includes reasoning tokens. A `None`
+    /// bucket is one the ledger row did not report.
     pub(crate) fn from_gateway(
         input: i64,
         output_including_reasoning: i64,
-        cache_read: i64,
-        cache_write: i64,
-        reasoning: i64,
+        cache_read: Option<i64>,
+        cache_write: Option<i64>,
+        reasoning: Option<i64>,
     ) -> Self {
         Self {
-            prompt_total: input.saturating_add(cache_read).saturating_add(cache_write),
+            prompt_total: input
+                .saturating_add(cache_read.unwrap_or(0).max(0))
+                .saturating_add(cache_write.unwrap_or(0).max(0)),
             completion_total: output_including_reasoning,
-            cache_read,
-            cache_write,
-            reasoning,
+            cache_read: cache_read.map(|value| value.max(0)),
+            cache_write: cache_write.map(|value| value.max(0)),
+            reasoning: reasoning.map(|value| value.max(0)),
         }
     }
 
     /// Build a signature from OpenAI-shaped counters whose input total already
     /// contains the cache read (so adding it again would double count) and
-    /// whose output already includes reasoning.
+    /// whose output already includes reasoning. A `None` bucket is one the
+    /// ledger row did not report.
     pub(crate) fn from_wire_totals(
         input_including_cache_read: i64,
         output_including_reasoning: i64,
-        cache_read: i64,
-        cache_write: i64,
-        reasoning: i64,
+        cache_read: Option<i64>,
+        cache_write: Option<i64>,
+        reasoning: Option<i64>,
     ) -> Self {
         Self {
-            prompt_total: input_including_cache_read.saturating_add(cache_write),
+            prompt_total: input_including_cache_read
+                .saturating_add(cache_write.unwrap_or(0).max(0)),
             completion_total: output_including_reasoning,
-            cache_read,
-            cache_write,
-            reasoning,
+            cache_read: cache_read.map(|value| value.max(0)),
+            cache_write: cache_write.map(|value| value.max(0)),
+            reasoning: reasoning.map(|value| value.max(0)),
         }
     }
 
     /// Compare against a gateway signature.
     ///
-    /// Totals and cache buckets must agree exactly. `reasoning` is compared
-    /// only when this side reports a nonzero bucket: several parsers keep the
-    /// whole completion count in `output` and leave `reasoning` at zero
-    /// because their source does not separate the two, so a zero here means
-    /// "not split", not "no reasoning tokens". The completion total already
-    /// binds the sum, so an unsplit client cannot smuggle extra tokens past
-    /// the comparison.
+    /// Totals must agree exactly. A bucket is compared only when both sides
+    /// report it: a ledger row that predates a counter must not contradict a
+    /// client that reports it, and a client that never split a bucket must not
+    /// contradict a ledger that did. The totals bind each sum, so a missing
+    /// bucket cannot smuggle extra tokens past the comparison.
     fn matches(&self, other: &Self) -> bool {
-        self.cache_read == other.cache_read
-            && self.cache_write == other.cache_write
-            && (self.reasoning == 0 || self.reasoning == other.reasoning)
+        bucket_agrees(self.cache_read, other.cache_read)
+            && bucket_agrees(self.cache_write, other.cache_write)
+            && bucket_agrees(self.reasoning, other.reasoning)
             && self.prompt_total == other.prompt_total
             && self.completion_total == other.completion_total
+    }
+}
+
+/// Buckets compare only when both sides reported them.
+fn bucket_agrees(left: Option<i64>, right: Option<i64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
     }
 }
 
@@ -411,13 +440,31 @@ impl GatewayIndex {
         if message.model_evidence == crate::sessions::ModelEvidence::ResponseReported {
             return false;
         }
-        if self.by_selector.contains_key(&message.model_id) {
+        // Membership alone is not enough: a selector a history of requests
+        // shares with the ledger would park every row that ever named it, so
+        // the park list could fill with months of old messages that no record
+        // can reach. Requiring one record inside the correlation window keeps
+        // parking bounded by the ledger's own time span, exactly as the
+        // candidate search that runs later over the parked set.
+        if self.by_selector.contains_key(&message.model_id)
+            && !self
+                .window(&self.by_selector[&message.model_id], message)
+                .is_empty()
+        {
             return true;
         }
-        if !message.session_id.is_empty() && self.by_session.contains_key(&message.session_id) {
-            return true;
+        if !message.session_id.is_empty() {
+            if let Some(slots) = self.by_session.get(&message.session_id) {
+                if !self.window(slots, message).is_empty() {
+                    return true;
+                }
+            }
         }
-        response_ids(&message.dedup_key).any(|id| self.by_id.contains_key(id))
+        response_ids(&message.dedup_key).any(|id| {
+            self.by_id
+                .get(id)
+                .is_some_and(|slots| !self.window(slots, message).is_empty())
+        })
     }
 
     /// Candidate records for one message, using only the strongest rule that
@@ -490,16 +537,23 @@ impl GatewayIndex {
 
     /// Slots whose recorded start can still reach this message. The window is
     /// the request-start skew plus any response span, bounded in both
-    /// directions so a start-less row is anchored on its response end.
+    /// directions so a start-less row is anchored on its response end; the
+    /// start-less lookback takes the late end bound, which is wider than the
+    /// early one for adapters whose clients persist usage late.
     fn window(&self, slots: &[usize], message: &UnifiedMessage) -> Vec<usize> {
         let span = message
             .duration_ms
             .filter(|duration| *duration >= 0)
             .unwrap_or(self.policy.max_response_duration_ms);
-        let lower = message
-            .timestamp
-            .saturating_sub(self.policy.max_start_skew_ms)
-            .saturating_sub(self.policy.max_response_duration_ms);
+        let back = if message.duration_ms.is_some_and(|duration| duration >= 0) {
+            self.policy.max_start_skew_ms
+        } else {
+            self.policy.max_late_end_skew_ms + self.policy.max_response_duration_ms
+        };
+        let lower = message.timestamp.saturating_sub(back);
+        // The upper bound takes the early end bound: a row's start can never
+        // sit after `message end + early skew`, because the timing check only
+        // tolerates the wider late skew in the other direction.
         let upper = message
             .timestamp
             .saturating_add(span)
@@ -537,18 +591,22 @@ fn timing_matches(message: &UnifiedMessage, record: &GatewayRecord, policy: Matc
     let record_end = record
         .start_ms
         .saturating_add(record.duration_ms.unwrap_or(0).max(0));
-    match message.duration_ms.filter(|duration| *duration >= 0) {
+    let message_end = match message.duration_ms.filter(|duration| *duration >= 0) {
         Some(duration) => {
             if message.timestamp.abs_diff(record.start_ms) > policy.max_start_skew_ms as u64 {
                 return false;
             }
-            let message_end = message.timestamp.saturating_add(duration);
-            message_end.abs_diff(record_end) <= policy.max_end_skew_ms as u64
+            message.timestamp.saturating_add(duration)
         }
         // An unconfirmed usage record is stamped when the response lands, so
         // its clock anchors on the request's end rather than its start.
-        None => message.timestamp.abs_diff(record_end) <= policy.max_end_skew_ms as u64,
-    }
+        None => message.timestamp,
+    };
+    // Only allow the wider skew when the client is late: a client can persist
+    // its usage event after the gateway records the response end, but an early
+    // event keeps the tight bound.
+    (-(policy.max_end_skew_ms)..=policy.max_late_end_skew_ms)
+        .contains(&(message_end.saturating_sub(record_end)))
 }
 
 /// Response and request identifiers a client parser retained inside its dedup
@@ -626,9 +684,9 @@ mod tests {
         TokenSignature::from_gateway(
             tokens.input,
             tokens.output + tokens.reasoning,
-            tokens.cache_read,
-            tokens.cache_write,
-            tokens.reasoning,
+            Some(tokens.cache_read),
+            Some(tokens.cache_write),
+            Some(tokens.reasoning),
         )
     }
 
@@ -653,7 +711,53 @@ mod tests {
     fn a_reasoning_mismatch_fails_closed() {
         let tokens = tokens();
         let mut gateway = signature(&tokens);
-        gateway.reasoning = 4;
+        gateway.reasoning = Some(4);
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![record("selector", gateway)]);
+        let mut message = message("selector", tokens);
+        message.duration_ms = Some(1_000);
+
+        assert!(index.candidates(&message).is_empty());
+    }
+
+    /// A ledger row that omits a counter bucket must not contradict a client
+    /// that reports it: the row predates the counter, and the additive totals
+    /// already bind the sum. Only a reported bucket may disagree (#1526
+    /// behavior `usage_matches` shipped on main).
+    #[test]
+    fn an_unreported_gateway_bucket_does_not_block_a_match() {
+        // input 100 + cache_read 400 = prompt 500; output 20 + reasoning 5 =
+        // completion 25. The gateway row reports the same totals but omits the
+        // buckets themselves, the shape of a ledger written before those
+        // counters existed.
+        let tokens = TokenBreakdown {
+            input: 100,
+            output: 20,
+            cache_read: 400,
+            cache_write: 0,
+            reasoning: 5,
+            ..TokenBreakdown::default()
+        };
+        let gateway = TokenSignature::from_wire_totals(500, 25, None, None, None);
+        let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![record("selector", gateway)]);
+        let mut message = message("selector", tokens);
+        message.duration_ms = Some(1_000);
+
+        let candidates = index.candidates(&message);
+        assert_eq!(candidates.len(), 1, "a missing bucket is not a zero bucket");
+    }
+
+    /// A reported bucket still has to agree once both sides name it.
+    #[test]
+    fn a_reported_gateway_bucket_still_has_to_agree() {
+        let tokens = TokenBreakdown {
+            input: 100,
+            output: 20,
+            cache_read: 400,
+            cache_write: 0,
+            reasoning: 5,
+            ..TokenBreakdown::default()
+        };
+        let gateway = TokenSignature::from_wire_totals(500, 25, Some(399), None, None);
         let index = GatewayIndex::new(MatchPolicy::opencodex(), vec![record("selector", gateway)]);
         let mut message = message("selector", tokens);
         message.duration_ms = Some(1_000);
@@ -819,5 +923,37 @@ mod tests {
 
         assert!(index.candidates(&message).is_empty());
         assert!(!index.could_claim(&message));
+    }
+
+    /// Parking is bounded by the ledger's own time span. A row far outside
+    /// every record's correlation window is not a claim, so a long history
+    /// sharing a selector with the ledger cannot fill the park list and
+    /// disable attribution for the rows a record can actually reach (#1522
+    /// review F1).
+    #[test]
+    fn a_row_outside_the_correlation_window_is_never_parked() {
+        let tokens = tokens();
+        let index = GatewayIndex::new(
+            MatchPolicy::opencodex(),
+            vec![record("selector", signature(&tokens))],
+        );
+        // A timed message the start skew cannot reach in either direction.
+        for offset in [365 * 24 * 3600 * 1000, -(365 * 24 * 3600 * 1000)] {
+            let mut distant = message("selector", tokens.clone());
+            distant.timestamp = START + offset;
+            distant.duration_ms = Some(1_000);
+
+            assert!(
+                !index.could_claim(&distant),
+                "a row {offset}ms away must not park"
+            );
+            assert!(index.candidates(&distant).is_empty());
+        }
+
+        // The same-selector row inside the window still parks and resolves.
+        let mut near = message("selector", tokens);
+        near.duration_ms = Some(1_000);
+        assert!(index.could_claim(&near));
+        assert_eq!(index.candidates(&near).len(), 1);
     }
 }

@@ -27,6 +27,7 @@ struct PersistedUsage {
     total_tokens: Option<i64>,
     cached_input_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
+    cache_write_input_tokens: Option<i64>,
     reasoning_output_tokens: Option<i64>,
     estimated: Option<bool>,
 }
@@ -164,7 +165,9 @@ fn attempt_eligible(attempt: &PersistedAttempt) -> bool {
 ///
 /// OpenCodex reports OpenAI-shaped usage: `inputTokens` includes the cache
 /// read, and `outputTokens` includes reasoning. A row whose own counters
-/// contradict each other is malformed evidence, not a candidate.
+/// contradict each other is malformed evidence, not a candidate. Counter
+/// buckets the row omits stay unreported (`None`), so a ledger written before
+/// a counter existed still matches a client that reports it.
 fn usage_signature(usage: &PersistedUsage) -> Option<TokenSignature> {
     let input = usage.input_tokens?;
     let output = usage.output_tokens?;
@@ -177,14 +180,19 @@ fn usage_signature(usage: &PersistedUsage) -> Option<TokenSignature> {
     {
         return None;
     }
-    let cached = match (usage.cached_input_tokens, usage.cache_read_input_tokens) {
+    // Both spellings of the cache counter are observations; disagreeing
+    // counters mean malformed evidence, not a choice between them.
+    let cache_read = match (usage.cached_input_tokens, usage.cache_read_input_tokens) {
         (Some(left), Some(right)) if left != right => return None,
-        (left, right) => left.or(right).unwrap_or(0),
-    }
-    .max(0);
-    let reasoning = usage.reasoning_output_tokens.unwrap_or(0).max(0);
+        (left, right) => left.or(right),
+    };
+    let cache_write = usage.cache_write_input_tokens.filter(|value| *value >= 0);
     Some(TokenSignature::from_wire_totals(
-        input, output, cached, 0, reasoning,
+        input,
+        output,
+        cache_read.filter(|value| *value >= 0),
+        cache_write,
+        usage.reasoning_output_tokens.filter(|value| *value >= 0),
     ))
 }
 
