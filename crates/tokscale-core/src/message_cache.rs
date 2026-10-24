@@ -1922,7 +1922,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v7->v8: turn aggregates retain modelCalls and trustworthy
         // costUsdTicks. Unchanged closed sessions otherwise replay v7 rows with
         // message_count = 1 and no provider-reported cost (#1387).
-        ClientId::Grok => 8,
+        // v8->v9: unified inference durations are now measured and anchored
+        // at request start, while overlap selection retains the source clock.
+        ClientId::Grok => 9,
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -6734,10 +6736,11 @@ mod tests {
     }
 
     #[test]
-    fn test_grok_cost_and_call_count_parser_version_invalidates_v7_entries() {
-        // A closed Grok session file keeps its fingerprint forever, so only the
-        // version bump discards cached rows without modelCalls/costUsdTicks.
-        assert_eq!(parser_version(ClientId::Grok), 8);
+    fn test_grok_inference_duration_parser_version_invalidates_v8_entries() {
+        // A closed Grok log keeps its fingerprint forever, so only the version
+        // bump discards v8 rows (shipped in 4.20.0) that carry no inference
+        // duration and still sit on the completion clock.
+        assert_eq!(parser_version(ClientId::Grok), 9);
     }
 
     #[test]
@@ -6817,12 +6820,49 @@ mod tests {
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v8 parse must replace the stale v7 row");
-        assert_eq!(rebuilt.parser_version, 8);
+            .expect("the v9 parse must replace the stale v7 row");
+        assert_eq!(rebuilt.parser_version, 9);
         assert_eq!(rebuilt.messages[0].message_count, 8);
         assert_eq!(
             rebuilt.messages[0].cost_source,
             crate::sessions::CostSource::ProviderReported
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grok_v8_shards_are_reparsed_with_inference_duration() {
+        let home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(home.path());
+        let path = home.path().join(".grok/logs/unified.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100,"completion_tokens":25,"model_elapsed_ms":500}}"#).unwrap();
+        let fingerprint = SourceFingerprint::from_grok_path(&path).unwrap();
+        let current = CacheIdentity::for_client(ClientId::Grok);
+        let previous = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 8,
+        };
+        let mut stale = test_entry(previous, &path, "session-1");
+        stale.fingerprint = fingerprint.clone();
+        stale.messages[0].timestamp = 1_700_000_000_000;
+        let shard = cache_shard_path(current, &path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, previous, &[stale], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let cold = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["grok".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].timestamp, 1_699_999_999_500);
+        assert_eq!(cold[0].duration_ms, Some(500));
+        assert_eq!(
+            SourceFingerprint::from_grok_path(&path).unwrap(),
+            fingerprint
         );
     }
 
