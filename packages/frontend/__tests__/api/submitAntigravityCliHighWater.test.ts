@@ -261,6 +261,8 @@ function selectResult(columns: Record<string, unknown>, store: Store) {
   if (keys.has("totalTokens")) return [aggregatesRow(store)];
   if (keys.has("id") && keys.has("sessionCount")) return existingSubmissionRow();
   if (keys.has("sessionCount") && keys.has("totalActiveTimeMs")) return [{}];
+  if (keys.has("leaderboardHidden")) return [{ leaderboardHidden: false }];
+  if (keys.has("action") && keys.has("actorUsername")) return [];
   throw new Error(`unexpected SELECT shape: ${[...keys].join(",")}`);
 }
 
@@ -270,6 +272,7 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
+    orderBy: vi.fn(() => builder),
     then: (resolve: (value: unknown) => unknown) =>
       Promise.resolve(resolve(result)),
   };

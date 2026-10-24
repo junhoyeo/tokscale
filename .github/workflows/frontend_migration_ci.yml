@@ -16,6 +16,9 @@ on:
       - "packages/frontend/__tests__/integration/leaderboardPostgres.test.ts"
       - "packages/frontend/src/lib/moderation/**"
       - "packages/frontend/__tests__/integration/moderationCandidatesPostgres.test.ts"
+      - "packages/frontend/src/app/api/submit/route.ts"
+      - "packages/frontend/src/lib/validation/**"
+      - "packages/frontend/__tests__/integration/submitWithholdingPostgres.test.ts"
       - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
       - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
       - "packages/frontend/src/lib/leaderboard/getLeaderboard.ts"
@@ -85,6 +88,9 @@ jobs:
         env:
           LEADERBOARD_DB_INTEGRATION: "1"
         run: bun run --cwd packages/frontend test -- __tests__/integration/leaderboardPostgres.test.ts
+
+      - name: Execute submission withholding against PostgreSQL
+        run: bun run --cwd packages/frontend test:withholding:db
 
       - name: Execute leaderboard totals query against PostgreSQL
         env:

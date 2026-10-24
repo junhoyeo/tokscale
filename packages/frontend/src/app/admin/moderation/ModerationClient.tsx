@@ -17,6 +17,9 @@ interface Candidate {
   hasBackfill: boolean;
   score: number;
   signals: CandidateSignal[];
+  latestActorUsername?: string | null;
+  latestAction?: string | null;
+  latestActionReason?: string | null;
 }
 
 /**
@@ -131,9 +134,9 @@ export default function ModerationClient() {
       <main className="service-main" id="main-content">
         <Title>Leaderboard moderation</Title>
         <Intro>
-          Hiding removes an account from the rankings only. Their profile, badge
-          and embeds stay public, and their usage still counts toward site-wide
-          totals. Every change is reversible and recorded.
+          Hiding removes an account from both rankings and site-wide totals. Their
+          profile, badge and embeds stay public. Every change is reversible and
+          recorded.
         </Intro>
         <Caveat>
           A high score is a prompt to investigate, not a verdict. In particular,
@@ -149,32 +152,89 @@ export default function ModerationClient() {
           <Muted>Nothing flagged, and nobody currently hidden.</Muted>
         ) : (
           <List>
-            {candidates.map((candidate) => (
-              <Row key={candidate.userId} $hidden={candidate.leaderboardHidden}>
-                <RowHead>
-                  <Handle
-                    href={`/u/${candidate.username}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    @{candidate.username}
-                  </Handle>
-                  <Score>score {Math.round(candidate.score)}</Score>
-                  {candidate.leaderboardHidden ? <Badge>hidden</Badge> : null}
-                  {candidate.hasBackfill ? <Badge $muted>backfill</Badge> : null}
-                </RowHead>
+            {candidates.map((candidate) => {
+              const isSystemWithheld =
+                candidate.leaderboardHidden &&
+                candidate.latestActorUsername?.trim().toLowerCase() === "system" &&
+                candidate.latestAction !== "unhide";
+              const isAdminHidden =
+                candidate.leaderboardHidden && !isSystemWithheld;
 
-                <Stats>
-                  {formatCompact(candidate.totalTokens, "number")} tokens ·{" "}
-                  {formatCompact(candidate.totalCost, "currency")} ·{" "}
-                  {candidate.submitCount} submits
-                </Stats>
+              return (
+                <Row key={candidate.userId} $hidden={candidate.leaderboardHidden}>
+                  <RowHead>
+                    <Handle
+                      href={`/u/${candidate.username}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      @{candidate.username}
+                    </Handle>
+                    <Score>score {Math.round(candidate.score)}</Score>
+                    {isSystemWithheld ? (
+                      <Badge
+                        $variant="system"
+                        role="status"
+                        data-status="system-withheld"
+                        aria-label="System Withheld"
+                        title="Automatically withheld by system"
+                      >
+                        system withheld
+                      </Badge>
+                    ) : isAdminHidden ? (
+                      <Badge
+                        $variant="admin"
+                        role="status"
+                        data-status="admin-hidden"
+                        aria-label="Admin Hidden"
+                        title={
+                          candidate.latestActorUsername
+                            ? `Hidden manually by @${candidate.latestActorUsername}`
+                            : "Hidden manually by administrator"
+                        }
+                      >
+                        admin hidden
+                      </Badge>
+                    ) : null}
+                    {candidate.hasBackfill ? <Badge $muted>backfill</Badge> : null}
+                  </RowHead>
 
-                <Signals>
-                  {candidate.signals.map((signal) => (
-                    <li key={signal.key}>{signal.label}</li>
-                  ))}
-                </Signals>
+                  <Stats>
+                    {formatCompact(candidate.totalTokens, "number")} tokens ·{" "}
+                    {formatCompact(candidate.totalCost, "currency")} ·{" "}
+                    {candidate.submitCount} submits
+                  </Stats>
+
+                  {candidate.leaderboardHidden ? (
+                    <ModerationInfo $system={isSystemWithheld}>
+                      <ModerationTag $system={isSystemWithheld}>
+                        {isSystemWithheld ? "[System Withheld]" : "[Admin Hidden]"}
+                      </ModerationTag>
+                      <span>
+                        {isSystemWithheld
+                          ? "Automatically withheld by system"
+                          : candidate.latestActorUsername
+                            ? `Hidden manually by @${candidate.latestActorUsername}`
+                            : "Hidden manually by administrator"}
+                        {candidate.latestActionReason &&
+                        candidate.latestAction !== "unhide" ? (
+                          <>
+                            {" "}
+                            &mdash; Reason:{" "}
+                            <ModerationReason>
+                              &ldquo;{candidate.latestActionReason}&rdquo;
+                            </ModerationReason>
+                          </>
+                        ) : null}
+                      </span>
+                    </ModerationInfo>
+                  ) : null}
+
+                  <Signals>
+                    {candidate.signals.map((signal) => (
+                      <li key={signal.key}>{signal.label}</li>
+                    ))}
+                  </Signals>
 
                 <ActionRow>
                   <ReasonSelect
@@ -210,7 +270,8 @@ export default function ModerationClient() {
                   </ActionButton>
                 </ActionRow>
               </Row>
-            ))}
+            );
+          })}
           </List>
         )}
       </main>
@@ -289,15 +350,75 @@ const Score = styled.span`
   font-size: 0.75rem;
 `;
 
-const Badge = styled.span<{ $muted?: boolean }>`
-  padding: 2px 8px;
+const Badge = styled.span<{
+  $muted?: boolean;
+  $variant?: "admin" | "system" | "muted";
+}>`
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
   border-radius: 999px;
-  background: ${({ $muted }) =>
-    $muted ? "var(--service-surface-muted)" : "var(--service-accent-soft)"};
-  color: ${({ $muted }) => ($muted ? "var(--service-text-muted)" : "var(--service-accent)")};
   font-size: 0.6875rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  font-weight: 550;
+  border: 1px solid transparent;
+  ${({ $muted, $variant }) => {
+    if ($variant === "system") {
+      return `
+        background: rgba(245, 158, 11, 0.14);
+        color: #f59e0b;
+        border-color: rgba(245, 158, 11, 0.32);
+      `;
+    }
+    if ($variant === "admin") {
+      return `
+        background: rgba(255, 107, 107, 0.14);
+        color: #ff6b6b;
+        border-color: rgba(255, 107, 107, 0.32);
+      `;
+    }
+    if ($muted || $variant === "muted") {
+      return `
+        background: var(--service-surface-muted);
+        color: var(--service-text-muted);
+      `;
+    }
+    return `
+      background: var(--service-accent-soft);
+      color: var(--service-accent);
+    `;
+  }}
+`;
+
+const ModerationInfo = styled.div<{ $system?: boolean }>`
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: ${({ $system }) =>
+    $system ? "rgba(245, 158, 11, 0.07)" : "rgba(255, 107, 107, 0.07)"};
+  border: 1px solid
+    ${({ $system }) =>
+      $system ? "rgba(245, 158, 11, 0.2)" : "rgba(255, 107, 107, 0.2)"};
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+`;
+
+const ModerationTag = styled.span<{ $system?: boolean }>`
+  font-weight: 650;
+  font-size: 0.75rem;
+  font-family: var(--font-mono), monospace;
+  color: ${({ $system }) => ($system ? "#f59e0b" : "#ff6b6b")};
+`;
+
+const ModerationReason = styled.span`
+  color: var(--service-text-muted);
+  font-style: italic;
 `;
 
 const Stats = styled.p`

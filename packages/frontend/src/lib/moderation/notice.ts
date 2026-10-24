@@ -166,7 +166,7 @@ export async function getModerationNotice(
         eq(moderationActions.action, "hide")
       )
     )
-    .orderBy(desc(moderationActions.createdAt))
+    .orderBy(desc(moderationActions.createdAt), desc(moderationActions.id))
     .limit(1);
 
   return moderationNoticeFor(latest?.reason ?? null, audience);
