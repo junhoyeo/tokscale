@@ -18271,8 +18271,7 @@ mod tests {
             &rollout,
             transcript
                 .replace("gpt-5.2", "combo/aggregate-fixture")
-                // Keep the equal-token sibling outside the 30s late-usage window.
-                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:01:10Z"),
+                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:00:10Z"),
         )
         .unwrap();
 

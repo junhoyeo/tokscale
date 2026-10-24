@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
@@ -13,6 +13,8 @@ use super::{CostSource, UnifiedMessage};
 const MAX_END_SKEW_MS: u64 = 2_000;
 // Codex can persist its token_count after OpenCodex records the response end.
 // Only allow a wider skew when Codex is late; early events keep the 2s bound.
+// The late window is a second matching pass: it only sees messages and rows
+// that the strict window left unmatched, so it never costs a strict match.
 const MAX_LATE_END_SKEW_MS: i64 = 30_000;
 const MAX_START_SKEW_MS: u64 = 120_000;
 /// Bounds how far a response's recorded end can sit after its start while a
@@ -224,7 +226,8 @@ impl AttributionIndex {
 
     /// Inspect only the selector's bounded time window. Candidates with
     /// unknown or conflicting physical targets still reserve their ledger row.
-    fn candidates(&self, message: &UnifiedMessage) -> Vec<CandidateMatch> {
+    /// `late_skew_ms` is how far the message's end may sit after the row's.
+    fn candidates(&self, message: &UnifiedMessage, late_skew_ms: i64) -> Vec<CandidateMatch> {
         if message.timestamp <= 0 {
             return Vec::new();
         }
@@ -241,7 +244,7 @@ impl AttributionIndex {
         let back = if message.duration_ms.is_some_and(|duration| duration >= 0) {
             MAX_START_SKEW_MS as i64
         } else {
-            MAX_LATE_END_SKEW_MS + MAX_RESPONSE_DURATION_MS
+            late_skew_ms + MAX_RESPONSE_DURATION_MS
         };
         let first =
             rows.partition_point(|row| row.timestamp < message.timestamp.saturating_sub(back));
@@ -255,7 +258,7 @@ impl AttributionIndex {
         let mut candidates = Vec::new();
 
         for (offset, row) in rows[first..end].iter().enumerate() {
-            if !timing_matches(message, row) {
+            if !timing_matches(message, row, late_skew_ms) {
                 continue;
             }
             let matched = row.attempts.iter().any(|attempt| {
@@ -342,7 +345,7 @@ fn attempt_eligible(attempt: &PersistedAttempt) -> bool {
             .is_some_and(|usage| usage.estimated != Some(true))
 }
 
-fn timing_matches(message: &UnifiedMessage, row: &IndexedRow) -> bool {
+fn timing_matches(message: &UnifiedMessage, row: &IndexedRow, late_skew_ms: i64) -> bool {
     if message.timestamp <= 0 {
         return false;
     }
@@ -357,10 +360,14 @@ fn timing_matches(message: &UnifiedMessage, row: &IndexedRow) -> bool {
         } else {
             // An unconfirmed `token_usage_record` is timestamped when the response
             // lands, so its time anchors on the request's end, not its start.
+            // Its lookback covers only MAX_RESPONSE_DURATION_MS of response,
+            // so a longer row is out of contract even when the scan reaches it.
+            if row.duration_ms > MAX_RESPONSE_DURATION_MS {
+                return false;
+            }
             message.timestamp
         };
-    (-(MAX_END_SKEW_MS as i64)..=MAX_LATE_END_SKEW_MS)
-        .contains(&message_end.saturating_sub(row_end))
+    (-(MAX_END_SKEW_MS as i64)..=late_skew_ms).contains(&message_end.saturating_sub(row_end))
 }
 
 fn usage_matches(message: &UnifiedMessage, usage: &PersistedUsage) -> bool {
@@ -474,6 +481,67 @@ fn usage_log_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
         .join("usage.jsonl")
 }
 
+/// Candidate rows per message for one matching pass. `keep` sees the message
+/// index, the message's selector and a row index, and drops rows the pass may
+/// not use.
+fn collect_candidates(
+    index: &AttributionIndex,
+    messages: &[UnifiedMessage],
+    late_skew_ms: i64,
+    keep: impl Fn(usize, &str, usize) -> bool,
+) -> Vec<Vec<CandidateMatch>> {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(message_index, message)| {
+            if message.client != "codex" {
+                return Vec::new();
+            }
+            let mut matches = index.candidates(message, late_skew_ms);
+            matches.retain(|candidate| keep(message_index, &message.model_id, candidate.row_index));
+            matches
+        })
+        .collect()
+}
+
+/// How many messages hold each (selector, row) as a candidate in one pass.
+fn count_claims(
+    messages: &[UnifiedMessage],
+    candidates: &[Vec<CandidateMatch>],
+) -> HashMap<(String, usize), usize> {
+    let mut claims: HashMap<(String, usize), usize> = HashMap::new();
+    for (message, matches) in messages.iter().zip(candidates) {
+        for candidate in matches {
+            *claims
+                .entry((message.model_id.clone(), candidate.row_index))
+                .or_default() += 1;
+        }
+    }
+    claims
+}
+
+/// A match only counts when the message has exactly one candidate row and no
+/// other message in the same pass holds that row as a candidate.
+fn unique_claim(
+    message: &UnifiedMessage,
+    matches: &[CandidateMatch],
+    claims: &HashMap<(String, usize), usize>,
+) -> Option<CandidateMatch> {
+    if message.client != "codex" {
+        return None;
+    }
+    let [candidate] = matches else {
+        return None;
+    };
+    if claims.get(&(message.model_id.clone(), candidate.row_index)) != Some(&1) {
+        return None;
+    }
+    Some(CandidateMatch {
+        row_index: candidate.row_index,
+        target: candidate.target.clone(),
+    })
+}
+
 /// Replace Codex's virtual OpenCodex combo selector with the physical target
 /// that actually served the request.
 ///
@@ -486,7 +554,8 @@ fn usage_log_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
 /// combo request, the requested selector must match exactly, a successful
 /// reported attempt must match Codex's token signature, and request timing
 /// must line up. Each ledger row may serve at most one Codex usage row.
-/// Ambiguity retains the original selector.
+/// Ambiguity retains the original selector. A strict end-time match is tried
+/// first; the late window only fills in what the strict pass left unmatched.
 pub(crate) fn attribute_codex_messages(
     home_dir: &str,
     use_env_roots: bool,
@@ -501,37 +570,50 @@ pub(crate) fn attribute_codex_messages(
         return 0;
     };
 
-    // Collect every feasible ledger claim before changing any model IDs.
-    // Even a message with multiple candidates prevents another message from
-    // claiming its shared row: uncertain attribution must fail closed.
-    let candidates: Vec<Vec<CandidateMatch>> = messages
+    // Pass 1 uses the strict window, so it keeps every attribution that
+    // window makes. Every row a strict candidate touched stays reserved, even
+    // when that candidate was ambiguous.
+    let strict = collect_candidates(&index, messages, MAX_END_SKEW_MS as i64, |_, _, _| true);
+    let strict_claims = count_claims(messages, &strict);
+    let reserved: HashSet<(&str, usize)> = messages
         .iter()
-        .map(|message| {
-            if message.client == "codex" {
-                index.candidates(message)
-            } else {
-                Vec::new()
-            }
+        .zip(&strict)
+        .flat_map(|(message, matches)| {
+            matches
+                .iter()
+                .map(move |candidate| (message.model_id.as_str(), candidate.row_index))
         })
         .collect();
-    let mut claims: HashMap<(String, usize), usize> = HashMap::new();
-    for (message, matches) in messages.iter().zip(&candidates) {
-        for candidate in matches {
-            *claims
-                .entry((message.model_id.clone(), candidate.row_index))
-                .or_default() += 1;
+    let mut resolved: Vec<Option<CandidateMatch>> = messages
+        .iter()
+        .zip(strict.iter())
+        .map(|(message, matches)| unique_claim(message, matches, &strict_claims))
+        .collect();
+
+    // Pass 2 uses the late window for messages pass 1 left unresolved, and
+    // only against rows pass 1 did not reserve. A message that had strict
+    // candidates still blocks rows here, but it can never take a late row:
+    // its strict evidence was ambiguous, so it fails closed.
+    let late = collect_candidates(
+        &index,
+        messages,
+        MAX_LATE_END_SKEW_MS,
+        |message_index, model_id, row_index| {
+            resolved[message_index].is_none() && !reserved.contains(&(model_id, row_index))
+        },
+    );
+    let late_claims = count_claims(messages, &late);
+    for (message_index, message) in messages.iter().enumerate() {
+        if resolved[message_index].is_none() && strict[message_index].is_empty() {
+            resolved[message_index] = unique_claim(message, &late[message_index], &late_claims);
         }
     }
 
     let mut attributed = 0;
-    for (message, matches) in messages.iter_mut().zip(candidates) {
-        if message.client != "codex" || matches.len() != 1 {
+    for (message, candidate) in messages.iter_mut().zip(resolved) {
+        let Some(candidate) = candidate else {
             continue;
-        }
-        let candidate = matches.into_iter().next().unwrap();
-        if claims.get(&(message.model_id.clone(), candidate.row_index)) != Some(&1) {
-            continue;
-        }
+        };
         let Some(target) = candidate.target else {
             continue;
         };
@@ -1037,9 +1119,12 @@ mod tests {
     fn late_usage_does_not_claim_a_row_shared_by_two_codex_messages() {
         let home = TempDir::new().unwrap();
         write_ledger(home.path(), &[row(200, 200, Some(usage()))], false);
-        let first = codex_message();
+        // Neither message ends within the strict window, so both only reach
+        // the row through the late window and must block each other.
+        let mut first = codex_message();
+        first.timestamp += 5_000;
         let mut second = codex_message();
-        second.timestamp += 8_000;
+        second.timestamp += 13_000;
         let mut messages = vec![first, second];
 
         assert_eq!(
@@ -1047,6 +1132,81 @@ mod tests {
             0
         );
         assert!(messages.iter().all(|message| message.model_id == SELECTOR));
+    }
+
+    #[test]
+    fn strict_match_keeps_its_row_against_a_late_twin() {
+        let home = TempDir::new().unwrap();
+        write_ledger(home.path(), &[row(200, 200, Some(usage()))], false);
+        // The first message ends on the row; its twin is 8s late and has no
+        // row of its own. The strict match wins and the twin keeps the
+        // selector.
+        let first = codex_message();
+        let mut second = codex_message();
+        second.timestamp += 8_000;
+        let mut messages = vec![first, second];
+
+        assert_eq!(
+            attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+            1
+        );
+        assert_eq!(messages[0].model_id, SERVED_MODEL);
+        assert_eq!(messages[1].model_id, SELECTOR);
+    }
+
+    #[test]
+    fn back_to_back_identical_requests_each_keep_their_own_row() {
+        let home = TempDir::new().unwrap();
+        let first_row = row(200, 200, Some(usage()));
+        let mut second_row = row_with_served(OTHER_SERVED_MODEL, 200, 200, Some(usage()));
+        second_row["timestamp"] = json!(START + ROW_START_OFFSET + 8_000);
+        write_ledger(home.path(), &[first_row, second_row], false);
+        // Each message ends on its own row. The second one is also within
+        // the late window of the first row, which must not cost either
+        // message its strict match.
+        let first = codex_message();
+        let mut second = codex_message();
+        second.timestamp += 8_000;
+        let mut messages = vec![first, second];
+
+        assert_eq!(
+            attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+            2
+        );
+        assert_eq!(messages[0].model_id, SERVED_MODEL);
+        assert_eq!(messages[1].model_id, OTHER_SERVED_MODEL);
+    }
+
+    fn start_less_record_on_row(row_duration_ms: i64, late_ms: i64) -> usize {
+        let home = TempDir::new().unwrap();
+        let mut value = row(200, 200, Some(usage()));
+        value["durationMs"] = json!(row_duration_ms);
+        value["attempts"][0]["durationMs"] = json!(row_duration_ms);
+        write_ledger(home.path(), &[value], false);
+        let mut message = codex_message();
+        message.timestamp = START + ROW_START_OFFSET + row_duration_ms + late_ms;
+        message.duration_ms = None;
+        let mut messages = vec![message];
+        attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages)
+    }
+
+    #[test]
+    fn late_start_less_record_finds_a_long_row() {
+        // The row starts 615s before the record: outside the strict lookback
+        // (2s + 600s), inside the late one (30s + 600s).
+        assert_eq!(start_less_record_on_row(590_000, 25_000), 1);
+    }
+
+    #[test]
+    fn start_less_record_past_the_late_window_is_rejected() {
+        assert_eq!(start_less_record_on_row(ROW_DURATION, 30_000), 1);
+        assert_eq!(start_less_record_on_row(ROW_DURATION, 30_001), 0);
+    }
+
+    #[test]
+    fn start_less_record_rejects_rows_longer_than_the_response_bound() {
+        assert_eq!(start_less_record_on_row(MAX_RESPONSE_DURATION_MS, 1_000), 1);
+        assert_eq!(start_less_record_on_row(610_000, 1_000), 0);
     }
 
     #[test]
