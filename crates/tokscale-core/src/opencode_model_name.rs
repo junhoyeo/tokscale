@@ -1,9 +1,11 @@
 //! OpenCode-configured model display names.
 //!
 //! OpenCode lets providers assign a human-readable `name` to a model key in
-//! its user-level configuration. These names are presentation metadata:
-//! they are applied only while grouping local reports and never replace the
-//! model id used for pricing, caching, or exports.
+//! its user-level configuration. The resolver reads both the legacy
+//! `provider` map and the current `providers` map; the `providers` entry wins
+//! when both define the same provider and model. These names are presentation
+//! metadata: they are applied only while grouping local reports and never
+//! replace the model id used for pricing, caching, or exports.
 
 use crate::{canonical_model_id, provider_identity};
 use std::collections::HashMap;
@@ -21,11 +23,18 @@ impl OpenCodeModelNameResolver {
             return Self::default();
         };
 
-        let Some(providers) = config
-            .get("provider")
-            .and_then(serde_json::Value::as_object)
-        else {
-            return Self::default();
+        let mut names = Self::names_from_providers(&config, "provider");
+        names.extend(Self::names_from_providers(&config, "providers"));
+
+        Self { names }
+    }
+
+    fn names_from_providers(
+        config: &serde_json::Value,
+        key: &str,
+    ) -> HashMap<(String, String), String> {
+        let Some(providers) = config.get(key).and_then(serde_json::Value::as_object) else {
+            return HashMap::new();
         };
 
         let mut names = HashMap::new();
@@ -49,14 +58,13 @@ impl OpenCodeModelNameResolver {
                     continue;
                 };
 
-                let name = name.to_string();
                 names
                     .entry((provider.clone(), canonical_model_id(model_id)))
-                    .or_insert(name);
+                    .or_insert_with(|| name.to_string());
             }
         }
 
-        Self { names }
+        names
     }
 
     fn extend_from_json(&mut self, contents: &str) {
@@ -305,6 +313,80 @@ mod tests {
         assert_eq!(
             resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p1"),
             None
+        );
+    }
+
+    #[test]
+    fn reads_v2_providers_key() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "providers": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "glm-5.3" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            Some("glm-5.3")
+        );
+    }
+
+    #[test]
+    fn v2_providers_name_wins_over_v1_provider_name_in_same_file() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "V1 Name" }
+                        }
+                    }
+                },
+                "providers": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "V2 Name" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            Some("V2 Name")
+        );
+    }
+
+    #[test]
+    fn skips_v2_provider_entries_without_models() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "providers": {
+                    "fireworks-ai": {
+                        "settings": { "apiKey": "test" }
+                    },
+                    "openrouter": {
+                        "models": {
+                            "named": { "name": "Named Model" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            None
+        );
+        assert_eq!(
+            resolver.display_name("openrouter", "named"),
+            Some("Named Model")
         );
     }
 
