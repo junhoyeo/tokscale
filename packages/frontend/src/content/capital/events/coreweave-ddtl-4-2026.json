@@ -1,0 +1,145 @@
+{
+  "sources": [
+    {
+      "id": "src_coreweave_8k_2026_03_31",
+      "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000129/crwv-20260330.htm",
+      "publisher": "SEC EDGAR (CoreWeave, Inc.)",
+      "type": "sec_filing",
+      "title": "CoreWeave Form 8-K, March 31, 2026 (DDTL 4.0 delayed draw term loan facility)",
+      "publishedAt": "2026-03-31",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001769628-26-000129",
+        "cik": "0001769628",
+        "filedAt": "2026-03-31",
+        "periodOfReport": "2026-03-30"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_coreweave_ex99_2026_03_31",
+      "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000129/ex991.htm",
+      "publisher": "SEC EDGAR (CoreWeave, Inc.)",
+      "type": "sec_filing",
+      "title": "CoreWeave press release, March 31, 2026 (Exhibit 99.1): closing of the $8.5 billion DDTL 4.0 facility",
+      "publishedAt": "2026-03-31",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001769628-26-000129",
+        "cik": "0001769628",
+        "filedAt": "2026-03-31",
+        "periodOfReport": "2026-03-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_coreweave_ddtl_4_2026",
+    "slug": "coreweave-ddtl-4-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "CoreWeave $8.5 billion DDTL 4.0 delayed draw term loan facility",
+    "summary": "A CoreWeave subsidiary closed an $8.5 billion delayed draw term loan facility to fund GPU servers and infrastructure for a customer contract. The facility matures in March 2032.",
+    "date": "2026-03-31",
+    "dates": {
+      "signed": "2026-03-30",
+      "announced": "2026-03-31"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_coreweave",
+        "roles": [
+          "borrower"
+        ],
+        "note": "Through its subsidiary CoreWeave Compute Acquisition Co. VIII, LLC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "facility",
+        "label": "DDTL 4.0 facility size",
+        "measure": "debt_raised",
+        "value": 8500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-03-31",
+        "to": "org_coreweave",
+        "term": {
+          "through": "2032-03-31"
+        },
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "CoreWeave, Inc. (Nasdaq: CRWV), The Essential Cloud for AI™, today announced it has closed an $8.5 billion delayed draw term loan facility (\"DDTL 4.0 Facility\"), supporting the continued expansion of its AI cloud platform."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Credit agreement",
+        "text": "CoreWeave Compute Acquisition Co. VIII, LLC signed the credit agreement on March 30, 2026, with MUFG Bank as administrative agent.",
+        "sourceId": "src_coreweave_8k_2026_03_31",
+        "quote": "On March 30, 2026, CoreWeave Compute Acquisition Co. VIII, LLC (\"CCAC VIII\" or the \"Borrower\"), a Delaware limited liability company and an indirect subsidiary of CoreWeave, Inc., a Delaware corporation (the \"Parent\"), entered into a credit agreement (the \"Credit Agreement\") with MUFG Bank, Ltd., as administrative agent, U.S. Bank Trust Company, National Association as collateral agent, U.S. Bank National Association, as depository bank, MUFG Bank, Ltd. and Morgan Stanley Asset Funding, Inc., as coordinating lead arrangers and joint bookrunners, and the lenders party thereto, providing for an $8.5 billion delayed draw term loan facility (the \"DDTL 4.0 Facility\")."
+      },
+      {
+        "label": "Initial borrowing",
+        "text": "CoreWeave can borrow up to about $7.5 billion at first, rising to $8.5 billion as the assets reach stabilization.",
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "The structure enables CoreWeave to borrow up to approximately $7.5 billion initially, with the ability to increase total borrowing capacity to $8.5 billion as underlying assets reach stabilization."
+      },
+      {
+        "label": "Purpose",
+        "text": "Mainly to finance capital spending, including GPU servers, needed to perform a customer contract.",
+        "sourceId": "src_coreweave_8k_2026_03_31",
+        "quote": "The DDTL 4.0 Facility was entered into primarily to finance capital expenditures required to perform a customer contract, including the acquisition of GPU servers and related infrastructure."
+      },
+      {
+        "label": "Draw period",
+        "text": "Loans can be drawn until the commitment termination date in June 2027.",
+        "sourceId": "src_coreweave_8k_2026_03_31",
+        "quote": "The DDTL 4.0 Facility provides for delayed draw term loans available in one or more draws until the commitment termination date in June 2027."
+      },
+      {
+        "label": "Maturity",
+        "text": "March 31, 2032.",
+        "sourceId": "src_coreweave_8k_2026_03_31",
+        "quote": "The maturity date of the DDTL 4.0 Facility is March 31, 2032."
+      },
+      {
+        "label": "Pricing",
+        "text": "A floating-rate tranche at SOFR plus 2.25% and a fixed-rate tranche at about 5.9%.",
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "The facility includes a floating rate tranche financed at SOFR + 2.25% and a fixed rate tranche financed at approximately 5.9%."
+      },
+      {
+        "label": "Ratings",
+        "text": "Rated A3 by Moody's and A (low) by DBRS.",
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "The DDTL 4.0 Facility received ratings of A3 by Moody's and A (low) by DBRS, respectively, representing the first investment-grade rated financing secured by HPC infrastructure and an associated customer contract."
+      },
+      {
+        "label": "Arrangers",
+        "text": "MUFG and Morgan Stanley were co-structuring agents and joint bookrunners; Goldman Sachs and JPMorgan were additional coordinating lead arrangers.",
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "MUFG and Morgan Stanley served as co-structuring agents and joint bookrunners with Goldman Sachs and JPMorgan serving as additional coordinating lead arrangers for the transaction, which was meaningfully oversubscribed."
+      },
+      {
+        "label": "Anchor lender",
+        "text": "Blackstone Credit & Insurance anchored the facility.",
+        "sourceId": "src_coreweave_ex99_2026_03_31",
+        "quote": "The facility was anchored by Blackstone Credit & Insurance and included participation from a diverse group of global financial institutions, asset managers, and insurance investors."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_coreweave_8k_2026_03_31",
+      "src_coreweave_ex99_2026_03_31"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

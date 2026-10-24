@@ -22,7 +22,7 @@ interface SizedSkeletonProps {
 export const Skeleton = styled.div<SizedSkeletonProps>`
   animation: ${pulse} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   border-radius: ${props => props.$rounded || '0.25rem'};
-  background-color: var(--color-border-default);
+  background-color: var(--service-border);
   
   width: ${props => props.$w};
   height: ${props => props.$h};
@@ -97,7 +97,7 @@ export function LeaderboardSkeleton() {
         {[...Array(4)].map((_, i) => (
           <StatCard
             key={i}
-            style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+            style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
           >
             <Skeleton $h="1rem" $w="5rem" $mb="0.5rem" />
             <Skeleton $h="2rem" $w="6rem" />
@@ -106,10 +106,10 @@ export function LeaderboardSkeleton() {
       </StatsGrid>
 
       <TableContainer
-        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
+        style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
       >
         <TableHeader
-          style={{ backgroundColor: "var(--color-bg-elevated)", borderColor: "var(--color-border-default)" }}
+          style={{ backgroundColor: "var(--service-surface-muted)", borderColor: "var(--service-border)" }}
         >
           <HeaderContent>
             <Skeleton $h="1rem" $w="3rem" />
@@ -121,7 +121,7 @@ export function LeaderboardSkeleton() {
         {[...Array(10)].map((_, i) => (
           <TableRow
             key={i}
-            style={{ borderColor: "var(--color-border-default)" }}
+            style={{ borderColor: "var(--service-border)" }}
           >
             <RowContent>
               <Skeleton $h="1.5rem" $w="2rem" />
@@ -209,7 +209,7 @@ export function ProfileSkeleton() {
         {[...Array(4)].map((_, i) => (
           <StatCard
             key={i}
-            style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+            style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
           >
             <Skeleton $h="1rem" $w="5rem" $mb="0.5rem" />
             <Skeleton $h="2rem" $w="6rem" />
@@ -218,7 +218,7 @@ export function ProfileSkeleton() {
       </ProfileStatsGrid>
 
       <ContentCard
-        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
+        style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
       >
         <Skeleton $h="1.5rem" $w="9rem" $mb="1rem" />
         <ProfileStatsGrid>
@@ -232,7 +232,7 @@ export function ProfileSkeleton() {
       </ContentCard>
 
       <ContentCard
-        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
+        style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
       >
         <Skeleton $h="1.5rem" $w="6rem" $mb="1rem" />
         <Skeleton $h="10rem" $w="100%" $rounded="0.5rem" />
@@ -244,7 +244,7 @@ export function ProfileSkeleton() {
 export function StatCardSkeleton() {
   return (
     <StatCard
-      style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
+      style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
     >
       <Skeleton $h="1rem" $w="5rem" $mb="0.5rem" />
       <Skeleton $h="2rem" $w="6rem" />
@@ -260,7 +260,7 @@ const SimpleTableRow = styled.div`
 export function TableRowSkeleton() {
   return (
     <SimpleTableRow
-      style={{ borderColor: "#1E2733" }}
+      style={{ borderColor: "var(--service-border)" }}
     >
       <RowContent>
         <Skeleton $h="1.5rem" $w="2rem" />

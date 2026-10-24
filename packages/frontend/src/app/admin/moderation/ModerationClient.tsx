@@ -285,7 +285,6 @@ const Handle = styled.a`
 
 const Score = styled.span`
   color: var(--service-text-muted);
-  font-family: var(--font-mono), monospace;
   font-size: 0.75rem;
 `;
 

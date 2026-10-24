@@ -5,6 +5,7 @@ import Image from "next/image";
 import styled from "styled-components";
 import { CompactBadge, SecondaryButton } from "./RankingUI";
 import { getGroupMonogram } from "./presentation";
+import { Select } from "@/components/ui/Select";
 import { canManageGroupRole } from "@/lib/groups/roles";
 import type { GroupRole } from "@/lib/db/schema";
 
@@ -119,18 +120,19 @@ const RoleBadge = styled(CompactBadge)`
   text-transform: capitalize;
 `;
 
-const RoleSelect = styled.select`
-  width: 100%;
-  min-height: 36px;
-  padding: 6px 8px;
-  border: 1px solid var(--service-border);
-  border-radius: 6px;
-  background: var(--service-surface);
-  color: var(--service-text);
-  font-size: 0.8125rem;
-  color-scheme: dark;
-  &:focus-visible { outline: 2px solid var(--service-focus); outline-offset: 2px; }
-  @media (pointer: coarse) { min-height: 44px; }
+const ROLE_OPTIONS = [
+  { value: "member", label: "Member" },
+  { value: "admin", label: "Admin" },
+];
+
+const RoleSelect = styled(Select)`
+  --select-width: 100%;
+  --select-height: 36px;
+  --select-padding-x: 8px;
+  --select-font-size: 0.8125rem;
+  --select-radius: 6px;
+  --select-background: var(--service-surface);
+  --select-border-color: var(--service-border);
 `;
 
 const MemberMenuButton = styled.button`
@@ -312,12 +314,9 @@ export function GroupManagement({ slug, userId, role, onChanged }: GroupManageme
                   </div>
                 </MemberIdentity>
                 {canManage && role === "owner"
-                  ? <RoleSelect aria-label={`Role for @${member.username}`} value={member.role} disabled={pending} onChange={(event) => {
-                      void mutate(`/members/${encodeURIComponent(member.userId)}/role`, "PATCH", { role: event.target.value });
-                    }}>
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                    </RoleSelect>
+                  ? <RoleSelect aria-label={`Role for @${member.username}`} value={member.role} disabled={pending} options={ROLE_OPTIONS} onChange={(nextRole) => {
+                      void mutate(`/members/${encodeURIComponent(member.userId)}/role`, "PATCH", { role: nextRole });
+                    }} />
                   : <RoleBadge>{member.role}</RoleBadge>}
                 {canManage ? <>
                   <MemberMenuButton type="button" aria-label={`Manage @${member.username}`} popoverTarget={menuId} disabled={pending} onClick={(event) => {

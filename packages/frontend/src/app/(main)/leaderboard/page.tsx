@@ -2,7 +2,7 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
 import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
@@ -14,9 +14,23 @@ import {
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
 import { leaderboardUrl } from "@/lib/seo/urls";
+import { exploreLeaderboardUrl } from "@/lib/seo/explore";
+import { getAgentLeaderboard, getModelLeaderboard } from "@/lib/explore";
+import {
+  DEFAULT_EXPLORE_PERIOD,
+  DEFAULT_EXPLORE_SORT,
+  EXPLORE_PERIODS,
+  EXPLORE_SORTS,
+  periodShortLabel,
+  resolveExplorePeriod,
+  resolveExploreSort,
+  sortLabel,
+} from "@/components/explore/format";
+import { ExploreRanking } from "@/components/explore/ExploreRanking";
 import LeaderboardClient from "./LeaderboardClient";
 import GroupsBrowser from "./GroupsBrowser";
-import ViewSelector, { type LeaderboardView } from "./ViewSelector";
+import ViewSelector from "./ViewSelector";
+import { buildExploreHref, resolveLeaderboardView, type LeaderboardView } from "./views";
 import { TOKSCALE_X_HANDLE } from "@/lib/community";
 
 function isMissingDatabaseUrl(error: unknown): boolean {
@@ -46,8 +60,34 @@ function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
   };
 }
 
-function resolveView(raw: string | string[] | undefined): LeaderboardView {
-  return raw === "groups" ? "groups" : "users";
+const EXPLORE_PAGE_SIZE = 50;
+
+const VIEW_META: Record<LeaderboardView, { title: string; description: string }> = {
+  humans: {
+    title: "Leaderboard - Who Burns the Most AI Tokens | Tokscale",
+    description:
+      "Public ranking of developers by AI coding assistant token usage and estimated cost, across Claude Code, Cursor, Codex, Copilot, Gemini, and more.",
+  },
+  models: {
+    title: "AI Model Leaderboard - Models Ranked by Active Users | Tokscale",
+    description:
+      "Which AI models developers use for coding: active users, adoption, tokens, and estimated cost per model, from public Tokscale submissions.",
+  },
+  agents: {
+    title: "AI Coding Agent Leaderboard - Agents Ranked by Active Users | Tokscale",
+    description:
+      "Which coding agents developers use: active users, adoption, tokens, estimated cost, and top models per agent, from public Tokscale submissions.",
+  },
+  groups: {
+    title: "Groups Leaderboard - Team AI Token Usage | Tokscale",
+    description:
+      "Browse public groups and compare combined AI coding assistant token usage and spend across teams, companies, and communities.",
+  },
+};
+
+function canonicalForView(view: LeaderboardView): string {
+  if (view === "models" || view === "agents") return exploreLeaderboardUrl(view);
+  return leaderboardUrl(view === "groups" ? "groups" : "users");
 }
 
 interface PageProps {
@@ -55,27 +95,20 @@ interface PageProps {
 }
 
 /**
- * Collapses the filter params onto one of two canonical URLs.
+ * Collapses the filter params onto one canonical URL per view.
  *
- * period, sortBy, page, from/to and search are all views of the same ranking,
- * and `search` in particular spans an unbounded set of URLs that would
- * otherwise be crawled as distinct near-duplicates. `view=groups` is the one
- * param that selects a genuinely different page, so it canonicalizes to itself.
+ * period, sort/sortBy, page, from/to and search are all views of the same
+ * ranking, and `search` in particular spans an unbounded set of URLs that
+ * would otherwise be crawled as distinct near-duplicates. `view` selects a
+ * genuinely different page (humans, models, agents, groups), so the non-default
+ * views canonicalize to themselves. The legacy `view=users` collapses onto the
+ * bare humans URL.
  */
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const params = await searchParams;
-  const view = resolveView(params.view);
-  const canonical = leaderboardUrl(view);
-
-  const title =
-    view === "groups"
-      ? "Groups Leaderboard - Team AI Token Usage | Tokscale"
-      : "Leaderboard - Who Burns the Most AI Tokens | Tokscale";
-
-  const description =
-    view === "groups"
-      ? "Browse public groups and compare combined AI coding assistant token usage and spend across teams, companies, and communities."
-      : "Live ranking of developers by AI coding assistant token usage and cost, across Claude Code, Cursor, Codex, Copilot, Gemini, and more.";
+  const view = resolveLeaderboardView(params.view);
+  const canonical = canonicalForView(view);
+  const { title, description } = VIEW_META[view];
 
   return {
     title,
@@ -108,7 +141,7 @@ export default function LeaderboardPage({ searchParams }: PageProps) {
         </Suspense>
       </main>
 
-      <ServiceFooter />
+      <PublicFooter />
     </div>
   );
 }
@@ -119,7 +152,16 @@ async function LeaderboardWithPreferences({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const [cookieStore, searchParams] = await Promise.all([cookies(), searchParamsPromise]);
-  const view = resolveView(searchParams.view);
+  const view = resolveLeaderboardView(searchParams.view);
+
+  if (view === "models" || view === "agents") {
+    return (
+      <>
+        <ViewSelector current={view} searchParams={searchParams} />
+        <ExploreView view={view} searchParams={searchParams} />
+      </>
+    );
+  }
 
   if (view === "groups") {
     return (
@@ -175,7 +217,7 @@ async function LeaderboardWithPreferences({
 
   return (
     <>
-      <ViewSelector current="users" searchParams={searchParams} />
+      <ViewSelector current="humans" searchParams={searchParams} />
       <LeaderboardClient
         initialData={initialData}
         currentUser={session}
@@ -224,6 +266,61 @@ async function GroupsView() {
       initialMyGroups={myGroups?.groups ?? []}
       initialPublicPagination={publicGroups.pagination}
       initialMyPagination={myGroups?.pagination ?? emptyPagination}
+    />
+  );
+}
+
+async function ExploreView({
+  view,
+  searchParams,
+}: {
+  view: "models" | "agents";
+  searchParams: { [key: string]: string | string[] | undefined };
+}) {
+  const period = resolveExplorePeriod(searchParams.period);
+  const sort = resolveExploreSort(searchParams.sort);
+  const query = { period, sort, limit: EXPLORE_PAGE_SIZE };
+  const current = { view, period, sort };
+  const defaults = { period: DEFAULT_EXPLORE_PERIOD, sort: DEFAULT_EXPLORE_SORT };
+
+  const periodOptions = EXPLORE_PERIODS.map((value) => ({
+    href: buildExploreHref("/leaderboard", current, { period: value }, defaults),
+    label: periodShortLabel(value),
+    active: value === period,
+  }));
+  const sortOptions = EXPLORE_SORTS.map((value) => ({
+    href: buildExploreHref("/leaderboard", current, { sort: value }, defaults),
+    label: sortLabel(value),
+    active: value === sort,
+  }));
+
+  if (view === "models") {
+    const ranked = await getModelLeaderboard(query);
+    return (
+      <ExploreRanking
+        kind="models"
+        rows={ranked.rows}
+        coverage={ranked.coverage}
+        period={period}
+        sort={sort}
+        periodOptions={periodOptions}
+        sortOptions={sortOptions}
+        truncated={ranked.rows.length >= EXPLORE_PAGE_SIZE}
+      />
+    );
+  }
+
+  const ranked = await getAgentLeaderboard(query);
+  return (
+    <ExploreRanking
+      kind="agents"
+      rows={ranked.rows}
+      coverage={ranked.coverage}
+      period={period}
+      sort={sort}
+      periodOptions={periodOptions}
+      sortOptions={sortOptions}
+      truncated={ranked.rows.length >= EXPLORE_PAGE_SIZE}
     />
   );
 }

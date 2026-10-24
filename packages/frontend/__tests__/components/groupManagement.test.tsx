@@ -190,7 +190,10 @@ describe("group member management client flow", () => {
     expect(screen.getByText("222")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Manage @teammate" })).toBeTruthy();
     const inviteRole = screen.getByRole("combobox", { name: "Invite role" });
-    expect(inviteRole.querySelector('option[value="admin"]')).toBeNull();
+    inviteRole.focus();
+    fireEvent.keyDown(inviteRole, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Member"]);
+    fireEvent.keyDown(inviteRole, { key: "Escape" });
     expect(screen.queryByRole("button", { name: /Transfer ownership to @/, hidden: true })).toBeNull();
   });
 

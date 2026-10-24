@@ -1,398 +1,387 @@
 "use client";
 
-import styled from "styled-components";
+import styled, { css } from "styled-components";
 import type { ViewMode, ColorPaletteName, ClientType, GraphColorPalette } from "@/lib/types";
 import { getPaletteNames, colorPalettes } from "@/lib/themes";
+import { getDarkGraphColor } from "@/lib/darkGraphColors";
 import { SOURCE_DISPLAY_NAMES, SOURCE_LOGOS } from "@/lib/constants";
 import { formatTokenCount, toggleClientFilter } from "@/lib/utils";
+import { Select } from "@/components/ui/Select";
+import { SegmentButton, SegmentedGroup } from "@/components/leaderboard/RankingUI";
 
 interface GraphControlsProps {
+  /** Id for the heading, so the graph card can be labelled by it. */
+  titleId?: string;
   view: ViewMode;
   onViewChange: (view: ViewMode) => void;
-  paletteName: ColorPaletteName;
-  onPaletteChange: (palette: ColorPaletteName) => void;
   selectedYear: string;
   availableYears: string[];
   onYearChange: (year: string) => void;
   clientFilter: ClientType[];
   availableClients: ClientType[];
   onClientFilterChange: (clients: ClientType[]) => void;
-  palette: GraphColorPalette;
   totalTokens: number;
 }
 
-const Container = styled.div`
-  position: relative;
-  margin-bottom: 16px;
-`;
-
-const ViewModeGroup = styled.div`
-  float: right;
-  margin-top: 4px;
-  margin-left: 16px;
-  position: relative;
-  top: 0;
-  display: flex;
-`;
-
-const ViewModeButton = styled.button<{ $isActive: boolean; $position: 'left' | 'right' }>`
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  border: 1px solid;
-  transition: all 200ms;
-  
-  ${({ $position }) => $position === 'left' 
-    ? 'border-radius: 9999px 0 0 9999px;' 
-    : 'border-radius: 0 9999px 9999px 0; border-left: none;'
-  }
-  
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px #3b82f6;
-    position: relative;
-    z-index: 1;
-  }
-`;
-
-const PaletteSelectContainer = styled.div`
-  float: right;
-  margin-top: 4px;
-  margin-left: 12px;
-`;
-
-const PaletteSelect = styled.select`
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid;
-  cursor: pointer;
-  font-weight: 500;
-  transition: all 200ms;
-  
-  &:hover {
-    border-color: #a3a3a3;
-  }
-  
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px #3b82f6;
-  }
-`;
-
-const Title = styled.h2`
-  font-size: 18px;
-  font-weight: 500;
-  margin-bottom: 12px;
-`;
-
-const TitleBold = styled.span`
-  font-weight: 700;
-`;
-
-const YearSelect = styled.select`
-  font-weight: 700;
-  border: none;
-  cursor: pointer;
-  text-decoration: underline;
-  text-decoration-style: dotted;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 4px;
-  background-color: transparent;
-  
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px #3b82f6;
-  }
-`;
-
-const YearOption = styled.option``;
-
-const ClearBoth = styled.div`
-  clear: both;
-`;
-
-const FiltersWrapper = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
-
-  @media (max-width: 560px) {
-    flex-direction: column;
-    align-items: stretch;
-    justify-content: flex-start;
-    gap: 8px;
-  }
-`;
-
-const SourceFilterGroup = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  padding-bottom: 4px;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-
-  @media (max-width: 560px) {
-    flex-wrap: nowrap;
-  }
-`;
-
-const FilterLabel = styled.span`
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
-  white-space: nowrap;
-`;
-
-const SourceFilterButton = styled.button<{ $isSelected: boolean }>`
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px 4px 6px;
-  font-size: 12px;
-  border-radius: 9999px;
-  transition: all 200ms;
-  font-weight: ${({ $isSelected }) => $isSelected ? '600' : '400'};
-  opacity: ${({ $isSelected }) => $isSelected ? '1' : '0.5'};
-  border: 1.5px solid;
-  flex: 0 0 auto;
-  touch-action: manipulation;
-  
-  &:hover {
-    transform: scale(1.05);
-  }
-  
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px #3b82f6;
-  }
-
-  @media (max-width: 400px) {
-    padding: 4px 10px 4px 4px;
-  }
-`;
-
-const SourceLogo = styled.img`
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-`;
-
-const ActionButton = styled.button`
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 9999px;
-  transition: colors 200ms;
-  border: none;
-  background: transparent;
-  
-  &:hover {
-    background-color: rgba(0, 0, 0, 0.05);
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    &:hover {
-      background-color: rgba(255, 255, 255, 0.1);
-    }
-  }
-  
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px #3b82f6;
-  }
-`;
-
-const LegendContainer = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-
-  @media (max-width: 560px) {
-    margin-left: 0;
-    width: 100%;
-    justify-content: flex-end;
-    min-width: 0;
-  }
-`;
-
-const LegendText = styled.span`
-  font-size: 12px;
-  font-weight: 500;
-`;
-
-const LegendBox = styled.div`
-  width: 12px;
-  height: 12px;
-  border-radius: 6px;
-  transition: transform 200ms;
-  
-  &:hover {
-    transform: scale(1.1);
-  }
-`;
+const INTENSITY_LEVELS = [0, 1, 2, 3, 4] as const;
 
 export function GraphControls({
+  titleId,
   view,
   onViewChange,
-  paletteName,
-  onPaletteChange,
   selectedYear,
   availableYears,
   onYearChange,
   clientFilter,
   availableClients,
   onClientFilterChange,
-  palette,
   totalTokens,
 }: GraphControlsProps) {
-  const paletteNames = getPaletteNames();
-
   const handleClientToggle = (client: ClientType) => {
     onClientFilterChange(toggleClientFilter(client, clientFilter, availableClients));
   };
 
   return (
     <Container>
-      <ViewModeGroup role="group" aria-label="View mode">
-        <ViewModeButton
-          $isActive={view === "2d"}
-          $position="left"
-          onClick={() => onViewChange("2d")}
-          aria-pressed={view === "2d"}
-          aria-label="2D view"
-          style={{
-            backgroundColor: view === "2d" ? palette.grade3 : "var(--color-bg-button)",
-            color: view === "2d" ? "#fff" : "var(--color-fg-default)",
-            borderColor: view === "2d" ? palette.grade3 : "var(--color-border-default)",
-          }}
-        >
-          2D
-        </ViewModeButton>
-        <ViewModeButton
-          $isActive={view === "3d"}
-          $position="right"
-          onClick={() => onViewChange("3d")}
-          aria-pressed={view === "3d"}
-          aria-label="3D view"
-          style={{
-            backgroundColor: view === "3d" ? palette.grade3 : "var(--color-bg-button)",
-            color: view === "3d" ? "#fff" : "var(--color-fg-default)",
-            borderColor: view === "3d" ? palette.grade3 : "var(--color-border-default)",
-          }}
-        >
-          3D
-        </ViewModeButton>
-      </ViewModeGroup>
+      <TopRow>
+        <Title id={titleId}>
+          <TotalTokens>{formatTokenCount(totalTokens)}</TotalTokens> tokens used
+          {selectedYear && (
+            <>
+              {" "}in{" "}
+              {availableYears.length > 1 ? (
+                <YearSelect
+                  variant="inline"
+                  aria-label="Select year"
+                  value={selectedYear}
+                  options={availableYears.map((year) => ({ value: year, label: year }))}
+                  onChange={onYearChange}
+                />
+              ) : (
+                <YearText>{selectedYear}</YearText>
+              )}
+            </>
+          )}
+        </Title>
 
-      <PaletteSelectContainer>
-        <PaletteSelect
-          value={paletteName}
-          onChange={(e) => onPaletteChange(e.target.value as ColorPaletteName)}
-          aria-label="Color palette"
-          style={{
-            borderColor: "var(--color-border-default)",
-            color: "var(--color-fg-default)",
-            backgroundColor: "var(--color-bg-button)",
-          }}
-        >
-          {paletteNames.map((name) => (
-            <option key={name} value={name}>{colorPalettes[name].name}</option>
+        <SegmentedGroup role="group" aria-label="View mode">
+          {(["2d", "3d"] as const).map((mode) => (
+            <ViewButton
+              key={mode}
+              type="button"
+              $active={view === mode}
+              onClick={() => onViewChange(mode)}
+              aria-pressed={view === mode}
+              aria-label={`${mode.toUpperCase()} view`}
+            >
+              {mode.toUpperCase()}
+            </ViewButton>
           ))}
-        </PaletteSelect>
-      </PaletteSelectContainer>
+        </SegmentedGroup>
+      </TopRow>
 
-      <Title style={{ color: "var(--color-fg-default)" }}>
-        <TitleBold style={{ color: palette.grade1 }}>{formatTokenCount(totalTokens)}</TitleBold>
-        {" "}tokens used
-        {selectedYear && (
-          <>
-            {" "}in{" "}
-            {availableYears.length > 1 ? (
-              <YearSelect
-                value={selectedYear}
-                onChange={(e) => onYearChange(e.target.value)}
-                aria-label="Select year"
-                style={{ color: "var(--color-fg-default)" }}
+      {availableClients.length > 1 && (
+        <FilterRow role="group" aria-label="Client filters">
+          <FilterLabel>Clients</FilterLabel>
+          {availableClients.map((client) => {
+            const isSelected = clientFilter.length === 0 || clientFilter.includes(client);
+            const name = SOURCE_DISPLAY_NAMES[client] || client;
+            return (
+              <FilterChip
+                key={client}
+                type="button"
+                $selected={isSelected}
+                onClick={() => handleClientToggle(client)}
+                aria-pressed={isSelected}
+                aria-label={`Filter by ${name}`}
               >
-                {availableYears.map((year) => (
-                  <YearOption key={year} value={year} style={{ backgroundColor: "var(--color-canvas-default)" }}>{year}</YearOption>
-                ))}
-              </YearSelect>
-            ) : (
-              <TitleBold>{selectedYear}</TitleBold>
-            )}
-          </>
-        )}
-      </Title>
-
-      <ClearBoth />
-
-      <FiltersWrapper>
-        {availableClients.length > 1 && (
-          <SourceFilterGroup role="group" aria-label="Client filters">
-            <FilterLabel id="client-filter-label" style={{ color: "var(--color-fg-muted)" }}>Filter:</FilterLabel>
-            {availableClients.map((client) => {
-              const isSelected = clientFilter.length === 0 || clientFilter.includes(client);
-              return (
-                <SourceFilterButton
-                  key={client}
-                  $isSelected={isSelected}
-                  onClick={() => handleClientToggle(client)}
-                  aria-pressed={isSelected}
-                  aria-label={`Filter by ${SOURCE_DISPLAY_NAMES[client] || client}`}
-                  style={{
-                    backgroundColor: isSelected ? `${palette.grade3}30` : "transparent",
-                    color: "var(--color-fg-default)",
-                    borderColor: isSelected ? palette.grade3 : "var(--color-border-default)",
-                  }}
-                >
-                  {SOURCE_LOGOS[client] && (
-                    <SourceLogo
-                      src={SOURCE_LOGOS[client]}
-                      alt={`${SOURCE_DISPLAY_NAMES[client] || client} logo`}
-                    />
-                  )}
-                  {SOURCE_DISPLAY_NAMES[client] || client}
-                </SourceFilterButton>
-              );
-            })}
-            {clientFilter.length > 0 && clientFilter.length < availableClients.length && (
-              <ActionButton
-                onClick={() => onClientFilterChange([...availableClients])}
-                aria-label="Show all clients"
-                style={{ color: "var(--color-fg-muted)" }}
-              >
-                Show all
-              </ActionButton>
-            )}
-            {clientFilter.length === availableClients.length && (
-              <ActionButton
-                onClick={() => onClientFilterChange([])}
-                aria-label="Clear all client filters"
-                style={{ color: "var(--color-fg-muted)" }}
-              >
-                Clear
-              </ActionButton>
-            )}
-          </SourceFilterGroup>
-        )}
-      </FiltersWrapper>
+                {SOURCE_LOGOS[client] && <ChipLogo src={SOURCE_LOGOS[client]} alt="" />}
+                {name}
+              </FilterChip>
+            );
+          })}
+          {clientFilter.length > 0 && clientFilter.length < availableClients.length && (
+            <TextButton type="button" onClick={() => onClientFilterChange([...availableClients])} aria-label="Show all clients">
+              Show all
+            </TextButton>
+          )}
+          {clientFilter.length === availableClients.length && (
+            <TextButton type="button" onClick={() => onClientFilterChange([])} aria-label="Clear all client filters">
+              Clear
+            </TextButton>
+          )}
+        </FilterRow>
+      )}
     </Container>
   );
 }
+
+interface GraphPaletteLegendProps {
+  paletteName: ColorPaletteName;
+  onPaletteChange: (palette: ColorPaletteName) => void;
+  palette: GraphColorPalette;
+}
+
+/** Palette picker and the low-to-high key, under the graph. */
+export function GraphPaletteLegend({ paletteName, onPaletteChange, palette }: GraphPaletteLegendProps) {
+  return (
+    <Footer>
+      <PaletteControl>
+        <span aria-hidden="true">Color</span>
+        <PaletteSelect
+          aria-label="Color palette"
+          value={paletteName}
+          options={getPaletteNames().map((name) => ({
+            value: name,
+            textValue: colorPalettes[name].name,
+            label: (
+              <PaletteOption>
+                <Swatches aria-hidden="true">
+                  {([1, 2, 3, 4] as const).map((level) => (
+                    <Swatch key={level} $color={getDarkGraphColor(colorPalettes[name], level)} />
+                  ))}
+                </Swatches>
+                {colorPalettes[name].name}
+              </PaletteOption>
+            ),
+          }))}
+          onChange={(next) => onPaletteChange(next as ColorPaletteName)}
+        />
+      </PaletteControl>
+
+      <Legend role="img" aria-label="Usage intensity, low to high">
+        <span aria-hidden="true">Low</span>
+        <Swatches aria-hidden="true">
+          {INTENSITY_LEVELS.map((level) => (
+            <Swatch key={level} $color={getDarkGraphColor(palette, level)} $outlined={level === 0} />
+          ))}
+        </Swatches>
+        <span aria-hidden="true">High</span>
+      </Legend>
+    </Footer>
+  );
+}
+
+const focusRing = css`
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+`;
+
+const Container = styled.div`
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+`;
+
+const TopRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  min-width: 0;
+`;
+
+const Title = styled.h2`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.3em;
+  min-width: 0;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.125rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+`;
+
+const TotalTokens = styled.span`
+  color: var(--v2-numeric);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+`;
+
+const YearText = styled.span`
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+`;
+
+/* Inline select that reads as part of the heading: same size, dotted underline, chevron from Select. */
+const YearSelect = styled(Select)`
+  --select-font-size: 1em;
+  --select-height: 1.5em;
+
+  && {
+    color: var(--service-text);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+`;
+
+const ViewButton = styled(SegmentButton)`
+  min-width: 40px;
+  font-weight: 600;
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    min-width: 48px;
+  }
+`;
+
+const FilterRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  @media (max-width: 560px) {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    padding-bottom: 4px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+`;
+
+const FilterLabel = styled.span`
+  flex: 0 0 auto;
+  margin-right: 4px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+`;
+
+const FilterChip = styled.button<{ $selected: boolean }>`
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px 0 6px;
+  border: 1px solid ${({ $selected }) => ($selected ? "rgba(0, 115, 255, 0.55)" : "var(--service-border)")};
+  border-radius: 999px;
+  background: ${({ $selected }) => ($selected ? "var(--v2-accent-soft)" : "transparent")};
+  color: ${({ $selected }) => ($selected ? "var(--service-text)" : "var(--service-text-muted)")};
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  touch-action: manipulation;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+
+  img {
+    opacity: ${({ $selected }) => ($selected ? 1 : 0.5)};
+  }
+
+  &:hover {
+    border-color: ${({ $selected }) => ($selected ? "rgba(0, 115, 255, 0.8)" : "var(--service-border-strong)")};
+    color: var(--service-text);
+  }
+
+  ${focusRing}
+
+  @media (pointer: coarse) {
+    min-height: 40px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+`;
+
+const ChipLogo = styled.img`
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  object-fit: cover;
+`;
+
+const TextButton = styled.button`
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--service-border-strong);
+  text-underline-offset: 3px;
+  white-space: nowrap;
+
+  &:hover {
+    color: var(--service-text);
+  }
+
+  ${focusRing}
+
+  @media (pointer: coarse) {
+    min-height: 40px;
+  }
+`;
+
+const Footer = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+`;
+
+const PaletteControl = styled.div`
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+`;
+
+const PaletteSelect = styled(Select)`
+  --select-height: 32px;
+  --select-font-size: 0.8125rem;
+  --select-padding-x: 10px;
+  --select-background: var(--service-surface-muted);
+  --select-border-color: var(--service-border);
+`;
+
+const PaletteOption = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+`;
+
+const Swatches = styled.span`
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+`;
+
+const Swatch = styled.span<{ $color: string; $outlined?: boolean }>`
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: ${({ $color }) => $color};
+  box-shadow: ${({ $outlined }) => ($outlined ? "inset 0 0 0 1px rgba(255, 255, 255, 0.08)" : "none")};
+`;
+
+const Legend = styled.div`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+`;

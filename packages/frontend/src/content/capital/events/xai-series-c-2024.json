@@ -1,0 +1,119 @@
+{
+  "sources": [
+    {
+      "id": "src_xai_series_c",
+      "url": "https://x.ai/news/series-c",
+      "publisher": "xAI",
+      "type": "company_announcement",
+      "title": "xAI raises $6B Series C",
+      "publishedAt": "2024-12-23",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_xai_series_c_2024",
+    "slug": "xai-series-c-2024",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "xAI Series C",
+    "summary": "xAI closed a $6 billion Series C round. NVIDIA and AMD took part as strategic investors.",
+    "roundLabel": "Series C",
+    "date": "2024-12-23",
+    "dates": {
+      "announced": "2024-12-23"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_xai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_andreessen_horowitz",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as A16Z"
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Lightspeed"
+      },
+      {
+        "org": "org_mgx",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_sequoia_capital",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_amd",
+        "roles": [
+          "strategic_investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series C equity",
+        "measure": "equity_raised",
+        "value": 6000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2024-12-23",
+        "to": "org_xai",
+        "sourceId": "src_xai_series_c",
+        "quote": "We have closed our Series C funding round of $6 billion with participation from key investors including A16Z, Blackrock, Fidelity Management & Research Company, Kingdom Holdings, Lightspeed, MGX, Morgan Stanley, OIA, QIA, Sequoia Capital, Valor Equity Partners and Vy Capital, amongst others."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Named investors",
+        "text": "A16Z, Blackrock, Fidelity Management & Research Company, Kingdom Holdings, Lightspeed, MGX, Morgan Stanley, OIA, QIA, Sequoia Capital, Valor Equity Partners and Vy Capital, among others.",
+        "sourceId": "src_xai_series_c",
+        "quote": "We have closed our Series C funding round of $6 billion with participation from key investors including A16Z, Blackrock, Fidelity Management & Research Company, Kingdom Holdings, Lightspeed, MGX, Morgan Stanley, OIA, QIA, Sequoia Capital, Valor Equity Partners and Vy Capital, amongst others."
+      },
+      {
+        "label": "Strategic investors",
+        "text": "NVIDIA and AMD invested as strategic investors.",
+        "sourceId": "src_xai_series_c",
+        "quote": "Strategic investors NVIDIA and AMD also participated and continue to support xAI in rapidly scaling our infrastructure."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_xai_series_c"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

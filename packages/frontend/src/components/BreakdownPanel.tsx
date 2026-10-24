@@ -1,107 +1,114 @@
 "use client";
 
 import styled from "styled-components";
-import type { DailyContribution, GraphColorPalette, ClientType } from "@/lib/types";
+import type { DailyContribution, ClientType } from "@/lib/types";
 import { formatCurrency, formatTokenCount, groupClientsByType, sortClientsByCost } from "@/lib/utils";
 import { formatContributionDateFull } from "@/lib/date-utils";
-import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS } from "@/lib/constants";
+import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS, SOURCE_LOGOS } from "@/lib/constants";
 import { SourceLogo } from "./SourceLogo";
+import { Eyebrow as SharedEyebrow } from "@/components/ui/Eyebrow";
 
 interface BreakdownPanelProps {
   day: DailyContribution | null;
   onClose: () => void;
-  palette: GraphColorPalette;
 }
 
-const PanelContainer = styled.div`
-  margin-top: 2rem;
-  border-radius: 1rem;
-  border: 1px solid;
+const PanelContainer = styled.section`
+  min-width: 0;
   overflow: hidden;
-  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  transition: box-shadow 150ms;
+  border: 1px solid var(--service-border);
+  border-radius: 12px;
+  background: var(--service-surface);
+  font-variant-numeric: tabular-nums;
+`;
 
-  &:hover {
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+const PanelHeader = styled.header`
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 14px 20px;
+  border-bottom: 1px solid var(--service-border);
+
+  @media (max-width: 520px) {
+    padding: 12px 10px 12px 14px;
   }
 `;
 
-const PanelHeader = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid;
-  gap: 12px;
+const PanelHeading = styled.div`
+  min-width: 0;
+`;
 
-  @media (max-width: 480px) {
-    padding: 1rem;
-    align-items: flex-start;
-  }
+/* The shared eyebrow (Title Case, no letter-spacing), tucked close to the title. */
+const Eyebrow = styled(SharedEyebrow)`
+  margin-bottom: 2px;
 `;
 
 const PanelTitle = styled.h3`
-  font-weight: 700;
-  font-size: 1.125rem;
-  min-width: 0;
-  flex: 1 1 auto;
-
-  @media (max-width: 560px) {
-    font-size: 1rem;
-  }
-
-  @media (max-width: 400px) {
-    font-size: 0.9375rem;
-  }
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 `;
 
 const CloseButton = styled.button`
-  padding: 0.5rem;
-  border-radius: 9999px;
-  transition: all 200ms;
+  display: inline-grid;
   flex: 0 0 auto;
-  min-height: 44px;
-  min-width: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--service-text-muted);
 
   &:hover {
-    background-color: var(--color-btn-hover-bg);
-    transform: scale(1.1);
+    border-color: var(--service-border);
+    background: var(--service-surface-muted);
+    color: var(--service-text);
   }
 
   &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--color-bg-default, #fff), 0 0 0 4px #3b82f6;
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (pointer: coarse) {
+    width: 44px;
+    height: 44px;
   }
 `;
 
 const PanelContent = styled.div`
-  padding: 1.5rem;
+  padding: 16px 20px 20px;
+
+  @media (max-width: 520px) {
+    padding: 14px;
+  }
 `;
 
 const EmptyState = styled.p`
-  text-align: center;
-  padding-top: 2rem;
-  padding-bottom: 2rem;
+  margin: 0;
+  padding: 24px 0;
+  color: var(--service-text-muted);
   font-size: 0.875rem;
-  font-weight: 500;
+  text-align: center;
 `;
 
 const SourceList = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--service-border);
+  border-radius: 10px;
 `;
 
 const SummaryFooter = styled.div`
-  margin-top: 1.5rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid;
   display: flex;
   flex-wrap: wrap;
-  gap: 1.5rem;
+  align-items: baseline;
+  gap: 4px 20px;
+  margin-top: 16px;
+  color: var(--service-text-muted);
   font-size: 0.875rem;
 `;
 
@@ -110,69 +117,58 @@ const SummaryItem = styled.div`
 `;
 
 const SummaryValue = styled.span`
+  color: var(--service-text);
   font-weight: 600;
 `;
 
 const SummaryTotalValue = styled(SummaryValue)`
-  font-weight: 700;
+  color: var(--v2-numeric);
   font-size: 1rem;
 `;
 
-export function BreakdownPanel({ day, onClose, palette }: BreakdownPanelProps) {
+export function BreakdownPanel({ day, onClose }: BreakdownPanelProps) {
   if (!day) return null;
 
   const groupedClients = groupClientsByType(day.clients);
   const sortedClientTypes = Array.from(groupedClients.keys()).sort();
 
   return (
-    <PanelContainer
-      role="region"
-      aria-label="Day breakdown"
-      style={{ backgroundColor: "var(--color-card-bg)", borderColor: "var(--color-border-default)" }}
-    >
-      <PanelHeader style={{ borderColor: "var(--color-border-default)" }}>
-        <PanelTitle style={{ color: "var(--color-fg-default)" }}>
-          {formatContributionDateFull(day)} - Detailed Breakdown
-        </PanelTitle>
-        <CloseButton
-          onClick={onClose}
-          aria-label="Close breakdown panel"
-          style={{ color: "var(--color-fg-muted)" }}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
+    <PanelContainer role="region" aria-label="Day breakdown">
+      <PanelHeader>
+        <PanelHeading>
+          <Eyebrow as="div">Detailed Breakdown</Eyebrow>
+          <PanelTitle>{formatContributionDateFull(day)}</PanelTitle>
+        </PanelHeading>
+        <CloseButton type="button" onClick={onClose} aria-label="Close breakdown panel">
+          <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 14 14" width="14">
+            <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.5" />
           </svg>
         </CloseButton>
       </PanelHeader>
 
       <PanelContent>
         {day.clients.length === 0 ? (
-          <EmptyState style={{ color: "var(--color-fg-muted)" }}>
-            No activity on this day
-          </EmptyState>
+          <EmptyState>No activity on this day</EmptyState>
         ) : (
           <SourceList>
             {sortedClientTypes.map((clientType) => {
               const clients = sortClientsByCost(groupedClients.get(clientType) || []);
               const clientTotalCost = clients.reduce((sum, c) => sum + c.cost, 0);
-              return (
-                <ClientSection key={clientType} clientType={clientType} clients={clients} totalCost={clientTotalCost} palette={palette} />
-              );
+              return <ClientSection key={clientType} clientType={clientType} clients={clients} totalCost={clientTotalCost} />;
             })}
           </SourceList>
         )}
 
         {day.clients.length > 0 && (
-          <SummaryFooter style={{ borderColor: "var(--color-border-default)" }}>
-            <SummaryItem style={{ color: "var(--color-fg-muted)" }}>
-              Total: <SummaryTotalValue style={{ color: "var(--color-fg-default)" }}>{formatCurrency(day.totals.cost)}</SummaryTotalValue>
+          <SummaryFooter>
+            <SummaryItem>
+              Total: <SummaryTotalValue>{formatCurrency(day.totals.cost)}</SummaryTotalValue>
             </SummaryItem>
-            <SummaryItem style={{ color: "var(--color-fg-muted)" }}>
-              across <SummaryValue style={{ color: "var(--color-fg-default)" }}>{sortedClientTypes.length} client{sortedClientTypes.length !== 1 ? "s" : ""}</SummaryValue>
+            <SummaryItem>
+              across <SummaryValue>{sortedClientTypes.length} client{sortedClientTypes.length !== 1 ? "s" : ""}</SummaryValue>
             </SummaryItem>
-            <SummaryItem style={{ color: "var(--color-fg-muted)" }}>
-              <SummaryValue style={{ color: "var(--color-fg-default)" }}>
+            <SummaryItem>
+              <SummaryValue>
                 {(() => {
                   const allModels = new Set<string>();
                   for (const c of day.clients) {
@@ -200,45 +196,67 @@ interface ClientSectionProps {
   clientType: ClientType;
   clients: DailyContribution["clients"];
   totalCost: number;
-  palette: GraphColorPalette;
 }
+
+const Section = styled.div`
+  min-width: 0;
+  padding: 14px 16px;
+
+  & + & {
+    border-top: 1px solid var(--service-border);
+  }
+
+  @media (max-width: 520px) {
+    padding: 12px;
+  }
+`;
 
 const SectionHeader = styled.div`
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
 `;
 
-const SourceBadge = styled.span`
+const ClientName = styled.span`
   display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.375rem 0.75rem;
-  border-radius: 9999px;
-  font-size: 0.75rem;
+  gap: 8px;
+  color: var(--service-text);
+  font-size: 0.875rem;
   font-weight: 600;
-  transition: transform 150ms;
 
-  &:hover {
-    transform: scale(1.05);
+  img {
+    border-radius: 4px;
   }
 `;
 
+const ClientDot = styled.span<{ $color: string }>`
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: ${({ $color }) => $color};
+`;
+
 const SectionTotal = styled.span`
+  flex: 0 0 auto;
+  color: var(--service-text);
   font-size: 0.875rem;
-  font-weight: 700;
+  font-weight: 600;
 `;
 
 const ModelsList = styled.div`
-  margin-left: 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+  display: grid;
+  gap: 12px;
+  margin-left: 4px;
 `;
 
-function ClientSection({ clientType, clients, totalCost, palette }: ClientSectionProps) {
-  const clientColor = SOURCE_COLORS[clientType] || palette.grade3;
+function ClientSection({ clientType, clients, totalCost }: ClientSectionProps) {
+  const hasLogo = Object.prototype.hasOwnProperty.call(SOURCE_LOGOS, String(clientType).toLowerCase());
 
   const modelEntries: Array<{ modelId: string; cost: number; messages: number; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number } }> = [];
   for (const client_contrib of clients) {
@@ -270,23 +288,25 @@ function ClientSection({ clientType, clients, totalCost, palette }: ClientSectio
   const sortedModels = modelEntries.sort((a, b) => b.cost - a.cost);
 
   return (
-    <div>
+    <Section>
       <SectionHeader>
-        <SourceBadge
-          style={{ backgroundColor: `${clientColor}20`, color: clientColor }}
-        >
-          <SourceLogo sourceId={clientType} height={14} />
+        <ClientName>
+          {hasLogo ? (
+            <SourceLogo sourceId={clientType} height={16} decorative />
+          ) : (
+            <ClientDot $color={SOURCE_COLORS[clientType] || "var(--service-text-muted)"} aria-hidden="true" />
+          )}
           {SOURCE_DISPLAY_NAMES[clientType] || clientType}
-        </SourceBadge>
-        <SectionTotal style={{ color: "var(--color-fg-default)" }}>{formatCurrency(totalCost)}</SectionTotal>
+        </ClientName>
+        <SectionTotal>{formatCurrency(totalCost)}</SectionTotal>
       </SectionHeader>
 
       <ModelsList>
         {sortedModels.map((model, index) => (
-          <ModelRow key={`${model.modelId}-${index}`} model={model} isLast={index === sortedModels.length - 1} palette={palette} />
+          <ModelRow key={`${model.modelId}-${index}`} model={model} isLast={index === sortedModels.length - 1} />
         ))}
       </ModelsList>
-    </div>
+    </Section>
   );
 }
 
@@ -298,7 +318,6 @@ interface ModelRowProps {
     tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number };
   };
   isLast: boolean;
-  palette: GraphColorPalette;
 }
 
 const ModelRowContainer = styled.div`
@@ -307,63 +326,63 @@ const ModelRowContainer = styled.div`
 
 const TreeLineContainer = styled.div`
   position: absolute;
-  left: 0;
   top: 0;
+  left: 0;
   width: 1rem;
   height: 100%;
 `;
 
 const TreeLineBranch = styled.span`
   position: absolute;
-  left: 0;
   top: 0.75rem;
+  left: 0;
   width: 0.75rem;
-  border-top: 1px solid;
+  border-top: 1px solid var(--service-border-strong);
 `;
 
 const TreeLineVertical = styled.span`
   position: absolute;
-  left: 0;
   top: 0;
-  height: 100%;
-  border-left: 1px solid;
+  left: 0;
+  height: calc(100% + 12px);
+  border-left: 1px solid var(--service-border-strong);
 `;
 
 const ModelContent = styled.div`
+  min-width: 0;
   margin-left: 1.5rem;
 `;
 
 const ModelHeader = styled.div`
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
   min-width: 0;
+  align-items: baseline;
+  gap: 12px;
 `;
 
 const ModelName = styled.span`
-  font-family: var(--font-mono);
-  font-size: 0.875rem;
-  font-weight: 600;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  color: var(--service-text);
+  font-family: var(--v2-font-mono);
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
 const ModelCost = styled.span`
-  font-weight: 700;
-  font-size: 0.875rem;
   flex: 0 0 auto;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 600;
 `;
 
 const TokenBadgesGrid = styled.div`
-  margin-top: 0.5rem;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 1rem;
-  row-gap: 0.5rem;
+  gap: 6px 16px;
+  margin-top: 8px;
   font-size: 0.75rem;
 
   @media (max-width: 400px) {
@@ -380,36 +399,36 @@ const TokenBadgesGrid = styled.div`
 `;
 
 const MessageCount = styled.div`
-  margin-top: 0.5rem;
+  margin-top: 6px;
+  color: var(--service-text-muted);
   font-size: 0.75rem;
-  font-weight: 500;
 `;
 
-function ModelRow({ model, isLast, palette }: ModelRowProps) {
+function ModelRow({ model, isLast }: ModelRowProps) {
   const { modelId, tokens, cost, messages } = model;
 
   return (
     <ModelRowContainer>
-      <TreeLineContainer style={{ color: "var(--color-fg-muted)" }}>
-        <TreeLineBranch style={{ opacity: 0.2, borderColor: "var(--color-fg-muted)" }} />
-        {!isLast && <TreeLineVertical style={{ opacity: 0.2, borderColor: "var(--color-fg-muted)" }} />}
+      <TreeLineContainer aria-hidden="true">
+        <TreeLineBranch />
+        {!isLast && <TreeLineVertical />}
       </TreeLineContainer>
 
       <ModelContent>
         <ModelHeader>
-          <ModelName style={{ color: "var(--color-fg-default)" }}>{modelId}</ModelName>
-          <ModelCost style={{ color: palette.grade1 }}>{formatCurrency(cost)}</ModelCost>
+          <ModelName title={modelId}>{modelId}</ModelName>
+          <ModelCost>{formatCurrency(cost)}</ModelCost>
         </ModelHeader>
 
         <TokenBadgesGrid>
           {tokens.input > 0 && <TokenBadge label="Input" value={tokens.input} />}
           {tokens.output > 0 && <TokenBadge label="Output" value={tokens.output} />}
-          {tokens.cacheRead > 0 && <TokenBadge label="Cache Read" value={tokens.cacheRead} />}
-          {tokens.cacheWrite > 0 && <TokenBadge label="Cache Write" value={tokens.cacheWrite} />}
+          {tokens.cacheRead > 0 && <TokenBadge label="Cache read" value={tokens.cacheRead} />}
+          {tokens.cacheWrite > 0 && <TokenBadge label="Cache write" value={tokens.cacheWrite} />}
           {tokens.reasoning > 0 && <TokenBadge label="Reasoning" value={tokens.reasoning} />}
         </TokenBadgesGrid>
 
-        <MessageCount style={{ color: "var(--color-fg-muted)" }}>
+        <MessageCount>
           {messages.toLocaleString()} message{messages !== 1 ? "s" : ""}
         </MessageCount>
       </ModelContent>
@@ -419,25 +438,25 @@ function ModelRow({ model, isLast, palette }: ModelRowProps) {
 
 const BadgeContainer = styled.div`
   display: flex;
-  align-items: center;
-  gap: 0.375rem;
   min-width: 0;
+  align-items: baseline;
+  gap: 6px;
 `;
 
 const BadgeLabel = styled.span`
-  font-weight: 500;
+  color: var(--service-text-muted);
 `;
 
 const BadgeValue = styled.span`
-  font-family: var(--font-mono);
+  color: var(--service-text);
   font-weight: 600;
 `;
 
 function TokenBadge({ label, value }: { label: string; value: number }) {
   return (
     <BadgeContainer>
-      <BadgeLabel style={{ color: "var(--color-fg-muted)" }}>{label}:</BadgeLabel>
-      <BadgeValue style={{ color: "var(--color-fg-default)" }}>{formatTokenCount(value)}</BadgeValue>
+      <BadgeLabel>{label}:</BadgeLabel>
+      <BadgeValue>{formatTokenCount(value)}</BadgeValue>
     </BadgeContainer>
   );
 }

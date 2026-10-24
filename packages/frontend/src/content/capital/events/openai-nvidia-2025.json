@@ -1,0 +1,106 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_nvidia_systems_partnership",
+      "url": "https://openai.com/index/openai-nvidia-systems-partnership/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI and NVIDIA announce strategic partnership to deploy 10 gigawatts of NVIDIA systems",
+      "publishedAt": "2025-09-22",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_nvidia_2025",
+    "slug": "openai-nvidia-2025",
+    "kind": "deal",
+    "types": [
+      "chip_supply",
+      "strategic_investment"
+    ],
+    "title": "OpenAI and NVIDIA systems partnership (letter of intent)",
+    "summary": "OpenAI and NVIDIA announced a letter of intent to deploy at least 10 gigawatts of NVIDIA systems for OpenAI. NVIDIA said it intends to invest up to $100 billion in OpenAI as the systems are deployed.",
+    "date": "2025-09-22",
+    "dates": {
+      "announced": "2025-09-22"
+    },
+    "status": "announced",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "buyer",
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "provider",
+          "strategic_investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "nvidia_investment",
+        "label": "NVIDIA intended investment",
+        "measure": "investment_commitment",
+        "value": 100000000000,
+        "currency": "USD",
+        "basis": "up_to",
+        "status": "announced",
+        "asOf": "2025-09-22",
+        "from": "org_nvidia",
+        "to": "org_openai",
+        "condition": "Invested progressively as each gigawatt is deployed; letter of intent, final details still to be agreed",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "To support the partnership, NVIDIA intends to invest up to $100 billion in OpenAI progressively as each gigawatt is deployed."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "capacity",
+        "label": "NVIDIA systems to deploy",
+        "measure": "capacity_gw",
+        "value": 10,
+        "basis": "at_least",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "Strategic partnership enables OpenAI to build and deploy at least 10 gigawatts of AI datacenters with NVIDIA systems representing millions of GPUs for OpenAI's next-generation AI infrastructure."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Letter of intent",
+        "text": "The two companies announced a letter of intent, not a final agreement.",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "San Francisco and Santa Clara—September 22, 2025—NVIDIA and OpenAI today announced a letter of intent for a landmark strategic partnership to deploy at least 10 gigawatts of NVIDIA systems for OpenAI's next-generation AI infrastructure to train and run its next generation of models on the path to deploying superintelligence."
+      },
+      {
+        "label": "First deployment",
+        "text": "The first gigawatt is planned for the second half of 2026 on NVIDIA's Vera Rubin platform.",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "The first gigawatt of NVIDIA systems will be deployed in the second half of 2026 on NVIDIA's Vera Rubin platform."
+      },
+      {
+        "label": "Next step",
+        "text": "NVIDIA and OpenAI said they would finalize the details in the following weeks.",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "NVIDIA and OpenAI look forward to finalizing the details of this new phase of strategic partnership in the coming weeks."
+      },
+      {
+        "label": "Preferred partner",
+        "text": "OpenAI will work with NVIDIA as a preferred strategic compute and networking partner.",
+        "sourceId": "src_openai_nvidia_systems_partnership",
+        "quote": "OpenAI will work with NVIDIA as a preferred strategic compute and networking partner for its AI factory growth plans."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_openai_nvidia_systems_partnership"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

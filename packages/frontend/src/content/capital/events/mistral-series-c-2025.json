@@ -1,0 +1,119 @@
+{
+  "sources": [
+    {
+      "id": "src_mistral_series_c",
+      "url": "https://mistral.ai/news/mistral-ai-raises-1-7-b-to-accelerate-technological-progress-with-ai/",
+      "publisher": "Mistral AI",
+      "type": "company_announcement",
+      "title": "Mistral raises 1.7B€ to accelerate technological progress with AI",
+      "publishedAt": "2025-09-09",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_mistral_series_c_2025",
+    "slug": "mistral-series-c-2025",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Mistral AI Series C",
+    "summary": "Mistral AI raised €1.7 billion in a Series C round led by ASML, at an €11.7 billion post-money valuation.",
+    "roundLabel": "Series C",
+    "date": "2025-09-09",
+    "dates": {
+      "announced": "2025-09-09"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_mistral_ai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_asml",
+        "roles": [
+          "lead_investor",
+          "partner"
+        ],
+        "note": "Named as ASML Holding NV"
+      },
+      {
+        "org": "org_andreessen_horowitz",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Lightspeed"
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series C equity",
+        "measure": "equity_raised",
+        "value": 1700000000,
+        "currency": "EUR",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2025-09-09",
+        "to": "org_mistral_ai",
+        "sourceId": "src_mistral_series_c",
+        "quote": "Mistral raises 1.7B€ to accelerate technological progress with AI"
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 11700000000,
+        "currency": "EUR",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-09-09",
+        "sourceId": "src_mistral_series_c",
+        "quote": "We are announcing a Series C funding round of 1.7B€ at a 11.7B€ post-money valuation."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Lead investor",
+        "text": "ASML, a semiconductor equipment maker, led the round.",
+        "sourceId": "src_mistral_series_c",
+        "quote": "The Series C funding round is led by leading semiconductor equipment manufacturer, ASML Holding NV (ASML)."
+      },
+      {
+        "label": "Strategic partnership",
+        "text": "ASML also entered a strategic partnership with Mistral AI.",
+        "sourceId": "src_mistral_series_c",
+        "quote": "ASML is proud to enter a strategic partnership with Mistral AI, and to be lead investor in this funding round."
+      },
+      {
+        "label": "Other named investors",
+        "text": "Existing investors DST Global, Andreessen Horowitz, Bpifrance, General Catalyst, Index Ventures, Lightspeed and NVIDIA took part.",
+        "sourceId": "src_mistral_series_c",
+        "quote": "It includes participation from existing investors: DST Global, Andreessen Horowitz, Bpifrance, General Catalyst, Index Ventures, Lightspeed and NVIDIA."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_mistral_series_c"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

@@ -1,0 +1,165 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_8k_2026_06_16",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026043411/spaceexplorationtechnologi.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, June 16, 2026 (merger agreement with Anysphere, Inc. (Cursor))",
+      "publishedAt": "2026-06-16",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-043411",
+        "cik": "0001181412",
+        "filedAt": "2026-06-16",
+        "periodOfReport": "2026-06-16"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_8k_2026_08_14",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026056945/spcx-20260814.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, August 14, 2026 (completion of the Cursor merger)",
+      "publishedAt": "2026-08-14",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-056945",
+        "cik": "0001181412",
+        "filedAt": "2026-08-14",
+        "periodOfReport": "2026-08-14"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_10q_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 10-Q for the quarter ended June 30, 2026",
+      "publishedAt": "2026-08-04",
+      "retrievedAt": "2026-10-20",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-052535",
+        "cik": "0001181412",
+        "filedAt": "2026-08-04",
+        "periodOfReport": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_spacex_cursor_acquisition_2026",
+    "slug": "spacex-cursor-acquisition-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "SpaceX acquires Cursor",
+    "summary": "SpaceX acquired Anysphere, the company behind Cursor, through a merger paid in SpaceX Class A shares at an implied equity value of $60.0 billion. Cursor became a wholly owned subsidiary of SpaceX.",
+    "date": "2026-08-14",
+    "dates": {
+      "signed": "2026-06-16",
+      "completed": "2026-08-14"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_spacex",
+        "roles": [
+          "acquirer"
+        ],
+        "note": "Space Exploration Technologies Corp."
+      },
+      {
+        "org": "org_cursor",
+        "roles": [
+          "target"
+        ],
+        "note": "Anysphere, Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "price",
+        "label": "Implied equity value of Cursor",
+        "measure": "purchase_price",
+        "value": 60000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-08-14",
+        "from": "org_spacex",
+        "sourceId": "src_spacex_8k_2026_08_14",
+        "quote": "Pursuant to the Merger Agreement, on August 14, 2026 (the \"Effective Time\"), the Merger became effective, and (i) the shares of Cursor's common stock and the shares of Cursor's preferred stock outstanding immediately prior to the Effective Time were automatically converted into the right to receive an aggregate of 389,289,254 shares of the Company's Class A common stock, based on an implied equity value of Cursor of $60.0 billion"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "shares",
+        "label": "SpaceX Class A shares issued for Cursor common and preferred stock",
+        "measure": "shares",
+        "value": 389289254,
+        "basis": "exact",
+        "sourceId": "src_spacex_8k_2026_08_14",
+        "quote": "Pursuant to the Merger Agreement, on August 14, 2026 (the \"Effective Time\"), the Merger became effective, and (i) the shares of Cursor's common stock and the shares of Cursor's preferred stock outstanding immediately prior to the Effective Time were automatically converted into the right to receive an aggregate of 389,289,254 shares of the Company's Class A common stock, based on an implied equity value of Cursor of $60.0 billion"
+      }
+    ],
+    "facts": [
+      {
+        "label": "Merger agreement",
+        "text": "SpaceX, its subsidiary X67 Inc. and Anysphere signed a merger agreement on June 16, 2026. Cursor survives as a wholly owned subsidiary of SpaceX.",
+        "sourceId": "src_spacex_8k_2026_06_16",
+        "quote": "On June 16, 2026, Space Exploration Technologies Corp. (the \"Company\"), X67 Inc., a wholly owned subsidiary of the Company (\"Merger Sub\"), and Anysphere, Inc. (\"Cursor\") entered into an Agreement and Plan of Merger (the \"Merger Agreement\"), pursuant to which Merger Sub will merge with and into Cursor, with Cursor surviving the merger as a wholly owned subsidiary of the Company (the \"Merger\")."
+      },
+      {
+        "label": "Terms at signing",
+        "text": "Cursor stock converts into SpaceX Class A shares based on an implied equity value of $60.0 billion and a seven-day volume-weighted average share price before closing.",
+        "sourceId": "src_spacex_8k_2026_06_16",
+        "quote": "At the effective time (the \"Effective Time\") of the Merger, each share of Cursor's common stock and each share of Cursor's preferred stock outstanding immediately prior to the Effective Time of the Merger will be automatically converted into the right to receive shares of the Company's Class A common stock based on an implied equity value of Cursor of $60.0 billion and the price of the Company's Class A common stock equal to the volume-weighted average closing price thereof over the seven consecutive trading days immediately preceding the closing of the Merger (the \"Merger Consideration\")."
+      },
+      {
+        "label": "Option agreement",
+        "text": "In April 2026 SpaceX signed an option agreement that gave it the right, but not the obligation, to acquire Cursor.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "In April 2026, the Company entered into an option agreement (\"Cursor Option Agreement\") providing for the right, but not the obligation, to acquire Anysphere, Inc., a San Francisco-based private software company doing business as Cursor (\"Cursor\")."
+      },
+      {
+        "label": "Option exercised",
+        "text": "SpaceX exercised the call option in June 2026 and signed the merger agreement.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "In June 2026, the Company exercised the call option and entered into an Agreement and Plan of Merger (the \"Cursor Merger Agreement\") with Cursor to acquire Cursor (the \"Cursor Merger\")."
+      },
+      {
+        "label": "Compute agreement",
+        "text": "With the option agreement, SpaceX agreed to provide Cursor with GPU cluster compute capacity, and the two agreed to work together on models, including Grok.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "Concurrently with the Cursor Option Agreement, the Company entered into a compute agreement (\"Cursor Compute Agreement\") where the Company would provide Cursor with certain GPU cluster compute capacity and the parties would collaborate to improve existing models, including Grok, and to jointly develop AI models and related model-specific deliverables or products."
+      },
+      {
+        "label": "Vested RSUs",
+        "text": "Vested Cursor restricted stock units converted into the right to receive SpaceX Class A shares.",
+        "sourceId": "src_spacex_8k_2026_08_14",
+        "quote": "(ii) the vested Cursor restricted stock units outstanding immediately prior to the Effective Time were automatically converted into the right to receive, prior to giving effect to any withholding for applicable taxes, an aggregate of 1,752,426 shares of the Company's Class A common stock"
+      },
+      {
+        "label": "Unvested awards",
+        "text": "Unvested Cursor restricted stock units and stock options were converted into SpaceX restricted stock units and stock options.",
+        "sourceId": "src_spacex_8k_2026_08_14",
+        "quote": "(iii) the unvested Cursor restricted stock units and Cursor stock options outstanding immediately prior to the Effective Time were assumed and converted into an aggregate of approximately 29,128,326 Company restricted stock units with respect to the Company's Class A common stock and approximately 44,365,047 stock options to purchase the Company's Class A common stock, respectively"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_spacex_8k_2026_06_16",
+      "src_spacex_8k_2026_08_14",
+      "src_spacex_10q_2026_06_30"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

@@ -90,7 +90,6 @@ const footerLinkStyles = css`
   display: inline-flex;
   align-items: center;
   min-height: 44px;
-  font-family: "Wanted Sans", system-ui, -apple-system, sans-serif;
   font-weight: 400;
   font-size: 16px;
   line-height: 1.5em;
@@ -127,7 +126,6 @@ const FooterLegalNav = styled(FooterNav)`
 `;
 
 const FooterCopyright = styled.p`
-  font-family: "Wanted Sans", system-ui, -apple-system, sans-serif;
   font-weight: 600;
   font-size: 16px;
   line-height: 1.5em;

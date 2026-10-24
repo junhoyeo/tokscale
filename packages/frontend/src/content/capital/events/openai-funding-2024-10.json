@@ -1,0 +1,78 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_scale_the_benefits_of_ai",
+      "url": "https://openai.com/index/scale-the-benefits-of-ai/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "New funding to scale the benefits of AI",
+      "publishedAt": "2024-10-02",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_funding_2024_10",
+    "slug": "openai-funding-2024-10",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "OpenAI funding round (October 2024)",
+    "summary": "OpenAI raised $6.6 billion in new funding at a $157 billion post-money valuation.",
+    "date": "2024-10-02",
+    "dates": {
+      "announced": "2024-10-02"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "issuer"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "New funding",
+        "measure": "equity_raised",
+        "value": 6600000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2024-10-02",
+        "to": "org_openai",
+        "sourceId": "src_openai_scale_the_benefits_of_ai",
+        "quote": "We've raised $6.6B in new funding at a $157B post-money valuation to accelerate progress on our mission."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 157000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2024-10-02",
+        "sourceId": "src_openai_scale_the_benefits_of_ai",
+        "quote": "We've raised $6.6B in new funding at a $157B post-money valuation to accelerate progress on our mission."
+      }
+    ],
+    "quantities": [],
+    "facts": [],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_openai_credit_facility_2024",
+        "note": "OpenAI announced a revolving credit facility the next day."
+      }
+    ],
+    "sourceIds": [
+      "src_openai_scale_the_benefits_of_ai"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

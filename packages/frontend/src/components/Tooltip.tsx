@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import styled from "styled-components";
-import type { DailyContribution, TooltipPosition, GraphColorPalette } from "@/lib/types";
+import type { DailyContribution, TooltipPosition } from "@/lib/types";
 import { formatCurrency, formatTokenCount } from "@/lib/utils";
 import { formatContributionDate } from "@/lib/date-utils";
 
@@ -10,7 +10,6 @@ interface TooltipProps {
   day: DailyContribution | null;
   position: TooltipPosition | null;
   visible: boolean;
-  palette: GraphColorPalette;
 }
 
 const TooltipContainer = styled.div`
@@ -20,116 +19,97 @@ const TooltipContainer = styled.div`
 `;
 
 const TooltipCard = styled.div`
-  border-radius: 16px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  border-width: 1px;
-  border-style: solid;
-  padding: 16px;
+  display: grid;
+  gap: 10px;
+  width: max-content;
   min-width: 220px;
-  backdrop-filter: blur(8px);
+  max-width: min(280px, calc(100vw - 20px));
+  padding: 12px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 10px;
+  background: var(--service-surface-muted);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  color: var(--service-text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 `;
 
 const DateText = styled.div`
-  font-weight: 700;
-  font-size: 16px;
-  margin-bottom: 12px;
+  color: var(--service-text);
+  font-size: 13px;
+  font-weight: 600;
 `;
 
 const Divider = styled.div`
-  border-top-width: 1px;
-  border-top-style: solid;
-  margin-top: 12px;
-  margin-bottom: 12px;
+  height: 1px;
+  background: var(--service-border);
 `;
 
-const FlexRow = styled.div<{ $marginBottom?: number; $marginTop?: number }>`
+const Row = styled.div`
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  align-items: center;
-  ${props => props.$marginBottom && `margin-bottom: ${props.$marginBottom}px;`}
-  ${props => props.$marginTop && `margin-top: ${props.$marginTop}px;`}
+  gap: 16px;
 `;
 
 const Label = styled.span`
-  font-size: 14px;
-  font-weight: 500;
+  color: var(--service-text-muted);
 `;
 
 const TotalValue = styled.span`
-  font-weight: 700;
-  font-size: 20px;
-  letter-spacing: -0.025em;
+  color: var(--v2-numeric);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 `;
 
-const TokenList = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-size: 14px;
-`;
-
-const TokenLabel = styled.span`
-  font-weight: 500;
-`;
-
-const TokenValue = styled.span`
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+const Value = styled.span`
+  color: var(--service-text);
   font-weight: 600;
 `;
 
-const CostLabel = styled.span`
-  font-size: 14px;
-  font-weight: 600;
+const List = styled.div`
+  display: grid;
+  gap: 6px;
 `;
 
-const CostValue = styled.span`
-  font-weight: 700;
-`;
-
-const MessageLabel = styled.span`
-  font-size: 14px;
-  font-weight: 500;
-`;
-
-const MessageValue = styled.span`
-  font-size: 14px;
-  font-weight: 600;
-`;
-
-function useAdjustedPosition(
-  position: TooltipPosition | null,
-  visible: boolean,
-  tooltipRef: React.RefObject<HTMLDivElement | null>
-): TooltipPosition | null {
-  if (!visible || !position) return null;
-
-  const tooltip = tooltipRef.current;
-  if (!tooltip) {
-    return { x: position.x + 15, y: position.y + 15 };
-  }
-
-  const rect = tooltip.getBoundingClientRect();
-  const viewportWidth = typeof window !== "undefined" ? window.innerWidth : 1920;
-  const viewportHeight = typeof window !== "undefined" ? window.innerHeight : 1080;
-
+/**
+ * Where the card goes: 15px below and right of the point, flipped to the other side when it would cross
+ * the window edge, and never closer than 10px to the top or left.
+ */
+export function placeTooltip(
+  position: TooltipPosition,
+  size: { width: number; height: number },
+  viewportWidth: number,
+  viewportHeight: number,
+): { left: number; top: number } {
   let x = position.x + 15;
   let y = position.y + 15;
 
-  if (x + rect.width > viewportWidth - 10) {
-    x = position.x - rect.width - 15;
+  if (x + size.width > viewportWidth - 10) {
+    x = position.x - size.width - 15;
   }
-  if (y + rect.height > viewportHeight - 10) {
-    y = position.y - rect.height - 15;
+  if (y + size.height > viewportHeight - 10) {
+    y = position.y - size.height - 15;
   }
 
-  return { x: Math.max(10, x), y: Math.max(10, y) };
+  return { left: Math.max(10, x), top: Math.max(10, y) };
 }
 
-export function Tooltip({ day, position, visible, palette }: TooltipProps) {
+export function Tooltip({ day, position, visible }: TooltipProps) {
   const tooltipRef = useRef<HTMLDivElement>(null);
-  const adjustedPosition = useAdjustedPosition(position, visible, tooltipRef);
 
-  if (!visible || !day || !adjustedPosition) return null;
+  // Measure after each render, before paint, so the card stays inside the window from its first frame.
+  // (It used to read the previous frame's size, so a tooltip near an edge spilled over until the next move.)
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    if (!tooltip || !visible || !position) return;
+    const { left, top } = placeTooltip(position, tooltip.getBoundingClientRect(), window.innerWidth, window.innerHeight);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  });
+
+  if (!visible || !day || !position) return null;
 
   const { totals, tokenBreakdown } = day;
 
@@ -137,57 +117,38 @@ export function Tooltip({ day, position, visible, palette }: TooltipProps) {
     <TooltipContainer
       ref={tooltipRef}
       role="tooltip"
-      style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
+      style={{ left: position.x + 15, top: position.y + 15 }}
     >
-      <TooltipCard
-        style={{
-          backgroundColor: "var(--color-card-bg)",
-          borderColor: "var(--color-border-default)",
-          color: "var(--color-fg-default)",
-        }}
-      >
-        <DateText style={{ color: "var(--color-fg-default)" }}>
-          {formatContributionDate(day)}
-        </DateText>
+      <TooltipCard>
+        <DateText>{formatContributionDate(day)}</DateText>
 
-        <Divider style={{ borderColor: "var(--color-border-default)" }} />
+        <Row>
+          <Label>Total tokens</Label>
+          <TotalValue>{formatTokenCount(totals.tokens)}</TotalValue>
+        </Row>
 
-        <FlexRow $marginBottom={12}>
-          <Label style={{ color: "var(--color-fg-muted)" }}>Total Tokens</Label>
-          <TotalValue
-            style={{
-              color: day.intensity >= 3 ? palette.grade1 : day.intensity >= 2 ? palette.grade2 : "var(--color-fg-default)",
-            }}
-          >
-            {formatTokenCount(totals.tokens)}
-          </TotalValue>
-        </FlexRow>
+        <Divider />
 
-        <Divider style={{ borderColor: "var(--color-border-default)" }} />
-
-        <TokenList>
+        <List>
           <TokenRow label="Input" value={tokenBreakdown.input} />
           <TokenRow label="Output" value={tokenBreakdown.output} />
-          <TokenRow label="Cache Read" value={tokenBreakdown.cacheRead} />
-          <TokenRow label="Cache Write" value={tokenBreakdown.cacheWrite} />
+          <TokenRow label="Cache read" value={tokenBreakdown.cacheRead} />
+          <TokenRow label="Cache write" value={tokenBreakdown.cacheWrite} />
           {tokenBreakdown.reasoning > 0 && <TokenRow label="Reasoning" value={tokenBreakdown.reasoning} />}
-        </TokenList>
+        </List>
 
-        <Divider style={{ borderColor: "var(--color-border-default)" }} />
+        <Divider />
 
-        <FlexRow>
-          <CostLabel style={{ color: "var(--color-fg-muted)" }}>Cost</CostLabel>
-          <CostValue style={{ color: "var(--color-fg-default)" }}>
-            {formatCurrency(totals.cost)}
-          </CostValue>
-        </FlexRow>
-
-        <FlexRow $marginTop={8}>
-          <MessageLabel style={{ color: "var(--color-fg-muted)" }}>Messages</MessageLabel>
-          <MessageValue style={{ color: "var(--color-fg-default)" }}>
-            {totals.messages.toLocaleString()}
-          </MessageValue>
-        </FlexRow>
+        <List>
+          <Row>
+            <Label>Cost</Label>
+            <Value>{formatCurrency(totals.cost)}</Value>
+          </Row>
+          <Row>
+            <Label>Messages</Label>
+            <Value>{totals.messages.toLocaleString()}</Value>
+          </Row>
+        </List>
       </TooltipCard>
     </TooltipContainer>
   );
@@ -197,11 +158,9 @@ function TokenRow({ label, value }: { label: string; value: number }) {
   if (value === 0) return null;
 
   return (
-    <FlexRow>
-      <TokenLabel style={{ color: "var(--color-fg-muted)" }}>{label}</TokenLabel>
-      <TokenValue style={{ color: "var(--color-fg-default)" }}>
-        {formatTokenCount(value)}
-      </TokenValue>
-    </FlexRow>
+    <Row>
+      <Label>{label}</Label>
+      <Value>{formatTokenCount(value)}</Value>
+    </Row>
   );
 }

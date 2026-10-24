@@ -1,0 +1,195 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_ex99_2026_06_23",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026044955/exhibit991-pricing8xk.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX press release, June 23, 2026 (Exhibit 99.1): pricing of $25 billion inaugural bond issuance",
+      "publishedAt": "2026-06-23",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-044955",
+        "cik": "0001181412",
+        "filedAt": "2026-06-23",
+        "periodOfReport": "2026-06-23"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_8k_2026_06_26",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026045763/spcx-closing8xkjune2026.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, June 26, 2026 (issuance of senior notes)",
+      "publishedAt": "2026-06-26",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-045763",
+        "cik": "0001181412",
+        "filedAt": "2026-06-26",
+        "periodOfReport": "2026-06-26"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_spacex_senior_notes_2026",
+    "slug": "spacex-senior-notes-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "SpaceX $25 billion senior notes offering",
+    "summary": "SpaceX sold senior unsecured notes in its first bond offering. It plans to use the net proceeds to repay its bridge loan facility.",
+    "date": "2026-06-26",
+    "dates": {
+      "announced": "2026-06-22",
+      "closed": "2026-06-26"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_spacex",
+        "roles": [
+          "issuer",
+          "borrower"
+        ],
+        "note": "Space Exploration Technologies Corp."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "total",
+        "label": "Senior notes, five series (as priced)",
+        "measure": "debt_raised",
+        "value": 25000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-06-23",
+        "to": "org_spacex",
+        "sourceId": "src_spacex_ex99_2026_06_23",
+        "quote": "SpaceX Announces Pricing of $25 Billion Inaugural Bond Issuance"
+      },
+      {
+        "id": "notes_2031",
+        "label": "5.350% Senior Notes due 2031",
+        "measure": "debt_raised",
+        "value": 7000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-26",
+        "to": "org_spacex",
+        "partOf": "total",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 26, 2026, the Company entered into an indenture (the \"Indenture\") with The Bank of New York Mellon Trust Company, N.A., as trustee (the \"trustee\"), pursuant to which the Company issued $7.0 billion aggregate principal amount of its 5.350% Senior Notes due 2031 (the \"2031 Notes\"), $6.0 billion aggregate principal amount of its 5.650% Senior Notes due 2033 (the \"2033 Notes\"), $6.0 billion aggregate principal amount of its 5.875% Senior Notes due 2036 (the \"2036 Notes\"), $2.5 billion aggregate principal amount of its 6.600% Senior Notes due 2046 (the \"2046 Notes\"), and $3.5 billion aggregate principal amount of its 6.650% Senior Notes due 2056 (the \"2056 Notes\" and, together with the 2031 Notes, the 2033 Notes, the 2036 Notes, and the 2046 Notes, the \"Notes\")."
+      },
+      {
+        "id": "notes_2033",
+        "label": "5.650% Senior Notes due 2033",
+        "measure": "debt_raised",
+        "value": 6000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-26",
+        "to": "org_spacex",
+        "partOf": "total",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 26, 2026, the Company entered into an indenture (the \"Indenture\") with The Bank of New York Mellon Trust Company, N.A., as trustee (the \"trustee\"), pursuant to which the Company issued $7.0 billion aggregate principal amount of its 5.350% Senior Notes due 2031 (the \"2031 Notes\"), $6.0 billion aggregate principal amount of its 5.650% Senior Notes due 2033 (the \"2033 Notes\"), $6.0 billion aggregate principal amount of its 5.875% Senior Notes due 2036 (the \"2036 Notes\"), $2.5 billion aggregate principal amount of its 6.600% Senior Notes due 2046 (the \"2046 Notes\"), and $3.5 billion aggregate principal amount of its 6.650% Senior Notes due 2056 (the \"2056 Notes\" and, together with the 2031 Notes, the 2033 Notes, the 2036 Notes, and the 2046 Notes, the \"Notes\")."
+      },
+      {
+        "id": "notes_2036",
+        "label": "5.875% Senior Notes due 2036",
+        "measure": "debt_raised",
+        "value": 6000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-26",
+        "to": "org_spacex",
+        "partOf": "total",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 26, 2026, the Company entered into an indenture (the \"Indenture\") with The Bank of New York Mellon Trust Company, N.A., as trustee (the \"trustee\"), pursuant to which the Company issued $7.0 billion aggregate principal amount of its 5.350% Senior Notes due 2031 (the \"2031 Notes\"), $6.0 billion aggregate principal amount of its 5.650% Senior Notes due 2033 (the \"2033 Notes\"), $6.0 billion aggregate principal amount of its 5.875% Senior Notes due 2036 (the \"2036 Notes\"), $2.5 billion aggregate principal amount of its 6.600% Senior Notes due 2046 (the \"2046 Notes\"), and $3.5 billion aggregate principal amount of its 6.650% Senior Notes due 2056 (the \"2056 Notes\" and, together with the 2031 Notes, the 2033 Notes, the 2036 Notes, and the 2046 Notes, the \"Notes\")."
+      },
+      {
+        "id": "notes_2046",
+        "label": "6.600% Senior Notes due 2046",
+        "measure": "debt_raised",
+        "value": 2500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-26",
+        "to": "org_spacex",
+        "partOf": "total",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 26, 2026, the Company entered into an indenture (the \"Indenture\") with The Bank of New York Mellon Trust Company, N.A., as trustee (the \"trustee\"), pursuant to which the Company issued $7.0 billion aggregate principal amount of its 5.350% Senior Notes due 2031 (the \"2031 Notes\"), $6.0 billion aggregate principal amount of its 5.650% Senior Notes due 2033 (the \"2033 Notes\"), $6.0 billion aggregate principal amount of its 5.875% Senior Notes due 2036 (the \"2036 Notes\"), $2.5 billion aggregate principal amount of its 6.600% Senior Notes due 2046 (the \"2046 Notes\"), and $3.5 billion aggregate principal amount of its 6.650% Senior Notes due 2056 (the \"2056 Notes\" and, together with the 2031 Notes, the 2033 Notes, the 2036 Notes, and the 2046 Notes, the \"Notes\")."
+      },
+      {
+        "id": "notes_2056",
+        "label": "6.650% Senior Notes due 2056",
+        "measure": "debt_raised",
+        "value": 3500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-26",
+        "to": "org_spacex",
+        "partOf": "total",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 26, 2026, the Company entered into an indenture (the \"Indenture\") with The Bank of New York Mellon Trust Company, N.A., as trustee (the \"trustee\"), pursuant to which the Company issued $7.0 billion aggregate principal amount of its 5.350% Senior Notes due 2031 (the \"2031 Notes\"), $6.0 billion aggregate principal amount of its 5.650% Senior Notes due 2033 (the \"2033 Notes\"), $6.0 billion aggregate principal amount of its 5.875% Senior Notes due 2036 (the \"2036 Notes\"), $2.5 billion aggregate principal amount of its 6.600% Senior Notes due 2046 (the \"2046 Notes\"), and $3.5 billion aggregate principal amount of its 6.650% Senior Notes due 2056 (the \"2056 Notes\" and, together with the 2031 Notes, the 2033 Notes, the 2036 Notes, and the 2046 Notes, the \"Notes\")."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Use of proceeds",
+        "text": "To repay the bridge loan facility in full, pay fees and expenses, and for general corporate purposes.",
+        "sourceId": "src_spacex_ex99_2026_06_23",
+        "quote": "SpaceX intends to use the net proceeds from the Notes Offering to repay the outstanding borrowings under its bridge loan facility in full, to pay related fees and expenses, and any remaining amount for general corporate purposes."
+      },
+      {
+        "label": "Offering type",
+        "text": "Sold under Rule 144A to qualified institutional buyers and under Regulation S outside the United States.",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "The Notes were offered and sold only to persons reasonably believed to be qualified institutional buyers in reliance on Rule 144A under the Securities Act of 1933, as amended (the \"Securities Act\"), and outside the United States, only to non-U.S. persons pursuant to Regulation S under the Securities Act."
+      },
+      {
+        "label": "Ranking",
+        "text": "Senior unsecured obligations of SpaceX.",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "The Notes are unsecured obligations of the Company and rank equally in right of payment with all existing and future unsubordinated indebtedness, liabilities and other obligations of the Company."
+      },
+      {
+        "label": "Interest dates",
+        "text": "Interest is paid every January 15 and July 15, starting January 15, 2027.",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "Interest on the Notes is payable semi-annually in arrears on January 15 and July 15 of each year, beginning on January 15, 2027."
+      },
+      {
+        "label": "Initial purchasers",
+        "text": "BofA Securities, Citigroup, Goldman Sachs, J.P. Morgan and Morgan Stanley represented the initial purchasers.",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "with BofA Securities, Inc., Citigroup Global Markets Inc., Goldman Sachs & Co. LLC, J.P. Morgan Securities LLC, and Morgan Stanley & Co. LLC, as representatives of the several initial purchasers"
+      },
+      {
+        "label": "Launch",
+        "text": "SpaceX started the offering on June 22, 2026.",
+        "sourceId": "src_spacex_8k_2026_06_26",
+        "quote": "On June 22, 2026, Space Exploration Technologies Corp. (the \"Company\") commenced an offering of senior unsecured notes (the \"Offering\")."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_spacex_ex99_2026_06_23",
+      "src_spacex_8k_2026_06_26"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

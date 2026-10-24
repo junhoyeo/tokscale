@@ -5,3 +5,5 @@
 export const TOKSCALE_DISCORD_URL = "https://discord.gg/h6DUGWdBbm";
 export const TOKSCALE_X_URL = "https://x.com/Tokscale";
 export const TOKSCALE_X_HANDLE = "@Tokscale";
+export const TOKSCALE_INSTAGRAM_URL = "https://www.instagram.com/tokscaleai/";
+export const TOKSCALE_INSTAGRAM_HANDLE = "@tokscaleai";

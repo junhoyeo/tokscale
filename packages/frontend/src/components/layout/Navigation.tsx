@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import styled, { css, keyframes } from "styled-components";
-import { PersonIcon, GearIcon, SignOutIcon } from "@/components/ui/Icons";
+import { GearIcon, PersonIcon, SignOutIcon } from "@/components/ui/Icons";
 
 interface User {
   id: string;
@@ -14,237 +14,175 @@ interface User {
   avatarUrl: string | null;
 }
 
-const MOBILE_BREAKPOINT = "520px";
+interface NavItem {
+  href: string;
+  label: string;
+  /** Path prefixes that mark this item as the current section. */
+  match: string[];
+}
+
+export const NAV_ITEMS: NavItem[] = [
+  { href: "/leaderboard", label: "Leaderboards", match: ["/leaderboard", "/groups"] },
+  { href: "/models", label: "Models", match: ["/models", "/benchmarks"] },
+  { href: "/capital", label: "Capital", match: ["/capital"] },
+  { href: "/tracker", label: "Tracker", match: ["/tracker"] },
+];
+
+export function isNavItemActive(item: NavItem, pathname: string | null): boolean {
+  if (!pathname) return false;
+  return item.match.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+/** Below this width the links move into the menu panel. */
+const COLLAPSE_BELOW = "720px";
+export const NAV_HEIGHT = 56;
 
 const pulse = keyframes`
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+`;
+
+const focusRing = css`
+  &:focus-visible {
+    outline: 2px solid var(--v2-focus, #75b6ff);
+    outline-offset: 2px;
   }
 `;
 
-const NavContainer = styled.nav`
+const Bar = styled.nav`
   position: fixed;
-  top: 17px;
-  left: 50%;
-  transform: translateX(-50%);
-  height: 40px;
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(10px);
-  border-radius: 32px;
-  padding: 4px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  top: 0;
+  right: 0;
+  left: 0;
   z-index: 50;
-  
-  @media (max-width: 767px) {
-    max-width: 100%;
-    gap: 2px;
-  }
-
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    left: 16px;
-    right: 16px;
-    transform: none;
-    width: calc(100% - 32px);
-    height: auto;
-    flex-direction: column;
-    align-items: stretch;
-    border-radius: 20px;
-    overflow: hidden;
-    border: 1px solid #10233E;
-    background: rgba(0, 0, 0, 0.5);
-  }
+  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 `;
 
-const NavHeaderRow = styled.div`
-  display: contents;
-
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    height: 40px;
-    flex-shrink: 0;
-  }
-`;
-
-const NavItemBase = styled.a<{ $isActive: boolean }>`
-  font-family: 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 16px;
-  text-transform: uppercase;
-  padding: 8px 23px;
-  border-radius: 1000px;
-  height: 32px;
+const BarInner = styled.div`
   display: flex;
   align-items: center;
-  justify-content: center;
-  text-decoration: none;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
-  min-width: 0;
-  
-  @media (max-width: 767px) {
-    padding: 8px 10px;
+  gap: 24px;
+  width: 100%;
+  max-width: 1500px;
+  height: ${NAV_HEIGHT}px;
+  margin: 0 auto;
+  padding: 0 32px;
+
+  @media (max-width: 520px) {
+    gap: 12px;
+    padding: 0 16px;
   }
-  
-  ${({ $isActive }) =>
-    $isActive
-      ? css`
-    background: rgba(235, 242, 245, 0.96);
-    border: 1px solid rgba(235, 242, 245, 0.96);
-    color: #000000;
-  `
-      : css`
-    background: transparent;
-    border: 1px solid transparent;
-    color: #D9D9D9;
-    
-    &:hover {
-      color: #ffffff;
-    }
-  `}
 `;
 
-const NavItemLink = styled(Link)<{ $isActive: boolean }>`
-  font-family: 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 16px;
-  text-transform: uppercase;
-  padding: 8px 23px;
-  border-radius: 1000px;
-  height: 32px;
+const LogoLink = styled(Link)`
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 40px;
+  border-radius: 6px;
+  ${focusRing}
+`;
+
+const Links = styled.ul`
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  @media (max-width: ${COLLAPSE_BELOW}) {
+    display: none;
+  }
+`;
+
+const linkBase = css`
   display: flex;
   align-items: center;
-  justify-content: center;
-  text-decoration: none;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
   white-space: nowrap;
-  min-width: 0;
-  
-  @media (max-width: 767px) {
-    padding: 8px 10px;
+  text-decoration: none;
+  transition: color 120ms ease, background-color 120ms ease;
+  ${focusRing}
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
-  
-  ${({ $isActive }) =>
-    $isActive
-      ? css`
-    background: rgba(235, 242, 245, 0.96);
-    border: 1px solid rgba(235, 242, 245, 0.96);
-    color: #000000;
-  `
-      : css`
-    background: transparent;
-    border: 1px solid transparent;
-    color: #D9D9D9;
-    
-    &:hover {
-      color: #ffffff;
-    }
-  `}
+`;
+
+const NavLink = styled(Link)<{ $active: boolean }>`
+  ${linkBase}
+  color: ${({ $active }) => ($active ? "var(--v2-text, #f4f7fb)" : "var(--v2-text-muted, #a3adbd)")};
+  background: ${({ $active }) => ($active ? "rgba(255, 255, 255, 0.08)" : "transparent")};
+
+  &:hover {
+    color: var(--v2-text, #f4f7fb);
+    background: rgba(255, 255, 255, 0.06);
+  }
+`;
+
+const Right = styled.div`
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+`;
+
+const DesktopOnly = styled.div`
+  display: flex;
+  align-items: center;
+
+  @media (max-width: ${COLLAPSE_BELOW}) {
+    display: none;
+  }
+`;
+
+const SignInLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
+  border-radius: 8px;
+  color: var(--v2-text, #f4f7fb);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  ${focusRing}
+
+  &:hover {
+    border-color: rgba(255, 255, 255, 0.32);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
 `;
 
 const LoadingSkeleton = styled.div`
   width: 32px;
   height: 32px;
-  border-radius: 1000px;
-  animation: ${pulse} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  border-radius: 999px;
   background-color: rgba(255, 255, 255, 0.1);
-  flex-shrink: 0;
-`;
+  animation: ${pulse} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 
-const DisplayName = styled.p`
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-fg-default, #e6edf3);
-`;
-const Username = styled.p`
-  font-size: 12px;
-  color: var(--color-fg-muted, #848d97);
-`;
-
-const SignInButton = styled.a`
-  display: flex;
-  flex-direction: row;
-  justify-content: center;
-  align-items: center;
-  padding: 6px 10px 6px 6px;
-  gap: 8px;
-  height: 32px;
-  background: #0073FF;
-  border-radius: 1000px;
-  text-decoration: none;
-  cursor: pointer;
-  transition: opacity 0.15s ease;
-  flex-shrink: 0;
-  
-  &:hover {
-    opacity: 0.9;
-  }
-  
-  @media (max-width: 374px) {
-    padding: 6px;
-    gap: 4px;
-  }
-`;
-
-const SignInIcon = styled.div`
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-`;
-
-const SignInText = styled.span`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 14px;
-  line-height: 94%;
-  text-align: center;
-  letter-spacing: -0.05em;
-  color: #FFFFFF;
-  white-space: nowrap;
-`;
-
-const SignInTextFull = styled(SignInText)`
-  @media (max-width: 767px) {
-    display: none;
-  }
-`;
-
-const SignInTextCompact = styled(SignInText)`
-  @media (min-width: 768px) {
-    display: none;
-  }
-`;
-
-const ProfileButton = styled.button`
-  box-sizing: border-box;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  width: 32px;
-  height: 32px;
-  background: #0073FF;
-  border: 1px solid #0073FF;
-  border-radius: 1000px;
-  padding: 0;
-  cursor: pointer;
-  overflow: hidden;
-  transition: opacity 0.15s ease;
-  flex-shrink: 0;
-  
-  &:hover {
-    opacity: 0.9;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
   }
 `;
 
@@ -252,409 +190,308 @@ const MenuWrapper = styled.div`
   position: relative;
 `;
 
-const MenuOverlay = styled.div`
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  width: 220px;
-  background: #1A212A;
-  border: 1px solid #1E2733;
-  border-radius: 12px;
-  overflow: hidden;
-  z-index: 100;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
-`;
-
-const MenuUserInfo = styled.div`
-  padding: 12px;
-  border-bottom: 1px solid var(--color-border-default, #30363d);
-`;
-
-const MenuDivider = styled.div`
-  height: 1px;
-  background: var(--color-border-default, #30363d);
-`;
-
-const MenuItem = styled(Link)<{ $danger?: boolean }>`
+const AvatarButton = styled.button`
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  font-size: 14px;
-  color: ${({ $danger }) => $danger ? '#F85149' : 'var(--color-fg-default, #e6edf3)'};
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 150ms;
-  &:hover {
-    background: ${({ $danger }) => $danger ? 'rgba(248, 81, 73, 0.1)' : 'rgba(255, 255, 255, 0.05)'};
-  }
-`;
-
-const MenuItemButton = styled.button<{ $danger?: boolean }>`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  font-size: 14px;
-  width: 100%;
-  color: ${({ $danger }) => $danger ? '#F85149' : 'var(--color-fg-default, #e6edf3)'};
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 150ms;
-  background: none;
-  border: none;
-  text-align: left;
-  &:hover {
-    background: ${({ $danger }) => $danger ? 'rgba(248, 81, 73, 0.1)' : 'rgba(255, 255, 255, 0.05)'};
-  }
-`;
-
-const MenuIconSlot = styled.span`
-  display: flex;
-  align-items: center;
-  color: var(--color-fg-muted, #848d97);
-`;
-
-const AvatarImg = styled.img`
-  border-radius: 50%;
-  object-fit: cover;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
-`;
-
-const DesktopNavItems = styled.div`
-  display: contents;
-
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    display: none;
-  }
-`;
-
-const DesktopAuthSection = styled.div`
-  display: contents;
-
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    display: none;
-  }
-`;
-
-const NavLogoLink = styled(Link)`
-  display: none;
-  flex-shrink: 0;
-
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    padding-left: 8px;
-    display: flex;
-  }
-`;
-
-const NavLogoImage = styled(Image)`
-  object-fit: contain;
-`;
-
-const HamburgerButton = styled.button`
-  position: relative;
-  display: none;
-  width: 32px;
-  height: 32px;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: none;
-  color: #D9D9D9;
-  cursor: pointer;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  flex-shrink: 0;
-  border-radius: 1000px;
-  transition: color 0.15s ease;
+  overflow: hidden;
+  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
+  border-radius: 999px;
+  background: var(--v2-surface-raised, #0d1016);
+  ${focusRing}
+`;
 
-  &:hover {
-    color: #ffffff;
+const Avatar = styled.img`
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+`;
+
+const UserMenuPanel = styled.div`
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 100;
+  width: 224px;
+  overflow: hidden;
+  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
+  border-radius: 12px;
+  background: #0b0d12;
+`;
+
+const UserInfo = styled.div`
+  padding: 12px;
+  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+`;
+
+const UserName = styled.p`
+  overflow: hidden;
+  color: var(--v2-text, #f4f7fb);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const UserHandle = styled.p`
+  overflow: hidden;
+  color: var(--v2-text-muted, #a3adbd);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const menuItem = css<{ $danger?: boolean }>`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text, #f4f7fb)")};
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+
+  svg {
+    flex-shrink: 0;
+    color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text-muted, #a3adbd)")};
   }
 
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
+  &:hover {
+    background: ${({ $danger }) => ($danger ? "rgba(255, 123, 114, 0.1)" : "rgba(255, 255, 255, 0.06)")};
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--v2-focus, #75b6ff);
+    outline-offset: -2px;
+  }
+`;
+
+const MenuLink = styled(Link)<{ $danger?: boolean }>`
+  ${menuItem}
+`;
+
+const MenuButton = styled.button<{ $danger?: boolean }>`
+  ${menuItem}
+`;
+
+const MenuGroup = styled.div`
+  padding: 4px 0;
+
+  & + & {
+    border-top: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+  }
+`;
+
+const MenuToggle = styled.button`
+  position: relative;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-right: -8px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--v2-text, #f4f7fb);
+  ${focusRing}
+
+  @media (max-width: ${COLLAPSE_BELOW}) {
     display: flex;
   }
 
   @media (pointer: coarse) {
-    &::after {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 44px;
-      height: 44px;
-      content: "";
-      transform: translate(-50%, -50%);
-    }
+    width: 44px;
+    height: 44px;
   }
 `;
 
-
-const MobileDropdownWrapper = styled.div<{ $isOpen: boolean }>`
+const MobilePanel = styled.div<{ $open: boolean }>`
   display: none;
 
-  @media (max-width: ${MOBILE_BREAKPOINT}) {
-    display: block;
-    max-height: ${({ $isOpen }) => ($isOpen ? "500px" : "0")};
-    overflow: hidden;
-    transition: max-height 0.25s ease-in-out;
+  @media (max-width: ${COLLAPSE_BELOW}) {
+    display: ${({ $open }) => ($open ? "block" : "none")};
+    max-height: calc(100dvh - ${NAV_HEIGHT}px);
+    overflow-y: auto;
+    border-top: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+    background: #000;
   }
 `;
 
-const MobileDropdown = styled.div`
+const MobileList = styled.ul`
+  margin: 0;
+  padding: 8px 16px;
+  list-style: none;
+`;
+
+const MobileNavLink = styled(Link)<{ $active: boolean }>`
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+  color: ${({ $active }) => ($active ? "var(--v2-text, #f4f7fb)" : "var(--v2-text-muted, #a3adbd)")};
+  font-size: 17px;
+  font-weight: ${({ $active }) => ($active ? 600 : 500)};
+  text-decoration: none;
+  ${focusRing}
+`;
+
+const MobileAuth = styled.div`
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 8px 16px 20px;
+`;
+
+const MobileUserRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 8px 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  width: 100%;
+
 `;
 
-const DropdownNavLink = styled(Link)<{ $isActive: boolean }>`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 15px;
-  text-transform: uppercase;
-  text-decoration: none;
-  padding: 10px 16px;
-  border-radius: 12px;
-  display: block;
-  transition: all 0.15s ease;
-
-  ${({ $isActive }) =>
-    $isActive
-      ? css`
-    background: rgba(0, 115, 255, 0.1);
-    color: #ffffff;
-  `
-      : css`
-    background: transparent;
-    color: #D9D9D9;
-
-    &:hover {
-      color: #ffffff;
-      background: rgba(255, 255, 255, 0.06);
-    }
-  `}
+const MobileAvatar = styled.img`
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
 `;
 
-const DropdownNavLinkExternal = styled.a<{ $isActive: boolean }>`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 15px;
-  text-transform: uppercase;
-  text-decoration: none;
-  padding: 10px 16px;
-  border-radius: 12px;
-  display: block;
-  transition: all 0.15s ease;
-
-  ${({ $isActive }) =>
-    $isActive
-      ? css`
-    background: rgba(0, 115, 255, 0.1);
-    color: #ffffff;
-  `
-      : css`
-    background: transparent;
-    color: #D9D9D9;
-
-    &:hover {
-      color: #ffffff;
-      background: rgba(255, 255, 255, 0.06);
-    }
-  `}
+const MobileAction = styled(Link)<{ $danger?: boolean }>`
+  ${menuItem}
+  min-height: 44px;
+  padding: 0 4px;
+  border-radius: 6px;
 `;
 
-const DropdownDivider = styled.div`
-  height: 1px;
-  background: rgba(255, 255, 255, 0.08);
-  margin: 4px 8px;
+const MobileActionButton = styled.button<{ $danger?: boolean }>`
+  ${menuItem}
+  min-height: 44px;
+  padding: 0 4px;
+  border-radius: 6px;
 `;
 
-const DropdownSignInButton = styled.a`
+const MobileSignIn = styled.a`
   display: flex;
-  flex-direction: row;
+  align-items: center;
   justify-content: center;
-  align-items: center;
   gap: 8px;
-  width: 100%;
-  height: 40px;
-  background: #0073FF;
-  border-radius: 12px;
-  text-decoration: none;
-  cursor: pointer;
-  transition: opacity 0.15s ease;
-  margin: 0 0 4px;
-
-  &:hover {
-    opacity: 0.9;
-  }
-`;
-
-const DropdownSignInText = styled.span`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 700;
-  font-size: 14px;
-  color: #ffffff;
-`;
-
-const DropdownUserCard = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-`;
-
-const DropdownUserDetails = styled.div`
-  flex: 1;
-  min-width: 0;
-`;
-
-const DropdownDisplayName = styled.p`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
+  min-height: 44px;
+  border-radius: 8px;
+  background: var(--v2-accent-strong, #0066e6);
+  color: #fff;
+  font-size: 15px;
   font-weight: 600;
-  font-size: 14px;
-  color: #ffffff;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-`;
-
-const DropdownUsername = styled.p`
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-`;
-
-const DropdownUserAction = styled(Link)`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 500;
-  font-size: 14px;
-  color: #D9D9D9;
   text-decoration: none;
-  padding: 10px 16px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  transition: all 0.15s ease;
-
-  &:hover {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  svg {
-    color: rgba(255, 255, 255, 0.4);
-    flex-shrink: 0;
-  }
+  ${focusRing}
 `;
 
-const DropdownSignOutButton = styled.button`
-  font-family: var(--font-figtree), 'Figtree', sans-serif;
-  font-weight: 500;
-  font-size: 14px;
-  color: #F85149;
-  background: transparent;
-  border: none;
-  padding: 10px 16px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  cursor: pointer;
-  transition: all 0.15s ease;
+function GitHubMark({ size = 16 }: { size?: number }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.79-.26.79-.58v-2.23c-3.34.73-4.03-1.42-4.03-1.42-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.49 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.62-5.48 5.92.43.37.82 1.1.82 2.22v3.29c0 .32.19.69.8.58C20.57 21.8 24 17.3 24 12c0-6.63-5.37-12-12-12Z" />
+    </svg>
+  );
+}
 
-  &:hover {
-    background: rgba(248, 81, 73, 0.1);
-  }
+function MenuIcon({ open }: { open: boolean }) {
+  return (
+    <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+      {open ? (
+        <>
+          <path d="M6 6l12 12" />
+          <path d="M18 6L6 18" />
+        </>
+      ) : (
+        <>
+          <path d="M4 7h16" />
+          <path d="M4 12h16" />
+          <path d="M4 17h16" />
+        </>
+      )}
+    </svg>
+  );
+}
 
-  svg {
-    color: #F85149;
-    flex-shrink: 0;
-  }
-`;
+async function signOut() {
+  await fetch("/api/auth/logout", { method: "POST" });
+  window.location.href = "/leaderboard";
+}
 
-const GitHubIcon = () => (
-  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 0C5.374 0 0 5.373 0 12C0 17.302 3.438 21.8 8.207 23.387C8.806 23.498 9 23.126 9 22.81V20.576C5.662 21.302 4.967 19.16 4.967 19.16C4.421 17.773 3.634 17.404 3.634 17.404C2.545 16.659 3.717 16.675 3.717 16.675C4.922 16.759 5.556 17.912 5.556 17.912C6.626 19.746 8.363 19.216 9.048 18.909C9.155 18.134 9.466 17.604 9.81 17.305C7.145 17 4.343 15.971 4.343 11.374C4.343 10.063 4.812 8.993 5.579 8.153C5.455 7.85 5.044 6.629 5.696 4.977C5.696 4.977 6.704 4.655 8.997 6.207C9.954 5.941 10.98 5.808 12 5.803C13.02 5.808 14.047 5.941 15.006 6.207C17.297 4.655 18.303 4.977 18.303 4.977C18.956 6.63 18.545 7.851 18.421 8.153C19.19 8.993 19.656 10.064 19.656 11.374C19.656 15.983 16.849 16.998 14.177 17.295C14.607 17.667 15 18.397 15 19.517V22.81C15 23.129 15.192 23.504 15.801 23.386C20.566 21.797 24 17.3 24 12C24 5.373 18.627 0 12 0Z" fill="white"/>
-  </svg>
-);
+function avatarSrc(user: User): string {
+  return user.avatarUrl || `https://github.com/${user.username}.png`;
+}
 
-const MenuIcon = () => (
-  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M3 12H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-    <path d="M3 6H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-    <path d="M3 18H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
-
-const CloseIcon = () => (
-  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-    <path d="M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
-
-function UserMenu({ user, onSignOut }: { user: User; onSignOut: () => void }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const handleClose = useCallback(() => setIsOpen(false), []);
+function UserMenu({ user }: { user: User }) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const close = useCallback((restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) buttonRef.current?.focus();
+  }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        handleClose();
-      }
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) close(false);
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen, handleClose]);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close(true);
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close]);
 
   return (
-    <MenuWrapper ref={menuRef}>
-      <ProfileButton
-        aria-label={`User menu for ${user.username}`}
-        aria-expanded={isOpen}
-        aria-haspopup="true"
-        onClick={() => setIsOpen((v) => !v)}
+    <MenuWrapper ref={wrapperRef}>
+      <AvatarButton
+        ref={buttonRef}
+        type="button"
+        aria-label={`Account menu for @${user.username}`}
+        aria-expanded={open}
+        aria-controls="account-menu"
+        onClick={() => setOpen((value) => !value)}
       >
-        <AvatarImg
-          src={user.avatarUrl || `https://github.com/${user.username}.png`}
-          alt={user.username}
-          width={32}
-          height={32}
-          style={{ width: "100%", height: "100%" }}
-        />
-      </ProfileButton>
-      {isOpen && (
-        <MenuOverlay>
-          <MenuUserInfo>
-            <DisplayName>{user.displayName || user.username}</DisplayName>
-            <Username>@{user.username}</Username>
-          </MenuUserInfo>
-          <div style={{ padding: "4px 0" }}>
-            <MenuItem href={`/u/${user.username}`} onClick={handleClose}>
-              <MenuIconSlot><PersonIcon /></MenuIconSlot>
-              Your Profile
-            </MenuItem>
-            <MenuItem href="/settings" onClick={handleClose}>
-              <MenuIconSlot><GearIcon /></MenuIconSlot>
+        <Avatar src={avatarSrc(user)} alt="" width={32} height={32} />
+      </AvatarButton>
+      {open && (
+        <UserMenuPanel id="account-menu">
+          <UserInfo>
+            <UserName>{user.displayName || user.username}</UserName>
+            <UserHandle>@{user.username}</UserHandle>
+          </UserInfo>
+          <MenuGroup>
+            <MenuLink href={`/u/${user.username}`} onClick={() => close(false)}>
+              <PersonIcon />
+              Your profile
+            </MenuLink>
+            <MenuLink href="/settings" onClick={() => close(false)}>
+              <GearIcon />
               Settings
-            </MenuItem>
-          </div>
-          <MenuDivider />
-          <div style={{ padding: "4px 0" }}>
-            <MenuItemButton $danger onClick={() => { handleClose(); onSignOut(); }}>
-              <MenuIconSlot><SignOutIcon /></MenuIconSlot>
-              Sign Out
-            </MenuItemButton>
-          </div>
-        </MenuOverlay>
+            </MenuLink>
+          </MenuGroup>
+          <MenuGroup>
+            <MenuButton type="button" $danger onClick={() => void signOut()}>
+              <SignOutIcon />
+              Sign out
+            </MenuButton>
+          </MenuGroup>
+        </UserMenuPanel>
       )}
     </MenuWrapper>
   );
@@ -664,160 +501,135 @@ export function Navigation() {
   const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    let cancelled = false;
     fetch("/api/auth/session")
       .then((res) => res.json())
       .then((data) => {
+        if (cancelled) return;
         setUser(data.user || null);
         setIsLoading(false);
       })
       .catch(() => {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const closeMobileMenu = () => setIsMobileMenuOpen(false);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileOpen(false);
+        toggleRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileOpen]);
+
+  const closeMobile = () => setMobileOpen(false);
 
   return (
-    <NavContainer aria-label="Main navigation">
-      <NavHeaderRow>
-        <NavLogoLink href="/" aria-label="Tokscale home">
-          <NavLogoImage
-            src="/assets/hero-logo.svg"
-            alt="Tokscale"
-            width={100}
-            height={21}
-            priority
-          />
-        </NavLogoLink>
+    <Bar aria-label="Main navigation">
+      <BarInner>
+        <LogoLink href="/" aria-label="Tokscale home">
+          <Image src="/assets/hero-logo.svg" alt="" width={147} height={28} priority />
+        </LogoLink>
 
-        <HamburgerButton
-          onClick={() => setIsMobileMenuOpen((prev) => !prev)}
-          aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
-          aria-controls="mobile-navigation-menu"
-          aria-expanded={isMobileMenuOpen}
-        >
-          {isMobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
-        </HamburgerButton>
+        <Links>
+          {NAV_ITEMS.map((item) => {
+            const active = isNavItemActive(item, pathname);
+            return (
+              <li key={item.href}>
+                <NavLink href={item.href} $active={active} aria-current={active ? "page" : undefined}>
+                  {item.label}
+                </NavLink>
+              </li>
+            );
+          })}
+        </Links>
 
-        <DesktopNavItems>
-          <NavItemLink href="/" $isActive={pathname === "/"}>
-            About
-          </NavItemLink>
-          <NavItemLink href="/leaderboard" $isActive={pathname === "/leaderboard" || pathname.startsWith("/groups")}>
-            Leaderboard
-          </NavItemLink>
-          <NavItemLink href="/profile" $isActive={pathname === "/profile" || pathname.startsWith("/u/")}>
-            Profile
-          </NavItemLink>
-          <NavItemBase
-            as="a"
-            href="https://github.com/junhoyeo/tokscale"
-            target="_blank"
-            rel="noopener noreferrer"
-            $isActive={false}
+        <Right>
+          <DesktopOnly>
+            {isLoading ? (
+              <LoadingSkeleton aria-hidden="true" />
+            ) : user ? (
+              <UserMenu user={user} />
+            ) : (
+              <SignInLink href="/api/auth/github">
+                <GitHubMark />
+                Sign in
+              </SignInLink>
+            )}
+          </DesktopOnly>
+          <MenuToggle
+            ref={toggleRef}
+            type="button"
+            aria-label={mobileOpen ? "Close menu" : "Open menu"}
+            aria-controls="mobile-navigation-menu"
+            aria-expanded={mobileOpen}
+            onClick={() => setMobileOpen((value) => !value)}
           >
-            GitHub
-          </NavItemBase>
-        </DesktopNavItems>
+            <MenuIcon open={mobileOpen} />
+          </MenuToggle>
+        </Right>
+      </BarInner>
 
-        <DesktopAuthSection>
-          {isLoading ? (
-            <LoadingSkeleton />
-          ) : user ? (
-            <UserMenu user={user} onSignOut={async () => {
-              await fetch("/api/auth/logout", { method: "POST" });
-              setUser(null);
-              window.location.href = "/leaderboard";
-            }} />
-          ) : (
-            <SignInButton href="/api/auth/github" aria-label="Sign in with GitHub">
-              <SignInIcon>
-                <GitHubIcon />
-              </SignInIcon>
-              <SignInTextFull>Sign in with GitHub</SignInTextFull>
-              <SignInTextCompact>Sign in</SignInTextCompact>
-            </SignInButton>
-          )}
-        </DesktopAuthSection>
-      </NavHeaderRow>
-
-
-      <MobileDropdownWrapper
-        id="mobile-navigation-menu"
-        $isOpen={isMobileMenuOpen}
-        aria-hidden={!isMobileMenuOpen}
-        inert={!isMobileMenuOpen}
-      >
-        <MobileDropdown>
-          <DropdownNavLink href="/" $isActive={pathname === "/"} onClick={closeMobileMenu}>
-            About
-          </DropdownNavLink>
-          <DropdownNavLink href="/leaderboard" $isActive={pathname === "/leaderboard" || pathname.startsWith("/groups")} onClick={closeMobileMenu}>
-            Leaderboard
-          </DropdownNavLink>
-          <DropdownNavLink href="/profile" $isActive={pathname === "/profile" || pathname.startsWith("/u/")} onClick={closeMobileMenu}>
-            Profile
-          </DropdownNavLink>
-          <DropdownNavLinkExternal
-            href="https://github.com/junhoyeo/tokscale"
-            target="_blank"
-            rel="noopener noreferrer"
-            $isActive={false}
-            onClick={closeMobileMenu}
-          >
-            GitHub ↗
-          </DropdownNavLinkExternal>
-
-          <DropdownDivider />
-
+      <MobilePanel id="mobile-navigation-menu" $open={mobileOpen}>
+        <MobileList>
+          {NAV_ITEMS.map((item) => {
+            const active = isNavItemActive(item, pathname);
+            return (
+              <li key={item.href}>
+                <MobileNavLink
+                  href={item.href}
+                  $active={active}
+                  aria-current={active ? "page" : undefined}
+                  onClick={closeMobile}
+                >
+                  {item.label}
+                </MobileNavLink>
+              </li>
+            );
+          })}
+        </MobileList>
+        <MobileAuth>
           {isLoading ? null : user ? (
             <>
-              <DropdownUserCard>
-                <AvatarImg
-                  src={user.avatarUrl || `https://github.com/${user.username}.png`}
-                  alt={user.username}
-                  width={32}
-                  height={32}
-                  style={{ width: "32px", height: "32px" }}
-                />
-                <DropdownUserDetails>
-                  <DropdownDisplayName>{user.displayName || user.username}</DropdownDisplayName>
-                  <DropdownUsername>@{user.username}</DropdownUsername>
-                </DropdownUserDetails>
-              </DropdownUserCard>
-              <DropdownUserAction href={`/u/${user.username}`} onClick={closeMobileMenu}>
-                <PersonIcon size={16} />
-                Your Profile
-              </DropdownUserAction>
-              <DropdownUserAction href="/settings" onClick={closeMobileMenu}>
-                <GearIcon size={16} />
+              <MobileUserRow>
+                <MobileAvatar src={avatarSrc(user)} alt="" width={32} height={32} />
+                <div>
+                  <UserName>{user.displayName || user.username}</UserName>
+                  <UserHandle>@{user.username}</UserHandle>
+                </div>
+              </MobileUserRow>
+              <MobileAction href={`/u/${user.username}`} onClick={closeMobile}>
+                <PersonIcon />
+                Your profile
+              </MobileAction>
+              <MobileAction href="/settings" onClick={closeMobile}>
+                <GearIcon />
                 Settings
-              </DropdownUserAction>
-              <DropdownSignOutButton
-                onClick={async () => {
-                  await fetch("/api/auth/logout", { method: "POST" });
-                  setUser(null);
-                  closeMobileMenu();
-                  window.location.href = "/leaderboard";
-                }}
-              >
-                <SignOutIcon size={16} />
-                Sign Out
-              </DropdownSignOutButton>
+              </MobileAction>
+              <MobileActionButton type="button" $danger onClick={() => void signOut()}>
+                <SignOutIcon />
+                Sign out
+              </MobileActionButton>
             </>
           ) : (
-            <DropdownSignInButton href="/api/auth/github">
-              <SignInIcon>
-                <GitHubIcon />
-              </SignInIcon>
-              <DropdownSignInText>Sign in with GitHub</DropdownSignInText>
-            </DropdownSignInButton>
+            <MobileSignIn href="/api/auth/github">
+              <GitHubMark size={18} />
+              Sign in with GitHub
+            </MobileSignIn>
           )}
-        </MobileDropdown>
-      </MobileDropdownWrapper>
-    </NavContainer>
+        </MobileAuth>
+      </MobilePanel>
+    </Bar>
   );
 }

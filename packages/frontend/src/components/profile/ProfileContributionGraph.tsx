@@ -14,6 +14,7 @@ import {
 } from "react";
 import styled, { css } from "styled-components";
 import { SourceLogo } from "@/components/SourceLogo";
+import { Select } from "@/components/ui/Select";
 import { SOURCE_COLORS, SOURCE_DISPLAY_NAMES, SOURCE_LOGOS } from "@/lib/constants";
 import { getContributionIntensity } from "@/lib/embed/embedShared";
 import type {
@@ -32,6 +33,7 @@ import {
   type GraphColorPalette,
 } from "@/lib/themes";
 import { formatCurrency, formatTokenCount } from "@/lib/utils";
+import { Eyebrow } from "@/components/ui/Eyebrow";
 
 export interface ProfileContributionGraphProps {
   breakdownId?: string;
@@ -989,59 +991,9 @@ const Heading = styled.h2`
   letter-spacing: -0.01em;
 `;
 
-const RangeSelectWrapper = styled.span`
-  position: relative;
-  display: inline-grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr) 0.75rem;
-  align-items: center;
-
-  &::after {
-    width: 0.3125rem;
-    height: 0.3125rem;
-    grid-column: 2;
-    grid-row: 1;
-    border-right: 1px solid var(--service-text-muted);
-    border-bottom: 1px solid var(--service-text-muted);
-    content: "";
-    pointer-events: none;
-    transform: translateY(-0.125rem) rotate(45deg);
-  }
-`;
-
-const RangeSelect = styled.select`
-  min-width: 0;
-  grid-column: 1 / -1;
-  grid-row: 1;
-  padding: 0 1rem 0.125rem 0;
-  appearance: none;
-  overflow: hidden;
-  color: var(--service-text-muted);
-  background: transparent;
-  border: 0;
-  border-bottom: 1px dotted var(--service-text-muted);
-  border-radius: 0;
-  font-size: 0.75rem;
-  font-weight: 500;
-  line-height: 1.25rem;
-  text-overflow: ellipsis;
-  cursor: pointer;
-
-  option {
-    color: var(--service-text);
-    background: var(--service-surface);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (pointer: coarse) {
-    min-height: 2.75rem;
-    padding-top: 0.625rem;
-    padding-bottom: 0.625rem;
-  }
+/** Reads as underlined text next to the heading; the Select draws the chevron. */
+const RangeSelect = styled(Select)`
+  --select-font-size: 0.75rem;
 `;
 
 const Description = styled.p`
@@ -1383,7 +1335,6 @@ const Footer = styled.div`
 `;
 
 const PaletteControl = styled.label`
-  position: relative;
   display: inline-flex;
   min-width: 0;
   align-items: center;
@@ -1391,39 +1342,19 @@ const PaletteControl = styled.label`
   color: var(--service-text-muted);
   font-size: 0.6875rem;
 
-  &::after {
-    position: absolute;
-    right: 0.625rem;
-    width: 0.3125rem;
-    height: 0.3125rem;
-    border-right: 1px solid var(--service-text-muted);
-    border-bottom: 1px solid var(--service-text-muted);
-    content: "";
-    pointer-events: none;
-    transform: translateY(-0.125rem) rotate(45deg);
-  }
-
   @media (pointer: coarse) {
     min-height: 2.75rem;
   }
 `;
 
-const PaletteSelect = styled.select`
-  max-width: 7.5rem;
-  height: 1.75rem;
-  padding: 0 1.5rem 0 0.5rem;
-  appearance: none;
-  color: var(--service-text);
-  background: var(--service-surface-muted);
-  border: 1px solid var(--service-border);
-  border-radius: 0.4375rem;
-  font: inherit;
-  cursor: pointer;
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 1px;
-  }
+const PaletteSelect = styled(Select)`
+  --select-height: 1.75rem;
+  --select-font-size: 0.6875rem;
+  --select-padding-x: 0.5rem;
+  --select-background: var(--service-surface-muted);
+  --select-border-color: var(--service-border);
+  --select-radius: 0.4375rem;
+  --select-max-width: 7.5rem;
 `;
 
 const PalettePreview = styled.span`
@@ -1532,7 +1463,6 @@ const TooltipMetricLabel = styled.span`
 
 const TooltipMetricValue = styled.span`
   color: var(--service-text);
-  font-family: var(--font-mono);
   font-weight: 600;
   text-align: right;
 `;
@@ -1567,14 +1497,9 @@ const DetailHeader = styled.header`
   border-bottom: 1px solid var(--service-border);
 `;
 
-const DetailEyebrow = styled.div`
+const DetailEyebrow = styled(Eyebrow)`
   margin-bottom: 0.125rem;
-  color: var(--service-text-muted);
-  font-size: 0.625rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-`;
+`
 
 const DetailTitle = styled.h3`
   margin: 0;
@@ -1648,7 +1573,6 @@ const DetailMetricLabel = styled.div`
 const DetailMetricValue = styled.div`
   overflow: hidden;
   color: var(--service-text);
-  font-family: var(--font-mono);
   font-size: 0.8125rem;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -1773,7 +1697,6 @@ const ClientName = styled.strong`
 const ClientTotal = styled.span`
   flex: 0 0 auto;
   color: var(--service-text-muted);
-  font-family: var(--font-mono);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
 `;
@@ -1797,7 +1720,6 @@ const ModelRow = styled.div`
 const ModelName = styled.span`
   overflow: hidden;
   color: var(--service-text);
-  font-family: var(--font-mono);
   font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1805,7 +1727,6 @@ const ModelName = styled.span`
 
 const ModelValue = styled.span`
   color: var(--service-text);
-  font-family: var(--font-mono);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
 `;
@@ -1952,7 +1873,7 @@ function ContributionDayBreakdown({
     >
       <DetailHeader>
         <div>
-          <DetailEyebrow>Day breakdown</DetailEyebrow>
+          <DetailEyebrow as="div">Day Breakdown</DetailEyebrow>
           <DetailTitle id={headingId}>{formatFullDay(day.date)}</DetailTitle>
         </div>
         {onClose && (
@@ -2432,21 +2353,14 @@ export function ProfileContributionGraph({
           <HeadingRow>
             <Heading id={titleId}>Contributions</Heading>
             {rangeOptions.length > 1 && rangeValue && onRangeChange && (
-              <RangeSelectWrapper>
-                <RangeSelect
-                  name="profile-contribution-range"
-                  aria-label="Contribution date range"
-                  aria-controls={calendarId}
-                  value={rangeValue}
-                  onChange={(event) => commitRange(event.currentTarget.value)}
-                >
-                  {rangeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </RangeSelect>
-              </RangeSelectWrapper>
+              <RangeSelect
+                variant="inline"
+                name="profile-contribution-range"
+                aria-label="Contribution date range"
+                value={rangeValue}
+                options={rangeOptions}
+                onChange={commitRange}
+              />
             )}
           </HeadingRow>
           <Description id={descriptionId}>{description}</Description>
@@ -2662,16 +2576,12 @@ export function ProfileContributionGraph({
                 name="profile-contribution-palette"
                 aria-label="Contribution graph color"
                 value={paletteName}
-                onChange={(event) =>
-                  commitPalette(event.currentTarget.value as ColorPaletteName)
-                }
-              >
-                {getPaletteNames().map((name) => (
-                  <option key={name} value={name}>
-                    {colorPalettes[name].name}
-                  </option>
-                ))}
-              </PaletteSelect>
+                options={getPaletteNames().map((name) => ({
+                  value: name,
+                  label: colorPalettes[name].name,
+                }))}
+                onChange={(next) => commitPalette(next as ColorPaletteName)}
+              />
             </PaletteControl>
             <Legend aria-label="Contribution intensity, low to high">
               <span>Low</span>

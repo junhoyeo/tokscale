@@ -1,0 +1,73 @@
+name: CLA
+
+# Enable only after legal review and the branch + JSON setup in docs/cla-setup.md.
+# No paths filter: both events publish a successful status for out-of-scope PRs.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: Resolve trusted PR head
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+          github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    steps:
+      - name: Checkout trusted default-branch check only
+        # actions/checkout v5.0.1; review this immutable ref before updating.
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/heads/${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts/cla
+      - name: Resolve current head from GitHub metadata
+        id: head
+        run: node .github/scripts/cla/check.mjs --resolve-head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  cla:
+    name: CLA metadata check
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Statuses are shared per commit. Serialize same-SHA events, not the whole
+    # repository (GitHub drops older pending runs). Other SHAs retry storage CAS.
+    concurrency:
+      group: cla-${{ github.repository }}-${{ needs.resolve.outputs.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    if: needs.resolve.outputs.sha != ''
+    steps:
+      - name: Checkout trusted default-branch check only
+        # actions/checkout v5.0.1; review this immutable ref before updating.
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/heads/${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts/cla
+      - name: Check frontend scope and CLA signatures
+        # No PR checkout, dependency install, imported PR module, shell expansion
+        # of comments, workflow rerun, PR lock, or PAT is needed.
+        run: node .github/scripts/cla/check.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLA_EXPECTED_HEAD: ${{ needs.resolve.outputs.sha }}

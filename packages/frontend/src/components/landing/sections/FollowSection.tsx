@@ -99,7 +99,6 @@ const SponsorCopy = styled.div`
 `;
 
 const SponsorEyebrow = styled.p`
-  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 13px;
   line-height: 1.4em;
@@ -201,7 +200,6 @@ const BlueprintHeader = styled.div`
 `;
 
 const BlueprintMeta = styled.p`
-  font-family: var(--font-mono), monospace;
   font-weight: 500;
   font-size: 13px;
   line-height: 1.4em;

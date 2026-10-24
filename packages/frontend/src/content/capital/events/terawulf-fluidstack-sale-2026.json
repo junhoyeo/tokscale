@@ -1,0 +1,124 @@
+{
+  "sources": [
+    {
+      "id": "src_terawulf_8k_2026_07_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000110465926080583/tm2619468d1_8k.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf Form 8-K, July 6, 2026 (Justified Data Campus lease and Abernathy transaction)",
+      "publishedAt": "2026-07-06",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001104659-26-080583",
+        "cik": "0001083301",
+        "filedAt": "2026-07-06",
+        "periodOfReport": "2026-07-06"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_terawulf_ex99_2026_07_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000110465926080583/tm2619468d1_ex99-1.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf press release, July 6, 2026 (Exhibit 99.1): Anthropic lease at Justified Data Campus and sale of Abernathy interest to Fluidstack",
+      "publishedAt": "2026-07-06",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001104659-26-080583",
+        "cik": "0001083301",
+        "filedAt": "2026-07-06",
+        "periodOfReport": "2026-07-06"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_terawulf_fluidstack_sale_2026",
+    "slug": "terawulf-fluidstack-sale-2026",
+    "kind": "deal",
+    "types": [
+      "asset_sale"
+    ],
+    "title": "TeraWulf sells its Abernathy joint-venture interest to a Fluidstack-led group",
+    "summary": "TeraWulf agreed to sell its interest in the Abernathy joint venture, which is developing an AI data-center campus in Abernathy, Texas, to purchasers led by Fluidstack. The price is paid in three installments.",
+    "date": "2026-07-06",
+    "dates": {
+      "signed": "2026-07-06",
+      "filed": "2026-07-06"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_terawulf",
+        "roles": [
+          "seller"
+        ],
+        "note": "Through its subsidiary Big Country Wulf LLC"
+      },
+      {
+        "org": "org_fluidstack",
+        "roles": [
+          "acquirer"
+        ],
+        "note": "Fluidstack CS I Inc. and other purchasers"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "consideration",
+        "label": "Aggregate consideration",
+        "measure": "purchase_price",
+        "value": 530000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-07-06",
+        "from": "org_fluidstack",
+        "to": "org_terawulf",
+        "sourceId": "src_terawulf_8k_2026_07_06",
+        "quote": "The aggregate consideration payable to the TeraWulf Member in the Transaction is approximately $530 million, payable in three installments"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "campus",
+        "label": "Abernathy campus critical IT load",
+        "measure": "it_load_mw",
+        "value": 168,
+        "basis": "exact",
+        "sourceId": "src_terawulf_ex99_2026_07_06",
+        "quote": "The Abernathy Joint Venture was established in 2025 to develop a 168 MW critical IT load AI data center campus in Abernathy, Texas."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Interest sold",
+        "text": "TeraWulf's entire 50.1% ownership interest in the Abernathy joint venture.",
+        "sourceId": "src_terawulf_ex99_2026_07_06",
+        "quote": "TeraWulf will sell its entire 50.1% ownership interest in the Abernathy Joint Venture to an investor group led by Fluidstack"
+      },
+      {
+        "label": "Installments",
+        "text": "$250 million within 14 days, $150 million by December 31, 2026, and about $130 million by April 30, 2027.",
+        "sourceId": "src_terawulf_8k_2026_07_06",
+        "quote": "(i) $250 million within 14 days following execution of the Purchase Agreement, (ii) $150 million on or before December 31, 2026, and (iii) approximately $130 million, subject to certain adjustments, on or before April 30, 2027."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_terawulf_anthropic_lease_2026",
+        "note": "Reported in the same 8-K."
+      }
+    ],
+    "sourceIds": [
+      "src_terawulf_8k_2026_07_06",
+      "src_terawulf_ex99_2026_07_06"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

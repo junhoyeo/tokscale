@@ -225,6 +225,13 @@
       "when": 1792076332157,
       "tag": "0031_group_week_start_constraint",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792663973551,
+      "tag": "0032_true_krista_starr",
+      "breakpoints": true
     }
   ]
 }

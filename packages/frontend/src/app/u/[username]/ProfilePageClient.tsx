@@ -4,7 +4,7 @@ import { useId, useMemo, useState } from "react";
 import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 import {
   createContributionRangeOptions,
   getContributionDayForDate,
@@ -436,7 +436,7 @@ export default function ProfilePageClient({
         </ContentWrapper>
       </MainContent>
 
-      <ServiceFooter />
+      <PublicFooter />
     </PageContainer>
   );
 }
@@ -572,7 +572,7 @@ const PageContainer = styled.div`
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--service-canvas);
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
   color: var(--service-text);
 `;
 

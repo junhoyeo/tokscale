@@ -1,0 +1,125 @@
+{
+  "sources": [
+    {
+      "id": "src_sb_energy_s1_2026_09_01",
+      "url": "https://www.sec.gov/Archives/edgar/data/2133037/000162828026059639/sbenergy-sx1.htm",
+      "publisher": "SEC EDGAR (SB Energy, Inc.)",
+      "type": "sec_filing",
+      "title": "SB Energy registration statement on Form S-1, filed September 1, 2026",
+      "publishedAt": "2026-08-31",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-059639",
+        "cik": "0002133037",
+        "filedAt": "2026-09-01"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_sb_energy_openai_lease_2026",
+    "slug": "sb-energy-openai-lease-2026",
+    "kind": "deal",
+    "types": [
+      "datacenter_lease",
+      "warrant"
+    ],
+    "title": "OpenAI and SB Energy 20-year leases at the PORTS-Pike campus",
+    "summary": "SB Energy subsidiaries signed long-term leases with an OpenAI affiliate for the PORTS-Pike Technology Campus in Pike County, Ohio. NVIDIA provided residual value guaranties for part of the tenant's obligations.",
+    "date": "2026-08-17",
+    "dates": {
+      "signed": "2026-08-17",
+      "filed": "2026-09-01"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_sb_energy",
+        "roles": [
+          "lessor"
+        ],
+        "note": "Through 17 subsidiaries, each as landlord"
+      },
+      {
+        "org": "org_openai",
+        "roles": [
+          "lessee"
+        ],
+        "note": "An affiliate of OpenAI as tenant"
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "partner"
+        ],
+        "note": "Residual value guarantor"
+      }
+    ],
+    "amounts": [],
+    "quantities": [
+      {
+        "id": "capacity",
+        "label": "Critical IT capacity across the 17 leases (GW-IT)",
+        "measure": "capacity_gw",
+        "value": 8.0,
+        "basis": "approximately",
+        "term": {
+          "years": 20
+        },
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "On August 17, 2026, 17 of our subsidiaries, each as landlord, and an affiliate of OpenAI, as tenant, entered into individual lease agreements for the PORTS-Pike Technology Campus, resulting in 17 leases covering approximately 8.0 GW-IT of critical IT capacity in the aggregate."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Term",
+        "text": "Each lease has a 20-year initial term from its commencement date.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "Each lease has a 20-year initial term commencing on the applicable commencement date"
+      },
+      {
+        "label": "Site",
+        "text": "The campus in Pike County, Ohio, is designed for 17 data center buildings.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "means our anticipated data center campus in Pike County, Ohio, designed to comprise 17 data center buildings aggregating approximately 8.0 GW-IT of critical IT capacity"
+      },
+      {
+        "label": "Timing",
+        "text": "The first phase targets the start of operations in 2028.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "the first phase is targeting commencement of operations in 2028"
+      },
+      {
+        "label": "NVIDIA guaranty",
+        "text": "NVIDIA guarantees the residual value of the tenant's lease obligations for the first approximately 4.25 GW-IT, up to $105 billion in aggregate.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "NVIDIA has provided residual value guaranties of the OpenAI tenant's lease obligations at PORTS-Pike Technology Campus covering only the initial approximately 4.25 GW-IT at an aggregate guaranteed value of $105 billion"
+      },
+      {
+        "label": "OpenAI warrants",
+        "text": "SB Energy issued OpenAI 3,991,809 warrants with a nominal exercise price of $0.01 per share.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "\"OpenAI Warrants\" means the 3,991,809 warrants issued by us to OpenAI pursuant to the Amended and Restated OpenAI Warrant Agreement, dated August 17, 2026, and outstanding as of the date of this prospectus at a nominal exercise price of $0.01 per share"
+      },
+      {
+        "label": "Purpose of the warrants",
+        "text": "The warrants were an inducement for OpenAI to sign the leases.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "The warrants were intended as a material inducement for OpenAI to enter into the lease agreements with us."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_sb_energy_nvidia_investment_2026",
+        "note": "NVIDIA also agreed to invest in SB Energy on the same day."
+      }
+    ],
+    "sourceIds": [
+      "src_sb_energy_s1_2026_09_01"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

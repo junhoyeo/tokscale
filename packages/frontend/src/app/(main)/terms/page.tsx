@@ -21,7 +21,7 @@ export const metadata: Metadata = {
 
 export default function TermsPage() {
   return (
-    <LegalPageShell title="Terms of Service" lastUpdated="July 30, 2026">
+    <LegalPageShell title="Terms of Service" lastUpdated="October 22, 2026">
       <p>
         These terms cover your use of the Tokscale website at tokscale.ai and
         the Tokscale CLI. By signing in or submitting usage data, you agree to
@@ -32,8 +32,9 @@ export default function TermsPage() {
       <p>
         Tokscale is a free, open-source tool that measures how many tokens you
         spend on AI coding assistants, and a public leaderboard that ranks
-        participants by that usage. The software is released under the MIT
-        license and is available at{" "}
+        participants by that usage. The CLI is released under the MIT license
+        and the web app under the GNU Affero General Public License v3.0. Both
+        are available at{" "}
         <a
           href="https://github.com/junhoyeo/tokscale"
           target="_blank"
@@ -41,7 +42,7 @@ export default function TermsPage() {
         >
           github.com/junhoyeo/tokscale
         </a>
-        . The MIT license governs the software itself; these terms govern the
+        . Those licenses govern the software itself; these terms govern the
         hosted service.
       </p>
 

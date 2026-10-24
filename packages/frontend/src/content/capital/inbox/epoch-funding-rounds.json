@@ -1,0 +1,1750 @@
+{
+  "dataset": "Epoch AI, Data on AI companies",
+  "url": "https://epoch.ai/data/ai-companies",
+  "downloadUrl": "https://epoch.ai/data/ai_companies_funding_rounds.csv",
+  "license": "CC BY 4.0",
+  "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+  "licenseText": "Epoch AI’s data is free to use, distribute, and reproduce provided the source and authors are credited under the Creative Commons Attribution license.",
+  "attribution": "Josh You, John Croxton, Venkat Somala, Yafah Edelman, 'Data on AI companies'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/data/ai-companies' [online resource]. Accessed 21 Oct 2026.",
+  "retrievedAt": "2026-10-21",
+  "epochUpdated": "2026-10-08",
+  "epochUpdatedText": "Updated Oct. 8, 2026",
+  "sha256": "fd912cf2bb692316c3462e793095c35bccc12d59d160b2d717e4171591d6add2",
+  "note": "Review inbox. Not shown on Tokscale pages. A row is published only after an editor re-checks it against a primary source.",
+  "rows": [
+    {
+      "epochId": "OpenAI–Nvidia",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": null,
+      "reportDate": "2025-09-22",
+      "status": "Late discussions",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 100000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "100000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://openai.com/index/openai-nvidia-systems-partnership/",
+        "https://fortune.com/2025/12/02/nvidia-openai-deal-not-signed-yet-100-billion-rally-colette-kress/",
+        "https://finance.yahoo.com/news/nvidia-ceo-jensen-huang-100b-123431494.html"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Microsoft/Nvidia",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": null,
+      "reportDate": "2025-11-18",
+      "status": "Late discussions",
+      "type": null,
+      "confidence": "Uncertain",
+      "equityUsd": 15000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 350000000000,
+      "epochCells": {
+        "Funding (equity)": "15000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "350000000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/microsoft-nvidia-anthropic-announce-strategic-partnerships",
+        "https://www.cnbc.com/2025/11/18/anthropic-ai-azure-microsoft-nvidia.html",
+        "https://www.bloomberg.com/news/articles/2026-01-21/anthropic-s-revenue-run-rate-tops-9-billion-as-vcs-pile-in"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "1B Disney",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": null,
+      "reportDate": "2025-12-11",
+      "status": "Cancelled",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 1000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 500000000000,
+      "epochCells": {
+        "Funding (equity)": "1000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "500000000000.0"
+      },
+      "sources": [
+        "https://openai.com/index/disney-sora-agreement/",
+        "https://www.bloomberg.com/news/articles/2025-12-15/openai-deal-to-license-disney-characters-is-entirely-in-stock",
+        "https://arstechnica.com/ai/2026/03/the-end-of-sora-also-means-the-end-of-disneys-1-billion-openai-investment/"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "2019 LP seed (Khosla)",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2019-03-11",
+      "reportDate": "2019-03-11",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 50000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "50000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://openai.com/index/openai-lp/",
+        "https://finance.yahoo.com/news/vinod-khosla-details-much-venture-134826473.html",
+        "https://www.theinformation.com/articles/will-new-openai-one-chart?rc=9mzoog"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 50000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "2019 LP seed (Other)",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2019-03-11",
+      "reportDate": "2019-03-11",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": null,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://openai.com/index/openai-lp/",
+        "https://finance.yahoo.com/news/vinod-khosla-details-much-venture-134826473.html",
+        "https://www.theinformation.com/articles/will-new-openai-one-chart?rc=9mzoog"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "2019 Microsoft 1B",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2019-07-22",
+      "reportDate": "2019-07-22",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 1000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "1000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://news.microsoft.com/source/2019/07/22/openai-forms-exclusive-computing-partnership-with-microsoft-to-build-new-azure-ai-supercomputing-technologies/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 1000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "March 2021 Microsoft 2B",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2021-03-15",
+      "reportDate": "2023-01-12",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 2000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "2000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.nytimes.com/2023/01/12/technology/microsoft-openai-chatgpt.html",
+        "https://www.gov.uk/cma-cases/microsoft-slash-openai-partnership-merger-inquiry"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 2000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "May 2021 Series A",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2021-05-28",
+      "reportDate": "2021-05-28",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 124000000,
+      "debtUsd": null,
+      "postMoneyUsd": 674000000,
+      "epochCells": {
+        "Funding (equity)": "124000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "674000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-raises-124-million-to-build-more-reliable-general-ai-systems"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 124000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 674000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "14B tender",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2021-07-01",
+      "reportDate": "2023-01-05",
+      "status": "Closed",
+      "type": "Secondary",
+      "confidence": "Uncertain",
+      "equityUsd": 0,
+      "debtUsd": null,
+      "postMoneyUsd": 14000000000,
+      "epochCells": {
+        "Funding (equity)": "0.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "14000000000.0"
+      },
+      "sources": [
+        "https://www.wsj.com/articles/chatgpt-creator-openai-is-in-talks-for-tender-offer-that-would-value-it-at-29-billion-11672949279b",
+        "https://news.crunchbase.com/ai-robotics/openai-chatgpt-tender-offer/"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Apr 2022 Series B",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2022-04-29",
+      "reportDate": "2022-04-29",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 580000000,
+      "debtUsd": null,
+      "postMoneyUsd": 3700000000,
+      "epochCells": {
+        "Funding (equity)": "580000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "3700000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-raises-series-b-to-build-safe-reliable-ai"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 580000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 3700000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Jan 2023 Microsoft",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2023-01-23",
+      "reportDate": "2023-04-28",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 10000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "10000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://openai.com/index/openai-and-microsoft-extend-partnership/",
+        "https://techcrunch.com/2023/04/28/openai-funding-valuation-chatgpt",
+        "https://www.bloomberg.com/news/articles/2023-01-23/microsoft-makes-multibillion-dollar-investment-in-openai"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 10000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Apr 2023 27B",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2023-04-26",
+      "reportDate": null,
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 300000000,
+      "debtUsd": null,
+      "postMoneyUsd": 27000000000,
+      "epochCells": {
+        "Funding (equity)": "300000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "27000000000.0"
+      },
+      "sources": [
+        "https://www.reuters.com/markets/deals/openai-closes-10-bln-funding-round-27-bln-29-bln-valuation-techcrunch-2023-04-28/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 300000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 27000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "May 2023 Series C",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2023-05-23",
+      "reportDate": "2023-05-23",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 450000000,
+      "debtUsd": null,
+      "postMoneyUsd": 4500000000,
+      "epochCells": {
+        "Funding (equity)": "450000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "4500000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-series-c"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 450000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 4500000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "June 2023 Seed",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2023-06-13",
+      "reportDate": "2023-06-13",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 113000000,
+      "debtUsd": null,
+      "postMoneyUsd": 260000000,
+      "epochCells": {
+        "Funding (equity)": "113000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "260000000.0"
+      },
+      "sources": [
+        "https://techcrunch.com/2023/06/13/frances-mistral-ai-blows-in-with-a-113m-seed-round-at-a-260m-valuation-to-take-on-openai/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 113000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 260000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Oct 2023 Google",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2023-10-25",
+      "reportDate": "2023-10-27",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 2000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "2000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.cnbc.com/2023/10/27/google-commits-to-invest-2-billion-in-openai-competitor-anthropic.html"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 2000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "December 2023 Series A",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2023-12-11",
+      "reportDate": "2025-12-11",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 415000000,
+      "debtUsd": null,
+      "postMoneyUsd": 2000000000,
+      "epochCells": {
+        "Funding (equity)": "415000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "2000000000.0"
+      },
+      "sources": [
+        "https://techcrunch.com/2023/12/11/mistral-ai-a-paris-based-openai-rival-closed-its-415-million-funding-round/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 415000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 2000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Dec 2023 18.4B Series D",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2024-01-11",
+      "reportDate": "2023-12-21",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 750000000,
+      "debtUsd": null,
+      "postMoneyUsd": 18400000000,
+      "epochCells": {
+        "Funding (equity)": "750000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "18400000000.0"
+      },
+      "sources": [
+        "https://www.cnbc.com/2023/12/21/openai-rival-anthropic-in-talks-to-raise-750-million-funding-round.html"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 750000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 18400000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Feb 2024 80B",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2024-02-16",
+      "reportDate": "2024-02-16",
+      "status": "Closed",
+      "type": "Secondary",
+      "confidence": "Likely",
+      "equityUsd": 0,
+      "debtUsd": null,
+      "postMoneyUsd": 80000000000,
+      "epochCells": {
+        "Funding (equity)": "0.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "80000000000.0"
+      },
+      "sources": [
+        "https://www.nytimes.com/2024/02/16/technology/openai-artificial-intelligence-deal-valuation.html"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "February 2024 Series A+",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2024-02-27",
+      "reportDate": "2024-02-27",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 16300000,
+      "debtUsd": null,
+      "postMoneyUsd": 2000000000,
+      "epochCells": {
+        "Funding (equity)": "16300000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "2000000000.0"
+      },
+      "sources": [
+        "https://techcrunch.com/2024/02/27/microsoft-made-a-16-million-investment-in-mistral-ai/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 16300000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 2000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Amazon March 2024",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2024-03-27",
+      "reportDate": "2024-03-27",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 4000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "4000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.aboutamazon.com/news/company-news/amazon-anthropic-ai-investment"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 4000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "May 2024 24B Series B",
+      "company": "xAI",
+      "org": "org_xai",
+      "closeDate": "2024-05-27",
+      "reportDate": "2024-05-27",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 6000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 24000000000,
+      "epochCells": {
+        "Funding (equity)": "6000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "24000000000.0"
+      },
+      "sources": [
+        "https://x.ai/news/series-b"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 6000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 24000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_xai_series_b_2024"
+      }
+    },
+    {
+      "epochId": "June 2024 6B",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2024-06-11",
+      "reportDate": "2024-06-11",
+      "status": "Closed",
+      "type": "Primary,Debt",
+      "confidence": "Confident",
+      "equityUsd": 500000000,
+      "debtUsd": 140000000,
+      "postMoneyUsd": 6000000000,
+      "epochCells": {
+        "Funding (equity)": "500000000.0",
+        "Funding (debt)": "140000000.0",
+        "Valuation (post-money)": "6000000000.0"
+      },
+      "sources": [
+        "https://techcrunch.com/2024/06/11/paris-based-ai-startup-mistral-ai-raises-640-million/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 500000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "debt_raised",
+          "value": 140000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 6000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Oct 2024 157B",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2024-10-02",
+      "reportDate": "2024-10-02",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 6600000000,
+      "debtUsd": 4000000000,
+      "postMoneyUsd": 157000000000,
+      "epochCells": {
+        "Funding (equity)": "6600000000.0",
+        "Funding (debt)": "4000000000.0",
+        "Valuation (post-money)": "157000000000.0"
+      },
+      "sources": [
+        "https://openai.com/index/scale-the-benefits-of-ai/",
+        "https://openai.com/index/new-credit-facility-enhances-financial-flexibility/",
+        "https://www.reuters.com/technology/artificial-intelligence/openai-closes-66-billion-funding-haul-valuation-157-billion-with-investment-2024-10-02/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 6600000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "debt_raised",
+          "value": 4000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 157000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_openai_funding_2024_10"
+      }
+    },
+    {
+      "epochId": "Dec 2024 Series C",
+      "company": "xAI",
+      "org": "org_xai",
+      "closeDate": "2024-11-20",
+      "reportDate": "2024-11-20",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 6000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 45000000000,
+      "epochCells": {
+        "Funding (equity)": "6000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "45000000000.0"
+      },
+      "sources": [
+        "https://x.ai/news/series-c"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 6000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 45000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Amazon Nov 2024",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2024-11-24",
+      "reportDate": "2024-11-24",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 4000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "4000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-amazon-trainium"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 4000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Google 1B 2025",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2025-03-01",
+      "reportDate": "2025-01-22",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 1000000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "1000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.ft.com/content/ed631513-dd37-44a3-a536-b2002f5727cc"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 1000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Mar 2025 61.5B Series E",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2025-03-03",
+      "reportDate": null,
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 3500000000,
+      "debtUsd": null,
+      "postMoneyUsd": 61500000000,
+      "epochCells": {
+        "Funding (equity)": "3500000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "61500000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-raises-series-e-at-usd61-5b-post-money-valuation"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 3500000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 61500000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_anthropic_series_e_2025"
+      }
+    },
+    {
+      "epochId": "Mar 2025 80B X merger",
+      "company": "xAI",
+      "org": "org_xai",
+      "closeDate": "2025-03-28",
+      "reportDate": "2025-03-28",
+      "status": "Closed",
+      "type": "Other",
+      "confidence": "Confident",
+      "equityUsd": 0,
+      "debtUsd": null,
+      "postMoneyUsd": 113000000000,
+      "epochCells": {
+        "Funding (equity)": "0.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "113000000000.0"
+      },
+      "sources": [
+        "https://www.cnbc.com/2025/03/28/elon-musk-says-xai-has-acquired-x-in-deal-that-values-social-media-site-at-33-billion.html"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Mar 2025 300B Stage 1",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2025-03-31",
+      "reportDate": "2025-03-31",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 10000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 300000000000,
+      "epochCells": {
+        "Funding (equity)": "10000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "300000000000.0"
+      },
+      "sources": [
+        "https://www.cnbc.com/2025/03/31/openai-closes-40-billion-in-funding-the-largest-private-fundraise-in-history-softbank-chatgpt.html",
+        "https://openai.com/index/march-funding-updates/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 10000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 300000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "June 2025 10B Raise",
+      "company": "xAI",
+      "org": "org_xai",
+      "closeDate": "2025-06-30",
+      "reportDate": "2025-08-01",
+      "status": "Closed",
+      "type": "Primary,Debt",
+      "confidence": "Likely",
+      "equityUsd": 5000000000,
+      "debtUsd": 5000000000,
+      "postMoneyUsd": 150000000000,
+      "epochCells": {
+        "Funding (equity)": "5000000000.0",
+        "Funding (debt)": "5000000000.0",
+        "Valuation (post-money)": "150000000000.0"
+      },
+      "sources": [
+        "https://www.cnbc.com/2025/07/01/elon-musk-xai-raises-10-billion-in-debt-and-equity.html",
+        "https://www.cnbc.com/2025/09/19/musks-xai-10-billion-at-200-billion-valuation.html"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 5000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "debt_raised",
+          "value": 5000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 150000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "300B Stage 2",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2025-08-01",
+      "reportDate": "2025-08-01",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 8300000000,
+      "debtUsd": null,
+      "postMoneyUsd": 300000000000,
+      "epochCells": {
+        "Funding (equity)": "8300000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "300000000000.0"
+      },
+      "sources": [
+        "https://www.nytimes.com/2025/08/01/business/dealbook/openai-ai-mega-funding-deal.html"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 8300000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 300000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Sep 2025 183B Series F",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2025-09-02",
+      "reportDate": "2025-09-02",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 13000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 183000000000,
+      "epochCells": {
+        "Funding (equity)": "13000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "183000000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-raises-series-f-at-usd183b-post-money-valuation"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 13000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 183000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_anthropic_series_f_2025"
+      }
+    },
+    {
+      "epochId": "Sep 2025 Series C",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2025-09-09",
+      "reportDate": "2025-08-05",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 1990000000,
+      "debtUsd": null,
+      "postMoneyUsd": 13700000000,
+      "epochCells": {
+        "Funding (equity)": "1990000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "13700000000.0"
+      },
+      "sources": [
+        "https://mistral.ai/news/mistral-ai-raises-1-7-b-to-accelerate-technological-progress-with-ai"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 1990000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 13700000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "2025 500B tender",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2025-10-01",
+      "reportDate": "2025-10-02",
+      "status": "Closed",
+      "type": "Secondary",
+      "confidence": "Confident",
+      "equityUsd": 0,
+      "debtUsd": null,
+      "postMoneyUsd": 500000000000,
+      "epochCells": {
+        "Funding (equity)": "0.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "500000000000.0"
+      },
+      "sources": [
+        "https://www.wsj.com/tech/ai/openai-valuation-hits-500-billion-while-altman-signs-more-deals-in-asia-59b47a0d",
+        "https://www.bloomberg.com/news/articles/2025-10-02/openai-completes-share-sale-at-record-500-billion-valuation"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "300B final stage",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2025-12-30",
+      "reportDate": "2025-12-30",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 22500000000,
+      "debtUsd": null,
+      "postMoneyUsd": null,
+      "epochCells": {
+        "Funding (equity)": "22500000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": ""
+      },
+      "sources": [
+        "https://www.cnbc.com/2025/12/30/softbank-openai-investment.html",
+        "https://www.nytimes.com/2025/03/31/technology/openai-valuation-300-billion.html",
+        "https://www.reuters.com/business/media-telecom/softbank-approves-remaining-225-billion-openai-investment-information-reports-2025-10-25/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 22500000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Jan 2026 20B Series E",
+      "company": "xAI",
+      "org": "org_xai",
+      "closeDate": "2026-01-06",
+      "reportDate": "2025-09-19",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 20000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 230000000000,
+      "epochCells": {
+        "Funding (equity)": "20000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "230000000000.0"
+      },
+      "sources": [
+        "https://x.ai/news/series-e",
+        "https://www.bloomberg.com/news/articles/2026-01-09/musk-s-xai-reports-higher-quarterly-loss-plans-to-power-optimus",
+        "https://www.nytimes.com/2026/01/06/technology/xai-elon-musk-funding.html"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 20000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 230000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_xai_series_e_2026"
+      }
+    },
+    {
+      "epochId": "Z.ai IPO",
+      "company": "Z.ai (Zhipu)",
+      "org": "org_zai",
+      "closeDate": "2026-01-08",
+      "reportDate": "2026-01-07",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 558000000,
+      "debtUsd": null,
+      "postMoneyUsd": 6600000000,
+      "epochCells": {
+        "Funding (equity)": "558000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "6600000000.0"
+      },
+      "sources": [
+        "https://www.bloomberg.com/news/articles/2026-01-07/china-s-openai-rival-zhipu-debuts-in-hk-after-558-million-ipo"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 558000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 6600000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "MiniMax IPO",
+      "company": "MiniMax",
+      "org": "org_minimax",
+      "closeDate": "2026-01-08",
+      "reportDate": "2026-01-08",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 619000000,
+      "debtUsd": null,
+      "postMoneyUsd": 6500000000,
+      "epochCells": {
+        "Funding (equity)": "619000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "6500000000.0"
+      },
+      "sources": [
+        "https://www.reuters.com/world/asia-pacific/chinas-ai-startup-minimax-group-raises-619-million-hong-kong-ipo-2026-01-08/",
+        "https://www.reuters.com/world/asia-pacific/chinese-ai-firm-minimax-expected-price-hong-kong-ipo-top-range-sources-say-2026-01-05/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 619000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 6500000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Feb 2026 380B Series G",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2026-02-12",
+      "reportDate": "2026-02-12",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 30000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 380000000000,
+      "epochCells": {
+        "Funding (equity)": "30000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "380000000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 30000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 380000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_anthropic_series_g_2026"
+      }
+    },
+    {
+      "epochId": "840B Feb 2026",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2026-02-27",
+      "reportDate": "2026-02-27",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 110000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 840000000000,
+      "epochCells": {
+        "Funding (equity)": "110000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "840000000000.0"
+      },
+      "sources": [
+        "https://openai.com/index/scaling-ai-for-everyone/",
+        "https://www.theinformation.com/briefings/amazon-completes-additional-35-billion-investment-openai?rc=9mzoog"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 110000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 840000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_openai_funding_2026_02"
+      }
+    },
+    {
+      "epochId": "Z.ai Q1",
+      "company": "Z.ai (Zhipu)",
+      "org": "org_zai",
+      "closeDate": "2026-03-31",
+      "reportDate": "2026-03-31",
+      "status": "Closed",
+      "type": "Other",
+      "confidence": "Confident",
+      "equityUsd": null,
+      "debtUsd": null,
+      "postMoneyUsd": 39400000000,
+      "epochCells": {
+        "Funding (equity)": "",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "39400000000.0"
+      },
+      "sources": [
+        "https://www.reuters.com/markets/companies/2513.HK/profile/"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "MiniMax Q1",
+      "company": "MiniMax",
+      "org": "org_minimax",
+      "closeDate": "2026-03-31",
+      "reportDate": "2026-03-31",
+      "status": "Closed",
+      "type": "Other",
+      "confidence": "Confident",
+      "equityUsd": null,
+      "debtUsd": null,
+      "postMoneyUsd": 37200000000,
+      "epochCells": {
+        "Funding (equity)": "",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "37200000000.0"
+      },
+      "sources": [
+        "https://finance.yahoo.com/quote/0100.HK/"
+      ],
+      "proposed": [],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "852B March 2026",
+      "company": "OpenAI",
+      "org": "org_openai",
+      "closeDate": "2026-03-31",
+      "reportDate": "2026-03-31",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 12000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 852000000000,
+      "epochCells": {
+        "Funding (equity)": "12000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "852000000000.0"
+      },
+      "sources": [
+        "https://openai.com/index/accelerating-the-next-phase-ai/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 12000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 852000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Amazon Anthropic April 2026",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2026-04-20",
+      "reportDate": "2026-04-20",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 5000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 380000000000,
+      "epochCells": {
+        "Funding (equity)": "5000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "380000000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/anthropic-amazon-compute",
+        "https://www.bloomberg.com/news/articles/2026-05-12/anthropic-in-talks-to-raise-30-billion-at-900-billion-valuation"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 5000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 380000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_anthropic_amazon_2026_04"
+      }
+    },
+    {
+      "epochId": "Alphabet Anthropic April 2026",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2026-04-24",
+      "reportDate": "2026-04-24",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 10000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 380000000000,
+      "epochCells": {
+        "Funding (equity)": "10000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "380000000000.0"
+      },
+      "sources": [
+        "https://www.reuters.com/business/google-plans-invest-up-40-billion-anthropic-bloomberg-news-reports-2026-04-24/"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 10000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 380000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "May 2026 965B Series H",
+      "company": "Anthropic",
+      "org": "org_anthropic",
+      "closeDate": "2026-05-28",
+      "reportDate": null,
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 65000000000,
+      "debtUsd": null,
+      "postMoneyUsd": 965000000000,
+      "epochCells": {
+        "Funding (equity)": "65000000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "965000000000.0"
+      },
+      "sources": [
+        "https://www.anthropic.com/news/series-h"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 65000000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 965000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "published",
+        "event": "evt_anthropic_series_h_2026"
+      }
+    },
+    {
+      "epochId": "DeepSeek June 2026",
+      "company": "DeepSeek",
+      "org": "org_deepseek",
+      "closeDate": "2026-06-16",
+      "reportDate": "2026-06-16",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 7500000000,
+      "debtUsd": null,
+      "postMoneyUsd": 50000000000,
+      "epochCells": {
+        "Funding (equity)": "7500000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "50000000000.0"
+      },
+      "sources": [
+        "https://www.wsj.com/tech/ai/deepseek-becomes-chinas-most-valuable-ai-startup-after-over-7-4-billion-fundraise-78ef64c0",
+        "https://www.theinformation.com/articles/anthropics-mythos-spooked-deepseek-prompting-7-4-billion-fundraising?rc=9mzoog"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 7500000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 50000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Mistral Series D",
+      "company": "Mistral AI",
+      "org": "org_mistral_ai",
+      "closeDate": "2026-09-15",
+      "reportDate": "2026-09-15",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Confident",
+      "equityUsd": 3460000000,
+      "debtUsd": null,
+      "postMoneyUsd": 24000000000,
+      "epochCells": {
+        "Funding (equity)": "3460000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "24000000000.0"
+      },
+      "sources": [
+        "https://mistral.ai/news/mistral-makes-sovereign-open-weight-ai-to-frontier/",
+        "https://www.wsj.com/tech/ai/mistral-ai-exceeds-24-billion-valuation-after-samsung-led-investment-round-ea377b82"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 3460000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 24000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    }
+  ]
+}

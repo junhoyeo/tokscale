@@ -7,6 +7,8 @@ import { db, submissions, submittedDevices } from "@/lib/db";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getBearerToken } from "../../../../lib/auth/bearerToken";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
+import { expireExploreCache } from "@/lib/explore/cache";
+import { advanceExploreCacheRevision } from "@/lib/explore/revision";
 
 async function resolveUser(request: Request): Promise<{ id: string; username: string } | null> {
   const token = getBearerToken(request.headers.get("Authorization"));
@@ -42,10 +44,17 @@ export async function DELETE(request: Request) {
         .delete(submittedDevices)
         .where(eq(submittedDevices.userId, user.id));
 
+      if (deleted.length > 0) await advanceExploreCacheRevision(tx);
       return deleted;
     });
 
     const usernameCacheKey = normalizeUsernameCacheKey(user.username);
+    try {
+      expireExploreCache();
+    } catch (cacheError) {
+      console.error("Explore cache invalidation failed after deletion:", cacheError);
+    }
+
     try {
       revalidateTag("leaderboard", "max");
       revalidateTag(`user:${usernameCacheKey}`, "max");
