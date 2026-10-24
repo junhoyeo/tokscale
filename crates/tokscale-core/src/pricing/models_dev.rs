@@ -92,6 +92,10 @@ pub(crate) fn parse_dataset(content: &str) -> Result<PricingDataset, serde_json:
     Ok(map_providers(providers))
 }
 
+pub(super) async fn fetch_uncached() -> Result<PricingDataset, String> {
+    fetch_inner(MODELS_DEV_URL, false).await
+}
+
 pub async fn fetch() -> Result<PricingDataset, String> {
     fetch_inner(MODELS_DEV_URL, true).await
 }

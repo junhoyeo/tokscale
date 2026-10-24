@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getCalendarDateRange } from "../../src/lib/reportingPeriods";
+import { finitePeriodCacheControl, getProfileDateRange, getCalendarDateRange } from "../../src/lib/reportingPeriods";
 
 describe("reporting calendar", () => {
   it.each([
@@ -30,5 +30,23 @@ describe("reporting calendar", () => {
   it("follows local midnight across daylight-saving changes", () => {
     expect(getCalendarDateRange("week", new Date("2026-03-09T03:30:00Z"), "America/New_York")).toEqual({ start: "2026-03-02", end: "2026-03-08" });
     expect(getCalendarDateRange("week", new Date("2026-03-09T04:30:00Z"), "America/New_York")).toEqual({ start: "2026-03-09", end: "2026-03-09" });
+  });
+});
+
+
+describe("UTC rank windows", () => {
+  it("keeps rolling 30d separate from calendar months over leap day", () => {
+    const now = new Date("2024-03-01T00:00:00Z");
+    expect(getProfileDateRange("month", now)).toEqual({ start: "2024-02-01", end: "2024-03-01" });
+    expect(getProfileDateRange("this-month", now)).toEqual({ start: "2024-03-01", end: "2024-03-01" });
+    expect(getProfileDateRange("last-month", now)).toEqual({ start: "2024-02-01", end: "2024-02-29" });
+    expect(getProfileDateRange("all", now)).toBeNull();
+  });
+
+  it("bounds fresh and stale HTTP caching by midnight, including slow requests", () => {
+    const started = Date.parse("2026-03-31T23:58:00Z");
+    expect(finitePeriodCacheControl(started, started)).toBe("public, max-age=0, s-maxage=60, stale-while-revalidate=60");
+    expect(finitePeriodCacheControl(started, Date.parse("2026-03-31T23:59:50Z"))).toBe("public, max-age=0, s-maxage=10, stale-while-revalidate=0");
+    expect(finitePeriodCacheControl(started, Date.parse("2026-04-01T00:00:00Z"))).toBe("no-store");
   });
 });

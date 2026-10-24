@@ -308,7 +308,7 @@ describe("user embed data", () => {
         // Only the ordering within a tie changed: the same rows are counted,
         // and the "of N" denominator still counts them all.
         expect(collapseSql(periodRankSql)).toContain(
-          "WHERE u.leaderboard_hidden = false AND d.date >= 2026-03-08 AND d.date <= 2026-03-14",
+          "WHERE u.leaderboard_hidden = false AND d.date >= 2026-03-06 AND d.date <= 2026-03-12",
         );
         expect(collapseSql(periodRankSql)).toContain(
           "GROUP BY s.user_id, u.username",
@@ -389,7 +389,7 @@ describe("user embed data", () => {
     ).toBe(true);
   });
 
-  it("scopes embed totals and rank to an anchored trailing seven-day window", async () => {
+  it("keeps personal totals ahead while ranking the common UTC week", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-12T12:00:00.000Z"));
 
@@ -416,6 +416,7 @@ describe("user embed data", () => {
       expect(stats).toMatchObject({
         period: "week",
         dateRange: { start: "2026-03-08", end: "2026-03-14" },
+        rankDateRange: { start: "2026-03-06", end: "2026-03-12" },
         stats: {
           totalTokens: 700,
           totalCost: 7,
@@ -430,8 +431,8 @@ describe("user embed data", () => {
             text.includes("WITH rankable AS") &&
             text.includes("FROM daily_breakdown d") &&
             text.includes("ROW_NUMBER() OVER") &&
-            text.includes("d.date >= 2026-03-08") &&
-            text.includes("d.date <= 2026-03-14"),
+            text.includes("d.date >= 2026-03-06") &&
+            text.includes("d.date <= 2026-03-12"),
         ),
       ).toBe(true);
     } finally {

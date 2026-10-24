@@ -8236,6 +8236,241 @@ fn test_codex_invalid_max_decoded_bytes_env_warns_and_uses_default() {
 }
 
 #[test]
+fn offline_reports_and_stale_pricing_make_no_network_connections() {
+    use std::net::TcpListener;
+    let tmp = create_temp_fixture_dir();
+    write_cursor_credentials(tmp.path());
+    prime_canonical_sonnet_pricing_cache(tmp.path(), "claude-sonnet-4-20250514");
+    let cache = tmp.path().join(".config/tokscale/cache");
+    let mut originals = Vec::new();
+    for name in [
+        "pricing-litellm.json",
+        "pricing-openrouter.json",
+        "pricing-models-dev.json",
+    ] {
+        let path = cache.join(name);
+        let mut data: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        data["timestamp"] = 1.into();
+        let bytes = serde_json::to_vec(&data).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        originals.push((path, bytes));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let commands: &[&[&str]] = &[
+        &["models", "--json"],
+        &["monthly", "--json"],
+        &["hourly", "--json"],
+        &["graph"],
+        &["clients", "--json"],
+        &["time-metrics", "--json"],
+        &["report", "--no-summarize", "--json"],
+        &[
+            "pricing",
+            "claude-sonnet-4-20250514",
+            "--source",
+            "litellm",
+            "--json",
+        ],
+        &[
+            "pricing",
+            "claude-sonnet-4-20250514",
+            "--source",
+            "openrouter",
+            "--json",
+        ],
+        &[
+            "pricing",
+            "claude-sonnet-4-20250514",
+            "--source",
+            "models.dev",
+            "--json",
+        ],
+    ];
+    for args in commands {
+        let mut cmd = cmd_with_home(tmp.path());
+        cmd.env_remove("TOKSCALE_PRICING_CACHE_ONLY")
+            .env("TOKSCALE_API_URL", &proxy)
+            .timeout(Duration::from_secs(15))
+            .args(["--no-spinner", "--offline"])
+            .args(*args);
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            cmd.env(key, &proxy);
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if args[0] == "pricing" {
+            assert_eq!(value["pricing"]["inputCostPerToken"], 0.000003);
+        }
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("fetch failed"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "network connection from {args:?}"
+        );
+    }
+    for (path, before) in originals {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            before,
+            "offline mode rewrote pricing freshness"
+        );
+    }
+}
+
+#[test]
+fn offline_rejects_network_commands_before_mutating_configuration() {
+    let tmp = TempDir::new().unwrap();
+    let commands: &[&[&str]] = &[
+        &["submit", "--dry-run"],
+        &["pricing", "refresh", "--json"],
+        &["cursor", "sync"],
+        &["amp", "sync"],
+        &["usage", "--json"],
+        &["login", "--token", "tt_not_a_real_token"],
+        &["autosubmit", "run"],
+        &["report"],
+        &["delete-submitted-data"],
+    ];
+    for args in commands {
+        cmd_with_home(tmp.path())
+            .args(["--no-spinner", "--offline"])
+            .args(*args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("offline"));
+    }
+    assert!(!sandbox_config_dir(tmp.path()).exists());
+}
+
+#[test]
+fn offline_cold_cache_preserves_unpriced_usage() {
+    let tmp = create_temp_fixture_dir_with_pricing_cache(false);
+    write_codex_token_session(
+        &tmp.path().join(".codex/sessions"),
+        "unpriced-offline.jsonl",
+        "offline-fixture-unknown-model",
+        100,
+        20,
+    );
+    let output = cmd_with_home(tmp.path())
+        .env_remove("TOKSCALE_PRICING_CACHE_ONLY")
+        .args([
+            "models",
+            "--offline",
+            "--json",
+            "--no-spinner",
+            "--client",
+            "codex",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["totalInput"].as_i64().unwrap() > 0);
+    assert_eq!(value["totalCost"], 0.0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unpriced"));
+    assert!(!tmp
+        .path()
+        .join(".config/tokscale/cache/pricing-litellm.json")
+        .exists());
+}
+
+#[test]
+fn pricing_refresh_reports_each_network_failure_and_retains_caches() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let tmp = TempDir::new().unwrap();
+    prime_canonical_sonnet_pricing_cache(tmp.path(), "claude-sonnet-4-20250514");
+    let cache = tmp.path().join(".config/tokscale/cache");
+    let originals: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let done = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let stop = done.clone();
+    let requests = seen.clone();
+    let server = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let _ = stream.read(&mut [0; 2048]);
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    });
+    let mut cmd = cmd_with_home(tmp.path());
+    cmd.timeout(Duration::from_secs(15))
+        .args(["pricing", "refresh", "--json", "--no-spinner"]);
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        cmd.env(key, &proxy);
+    }
+    let output = cmd.output();
+    done.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    let output = output.unwrap();
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sources = report["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 3);
+    for source in sources {
+        assert_eq!(source["models"], 0);
+        assert!(source["error"].as_str().is_some());
+    }
+    assert!(
+        seen.load(Ordering::Relaxed) >= 3,
+        "refresh must bypass a fresh cache"
+    );
+    for (path, before) in originals {
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+}
+
+#[test]
 fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
     let tmp = create_empty_fixture_dir();
     let native_root = tmp.path().join(".proma/sdk-config/sessions/project");

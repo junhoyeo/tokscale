@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { formatCurrency, formatNumber } from "../format";
 import {
@@ -87,6 +88,7 @@ export function renderVitalsEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="vitals" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale usage signals for @${escapeXml(data.user.username)}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   ${cardTextStyle()}
   ${cardSurface(W, H, palette)}
   ${cardHeader({
@@ -148,7 +150,7 @@ export function renderVitalsEmbedSvg(
     minFontSize: 8,
     fontWeight: 600,
   })}
-  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel}`}</text>
+  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel} UTC`}</text>
   ${fittedText({
     text: rankText,
     x: right,

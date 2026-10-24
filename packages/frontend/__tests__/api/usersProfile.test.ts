@@ -1,3 +1,4 @@
+import { getProfileDateRange } from "@/lib/reportingPeriods";
 import {
   afterEach,
   beforeAll,
@@ -1075,15 +1076,14 @@ describe("GET /api/users/[username]", () => {
         (text) =>
           text.includes("FROM daily_breakdown d") &&
           text.includes("ROW_NUMBER() OVER") &&
-          text.includes("d.date >= 2026-07-18") &&
-          text.includes("d.date <= 2026-07-24"),
+          text.includes("d.date >= 2026-07-17") &&
+          text.includes("d.date <= 2026-07-23"),
       ),
     ).toBe(true);
-    // The cache key carries the anchored window, not the one measured back
-    // from UTC today, so a moved anchor is a different cache entry.
+    // Rank caches share the UTC window even when personal data is ahead.
     expect(unstableCacheMock).toHaveBeenCalledWith(
       expect.any(Function),
-      ["profile-period-rank", "user-ahead-of-utc", "2026-07-18", "2026-07-24"],
+      ["profile-period-rank", "user-ahead-of-utc", "2026-07-17", "2026-07-23"],
       {
         revalidate: 60,
         tags: ["leaderboard", "user:alice"],
@@ -1248,11 +1248,12 @@ describe("GET /api/users/[username]", () => {
     );
     const body = await response.json();
     const sqlTexts = serializeSqlCalls();
+    const rankRange = getProfileDateRange(period, new Date(now))!;
 
     expect(response.status).toBe(200);
     expect(mockState.gte).toHaveBeenCalledWith(
       mockState.tables.dailyBreakdown.date,
-      start,
+      rankRange.start,
     );
     // The final upper bound is resolved from the newest submitted date after fetching.
     expect(mockState.lte).not.toHaveBeenCalled();
@@ -1265,13 +1266,13 @@ describe("GET /api/users/[username]", () => {
         (text) =>
           text.includes("FROM daily_breakdown d") &&
           text.includes("ROW_NUMBER() OVER") &&
-          text.includes(`d.date >= ${start}`) &&
-          text.includes(`d.date <= ${end}`),
+          text.includes(`d.date >= ${rankRange.start}`) &&
+          text.includes(`d.date <= ${rankRange.end}`),
       ),
     ).toBe(true);
     expect(unstableCacheMock).toHaveBeenCalledWith(
       expect.any(Function),
-      ["profile-period-rank", "user-1", start, end],
+      ["profile-period-rank", "user-1", rankRange.start, rankRange.end],
       {
         revalidate: 60,
         tags: ["leaderboard", "user:alice"],
