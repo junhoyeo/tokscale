@@ -52,13 +52,10 @@ use std::path::Path;
 ///
 /// v3 retained assistant `durationMs`; v4 prefers the assistant message's
 /// authoritative request-start `timestamp` over the later persistence time.
-///
-/// Counting the billed operations that are not assistant replies (`compaction`,
-/// `branch_summary`, `usage`, `toolResult`) moved the Pi-family member offsets
-/// in `message_cache.rs` instead: Prime Agent rides on this parser with
-/// `count_operations` off, so its own caches are unaffected and a base bump
-/// would re-decode them for nothing.
-pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 4;
+/// v5 includes standalone `usage` in Prime Agent, tolerates unrelated root
+/// metadata, and separates operation dedup identities from assistant messages.
+/// Other billed operations retain their member offsets in `message_cache.rs`.
+pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 5;
 
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
@@ -246,10 +243,13 @@ pub struct PiSessionEntry {
     pub message: Option<PiMessage>,
     /// Present on billed operation entries (`compaction`, `branch_summary`,
     /// `usage`): the API call behind them has no `message` record of its own.
+    #[serde(default, deserialize_with = "deserialize_standalone_field")]
     pub usage: Option<PiUsage>,
     /// Standalone `usage` records identify their billed provider and model.
     /// `model_change` records use `provider` plus `modelId` instead.
+    #[serde(default, deserialize_with = "deserialize_standalone_field")]
     pub provider: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_standalone_field")]
     pub model: Option<String>,
     #[serde(rename = "modelId")]
     pub model_id: Option<String>,
@@ -265,6 +265,16 @@ pub struct PiSessionEntry {
     #[serde(flatten)]
     #[allow(dead_code)]
     extra_fields: BTreeMap<String, serde_json::Value>,
+}
+
+// Other record types can use these top-level names for unrelated metadata.
+fn deserialize_standalone_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 impl PiSessionEntry {
@@ -508,7 +518,7 @@ pub(crate) fn parse_pi_format_file_with_dedup(
 ///
 /// Prime Agent uses this hook to derive its fork/child accounting metadata in
 /// the same pass that emits messages. The emitted message is supplied only for
-/// an assistant record that passed the shared parser's validation.
+/// an assistant or standalone usage record that passed the shared validation.
 pub(crate) trait PiFormatObserver {
     fn observe_header(&mut self, _header: &PiSessionHeader) {}
 
@@ -551,10 +561,9 @@ struct PiParseOptions {
     cross_session_dedup: bool,
     lossy_line_reader: bool,
     /// Whether the transcript bills work outside assistant replies
-    /// (`compaction`, `branch_summary`, `usage`, `toolResult`). Prime Agent
-    /// keeps this off: its RLM accounting matches emitted messages against
-    /// `child_usage_attributed` records positionally, so widening what the
-    /// shared parser emits there is a separate decision from Pi's totals.
+    /// (`compaction`, `branch_summary`, `toolResult`). Standalone `usage`
+    /// is counted for every client. Prime Agent keeps other operations off
+    /// while its accounting reconciles only assistant completions.
     count_operations: bool,
 }
 
@@ -685,10 +694,8 @@ fn pi_emitted_record<'a>(
         (
             message.usage.as_ref()?,
             Some(message.model.as_deref()?),
-            // Historical behaviour: a reply's recorded spellings are kept as
-            // they are, and only a fully empty provider falls back to
-            // inference, so cached assistant rows stay byte-identical.
-            message.provider.as_deref().filter(|p| !p.is_empty()),
+            // Preserve recorded spellings, but infer a missing/blank provider.
+            message.provider.as_deref().filter(|p| !p.trim().is_empty()),
             true,
             false,
             false,
@@ -707,7 +714,7 @@ fn pi_emitted_record<'a>(
             recorded_model.is_none(),
             true,
         )
-    } else if options.count_operations && is_operation {
+    } else if is_operation && (options.count_operations || entry.entry_type == "usage") {
         // Current Pi UsageEntry records carry concrete root-level model and
         // provider fields. Older compaction/branch-summary records do not.
         (
@@ -1062,7 +1069,8 @@ fn parse_pi_format_file_inner(
                             .map(|timestamp| timestamp.to_string())
                             .unwrap_or_else(|| "missing".to_string());
                         format!(
-                            "{namespace}:message:{id}:{stable_timestamp}:{provider}:{model}:{}:{}:{}:{}",
+                            "{namespace}:{}:{id}:{stable_timestamp}:{provider}:{model}:{}:{}:{}:{}",
+                            entry.entry_type,
                             unified.tokens.input,
                             unified.tokens.output,
                             unified.tokens.cache_read,
@@ -1084,7 +1092,11 @@ fn parse_pi_format_file_inner(
             } else if let Some(message_id) = entry.id.as_deref().filter(|id| !id.trim().is_empty())
             {
                 let session_id = session_id.as_deref().unwrap_or("unknown");
-                unified.dedup_key = Some(format!("{namespace}:{session_id}:{message_id}"));
+                unified.dedup_key = Some(if entry.entry_type == "usage" {
+                    format!("{namespace}:{session_id}:usage:{message_id}")
+                } else {
+                    format!("{namespace}:{session_id}:{message_id}")
+                });
             }
         }
         unified.session_title = header_title.clone().or_else(|| rolling_title.clone());
@@ -1128,6 +1140,165 @@ mod tests {
     fn parse_prime_test_file(path: &Path) -> Vec<UnifiedMessage> {
         let mut observer = NoopPiFormatObserver;
         parse_pi_format_rlm_file_with_observer(path, "prime-agent", "prime-agent", &mut observer)
+    }
+
+    #[test]
+    fn standalone_usage_counts_arbitrary_kinds_across_pi_format_clients() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"usage-session","cwd":"/tmp/project","title":"Background usage"}
+{"type":"session_info","name":"subagent-reviewer-abcd1234-1"}
+{"type":"usage","id":"warm-1","timestamp":"2026-10-16T12:00:00Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":20,"totalTokens":120}}
+{"type":"usage","id":"other-1","timestamp":"2026-10-16T12:01:00Z","kind":"future_operation","provider":"example-provider","model":"example-model","usage":{"input":12,"output":3,"reasoning":2,"cacheRead":4,"cacheWrite":5,"totalTokens":24,"cost":{"total":0.01}}}
+{"type":"message","id":"reply-1","timestamp":"2026-10-16T12:02:00Z","message":{"role":"assistant","provider":"openai","model":"gpt-5","usage":{"input":10,"output":5}}}"#,
+        );
+
+        for messages in [
+            parse_pi_file(file.path()),
+            crate::sessions::senpi::parse_senpi_file(file.path()),
+            crate::sessions::kimchi::parse_kimchi_file(file.path()),
+            crate::sessions::omp::parse_omp_file(file.path()),
+            parse_prime_test_file(file.path()),
+        ] {
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0].tokens.cache_read, 100);
+            assert_eq!(messages[0].tokens.cache_write, 20);
+            assert_eq!(messages[1].model_id, "example-model");
+            assert_eq!(messages[1].provider_id, "example-provider");
+            assert_eq!(messages[1].tokens.total(), 24);
+            assert_eq!(messages[1].tokens.reasoning, 0);
+            assert_eq!(messages[1].cost, 0.01);
+            assert_eq!(
+                messages[1].cost_source,
+                super::super::CostSource::ProviderReported
+            );
+            assert_eq!(messages[1].timestamp, 1792152060000);
+            assert_eq!(messages[1].duration_ms, None);
+            assert_eq!(messages[1].session_id, "usage-session");
+            assert_eq!(
+                messages[1].session_title.as_deref(),
+                Some("Background usage")
+            );
+            assert_eq!(messages[1].agent.as_deref(), Some("reviewer"));
+            assert_eq!(messages[1].workspace_key.as_deref(), Some("/tmp/project"));
+            assert_eq!(messages[2].tokens.total(), 15);
+        }
+    }
+
+    #[test]
+    fn standalone_usage_fields_do_not_reject_unrelated_records() {
+        for field in [
+            r#""usage":"extension metadata""#,
+            r#""usage":{"input":"extension metadata"}"#,
+            r#""model":{"name":"extension metadata"}"#,
+            r#""provider":["extension metadata"]"#,
+        ] {
+            let file = create_test_file(&format!(
+                "{{\"type\":\"session\",\"id\":\"metadata\"}}\n\
+                 {{\"type\":\"session_info\",\"name\":\"subagent-reviewer-abcd1234-1\",{field}}}\n\
+                 {{\"type\":\"message\",\"id\":\"reply\",{field},\"message\":{{\"role\":\"assistant\",\"model\":\"gpt-5\",\"usage\":{{\"input\":10}}}}}}"
+            ));
+            for client in ["pi", "omp", "senpi", "kimchi", "prime-agent"] {
+                let messages = parse_pi_format_file(file.path(), client, "pi");
+                assert_eq!(messages.len(), 1, "{client}: {field}");
+                assert_eq!(messages[0].tokens.input, 10, "{client}: {field}");
+                assert_eq!(
+                    messages[0].agent.as_deref(),
+                    Some("reviewer"),
+                    "{client}: {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_usage_and_assistant_whitespace_providers_use_fallback() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"providers"}
+{"type":"usage","id":"standalone","model":"gpt-5","provider":" \t ","usage":{"input":10}}
+{"type":"message","id":"reply","message":{"role":"assistant","model":"gpt-5","provider":" \t ","usage":{"input":20}}}
+{"type":"usage","id":"explicit","model":"gpt-5","provider":"custom-gateway","usage":{"input":30}}"#,
+        );
+        for client in ["pi", "omp", "senpi", "kimchi", "prime-agent"] {
+            let messages = parse_pi_format_file(file.path(), client, "pi");
+            assert_eq!(messages.len(), 3, "{client}");
+            assert_eq!(messages[0].provider_id, "openai", "{client}");
+            assert_eq!(messages[1].provider_id, "openai", "{client}");
+            assert_eq!(messages[2].provider_id, "custom-gateway", "{client}");
+        }
+    }
+
+    #[test]
+    fn standalone_usage_skips_invalid_records_and_preserves_fallbacks() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"fallbacks"}
+{"type":"usage","model":"gpt-5"}
+{"type":"usage","usage":{"input":999}}
+{"type":"usage","model":" ","usage":{"input":999}}
+{"type":"usage","model":"gpt-5","usage":"invalid"}
+{"type":"usage","model":"gpt-5","usage":{"input":"invalid"}}
+{"type":"custom","model":"gpt-5","usage":{"input":999}}
+{"type":"usage","model":"gpt-5","usage":{"input":-10,"output":5,"cacheRead":-4,"cacheWrite":3,"totalTokens":999}}
+{"type":"usage","id":"zero","model":"other-model","provider":"other-provider","usage":{"input":0,"output":0}}"#,
+        );
+        let messages = parse_pi_file(file.path());
+        assert_eq!(messages.len(), 4);
+        for message in &messages[..2] {
+            assert_eq!(message.model_id, "unknown");
+            assert_eq!(message.tokens.input, 999);
+        }
+        assert_eq!(messages[2].provider_id, "openai");
+        assert_eq!(messages[2].tokens.input, 0);
+        assert_eq!(messages[2].tokens.cache_read, 0);
+        assert_eq!(messages[2].tokens.total(), 8);
+        assert_eq!(
+            messages[2].timestamp,
+            file_modified_timestamp_ms(file.path())
+        );
+        assert_eq!(messages[3].tokens.total(), 0);
+    }
+
+    #[test]
+    fn standalone_usage_keeps_kimchi_session_scoped_identity() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"kimchi-session"}
+{"type":"usage","id":"same-id","model":"gpt-5","usage":{"input":10}}
+{"type":"message","id":"same-id","message":{"role":"assistant","model":"gpt-5","usage":{"input":10}}}"#,
+        );
+        let messages = crate::sessions::kimchi::parse_kimchi_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("kimchi:kimchi-session:usage:same-id")
+        );
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some("kimchi:kimchi-session:same-id")
+        );
+    }
+
+    #[test]
+    fn standalone_usage_fork_copies_share_keys_without_colliding_with_messages() {
+        let record = r#"{"type":"usage","id":"same-id","timestamp":"2026-10-16T12:00:00Z","kind":"cache_warm","provider":"openai","model":"gpt-5","usage":{"input":10,"output":5}}"#;
+        let make = |session| {
+            create_test_file(&format!(
+            "{{\"type\":\"session\",\"id\":\"{session}\"}}\n{record}\n\
+             {{\"type\":\"message\",\"id\":\"same-id\",\"timestamp\":\"2026-10-16T12:00:00Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"openai\",\"model\":\"gpt-5\",\"usage\":{{\"input\":10,\"output\":5}}}}}}"
+        ))
+        };
+        let parent = make("parent");
+        let fork = make("fork");
+        for client in ["pi", "omp", "senpi", "prime-agent"] {
+            let first = parse_pi_format_file(parent.path(), client, "pi");
+            let copied = parse_pi_format_file(fork.path(), client, "pi");
+            assert_eq!(first.len(), 2);
+            assert_eq!(first[0].dedup_key, copied[0].dedup_key);
+            assert_ne!(first[0].dedup_key, first[1].dedup_key);
+            assert!(first[0]
+                .dedup_key
+                .as_deref()
+                .unwrap()
+                .starts_with(&format!("{client}:usage:")));
+        }
     }
 
     #[test]

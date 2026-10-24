@@ -1856,11 +1856,18 @@ Hermes는 세션 수준 사용량을 SQLite `sessions` 테이블에 저장합니
 
 위치: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. [Oh My Pi](https://github.com/can1357/oh-my-pi)는 동일한 세션 형식을 `~/.omp/agent/sessions/` 아래에 기록하며 별도의 `omp` 클라이언트로 추적됩니다.
 
-세션 헤더와 메시지 항목을 포함하는 JSONL 형식:
+세션, 메시지, 사용량 항목을 포함하는 JSONL 형식:
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
+
+Tokscale은 `provider`, `model`, `usage` 필드가 있는 네이티브 독립 `usage` 항목을 읽습니다. 모든 `kind` 값을 허용합니다. Pi는 이 레코드를 [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry)로 정의합니다.
+
+usage가 없는 레코드는 토큰 수에 더하지 않습니다. 독립 usage에 보고된 비용이 있으면 Tokscale은 이를 보존하고, 없으면 기존 가격 데이터를 사용합니다.
+
+이 동작은 Pi, Oh My Pi, Senpi, Kimchi Coding, Prime Agent의 Pi 형식 파서에 적용됩니다. Prime Agent의 독립 usage는 어시스턴트 완료 매칭에 포함되지 않습니다. 복사된 레코드는 중복 제거 식별자를 유지합니다. Kimchi는 기존 세션 범위 식별자를 유지합니다. 업그레이드 후 파서 캐시가 무효화되므로 Tokscale은 세션을 다시 읽습니다.
 
 ### Senpi (OmO Native)
 

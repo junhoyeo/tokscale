@@ -6451,7 +6451,7 @@ mod tests {
 
     #[test]
     fn test_lossy_jsonl_parser_versions_invalidate_v3_entries() {
-        assert_eq!(parser_version(ClientId::PrimeAgent), 8);
+        assert_eq!(parser_version(ClientId::PrimeAgent), 9);
         assert_eq!(parser_version(ClientId::Reasonix), 4);
     }
 
@@ -6472,7 +6472,7 @@ mod tests {
             (ClientId::PrimeAgent, 6),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, previous_version + 2, "{client:?}");
+            assert_eq!(current.parser_version, previous_version + 3, "{client:?}");
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: previous_version,
@@ -6483,6 +6483,47 @@ mod tests {
                 &shard,
                 previous,
                 &[test_entry(previous, source.path(), "untimed")],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
+            assert!(SourceMessageCache::load()
+                .get(current, source.path())
+                .is_none());
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                fingerprint
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pi_standalone_usage_parser_versions_reject_pre_merge_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(
+            b"{\"type\":\"session\",\"id\":\"background\"}\n{\"type\":\"usage\",\"id\":\"warm-1\",\"kind\":\"cache_warm\",\"provider\":\"anthropic\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"cacheRead\":100}}\n",
+        );
+        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        for (client, pre_merge_version) in [
+            (ClientId::Pi, 7),
+            (ClientId::Kimchi, 6),
+            (ClientId::Omp, 6),
+            (ClientId::Senpi, 6),
+            (ClientId::PrimeAgent, 8),
+        ] {
+            let current = CacheIdentity::for_client(client);
+            assert_eq!(current.parser_version, pre_merge_version + 1, "{client:?}");
+            let previous = CacheIdentity {
+                namespace: current.namespace,
+                parser_version: pre_merge_version,
+            };
+            let shard = cache_shard_path(current, source.path());
+            ensure_cache_dir(shard.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &shard,
+                previous,
+                &[test_entry(previous, source.path(), "pre-merge")],
                 MAX_CACHE_SHARD_BYTES,
             )
             .unwrap();
@@ -6515,7 +6556,7 @@ mod tests {
             let current = CacheIdentity::for_client(client);
             assert_eq!(
                 current.parser_version,
-                completion_anchored_version + 1,
+                completion_anchored_version + 2,
                 "{client:?}"
             );
             let completion_anchored = CacheIdentity {
@@ -6554,7 +6595,7 @@ mod tests {
                 b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"valid\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n".as_slice(),
                 "stale-prime-v3",
                 "anthropic",
-                8,
+                9,
             ),
             (
                 ClientId::Reasonix,

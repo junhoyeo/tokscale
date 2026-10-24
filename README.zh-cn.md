@@ -1856,11 +1856,18 @@ Hermes 将会话级使用量存储在 SQLite `sessions` 表中。Tokscale 导入
 
 位置：`~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`。[Oh My Pi](https://github.com/can1357/oh-my-pi) 将相同的会话格式写入 `~/.omp/agent/sessions/`，并作为独立的 `omp` 客户端进行跟踪。
 
-包含会话头和消息条目的 JSONL 格式：
+包含会话、消息和使用量条目的 JSONL 格式：
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
+
+Tokscale 读取具有 `provider`、`model` 和 `usage` 字段的原生独立 `usage` 条目。它接受任意 `kind` 值。Pi 将该记录定义为 [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry)。
+
+不含 usage 的记录不会增加 Token 计数。独立 usage 有上报成本时，Tokscale 保留该成本。否则，Tokscale 使用现有价格数据。
+
+此行为适用于 Pi、Oh My Pi、Senpi、Kimchi Coding 和 Prime Agent 的 Pi 格式解析器。Prime Agent 的独立 usage 不参与助手完成匹配。复制的记录保留其去重标识。Kimchi 保持现有的会话范围标识。升级后，解析器缓存会失效，因此 Tokscale 会再次读取会话。
 
 ### Senpi (OmO Native)
 
