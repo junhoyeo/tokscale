@@ -7,6 +7,7 @@ pub mod lookup;
 pub mod models_dev;
 pub mod openrouter;
 pub(crate) mod provenance;
+mod refresh;
 mod self_hosted;
 
 use custom::CustomPricing;
@@ -19,8 +20,10 @@ use crate::TokenBreakdown;
 
 pub use crate::EstimateSource;
 pub use litellm::ModelPricing;
+pub use refresh::PricingRefreshReport;
 
 static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
+static OFFLINE_PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
 
 // @keep: documents non-obvious filtering behavior — without this, the next person
 // will wonder why github_copilot entries disappear from the pricing data.
@@ -592,10 +595,31 @@ impl PricingService {
     }
 
     pub async fn get_or_init() -> Result<Arc<PricingService>, String> {
+        if crate::network::is_offline() {
+            return Ok(Arc::clone(
+                OFFLINE_PRICING_SERVICE
+                    .get_or_init(|| async {
+                        Arc::new(Self::load_cached_any_age().unwrap_or_else(|| {
+                            Self::new_with_custom(
+                                CustomPricing::load_from_default_path(),
+                                HashMap::new(),
+                                HashMap::new(),
+                            )
+                        }))
+                    })
+                    .await,
+            ));
+        }
         PRICING_SERVICE
             .get_or_try_init(|| async { Self::fetch_inner().await.map(Arc::new) })
             .await
             .map(Arc::clone)
+    }
+
+    /// Fetch and persist each catalog independently, bypassing its freshness TTL.
+    /// Failed sources keep their previous disk cache unchanged.
+    pub async fn refresh() -> Result<PricingRefreshReport, String> {
+        refresh::refresh().await
     }
 
     pub fn lookup_with_source(

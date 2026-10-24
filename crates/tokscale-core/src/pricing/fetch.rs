@@ -5,6 +5,7 @@ const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 200;
 
 pub(crate) fn pricing_client() -> Result<Client, String> {
+    crate::network::require_online("Pricing fetch")?;
     crate::http::client_builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
