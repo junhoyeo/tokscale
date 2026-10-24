@@ -1701,6 +1701,10 @@ fn parser_version(client: ClientId) -> u32 {
     }
     match client {
         ClientId::Aside => 1,
+        // Meept's llm_calls parser is versioned from the start (v1) so later
+        // parser changes have an obvious local counter to bump, like every
+        // other client here.
+        ClientId::Meept => 1,
         // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
         // JSONL and cached as empty. Their bytes do not change when decoding is
         // fixed, so only the parser version can retire those entries.

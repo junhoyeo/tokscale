@@ -68,6 +68,7 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     ClientUi { hotkey: 'H' },
     // Xiaomi MiMo AI desktop: uppercase 'W' stays free; lowercase letters for
     // "MiMo"/"desktop" are already taken by MiMo Code / Crush / Mux.
+
     ClientUi { hotkey: 'W' },
     // Muse: both cases of `m` are taken (MiMo Code / Mcode), `u` belongs to
     // Grok Build, `s` is the global "sources" picker binding and `e` belongs
@@ -81,6 +82,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // uppercase) and `m`/`M`, `i`/`I` are too, so `T` takes the next free
     // letter from "misTral".
     ClientUi { hotkey: 'T' },
+    // Meept: lowercase `m` belongs to Mux and uppercase `M` to MiMo Code;
+    // `z` is taken by Zed, so uppercase `Z` (last letter of "meept") takes
+    // the remaining free slot.
+    ClientUi { hotkey: 'Z' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
