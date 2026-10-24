@@ -3947,7 +3947,11 @@ fn run_pricing_lookup(
             println!("{}", serde_json::to_string_pretty(&explanations)?);
         } else {
             for row in explanations {
-                println!("{} / {} billing={} {:?}: ${:.8} source={} scope={} matched={} normalized={} base ×{} coverage={}", row.client, row.raw_model_id, row.billing_provider_id.as_deref().unwrap_or("unknown"), row.estimate_status, row.final_estimate, row.price_source.as_deref().unwrap_or("unpriced"), row.scope, row.matched_model_id.as_deref().unwrap_or("none"), row.normalized, row.effective_multiplier, row.coverage);
+                print!("{} / {} billing={} {:?}: ${:.8} source={} scope={} matched={} normalized={} base ×{} coverage={}", row.client, row.raw_model_id, row.billing_provider_id.as_deref().unwrap_or("unknown"), row.estimate_status, row.final_estimate, row.price_source.as_deref().unwrap_or("unpriced"), row.scope, row.matched_model_id.as_deref().unwrap_or("none"), row.normalized, row.effective_multiplier, row.coverage);
+                if !row.coverage && !row.uncovered_buckets.is_empty() {
+                    print!(" uncovered={}", row.uncovered_buckets.join(","));
+                }
+                println!();
             }
         }
         return Ok(());
@@ -4090,13 +4094,21 @@ fn run_pricing_lookup(
                     },
                     matched_provider_id: pricing.matched_provider_id,
                     rate_basis: "base",
-                    missing_rates: [
-                        ("input", pricing.pricing.input_cost_per_token),
-                        ("output", pricing.pricing.output_cost_per_token),
-                    ]
-                    .into_iter()
-                    .filter_map(|(name, value)| value.is_none().then_some(name))
-                    .collect(),
+                    missing_rates: {
+                        let mut missing = Vec::new();
+                        if pricing.pricing.input_cost_per_token.is_none() {
+                            missing.push("input");
+                        }
+                        if pricing.pricing.output_cost_per_token.is_none() {
+                            missing.push("output");
+                        }
+                        if pricing.pricing.cache_read_input_token_cost.is_some()
+                            && pricing.pricing.cache_creation_input_token_cost.is_none()
+                        {
+                            missing.push("cache_creation");
+                        }
+                        missing
+                    },
                     all_rates: pricing.pricing.clone(),
                     matched_key: pricing.matched_key,
                     source: pricing.source,

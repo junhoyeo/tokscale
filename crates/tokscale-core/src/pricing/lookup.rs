@@ -360,6 +360,10 @@ impl LookupResult {
     pub(crate) fn covers_usage(&self, usage: &TokenBreakdown) -> bool {
         self.pricing.covers_usage(usage) && covers_required_request_tiers(self, usage)
     }
+
+    pub(crate) fn uncovered_buckets(&self, usage: &TokenBreakdown) -> Vec<&'static str> {
+        self.pricing.uncovered_buckets(usage)
+    }
 }
 
 impl PricingLookup {
@@ -619,8 +623,11 @@ impl PricingLookup {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
-        self.resolve_with_source_and_provider(model_id, force_source, provider_id)
-            .map(LookupResult::with_subscription_namespace_check)
+        let mut result = self
+            .resolve_with_source_and_provider(model_id, force_source, provider_id)
+            .map(LookupResult::with_subscription_namespace_check)?;
+        apply_openai_pre_56_cache_write_pricing(&mut result, provider_id);
+        Some(result)
     }
 
     fn resolve_with_source_and_provider(
@@ -2012,7 +2019,7 @@ impl PricingLookup {
             return Some(hinted);
         }
 
-        let filled = if needs_haiku_55_100k_tier {
+        let mut filled = if needs_haiku_55_100k_tier {
             if !is_anthropic_haiku_55_catalog_result(&canonical)
                 || !quote_same_anthropic_haiku_55_1h_base_rate(&hinted.pricing, &canonical.pricing)
                 || !has_complete_anthropic_haiku_55_100k_pricing(&canonical.pricing)
@@ -2025,6 +2032,15 @@ impl PricingLookup {
                 .pricing
                 .with_missing_rates_from(&canonical.pricing, usage)
         };
+
+        // A non-OpenAI routing must not inherit OpenAI's pre-5.6 cache write rate
+        // from the canonical row.
+        if !uses_openai_pre_56_cache_pricing(&hinted, provider_id)
+            && uses_openai_pre_56_cache_pricing(&canonical, None)
+        {
+            filled.cache_creation_input_token_cost = hinted.pricing.cache_creation_input_token_cost;
+        }
+
         if !filled.covers_usage(usage) {
             return Some(hinted);
         }
@@ -2303,6 +2319,41 @@ fn matches_model_or_snapshot(model_id: &str, base: &str) -> bool {
         || model_id
             .strip_prefix(base)
             .is_some_and(|suffix| suffix.starts_with("-20"))
+}
+
+fn is_openai_pre_56_cache_model(model_id: &str) -> bool {
+    let key = model_id.to_ascii_lowercase();
+    let model_id = key.split('/').next_back().unwrap_or(&key);
+
+    ["gpt-5.4", "gpt-5.4-pro", "gpt-5.5", "gpt-5.5-pro"]
+        .into_iter()
+        .any(|base| matches_model_or_snapshot(model_id, base))
+}
+
+fn uses_openai_pre_56_cache_pricing(result: &LookupResult, provider_id: Option<&str>) -> bool {
+    if result.source != "LiteLLM"
+        || is_reseller_provider(&result.matched_key)
+        || provider_id.is_some_and(|provider| {
+            provider_identity::canonical_provider(provider).as_deref() != Some("openai")
+        })
+    {
+        return false;
+    }
+
+    let key = result.matched_key.to_ascii_lowercase();
+    if key.contains('/') && !key.starts_with("openai/") {
+        return false;
+    }
+
+    is_openai_pre_56_cache_model(&key)
+}
+
+fn apply_openai_pre_56_cache_write_pricing(result: &mut LookupResult, provider_id: Option<&str>) {
+    if uses_openai_pre_56_cache_pricing(result, provider_id)
+        && result.pricing.cache_creation_input_token_cost.is_none()
+    {
+        result.pricing.cache_creation_input_token_cost = result.pricing.input_cost_per_token;
+    }
 }
 
 fn is_openai_full_request_272k_model(model_id: &str) -> bool {
@@ -10562,5 +10613,212 @@ mod tests {
             .lookup_with_provider("model-x", Some("together"))
             .expect("together-hinted model-x must price");
         assert_eq!(result.matched_key, "together_ai/model-x");
+    }
+
+    #[test]
+    fn test_openai_pre_56_cache_pricing_scope() {
+        for key in [
+            "gpt-5.4",
+            "openai/gpt-5.4",
+            "gpt-5.4-2026-03-05",
+            "openai/gpt-5.4-pro-2026-03-05",
+            "gpt-5.5",
+            "openai/gpt-5.5",
+            "gpt-5.5-2026-04-23",
+            "gpt-5.5-pro",
+            "gpt-5.5-pro-2026-04-23",
+        ] {
+            assert!(
+                uses_openai_pre_56_cache_pricing(
+                    &openai_272k_result(key, "LiteLLM"),
+                    Some("openai")
+                ),
+                "expected pre-5.6 cache pricing for {key}"
+            );
+            assert!(
+                uses_openai_pre_56_cache_pricing(&openai_272k_result(key, "LiteLLM"), None),
+                "expected pre-5.6 cache pricing for {key} without provider hint"
+            );
+        }
+
+        for key in [
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra-2026-07-01",
+            "gpt-5.6-luna",
+            "gpt-6-astra",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.2",
+            "fugu-ultra",
+            "custom/gpt-5.5-pro",
+        ] {
+            assert!(
+                !uses_openai_pre_56_cache_pricing(
+                    &openai_272k_result(key, "LiteLLM"),
+                    Some("openai")
+                ),
+                "expected no pre-5.6 cache pricing for {key}"
+            );
+        }
+
+        for (result, provider) in [
+            (openai_272k_result("gpt-5.4", "OpenRouter"), None),
+            (openai_272k_result("openai/gpt-5.5", "OpenRouter"), None),
+            (
+                openai_272k_result("azure/openai/gpt-5.5", "LiteLLM"),
+                Some("azure"),
+            ),
+        ] {
+            assert!(
+                !uses_openai_pre_56_cache_pricing(&result, provider),
+                "expected non-OpenAI source to be excluded"
+            );
+        }
+    }
+
+    #[test]
+    fn test_openai_pre_56_cache_write_inherits_input_rate() {
+        let mut litellm = HashMap::new();
+        // Model entry with absent cache_creation_input_token_cost, mirroring upstream LiteLLM.
+        litellm.insert(
+            "gpt-5.4-2026-03-05".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                input_cost_per_token_above_272k_tokens: Some(0.000010),
+                output_cost_per_token: Some(0.000030),
+                output_cost_per_token_above_272k_tokens: Some(0.000045),
+                cache_read_input_token_cost: Some(0.000001),
+                cache_read_input_token_cost_above_272k_tokens: Some(0.000002),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let result = lookup
+            .lookup_with_provider("gpt-5.4-2026-03-05", None)
+            .expect("gpt-5.4-2026-03-05 should resolve");
+        assert_eq!(
+            result.pricing.cache_creation_input_token_cost,
+            Some(0.000005),
+            "cache write should inherit input rate"
+        );
+
+        let usage = TokenBreakdown {
+            input: 1_000,
+            output: 500,
+            cache_read: 200,
+            cache_write: 300,
+            cache_write_1h: 0,
+            reasoning: 0,
+        };
+        assert!(
+            result.covers_usage(&usage),
+            "usage with cache write must be covered"
+        );
+        assert!(result.uncovered_buckets(&usage).is_empty());
+
+        // Under 272k threshold: cache_write charged at base input rate ($5/M).
+        let cost = lookup.calculate_cost_with_provider("gpt-5.4-2026-03-05", None, &usage);
+        let expected = 1_000.0 * 0.000005 + 500.0 * 0.000030 + 200.0 * 0.000001 + 300.0 * 0.000005;
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "cost {cost} != expected {expected}"
+        );
+
+        // Above 272k threshold: total input = 200k + 50k + 30k = 280k > 272k.
+        let long_usage = TokenBreakdown {
+            input: 200_000,
+            output: 10_000,
+            cache_read: 50_000,
+            cache_write: 30_000,
+            cache_write_1h: 0,
+            reasoning: 0,
+        };
+        let long_cost =
+            lookup.calculate_cost_with_provider("gpt-5.4-2026-03-05", None, &long_usage);
+        // Under 272k tier, input doubles from 5e-6 to 10e-6, so cache_write also doubles to 10e-6.
+        let expected_long =
+            200_000.0 * 0.000010 + 10_000.0 * 0.000045 + 50_000.0 * 0.000002 + 30_000.0 * 0.000010;
+        assert!(
+            (long_cost - expected_long).abs() < 1e-10,
+            "long cost {long_cost} != expected {expected_long}"
+        );
+
+        // Multi-call aggregate stays on base rate even if sum > 272k.
+        let (agg_cost, _) = lookup.calculate_cost_detailed_for_multi_call_aggregate(
+            "gpt-5.4-2026-03-05",
+            None,
+            &long_usage,
+        );
+        let expected_agg =
+            200_000.0 * 0.000005 + 10_000.0 * 0.000030 + 50_000.0 * 0.000001 + 30_000.0 * 0.000005;
+        assert!(
+            (agg_cost - expected_agg).abs() < 1e-10,
+            "agg cost {agg_cost} != expected {expected_agg}"
+        );
+    }
+
+    #[test]
+    fn test_non_openai_routing_does_not_inherit_or_borrow_cache_write_rate() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.5-2026-04-23".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000030),
+                cache_read_input_token_cost: Some(0.000001),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "azure/openai/gpt-5.5-2026-04-23".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000030),
+                cache_read_input_token_cost: Some(0.000001),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let azure_result = lookup
+            .lookup_with_provider("gpt-5.5-2026-04-23", Some("azure"))
+            .expect("azure gpt-5.5 should resolve");
+        assert_eq!(
+            azure_result.pricing.cache_creation_input_token_cost, None,
+            "Azure row must not inherit OpenAI cache write rate"
+        );
+
+        let usage = TokenBreakdown {
+            input: 1_000,
+            output: 500,
+            cache_read: 200,
+            cache_write: 300,
+            cache_write_1h: 0,
+            reasoning: 0,
+        };
+        assert!(
+            !azure_result.covers_usage(&usage),
+            "Azure row with missing cache write must not cover cache write usage"
+        );
+        assert_eq!(
+            azure_result.uncovered_buckets(&usage),
+            vec!["cache_write"],
+            "diagnostic must identify cache_write as missing"
+        );
+
+        // In resolve_for_usage, Azure row must not borrow canonical row's cache write rate.
+        let resolved = lookup
+            .resolve_for_usage("gpt-5.5-2026-04-23", Some("azure"), &usage)
+            .expect("resolve_for_usage should return a result");
+        assert!(
+            !resolved.covers_usage(&usage),
+            "borrowed row must not cover cache write usage for non-OpenAI routing"
+        );
+        assert_eq!(resolved.uncovered_buckets(&usage), vec!["cache_write"]);
     }
 }

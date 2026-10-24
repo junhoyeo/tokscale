@@ -860,6 +860,15 @@ impl PricingService {
         } else {
             estimate.selected.as_ref()
         };
+        let uncovered_buckets = if authoritative || estimate.coverage {
+            Vec::new()
+        } else {
+            estimate
+                .selected
+                .as_ref()
+                .map(|row| row.uncovered_buckets(&message.tokens))
+                .unwrap_or_default()
+        };
         PricingExplanation {
             client: message.client.clone(),
             model_id: message.model_id.clone(),
@@ -901,6 +910,7 @@ impl PricingService {
                 estimate.cost
             },
             coverage: authoritative || estimate.coverage,
+            uncovered_buckets,
             estimate_status: status,
         }
     }
@@ -3541,6 +3551,8 @@ pub struct PricingExplanation {
     pub effective_multiplier: f64,
     pub final_estimate: f64,
     pub coverage: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncovered_buckets: Vec<&'static str>,
     pub estimate_status: crate::sessions::EstimateStatus,
 }
 

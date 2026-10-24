@@ -180,6 +180,37 @@ impl ModelPricing {
             && (usage.cache_write_1h <= 0 || has_5m_rate || has_1h_rate)
     }
 
+    pub(crate) fn uncovered_buckets(&self, usage: &crate::TokenBreakdown) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.quotes_zero_for_every_published_rate() {
+            return missing;
+        }
+
+        let valid_rate =
+            |rate: Option<f64>| rate.is_some_and(|rate| rate.is_finite() && rate >= 0.0);
+        let cache_write_5m = usage.cache_write.saturating_sub(usage.cache_write_1h);
+        let has_5m_rate = valid_rate(self.cache_creation_input_token_cost);
+        let has_1h_rate = valid_rate(self.cache_creation_input_token_cost_above_1hr);
+
+        if usage.input > 0 && !valid_rate(self.input_cost_per_token) {
+            missing.push("input");
+        }
+        if (usage.output > 0 || usage.reasoning > 0) && !valid_rate(self.output_cost_per_token) {
+            missing.push("output");
+        }
+        if usage.cache_read > 0 && !valid_rate(self.cache_read_input_token_cost) {
+            missing.push("cache_read");
+        }
+        if cache_write_5m > 0 && !has_5m_rate {
+            missing.push("cache_write");
+        }
+        if usage.cache_write_1h > 0 && !has_5m_rate && !has_1h_rate {
+            missing.push("cache_write_1h");
+        }
+
+        missing
+    }
+
     /// Whether `usage` bills a 1-hour cache write that this row cannot price
     /// at the 1-hour rate. `covers_usage` treats the 5-minute rate as enough,
     /// so `resolve_for_usage` asks this separately before skipping the
