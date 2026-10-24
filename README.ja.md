@@ -119,6 +119,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl`（Windows も共通の XDG 形式パス。`subagent/<uuid>/` 配下のサブエージェント記録を含む） |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json`（Windows も共通のパス。ルートは `VIBE_HOME` で変更可能） |
+| <img width="48px" src="https://github.com/cortexkit.png" alt="Broca" /> | [Broca](https://github.com/cortexkit/broca) | `$BROCA_STATE_ROOT/run-index.db`（既定: `~/.local/share/cortexkit/broca/run-index.db`） |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
 
@@ -194,7 +195,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - 設定可能なカラーテーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibeの使用量を追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe、Brocaの使用量を追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -431,7 +432,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`、`aside`、`vibe`。
+利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`、`aside`、`vibe`、`broca`。
 
 > **破壊的変更 (v4.0.0)**: クライアント単位のブール型フラグ（`--opencode`、`--claude`、`--codex` など）は削除され、現在はエラーになります。代わりに正規の `--client`/`-c` フラグを使用してください — 例: `tokscale --client opencode,claude`。
 
@@ -1127,7 +1128,7 @@ tokscale sources --json
 - **インタラクティブツールチップ**: ホバーで詳細な日別内訳を表示
 - **日別内訳パネル**: クリックでソース別、モデル別の詳細を確認
 - **年別フィルタリング**: 年間を移動
-- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe）
+- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Broca）
 - **統計パネル**: 総コスト、トークン、活動日数、連続記録
 - **FOUC防止**: Reactハイドレーション前にテーマを適用（フラッシュなし）
 
@@ -1553,6 +1554,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 全プラットフォーム共通の XDG 形式パス。`session.jsonl` の `model_completed` 使用量イベントと `subagent/` 記録を解析 |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | アカウント別のブラウザ使用量。`messages.jsonl` のみを読み、artifacts、memory、passwords は除外。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（既定: `~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（既定: `%USERPROFILE%\.vibe\logs\session\`） | 全プラットフォーム共通の `~/.vibe` ルート。各セッションディレクトリの `meta.json` の累積 `stats` のみを読み取り、`messages.jsonl` の会話内容は読み取りません |
+| Broca | `$BROCA_STATE_ROOT/run-index.db`（既定: `~/.local/share/cortexkit/broca/run-index.db`） | `%BROCA_STATE_ROOT%\run-index.db`（既定: `%USERPROFILE%\.local\share\cortexkit\broca\run-index.db`） | Broca の SQLite 実行インデックスの `export_facts` テーブルを読み取ります。完了した実行ごとに不変の計測レコードが 1 件記録されます |
 
 > **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 
@@ -2038,6 +2040,14 @@ Muse Spark モデルはアップストリームのデータセットから価格
 Vibe はセッションごとにディレクトリを作成し、`meta.json` と `messages.jsonl` の会話記録を保存します。使用量はセッション単位です。会話記録にはメッセージ単位のモデル、タイムスタンプ、トークン数が含まれないため、Tokscale は `meta.json` の累積 `stats` ブロック（`session_prompt_tokens`、`session_completion_tokens`、`session_cached_tokens`）のみを読み取り、会話内容は読み取りません。`session_cached_tokens` は `session_prompt_tokens` に加算される値ではなくその*内数*であるため、価格計算の前にキャッシュ読み取りを入力トークンから分離します（Vibe 自身のコスト表示と同じ計算です）。したがってセッションあたり 1 件のメッセージがこの形式で表現できる最小単位であり、`steps` がメッセージ数、`end_time`（ISO-8601、無い場合は `start_time`）がタイムスタンプになります。2.0 より前のセッションは同じフィールドを `metadata` キーの下に置いたフラットな `<prefix>_*.json` で保存しており、この形式も引き続き読み取ります。
 
 モデルは `meta.json` の `config.active_model`（セッションに固定されたエイリアス）から取得します。一度も固定されていないセッションは空文字列を記録しますが、これは Vibe が文書化している「設定された既定値に従う」センチネルです。そのため Tokscale は空のモデルとして集計せず、セッション自身の `config.models` テーブル、次に Mistral が公開している既定エイリアスから解決します。エイリアス（`mistral-medium-3.5`）は実際の送信 ID ではありません。Vibe は公開価格データセットに存在しない CLI 専用エンドポイント名（`mistral-vibe-cli-latest`）を送信するため、価格はエイリアスで解決します。ワークスペースラベルは `environment.working_directory`、無い場合は `origin_directory` から取得します。
+
+### Broca
+
+場所: `$BROCA_STATE_ROOT/run-index.db`（既定: `~/.local/share/cortexkit/broca/run-index.db`）
+
+Broca は実行が完了するたびに、不変の計測レコードを 1 件、SQLite 実行インデックスの `export_facts` テーブルに追加します。Tokscale は Broca の実行中でもデータベースを読み取り専用で開き、まだ WAL（write-ahead log）に残っているレコードも含めて各レコードの `segment_json` を読み取ります。`fact_id` を重複排除キーとして使うため、データベースを何度再スキャンしても各レコードは 1 回だけ集計されます。
+
+`input_tokens` はすでにキャッシュされていない入力で、`cached_input_tokens` はキャッシュ読み取りです。`cache_write_tokens` はキャッシュ書き込みで、Broca は TTL の区別なく報告するため、既定のキャッシュ書き込み料金で計算されます。`output_tokens` には推論が含まれるため、表示される出力は `output_tokens` から `reasoning_tokens` を引いた値です。各レコードは `occurred_at_ms` の時刻のメッセージ 1 件になり、タイムスタンプのないレコードはスキップされます。ワークスペースのラベルはセッションの `project_root` から取得します。
 
 ## 価格
 

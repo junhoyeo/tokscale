@@ -87,6 +87,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   "micode-desktop": "Xiaomi MiMo AI",
   muse: "Muse Code",
   vibe: "Mistral Vibe",
+  broca: "Broca",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -158,6 +159,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   "micode-desktop": `${GITHUB_CDN_BASE}/client-micode-desktop.png`,
   muse: "https://github.com/meta-models.png",
   vibe: "https://github.com/mistralai.png",
+  broca: "https://github.com/cortexkit.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -221,6 +223,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   "micode-desktop": "#FF6900",
   muse: "#0064E0",
   vibe: "#FA520F",
+  broca: "#5B6B7F",
 };
 
 // Derived values

@@ -771,6 +771,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "studio.db" => file_name == "studio.db",
                 "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
+                "run-index.db" => file_name == "run-index.db",
                 "threads.db" => file_name == "threads.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
                 // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
