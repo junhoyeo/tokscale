@@ -329,6 +329,7 @@ TUI에서 `g`를 누르거나 `--light`/`--json` 모드에서 `--group-by`를 �
 | **워크스페이스 + 모델** | `--group-by workspace,model` | | 로컬 사용량을 워크스페이스 키별로, 그 다음 모델별로 그룹화. [`--merge-worktrees`](#워크스페이스별-비용)를 추가하면 git 워크트리를 상위 리포지터리로 병합합니다 |
 | **세션 + 모델** | `--group-by session,model` | | `session_id`와 모델당 한 행 — 특정 에이전트-CLI 세션에 비용 귀속 |
 | **클라이언트 + 세션 + 모델** | `--group-by client,session,model` | | 클라이언트, 세션, 모델당 한 행 — `session_id`로 조인하는 멀티 에이전트 러너에 유용 |
+| **머신 + 모델** | `--group-by machine,model` | | 머신 라벨과 모델당 한 행 — [머신별 사용량](#머신별-사용량) 참조 |
 
 **`--group-by model`** (가장 통합)
 
@@ -395,6 +396,37 @@ tokscale models --json --group-by workspace,model --merge-worktrees
 ```
 
 TUI에서는 `g` → **워크스페이스 + 모델**을 선택한 뒤 `w`로 워크트리 병합을 토글합니다(푸터에 `[w:worktrees]` 또는 `[w:repos]`가 표시됩니다).
+
+#### 머신별 사용량
+
+다른 머신의 세션 폴더를 로컬 디렉터리로 복사하고 `scanner.extraScanPaths`로 추가했다면, `scanner.machineLabels`로 각 폴더에 머신 라벨을 지정하세요. 라벨이 지정된 폴더 아래의 모든 세션 파일은 해당 머신으로 집계되고, 나머지는 모두 `scanner.localMachineLabel`(기본값 `"local"`)로 집계됩니다:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/Users/me/mirrors/steven/.codex/sessions"],
+      "claude": ["/Users/me/mirrors/steven/.claude/projects"]
+    },
+    "machineLabels": {
+      "/Users/me/mirrors/steven": "steven"
+    },
+    "localMachineLabel": "laptop"
+  }
+}
+```
+
+폴더는 그 아래의 모든 파일과 일치하며, 경로 구성 요소 단위로 비교합니다(Windows에서는 대소문자 무시). 폴더가 중첩되면 가장 긴 폴더가 우선합니다. 그런 다음 머신별로 그룹화합니다:
+
+```bash
+# (머신, 모델)당 한 행, Machine 열 포함
+tokscale models --light --group-by machine,model
+
+# JSON 항목에는 이 모드에서만 `machine` 필드가 포함됩니다
+tokscale models --json --group-by machine,model
+```
+
+TUI에서는 `g` → **머신 + 모델**을 선택합니다.
 
 워크스페이스 행의 라벨은 `repo` 또는 `repo ⑃ worktree`입니다. 클라이언트마다 워크스페이스 기록 방식이 달라서(Claude Code는 대시로 변환한 디렉터리 슬러그 `-Users-me-devpro-app`, Codex와 OpenCode는 실제 경로) tokscale은 슬러그를 파일시스템과 대조해 실제 경로로 되돌립니다. 알아둘 점이 네 가지 있습니다:
 
@@ -969,6 +1001,8 @@ Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다.
 | `minutelyTabEnabled` | boolean | `false` | TUI에 분 단위 Minutely 탭을 표시하고 데이터 로딩 중에 분 단위 집계를 수행합니다. 대부분의 사용자에게 분 단위 세분화는 틈새/진단 뷰이며, 대규모 데이터셋에서는 분 단위 버케팅에 무시할 수 없는 비용이 들기 때문에 기본적으로 비활성화되어 있습니다. |
 | `cursor.syncTimeoutSeconds` | number | 미설정 | `tokscale cursor sync`가 계정별 사용량을 내려받을 때 쓰는 전체 시간 예산(초, 1-86400). 설정하지 않으면 120초에서 시작해 Cursor가 알려 주는 사용량 이벤트 수에 맞춰 최대 1800초까지 늘어납니다. `tokscale cursor sync --timeout <SECONDS>`가 실행별로 우선합니다. [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요. |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale의 기본 home-root 위치 밖에 있는 세션을 위한 클라이언트별 추가 스캔 루트 |
+| `scanner.machineLabels` | object | `{}` | 폴더별 머신 라벨, `{ "<folder>": "<label>" }` 형식. `--group-by machine,model`에서 폴더 아래의 세션 파일은 해당 라벨로 집계되며, 일치하는 폴더 중 가장 긴 폴더가 우선합니다. [머신별 사용량](#머신별-사용량)을 참조하세요. |
+| `scanner.localMachineLabel` | string | `"local"` | 어느 `scanner.machineLabels` 폴더에도 속하지 않는 세션 파일의 머신 라벨 |
 | `scanner.bucketTimezone` | string | 자동 감지 | 이 기기가 사용량 날짜를 버킷화하는 시간대의 IANA 이름(예: `"Asia/Seoul"`). 최초 실행 시 자동으로 기록됩니다. 직접 편집하는 대신 `tokscale config set timezone <zone>`을 사용하세요. |
 
 #### 날짜 경계와 `scanner.bucketTimezone`
