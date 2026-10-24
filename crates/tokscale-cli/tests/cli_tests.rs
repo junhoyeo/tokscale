@@ -5202,6 +5202,180 @@ fn test_models_group_by_machine_model_table_shows_a_machine_column() {
         .stdout(predicate::str::contains("local"));
 }
 
+/// Labels are applied per source after the parse or the cache load and are
+/// never stored in the source message cache (`machine_label` is
+/// `#[serde(skip)]`). So a warm cache must follow a settings change without a
+/// cache version bump: each scan in the same home, after `machineLabels` and
+/// `localMachineLabel` change, must show only the new labels. Claude is in the
+/// fixture because its lane has a second labeling site: the history of a
+/// deleted, compacted transcript comes only from the cache and is labeled by
+/// the path the cache recorded, not by a path the scan found.
+#[test]
+fn test_models_group_by_machine_model_relabels_a_warm_source_cache() {
+    let tmp = create_empty_fixture_dir();
+    let home = tmp.path();
+    let blade_root = home.join("mirrors/blade");
+    let steven_root = home.join("mirrors/steven");
+    let blade_codex = blade_root.join(".codex/sessions");
+    let steven_codex = steven_root.join(".codex/sessions");
+    let blade_claude = blade_root.join(".claude/projects/demo");
+    let steven_claude = steven_root.join(".claude/projects/demo");
+    write_codex_token_session(&blade_codex, "blade.jsonl", "gpt-4o-mini", 100, 10);
+    write_codex_token_session(&steven_codex, "steven.jsonl", "gpt-4o-mini", 200, 20);
+    write_codex_token_session(
+        &home.join(".codex/sessions"),
+        "local.jsonl",
+        "gpt-4o-mini",
+        50,
+        5,
+    );
+    let claude_line = |id: &str, input: i64| {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"req-{id}","message":{{"id":"msg-{id}","model":"claude-sonnet-4-20250514","usage":{{"input_tokens":{input},"output_tokens":5}}}}}}"#
+        )
+    };
+    fs::create_dir_all(&blade_claude).unwrap();
+    fs::create_dir_all(&steven_claude).unwrap();
+    let blade_transcript = blade_claude.join("session.jsonl");
+    let blade_turn_one = claude_line("blade-1", 300);
+    let blade_turn_two = claude_line("blade-2", 30);
+    fs::write(
+        &blade_transcript,
+        format!("{blade_turn_one}\n{blade_turn_two}\n"),
+    )
+    .unwrap();
+    fs::write(
+        steven_claude.join("session.jsonl"),
+        claude_line("steven", 400),
+    )
+    .unwrap();
+
+    let json_path = |path: &Path| serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let write_settings = |labels: &str| {
+        write_settings_json(
+            home,
+            &format!(
+                r#"{{
+                    "scanner": {{
+                        "extraScanPaths": {{
+                            "codex": [{}, {}],
+                            "claude": [{}, {}]
+                        }},
+                        {labels}
+                    }}
+                }}"#,
+                json_path(&blade_codex),
+                json_path(&steven_codex),
+                json_path(&blade_root.join(".claude/projects")),
+                json_path(&steven_root.join(".claude/projects")),
+            ),
+        );
+    };
+    let rows = |pass: &str| -> Vec<(String, String, String, i64)> {
+        let output = cmd_with_home(home)
+            .args([
+                "models",
+                "--json",
+                "--light",
+                "--client",
+                "codex,claude",
+                "--no-spinner",
+                "--group-by",
+                "machine,model",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} pass stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut rows: Vec<_> = json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["machine"].as_str().unwrap().to_string(),
+                    entry["client"].as_str().unwrap().to_string(),
+                    entry["model"].as_str().unwrap().to_string(),
+                    entry["input"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let row = |machine: &str, client: &str, model: &str, input: i64| {
+        (
+            machine.to_string(),
+            client.to_string(),
+            model.to_string(),
+            input,
+        )
+    };
+
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "steven" }}"#,
+        json_path(&steven_root)
+    ));
+    assert_eq!(
+        rows("cold"),
+        vec![
+            row("local", "claude", "claude-sonnet-4", 330),
+            row("local", "codex", "gpt-4o-mini", 150),
+            row("steven", "claude", "claude-sonnet-4", 400),
+            row("steven", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+    assert!(
+        sandbox_config_dir(home)
+            .join("cache")
+            .join("source-message-cache-v2")
+            .is_dir(),
+        "the cold pass must leave a source cache for the warm pass to load"
+    );
+
+    // Relabel every machine and the local one. Compact the blade transcript so
+    // its first turn survives only as retained history in the cache.
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "blade", {}: "studio" }}, "localMachineLabel": "laptop""#,
+        json_path(&blade_root),
+        json_path(&steven_root)
+    ));
+    fs::write(&blade_transcript, format!("{blade_turn_two}\n")).unwrap();
+    assert_eq!(
+        rows("warm"),
+        vec![
+            row("blade", "claude", "claude-sonnet-4", 330),
+            row("blade", "codex", "gpt-4o-mini", 100),
+            row("laptop", "codex", "gpt-4o-mini", 50),
+            row("studio", "claude", "claude-sonnet-4", 400),
+            row("studio", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+
+    // Relabel blade again and delete its transcript: both turns now come only
+    // from the Claude retained-history branch.
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "razor", {}: "studio" }}, "localMachineLabel": "laptop""#,
+        json_path(&blade_root),
+        json_path(&steven_root)
+    ));
+    fs::remove_file(&blade_transcript).unwrap();
+    assert_eq!(
+        rows("deleted"),
+        vec![
+            row("laptop", "codex", "gpt-4o-mini", 50),
+            row("razor", "claude", "claude-sonnet-4", 330),
+            row("razor", "codex", "gpt-4o-mini", 100),
+            row("studio", "claude", "claude-sonnet-4", 400),
+            row("studio", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+}
+
 #[test]
 fn test_models_group_by_other_modes_omit_the_machine_field() {
     let tmp = create_empty_fixture_dir();
