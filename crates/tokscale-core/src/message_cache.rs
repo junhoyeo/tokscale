@@ -1563,6 +1563,7 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1 more: billed operations, as for Pi.
             (ClientId::Omp, 2),
             (ClientId::Senpi, 2),
+            (ClientId::Proma, 0),
             // +3 for Prime Agent's independent history. v1->v2 strips a
             // leading BOM and recovers records containing undecodable
             // bytes; its accounting scan also continues past those records
@@ -1884,7 +1885,16 @@ fn parser_version(client: ClientId) -> u32 {
         // `chargedCents`) so plan-included rows keep Cursor's own figure instead
         // of landing unpriced, and uses a UTC-stable synthetic id for the id-less
         // fallback.
-        ClientId::Cursor => 3,
+        // v3->v4: usage-events rows are collapsed per `usageEventId`, so the
+        // repeated snapshots of one event are counted once instead of once per
+        // snapshot. The cached rows keep their valid fingerprints — only the
+        // parser changed — so without this bump a warm entry would keep
+        // replaying the inflated totals.
+        // v4->v5: an id-less legacy row that matches an identified event by
+        // parsed session, model, and timestamp joins that event's snapshot
+        // group instead of being counted beside it. Cached v4 entries of such
+        // mixed files would keep serving both copies.
+        ClientId::Cursor => 5,
         // Initial Reasonix implementation. The fingerprint samples the
         // append-only stats JSONL source so appended records are reparsed.
         // v1->v2: strip a leading BOM and recover records containing
@@ -1983,7 +1993,9 @@ fn parser_version(client: ClientId) -> u32 {
         // and would keep the client reporting zero throughput until reparsed.
         // v8->v9: request-header fallback billing evidence is labelled
         // session-level while per-message source evidence remains record-level.
-        ClientId::Dsh => 9,
+        // v9->v10: stream large transcripts and refuse to cache incomplete
+        // reads. Invalidate old cached prefixes from torn compressed frames.
+        ClientId::Dsh => 10,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -2012,7 +2024,11 @@ fn parser_version(client: ClientId) -> u32 {
         // either added to a shared family (its version then derives from
         // the family's driver base) or given an explicit independent arm.
         ClientId::Gemini => 1,
-        ClientId::Qwen => 1,
+        // v1->v2: split the cached prefix out of `promptTokenCount`, and the
+        // reasoning out of `candidatesTokenCount` when the recorded total
+        // shows it inside. Unchanged transcripts must not replay the old
+        // double-counted buckets.
+        ClientId::Qwen => 2,
         ClientId::Mux => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
@@ -2047,6 +2063,7 @@ fn parser_version(client: ClientId) -> u32 {
         | ClientId::Omp
         | ClientId::Senpi
         | ClientId::PrimeAgent
+        | ClientId::Proma
         | ClientId::RooCode
         | ClientId::KiloCode
         | ClientId::Cline
@@ -2298,6 +2315,7 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             session_title: message.session_title,
             parent_session_id: None,
             copilot_context: None,
+            machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
@@ -2387,6 +2405,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             session_title: message.session_title,
             parent_session_id: None,
             copilot_context: None,
+            machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
@@ -2474,6 +2493,7 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
             session_title: message.session_title,
             parent_session_id: None,
             copilot_context: None,
+            machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
@@ -2634,6 +2654,7 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             copilot_context: None,
+            machine_label: None,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
             pricing_model_id: None,
             estimate_status: crate::sessions::EstimateStatus::Unpriced,
@@ -6344,6 +6365,11 @@ mod tests {
     }
 
     #[test]
+    fn test_qwen_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Qwen), 2);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_kimi_v5_cache_reused_with_current_workspace_metadata() {
         let cache_home = TempDir::new().unwrap();
@@ -7565,7 +7591,7 @@ mod tests {
         // DSH transcript files are append-only, so v6 cache entries keep the
         // old cross-session attempt keys unless the source is reparsed. The
         // v7->v8 bump retires rows parsed without generation durations.
-        assert_eq!(parser_version(ClientId::Dsh), 9);
+        assert_eq!(parser_version(ClientId::Dsh), 10);
     }
 
     /// Names the row that only a served cache can put in a report. No DSH
@@ -7821,6 +7847,59 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn dsh_partial_rewrite_invalidates_cache_and_retries_until_complete() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let row = concat!(
+            r#"{"type":"assistant/message","time":1786669454772,"data":{"message":{"id":"m"},"usage":{"inputTokens":10,"outputTokens":20}}}"#,
+            "\n"
+        );
+        let source = write_dsh_transcript(source_home.path(), "stream", row.as_bytes());
+        let identity = CacheIdentity::for_client(ClientId::Dsh);
+        let cold = scan_dsh(source_home.path());
+        assert_eq!(cold.len(), 1);
+        assert!(SourceMessageCache::load().get(identity, &source).is_some());
+        assert_eq!(scan_dsh(source_home.path()), cold);
+
+        // Retain a complete, newly changed first record before a torn frame.
+        // Positive partial output must invalidate the former warm entry.
+        let changed = row.replace("10", "11");
+        let mut payload = zstd::encode_all(changed.as_bytes(), 1).unwrap();
+        let last = zstd::encode_all(b"{\"type\":\"session\"}".as_slice(), 1).unwrap();
+        payload.extend_from_slice(&last[..last.len() / 2]);
+        std::fs::write(&source, payload).unwrap();
+        for _ in 0..2 {
+            let partial = scan_dsh(source_home.path());
+            assert_eq!(partial.len(), 1);
+            assert_eq!(partial[0].tokens.input, 11);
+            assert!(SourceMessageCache::load().get(identity, &source).is_none());
+        }
+
+        std::fs::write(&source, zstd::encode_all(changed.as_bytes(), 1).unwrap()).unwrap();
+        let repaired = scan_dsh(source_home.path());
+        assert_eq!(repaired[0].tokens.input, 11);
+        assert!(SourceMessageCache::load().get(identity, &source).is_some());
+        assert_eq!(scan_dsh(source_home.path()), repaired);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn dsh_v9_cached_prefix_is_reparsed_by_the_streaming_reader() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let row = br#"{"type":"assistant/message","time":1786669454772,"data":{"message":{"id":"m"},"usage":{"inputTokens":10,"outputTokens":20}}}"#;
+        let source = write_dsh_transcript(source_home.path(), "stream", row);
+        seed_dsh_cache_at_version(std::slice::from_ref(&source), 9);
+        let messages = scan_dsh(source_home.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.total(), 30);
+        assert_eq!(scan_dsh(source_home.path()), messages);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn dsh_v7_shards_are_reparsed_with_generation_duration() {
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
@@ -7834,7 +7913,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
             parser_version: 7,
@@ -7887,7 +7966,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].timestamp, 1786669450000);
         assert_eq!(cached.messages[0].duration_ms, Some(1_200));
@@ -7910,7 +7989,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         // Pinned at 3, the identity 4.14.0 cached under, rather than derived
         // from the running version: this is the row that release left on disk.
         let stale_identity = CacheIdentity {
@@ -7971,7 +8050,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].model_id, "glm-5.3");
 
@@ -7998,7 +8077,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 9);
+        assert_eq!(current_identity.parser_version, 10);
         // Pinned at 4, the identity 4.15.0 cached under; see the v3 test.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
@@ -8058,7 +8137,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 9);
+        assert_eq!(cached.parser_version, 10);
         assert_eq!(cached.messages, scanned);
 
         let warm = scan_dsh(source_home.path());
@@ -8407,7 +8486,7 @@ mod tests {
 
     #[test]
     fn test_cursor_parser_version_invalidates_incorrect_token_and_cost_rows() {
-        assert_eq!(parser_version(ClientId::Cursor), 3);
+        assert_eq!(parser_version(ClientId::Cursor), 5);
     }
 
     #[test]
@@ -8453,6 +8532,7 @@ mod tests {
                     (ClientId::Kimchi, 2),
                     (ClientId::Omp, 2),
                     (ClientId::Senpi, 2),
+                    (ClientId::Proma, 0),
                     (ClientId::PrimeAgent, 4),
                 ],
             ),

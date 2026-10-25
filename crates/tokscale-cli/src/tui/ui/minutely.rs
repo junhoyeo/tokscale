@@ -2,8 +2,11 @@ use chrono::{Local, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+use tokscale_core::GroupBy;
+
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, total_tokens_cell, viewport_scrollbar_state,
+    format_cache_hit_rate, format_cost, format_tokens, period_source_header, total_tokens_cell,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -17,6 +20,7 @@ use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 /// `메시지` clip in `sessions.rs` survived a header test that already existed.
 fn header_labels(
     lang: TuiLanguage,
+    group_by: &GroupBy,
     is_narrow: bool,
     is_very_narrow: bool,
     has_turn_data: bool,
@@ -30,7 +34,7 @@ fn header_labels(
 
     let mut labels = vec![
         tr(lang, MessageKey::ColMinute),
-        tr(lang, MessageKey::ColSource),
+        period_source_header(lang, group_by),
     ];
     if has_turn_data {
         labels.push(tr(lang, MessageKey::ColTurn));
@@ -155,7 +159,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(now);
 
     let lang = app.settings.tui_language;
-    let header_cells = header_labels(lang, is_narrow, is_very_narrow, has_turn_data);
+    let group_by = app.group_by.borrow().clone();
+    let header_cells = header_labels(lang, &group_by, is_narrow, is_very_narrow, has_turn_data);
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -347,6 +352,10 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::{BTreeMap, BTreeSet};
 
+    /// A grouping whose Source column lists clients, and the one that lists
+    /// machines instead.
+    const GROUPINGS: [GroupBy; 2] = [GroupBy::ClientModel, GroupBy::MachineModel];
+
     fn minute(date: NaiveDate, h: u32, m: u32) -> MinutelyUsage {
         let mut clients = BTreeSet::new();
         clients.insert("claude".to_string());
@@ -406,9 +415,10 @@ mod tests {
     }
 
     /// The rendered header row of the Minutely table.
-    fn header_for(lang: TuiLanguage, width: u16, has_turn: bool) -> String {
+    fn header_for(lang: TuiLanguage, group_by: &GroupBy, width: u16, has_turn: bool) -> String {
         let mut app = make_app(width);
         app.settings.tui_language = lang;
+        *app.group_by.borrow_mut() = group_by.clone();
         for m in &mut app.data.minutely {
             m.turn_count = if has_turn { 2 } else { 0 };
         }
@@ -454,14 +464,16 @@ mod tests {
     #[test]
     fn no_header_overflows_its_budget_in_any_language() {
         for lang in TuiLanguage::ALL {
-            for has_turn in [true, false] {
-                assert_header_layout_fits(
-                    &format!("minutely/wide(turn={has_turn})"),
-                    lang,
-                    &header_labels(lang, false, false, has_turn),
-                    &header_widths(false, false, has_turn),
-                    &sortable_flags(has_turn),
-                );
+            for group_by in &GROUPINGS {
+                for has_turn in [true, false] {
+                    assert_header_layout_fits(
+                        &format!("minutely/wide(turn={has_turn},group={group_by:?})"),
+                        lang,
+                        &header_labels(lang, group_by, false, false, has_turn),
+                        &header_widths(false, false, has_turn),
+                        &sortable_flags(has_turn),
+                    );
+                }
             }
         }
     }
@@ -479,12 +491,14 @@ mod tests {
             // +2 for the block borders the table draws inside.
             for width in [needed + 2, needed + 22, 200] {
                 for lang in TuiLanguage::ALL {
-                    assert_headers_render_in_full(
-                        &format!("minutely(width={width},turn={has_turn})"),
-                        lang,
-                        &header_for(lang, width, has_turn),
-                        &header_labels(lang, false, false, has_turn),
-                    );
+                    for group_by in &GROUPINGS {
+                        assert_headers_render_in_full(
+                            &format!("minutely(width={width},turn={has_turn},group={group_by:?})"),
+                            lang,
+                            &header_for(lang, group_by, width, has_turn),
+                            &header_labels(lang, group_by, false, false, has_turn),
+                        );
+                    }
                 }
             }
         }

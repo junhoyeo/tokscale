@@ -660,7 +660,7 @@ export const ratchetCensusWork = pgTable(
 export const groupRoles = ["owner", "admin", "member"] as const;
 export type GroupRole = (typeof groupRoles)[number];
 
-export const groupInviteStatuses = ["pending", "accepted", "declined", "expired"] as const;
+export const groupInviteStatuses = ["pending", "accepted", "declined", "expired", "revoked"] as const;
 export type GroupInviteStatus = (typeof groupInviteStatuses)[number];
 
 export const groups = pgTable(
@@ -760,11 +760,15 @@ export const groupInvites = pgTable(
     tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    maxUses: integer("max_uses").notNull().default(1),
+    useCount: integer("use_count").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (table) => [
+    check("group_invites_use_limits", sql`${table.maxUses} BETWEEN 1 AND 1000 AND ${table.useCount} BETWEEN 0 AND ${table.maxUses}`),
+    check("group_invites_target_single_use", sql`(${table.invitedUsernameNormalized} IS NULL AND ${table.invitedUserId} IS NULL) OR ${table.maxUses} = 1`),
     index("idx_group_invites_group_status").on(table.groupId, table.status),
     index("idx_group_invites_invited_user_status").on(table.invitedUserId, table.status),
     index("idx_group_invites_invited_username_status").on(
@@ -776,6 +780,17 @@ export const groupInvites = pgTable(
     index("idx_group_invites_invited_by").on(table.invitedBy),
   ]
 );
+
+// A redemption outlives membership, so leaving cannot make a link reusable by
+// the same account. Counter and ledger are committed with the membership.
+export const groupInviteRedemptions = pgTable("group_invite_redemptions", {
+  inviteId: uuid("invite_id").notNull().references(() => groupInvites.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.inviteId, table.userId] }),
+  index("idx_group_invite_redemptions_user").on(table.userId),
+]);
 
 export const groupInvitesRelations = relations(groupInvites, ({ one }) => ({
   group: one(groups, {

@@ -54,6 +54,8 @@ pub struct ModelUsage {
     pub client: String,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
+    /// Machine label of the row; set only for `GroupBy::MachineModel`.
+    pub machine: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub performance: ModelPerformance,
@@ -118,6 +120,7 @@ pub struct DailyUsage {
     pub date: NaiveDate,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    /// Keyed by client, or by machine label for `GroupBy::MachineModel`.
     pub source_breakdown: BTreeMap<String, DailySourceInfo>,
     pub message_count: u32,
     pub turn_count: u32,
@@ -137,6 +140,7 @@ pub struct HourlyUsage {
     pub datetime: NaiveDateTime,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    /// Clients seen, or machine labels for `GroupBy::MachineModel`.
     pub clients: BTreeSet<String>,
     pub models: BTreeMap<String, HourlyModelInfo>,
     pub message_count: u32,
@@ -148,6 +152,7 @@ pub struct MinutelyUsage {
     pub datetime: NaiveDateTime,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    /// Clients seen, or machine labels for `GroupBy::MachineModel`.
     pub clients: BTreeSet<String>,
     pub models: BTreeMap<String, HourlyModelInfo>,
     pub message_count: u32,
@@ -529,9 +534,11 @@ fn daily_source_model_key(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
-            model.to_string()
-        }
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::Session
+        | GroupBy::ClientSession
+        | GroupBy::MachineModel => model.to_string(),
     }
 }
 
@@ -544,9 +551,11 @@ fn daily_source_model_display_name(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
-            model.to_string()
-        }
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::Session
+        | GroupBy::ClientSession
+        | GroupBy::MachineModel => model.to_string(),
     }
 }
 
@@ -557,7 +566,8 @@ fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> Strin
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
         | GroupBy::Session
-        | GroupBy::ClientSession => model.to_string(),
+        | GroupBy::ClientSession
+        | GroupBy::MachineModel => model.to_string(),
     }
 }
 
@@ -568,7 +578,8 @@ fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> Strin
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
         | GroupBy::Session
-        | GroupBy::ClientSession => model.to_string(),
+        | GroupBy::ClientSession
+        | GroupBy::MachineModel => model.to_string(),
     }
 }
 
@@ -579,7 +590,8 @@ fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str)
         | GroupBy::ClientModel
         | GroupBy::WorkspaceModel
         | GroupBy::Session
-        | GroupBy::ClientSession => model.to_string(),
+        | GroupBy::ClientSession
+        | GroupBy::MachineModel => model.to_string(),
     }
 }
 
@@ -940,8 +952,22 @@ impl DataLoader {
                 GroupBy::ClientSession => {
                     format!("{}:{}:{}", msg.client, msg.session_id, normalized_model)
                 }
+                GroupBy::MachineModel => {
+                    let machine = tokscale_core::message_machine_label(msg);
+                    format!("{}:{}:{}", machine.len(), machine, normalized_model)
+                }
             };
-            let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
+            let merge_clients = matches!(
+                group_by,
+                GroupBy::Model | GroupBy::WorkspaceModel | GroupBy::MachineModel
+            );
+            // What the time-period views' Source column lists: the machine for
+            // `machine,model`, the client otherwise.
+            let period_source = if *group_by == GroupBy::MachineModel {
+                tokscale_core::message_machine_label(msg)
+            } else {
+                msg.client.as_str()
+            };
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
@@ -955,6 +981,11 @@ impl DataLoader {
                 },
                 workspace_label: if *group_by == GroupBy::WorkspaceModel {
                     Some(workspace_label.clone())
+                } else {
+                    None
+                },
+                machine: if *group_by == GroupBy::MachineModel {
+                    Some(tokscale_core::message_machine_label(msg).to_string())
                 } else {
                     None
                 },
@@ -1155,7 +1186,7 @@ impl DataLoader {
 
                 let source_entry = daily_entry
                     .source_breakdown
-                    .entry(msg.client.clone())
+                    .entry(period_source.to_string())
                     .or_insert_with(|| DailySourceInfo {
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
@@ -1284,7 +1315,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     hourly_entry.turn_count += 1;
                 }
-                hourly_entry.clients.insert(msg.client.clone());
+                hourly_entry.clients.insert(period_source.to_string());
 
                 let hourly_model_key =
                     hourly_model_key(group_by, &msg.provider_id, &normalized_model);
@@ -1379,7 +1410,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     minutely_entry.turn_count += 1;
                 }
-                minutely_entry.clients.insert(msg.client.clone());
+                minutely_entry.clients.insert(period_source.to_string());
 
                 let m_model_key = hourly_model_key(group_by, &msg.provider_id, &normalized_model);
                 let m_model =
@@ -2123,6 +2154,7 @@ mod tests {
             pricing_model_id: None,
             estimate_status: tokscale_core::sessions::EstimateStatus::Unpriced,
             copilot_context: None,
+            machine_label: None,
         };
 
         accumulate_session_entry(&mut entry, &msg, 0.0, "test-model", "test-model", true);
@@ -2393,7 +2425,8 @@ mod tests {
         assert_eq!(clients[55], ClientId::AntigravityExtension);
         assert_eq!(clients[56], ClientId::Aside);
         assert_eq!(clients[57], ClientId::Vibe);
-        assert_eq!(clients[58], ClientId::Shelley);
+        assert_eq!(clients[58], ClientId::Proma);
+        assert_eq!(clients[59], ClientId::Shelley);
     }
 
     #[test]
@@ -2457,6 +2490,7 @@ mod tests {
             "Antigravity IDE Extension",
             "Aside",
             "Mistral Vibe",
+            "Proma",
             "Shelley",
         ];
 
@@ -2516,6 +2550,7 @@ mod tests {
             'I'
         );
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Vibe), 'T');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Proma), 'J');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Shelley), 'Z');
     }
 
@@ -2644,6 +2679,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('T'),
             Some(ClientId::Vibe)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('J'),
+            Some(ClientId::Proma)
         );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('Z'),
@@ -2896,6 +2935,121 @@ mod tests {
         assert_eq!(usage.models[0].client, "claude, qwen");
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 4.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_machine_model_splits_rows_by_machine() {
+        let labeled = |client: &str, session: &str, machine: &str, cost: f64| {
+            let mut msg = make_workspace_message(
+                client,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                session,
+                cost,
+                None,
+                None,
+            );
+            msg.machine_label = Some(machine.to_string());
+            msg
+        };
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    labeled("claude", "session-1", "local", 1.0),
+                    labeled("qwen", "session-2", "local", 2.0),
+                    labeled("claude", "session-3", "steven", 4.0),
+                ],
+                &GroupBy::MachineModel,
+            )
+            .unwrap();
+
+        let mut models = usage.models;
+        models.sort_by(|a, b| a.machine.cmp(&b.machine));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].machine.as_deref(), Some("local"));
+        assert_eq!(models[0].client, "claude, qwen");
+        assert_eq!(models[0].cost, 3.0);
+        assert_eq!(models[1].machine.as_deref(), Some("steven"));
+        assert_eq!(models[1].cost, 4.0);
+        assert_ne!(models[0].group_key, models[1].group_key);
+        assert_eq!(models[0].workspace_label, None);
+    }
+
+    /// Two messages in the same hour from two machines, one of them unlabeled.
+    fn two_machine_messages() -> Vec<UnifiedMessage> {
+        let local = make_workspace_message(
+            "claude",
+            "claude-sonnet-4-5-20250929",
+            "anthropic",
+            "session-1",
+            1.0,
+            None,
+            None,
+        );
+        let mut steven = make_workspace_message(
+            "pi",
+            "claude-sonnet-4-5-20250929",
+            "anthropic",
+            "session-2",
+            2.0,
+            None,
+            None,
+        );
+        steven.machine_label = Some("steven".to_string());
+        vec![local, steven]
+    }
+
+    #[test]
+    fn test_period_breakdowns_list_machines_for_machine_model() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let usage = loader
+            .aggregate_messages(two_machine_messages(), &GroupBy::MachineModel)
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let sources: Vec<&str> = usage.daily[0]
+            .source_breakdown
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(sources, vec!["local", "steven"]);
+        assert_eq!(usage.daily[0].source_breakdown["local"].cost, 1.0);
+        assert_eq!(usage.daily[0].source_breakdown["steven"].cost, 2.0);
+
+        assert_eq!(usage.hourly.len(), 1);
+        let hourly: Vec<&str> = usage.hourly[0].clients.iter().map(String::as_str).collect();
+        assert_eq!(hourly, vec!["local", "steven"]);
+        assert_eq!(usage.minutely.len(), 1);
+        let minutely: Vec<&str> = usage.minutely[0]
+            .clients
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(minutely, vec!["local", "steven"]);
+    }
+
+    #[test]
+    fn test_period_breakdowns_list_clients_for_client_model() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let usage = loader
+            .aggregate_messages(two_machine_messages(), &GroupBy::ClientModel)
+            .unwrap();
+
+        let sources: Vec<&str> = usage.daily[0]
+            .source_breakdown
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(sources, vec!["claude", "pi"]);
+        let hourly: Vec<&str> = usage.hourly[0].clients.iter().map(String::as_str).collect();
+        assert_eq!(hourly, vec!["claude", "pi"]);
+        let minutely: Vec<&str> = usage.minutely[0]
+            .clients
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(minutely, vec!["claude", "pi"]);
     }
 
     #[test]

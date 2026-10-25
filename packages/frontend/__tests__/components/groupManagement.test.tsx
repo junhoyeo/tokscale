@@ -117,6 +117,7 @@ describe("group member management client flow", () => {
 
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/invite") && (!init?.method || init.method === "GET")) return Promise.resolve(jsonResponse({ invites: [] }));
       if (url.endsWith("/api/groups/team/members") && (!init?.method || init.method === "GET")) {
         memberCalls += 1;
         return Promise.resolve(jsonResponse({ members: memberCalls === 1
@@ -200,6 +201,7 @@ describe("group member management client flow", () => {
     const onChanged = vi.fn(async () => {});
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/invite") && (!init?.method || init.method === "GET")) return Promise.resolve(jsonResponse({ invites: [] }));
       if (url.includes("/api/groups/team/members?userId=") && init?.method === "DELETE") {
         deleteCalls += 1;
         return Promise.resolve(deleteCalls === 1
@@ -241,4 +243,54 @@ describe("group member management client flow", () => {
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
+});
+
+
+it("creates a reusable invite once, shows usage, and preserves the link on failed revocation", async () => {
+  const creation = deferred<Response>();
+  let invite: Record<string, unknown> | null = null;
+  let posts = 0;
+  let deletes = 0;
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/members")) return Promise.resolve(jsonResponse({ members: initialMembers }));
+    if (url.endsWith("/invite")) {
+      if (init?.method === "POST") {
+        posts++;
+        expect(JSON.parse(String(init.body))).toMatchObject({ maxUses: 5, expiresInDays: 7, invitedUsername: null });
+        return creation.promise;
+      }
+      if (init?.method === "DELETE") {
+        deletes++;
+        expect(JSON.parse(String(init.body))).toEqual({ inviteId: "invite-1" });
+        if (deletes === 1) return Promise.resolve(jsonResponse({ error: "Try again" }, 500));
+        invite = { ...invite, status: "revoked" };
+        return Promise.resolve(jsonResponse({ revoked: true }));
+      }
+      return Promise.resolve(jsonResponse({ invites: invite ? [invite] : [] }));
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<GroupDetailClient group={ownerGroup} currentUser={owner} initialData={initialData} />);
+  await screen.findByRole("button", { name: "Manage @member" });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Maximum joins" }), { target: { value: "5" } });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Expires in days" }), { target: { value: "7" } });
+  const createButton = screen.getByRole("button", { name: "Create invite" });
+  fireEvent.click(createButton);
+  fireEvent.click(createButton);
+  expect(posts).toBe(1);
+  invite = { id: "invite-1", role: "member", invitedUsername: null, maxUses: 5, useCount: 1, status: "pending", expiresAt: "2099-01-01T00:00:00Z" };
+  await act(async () => creation.resolve(jsonResponse({ invite, joinUrl: "/groups/join/local-token" })));
+  expect(await screen.findByText(/1\/5 joined/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Try again");
+  expect(screen.getByRole("button", { name: "Copy invite link" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull());
+  expect(screen.queryByRole("button", { name: "Copy invite link" })).toBeNull();
+  expect(screen.getByText(/revoked/)).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "Invitee GitHub username" }), { target: { value: "alice" } });
+  const limit = screen.getByRole("spinbutton", { name: "Maximum joins" }) as HTMLInputElement;
+  expect(limit.disabled).toBe(true);
+  expect(limit.value).toBe("1");
 });

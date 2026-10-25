@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { formatCurrency, formatNumber } from "../format";
 import {
@@ -107,6 +108,7 @@ export function renderOrbitEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="orbit" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale leaderboard standing for @${escapeXml(data.user.username)}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
   ${cardHeader({
@@ -119,7 +121,7 @@ export function renderOrbitEmbedSvg(
     period: data.period,
   })}
   ${divider(PAD, right, 66, palette)}
-  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel}`}</text>
+  <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${periodLabel === "lifetime" ? `Rank · ${sortBy === "cost" ? "cost" : "tokens"}` : `Rank · ${periodLabel} UTC`}</text>
   ${fittedText({
     text: rankText,
     x: PAD,

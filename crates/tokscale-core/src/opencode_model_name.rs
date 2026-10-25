@@ -1,12 +1,16 @@
 //! OpenCode-configured model display names.
 //!
 //! OpenCode lets providers assign a human-readable `name` to a model key in
-//! its user-level configuration. These names are presentation metadata:
-//! they are applied only while grouping local reports and never replace the
-//! model id used for pricing, caching, or exports.
+//! its user-level configuration. The resolver reads both the legacy
+//! `provider` map and the current `providers` map. As in OpenCode's own
+//! migration, a provider defined under `providers` replaces the same provider
+//! under `provider` as a whole, so its legacy model names no longer apply.
+//! These names are presentation metadata: they are applied only while grouping
+//! local reports and never replace the model id used for pricing, caching, or
+//! exports.
 
 use crate::{canonical_model_id, provider_identity};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -21,11 +25,35 @@ impl OpenCodeModelNameResolver {
             return Self::default();
         };
 
-        let Some(providers) = config
-            .get("provider")
+        // OpenCode moves the legacy `provider` map into `providers` and lets a
+        // `providers` entry replace the legacy entry of the same provider, so a
+        // legacy name survives only for providers that `providers` leaves out.
+        let replaced = Self::provider_keys(&config, "providers");
+        let mut names = Self::names_from_providers(&config, "provider");
+        names.retain(|(provider, _), _| !replaced.contains(provider));
+        names.extend(Self::names_from_providers(&config, "providers"));
+
+        Self { names }
+    }
+
+    /// Canonical ids of the providers that `key` defines with an object value.
+    fn provider_keys(config: &serde_json::Value, key: &str) -> HashSet<String> {
+        config
+            .get(key)
             .and_then(serde_json::Value::as_object)
-        else {
-            return Self::default();
+            .into_iter()
+            .flatten()
+            .filter(|(_, provider_config)| provider_config.is_object())
+            .map(|(provider, _)| provider_key(provider))
+            .collect()
+    }
+
+    fn names_from_providers(
+        config: &serde_json::Value,
+        key: &str,
+    ) -> HashMap<(String, String), String> {
+        let Some(providers) = config.get(key).and_then(serde_json::Value::as_object) else {
+            return HashMap::new();
         };
 
         let mut names = HashMap::new();
@@ -37,8 +65,7 @@ impl OpenCodeModelNameResolver {
                 continue;
             };
 
-            let provider = provider_identity::canonical_provider(provider)
-                .unwrap_or_else(|| provider.to_string());
+            let provider = provider_key(provider);
             for (model_id, model_config) in models {
                 let Some(name) = model_config
                     .get("name")
@@ -49,14 +76,13 @@ impl OpenCodeModelNameResolver {
                     continue;
                 };
 
-                let name = name.to_string();
                 names
                     .entry((provider.clone(), canonical_model_id(model_id)))
-                    .or_insert(name);
+                    .or_insert_with(|| name.to_string());
             }
         }
 
-        Self { names }
+        names
     }
 
     fn extend_from_json(&mut self, contents: &str) {
@@ -64,12 +90,15 @@ impl OpenCodeModelNameResolver {
     }
 
     pub fn display_name(&self, provider_id: &str, model_id: &str) -> Option<&str> {
-        let provider = provider_identity::canonical_provider(provider_id)
-            .unwrap_or_else(|| provider_id.to_string());
         self.names
-            .get(&(provider, canonical_model_id(model_id)))
+            .get(&(provider_key(provider_id), canonical_model_id(model_id)))
             .map(String::as_str)
     }
+}
+
+/// The key a provider id is stored and looked up under.
+fn provider_key(provider_id: &str) -> String {
+    provider_identity::canonical_provider(provider_id).unwrap_or_else(|| provider_id.to_string())
 }
 
 pub(crate) fn parse_jsonc(contents: &str) -> Option<serde_json::Value> {
@@ -305,6 +334,143 @@ mod tests {
         assert_eq!(
             resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p1"),
             None
+        );
+    }
+
+    #[test]
+    fn reads_v2_providers_key() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "providers": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "glm-5.3" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            Some("glm-5.3")
+        );
+    }
+
+    #[test]
+    fn v2_providers_name_wins_over_v1_provider_name_in_same_file() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "V1 Name" }
+                        }
+                    }
+                },
+                "providers": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "V2 Name" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            Some("V2 Name")
+        );
+    }
+
+    #[test]
+    fn skips_v2_provider_entries_without_models() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "providers": {
+                    "fireworks-ai": {
+                        "settings": { "apiKey": "test" }
+                    },
+                    "openrouter": {
+                        "models": {
+                            "named": { "name": "Named Model" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            None
+        );
+        assert_eq!(
+            resolver.display_name("openrouter", "named"),
+            Some("Named Model")
+        );
+    }
+
+    #[test]
+    fn v2_provider_replaces_the_legacy_provider_of_the_same_id() {
+        // OpenCode replaces a legacy provider entry wholesale when `providers`
+        // defines the same provider, even with no models of its own.
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks-ai": {
+                        "models": {
+                            "legacy-only": { "name": "Stale legacy label" }
+                        }
+                    }
+                },
+                "providers": {
+                    "fireworks-ai": {
+                        "settings": { "apiKey": "test" }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(resolver.display_name("fireworks_ai", "legacy-only"), None);
+    }
+
+    #[test]
+    fn v2_provider_keeps_only_its_own_model_names() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks-ai": {
+                        "models": {
+                            "legacy-only": { "name": "Stale legacy label" },
+                            "accounts/fireworks/models/glm-5p3": { "name": "V1 Name" }
+                        }
+                    },
+                    "openrouter": {
+                        "models": {
+                            "kept": { "name": "Kept Legacy Name" }
+                        }
+                    }
+                },
+                "providers": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p3": { "name": "V2 Name" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(resolver.display_name("fireworks_ai", "legacy-only"), None);
+        assert_eq!(
+            resolver.display_name("fireworks_ai", "accounts/fireworks/models/glm-5p3"),
+            Some("V2 Name")
+        );
+        // A legacy provider that `providers` does not define keeps its names.
+        assert_eq!(
+            resolver.display_name("openrouter", "kept"),
+            Some("Kept Legacy Name")
         );
     }
 

@@ -81,6 +81,7 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // uppercase) and `m`/`M`, `i`/`I` are too, so `T` takes the next free
     // letter from "misTral".
     ClientUi { hotkey: 'T' },
+    ClientUi { hotkey: 'J' },
     // Shelley: both cases of `s` are unavailable — lowercase `s` is the global
     // "sources" picker binding and uppercase `S` belongs to an existing client —
     // and every other letter of "Shelley" is taken too (`h`/`H`, `e`/`E`,

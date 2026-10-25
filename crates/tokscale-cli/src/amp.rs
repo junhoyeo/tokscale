@@ -479,7 +479,10 @@ pub fn auto_sync_status() -> AutoSyncAmpResult {
     let cache_dir = get_amp_cache_dir();
     let persisted_index = load_index(&cache_dir);
     let persisted_complete = persisted_index.complete;
-    if find_amp_binary().is_none() || !auto_sync_is_due(&persisted_index) {
+    if tokscale_core::network::is_offline()
+        || find_amp_binary().is_none()
+        || !auto_sync_is_due(&persisted_index)
+    {
         return AutoSyncAmpResult {
             warning: None,
             cache_complete: persisted_complete,

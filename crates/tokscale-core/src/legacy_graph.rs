@@ -261,6 +261,8 @@ impl From<GraphResult> for crate::GraphResultV2 {
             time_metrics: value.time_metrics,
             unpriced_submission_usage: value.unpriced_submission_usage,
             incomplete_cost_dates: value.incomplete_cost_dates,
+            recount_proofs: std::collections::BTreeMap::new(),
+            source_reads: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -284,7 +286,7 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 }
 
 pub async fn generate_submission_graph(options: ReportOptions) -> Result<GraphResult, String> {
-    crate::generate_submission_graph_v2(options)
+    crate::generate_submission_graph_v2(options, &std::collections::BTreeSet::new())
         .await
         .map(Into::into)
 }

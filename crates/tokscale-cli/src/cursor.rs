@@ -373,30 +373,43 @@ fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -
 
 /// Identity of a usage event for incremental merge.
 ///
-/// Accepted rows use the report parser's projection of every immutable known
-/// field: trimmed model/session ids (one missing-id fallback), integer timestamp
-/// and defaulted/coerced/clamped token counts. Mutable billing and unknown fields
-/// are omitted so a re-fetched correction replaces its cached row; the multiset
-/// merge separately preserves repeated events with the same projection. Rejected
-/// rows retain their raw identity; only object key ordering is canonicalized.
+/// A row that carries a `usageEventId` is identified by that id alone: Cursor
+/// reports one event repeatedly with its running token totals, so the token
+/// projection differs between those snapshots and would make the merge keep
+/// them side by side instead of letting the newest one replace the older.
+///
+/// Rows without such an id use the report parser's projection of every
+/// immutable known field: trimmed model/session ids (one missing-id fallback),
+/// integer timestamp and defaulted/coerced/clamped token counts. Mutable
+/// billing and unknown fields are omitted so a re-fetched correction replaces
+/// its cached row; the multiset merge separately preserves repeated events with
+/// the same projection. Rejected rows retain their raw identity; only object
+/// key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
     let mut identity = if let Some(parsed) =
         tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
     {
-        // Restrict accepted rows to the report parser's immutable projection.
-        // Cursor exposes no stable event id, so multiplicity is tracked by the
-        // merge rather than by unknown fields that billing corrections may change.
-        serde_json::json!({
-            "conversationId": parsed.conversation_id,
-            "model": parsed.model,
-            "timestamp": parsed.timestamp,
-            "tokenUsage": {
-                "inputTokens": parsed.tokens.input,
-                "outputTokens": parsed.tokens.output,
-                "cacheReadTokens": parsed.tokens.cache_read,
-                "cacheWriteTokens": parsed.tokens.cache_write,
-            },
-        })
+        if let Some(usage_event_id) = parsed.usage_event_id {
+            // The event's own id identifies it across its snapshots.
+            serde_json::json!({
+                "usageEventId": usage_event_id,
+            })
+        } else {
+            // Restrict accepted rows to the report parser's immutable projection.
+            // Without an event id, multiplicity is tracked by the merge rather
+            // than by unknown fields that billing corrections may change.
+            serde_json::json!({
+                "conversationId": parsed.conversation_id,
+                "model": parsed.model,
+                "timestamp": parsed.timestamp,
+                "tokenUsage": {
+                    "inputTokens": parsed.tokens.input,
+                    "outputTokens": parsed.tokens.output,
+                    "cacheReadTokens": parsed.tokens.cache_read,
+                    "cacheWriteTokens": parsed.tokens.cache_write,
+                },
+            })
+        }
     } else {
         // Rejected rows cannot be projected safely. Keep their complete raw
         // identity so unrelated malformed data is never discarded.
@@ -409,9 +422,9 @@ fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
 /// Reconcile `incoming` (just fetched, newest first) with `existing` (the cache).
 /// Incoming is authoritative for every identity present in the completed overlap,
 /// so all cached occurrences of those identities are replaced. Every incoming
-/// occurrence is retained because Cursor has no stable event id and distinct
-/// billable events may have identical parser fields. Cached identities the new
-/// pages never reached stay in the result.
+/// occurrence is retained because distinct billable events may have identical
+/// parser fields. Cached identities the new pages never reached stay in the
+/// result.
 fn merge_cursor_usage_events(
     existing: Vec<serde_json::Value>,
     incoming: Vec<serde_json::Value>,
@@ -5041,6 +5054,37 @@ mod tests {
             4,
             "the complete overlap must replace cached variants and keep incoming multiplicity"
         );
+    }
+
+    #[test]
+    fn test_cursor_merge_replaces_the_snapshots_of_one_event() {
+        // Cursor reports one event repeatedly with its running token totals.
+        // The snapshots share the event's id, so the merge must let the newest
+        // one replace the older instead of keeping them side by side — the
+        // cached row would otherwise keep reporting the stale totals.
+        let snapshot = |tokens: i64, cents: f64| {
+            serde_json::json!({
+                "conversationId":"same-event",
+                "timestamp":"7200000",
+                "model":"gpt-5",
+                "usageEventId":"452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                "chargedCents":cents,
+                "tokenUsage":{"inputTokens":tokens,"outputTokens":0,"totalCents":cents},
+            })
+        };
+        let older = snapshot(10, 1.0);
+        let newer = snapshot(20, 2.0);
+
+        let merged = merge_cursor_usage_events(vec![older.clone()], vec![newer.clone()]);
+        assert_eq!(merged.len(), 1, "the newer snapshot must replace the older");
+        assert_eq!(merged[0], newer);
+
+        // Distinct events stay distinct, even when they share a conversation.
+        let mut other = newer.clone();
+        other["usageEventId"] = serde_json::json!("b039781d-caa8-43ec-b993-ef2002481e3c");
+        let merged =
+            merge_cursor_usage_events(vec![older.clone()], vec![newer.clone(), other.clone()]);
+        assert_eq!(merged.len(), 2, "distinct events must both survive");
     }
 
     #[test]

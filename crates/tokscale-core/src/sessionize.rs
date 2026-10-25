@@ -515,6 +515,7 @@ mod tests {
             pricing_model_id: None,
             estimate_status: crate::sessions::EstimateStatus::Unpriced,
             copilot_context: None,
+            machine_label: None,
             duration_ms: None,
         }
     }

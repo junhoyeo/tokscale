@@ -1,3 +1,17 @@
+import { getProfileDateRange, type ReportDateRange } from "@/lib/reportingPeriods";
+import type { Period } from "./types";
+
+/** Leaderboard month is calendar month; profile month remains rolling 30d. */
+export function getLeaderboardDateRange(
+  period: Period,
+  now: Date,
+  customFrom?: string,
+  customTo?: string,
+): ReportDateRange | null {
+  if (period === "custom") return customFrom && customTo ? { start: customFrom, end: customTo } : null;
+  return getProfileDateRange(period === "month" ? "this-month" : period, now);
+}
+
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface CustomDateRange {

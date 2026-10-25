@@ -1125,6 +1125,17 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
+    Proma = 58 => {
+        id: "proma",
+        display: "Proma",
+        logo: Some("https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png"),
+        root: PathRoot::Home,
+        relative: ".proma",
+        pattern: "proma-session",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
     // Shelley: Go coding agent by Bold Software. It keeps every conversation in
     // one SQLite database instead of a transcript tree, so it is the first
     // client whose only source is a live, WAL-mode database owned by another
@@ -1134,7 +1145,7 @@ define_clients!(
     // exe.dev image's unit points it. Shelley defines no environment variable of
     // its own, so a database elsewhere is reached through
     // `scanner.extraScanPaths.shelley` rather than a client-specific variable.
-    Shelley = 58 => {
+    Shelley = 59 => {
         id: "shelley",
         display: "Shelley",
         logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-shelley.png"),
@@ -1259,7 +1270,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 59);
+        assert_eq!(ClientId::COUNT, 60);
     }
 
     #[test]

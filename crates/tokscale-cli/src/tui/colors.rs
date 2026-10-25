@@ -150,6 +150,7 @@ mod tests {
             client: "claude".to_string(),
             workspace_key: None,
             workspace_label: None,
+            machine: None,
             tokens: TokenBreakdown::default(),
             cost,
             performance: Default::default(),

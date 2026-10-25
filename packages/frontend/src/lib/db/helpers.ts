@@ -201,7 +201,14 @@ export function mergeClientBreakdownsWithRegressionGuard(
   // different readers use different ones (profile totals read the scalar,
   // filtered leaderboards sum the JSON). Flooring the breakdown keeps them
   // reconcilable by construction.
-  incomingCostIsComplete: boolean = true
+  incomingCostIsComplete: boolean = true,
+  // `true` when a client's absence from this day carries no signal: a
+  // date-bounded submit ships its declared-complete clients unfiltered
+  // (#1513), so the payload dates days every other client was scoped out of.
+  // The preserve path runs unchanged — stored bytes are identical either
+  // way — only the "disappeared" notice is suppressed, because on such a day
+  // it would fire for every scanned bounded-growth client at once.
+  suppressDisappearedNotices: boolean = false
 ): MergeClientBreakdownsResult {
   const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
   const warnings: string[] = [];
@@ -219,9 +226,11 @@ export function mergeClientBreakdownsWithRegressionGuard(
     if (!incomingClient) {
       if (existingClient && existingClient.tokens > 0) {
         merged[clientName] = withDerivedProvenance(existingClient);
-        warnings.push(
-          `Preserved ${clientName} because it disappeared from this same-device resubmit; kept ${formatTokens(existingClient.tokens)} tokens.`
-        );
+        if (!suppressDisappearedNotices) {
+          warnings.push(
+            `Preserved ${clientName} because it disappeared from this same-device resubmit; kept ${formatTokens(existingClient.tokens)} tokens.`
+          );
+        }
       } else {
         delete merged[clientName];
         foldPreservedClients.delete(clientName);

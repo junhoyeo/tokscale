@@ -1,8 +1,11 @@
+import type { ReportDateRange } from "@/lib/reportingPeriods";
+
 export interface ProfileUser {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
   rank: number | null;
+  rankDateRange?: ReportDateRange | null;
   createdAt?: string | null;
 }
 

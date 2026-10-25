@@ -27,10 +27,18 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * `gen_metadata`; the `antigravity` parser correlates standalone rows to
  * trajectory steps. All three source labels are admitted and reconciled as one
  * family because the same provider response can appear in multiple surfaces.
+ *
+ * Devin CLI is registered at generation 2: generation 1 deduplicated
+ * `message_nodes` rows by database row id and counted the same API request
+ * once per persisted copy, while generation 2 deduplicates by
+ * `metadata.request_id`. Because that generation counts the same history
+ * strictly LOWER, neither the merge guard nor the high-water can heal the
+ * inflation — both only ever defend stored values. See RECOUNT_PROOF_CLIENTS.
  */
 export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   copilot: 2,
   droid: 1,
+  "devin-cli": 2,
   // v2 moves exported Amp messages from the synthesized thread-created day to
   // their server-provided usage timestamp. This is a pure re-attribution, so
   // the receiver must replace the daily layout instead of applying its normal
@@ -55,6 +63,57 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
  * keeps every stored row.
  */
 const SNAPSHOT_LAYOUT_CLIENTS: ReadonlySet<string> = new Set(["droid", "amp"]);
+
+/**
+ * Clients whose REGISTERED generation counts the same history differently in
+ * absolute terms — unlike SNAPSHOT_LAYOUT_CLIENTS, where tokens only move
+ * between days, a recounting generation legitimately lowers the credited
+ * lifetime (Devin CLI gen 2 drops duplicate-row counting).
+ *
+ * Every ledger this file maintains is monotonic, so deflation cannot flow
+ * through increments or a coverage-gated replace: a stored inflated cell
+ * would be defended forever. A lower snapshot alone is not evidence either —
+ * a database that failed to open or history the user deleted both lower it
+ * too, and replacing a stored cell with such a snapshot deletes real usage.
+ *
+ * These clients therefore ship a per-day recount proof with every
+ * full-history snapshot (`scanScope.recountProofs`): for each (day, model)
+ * cell, what the previous generation counted from the same rows and what
+ * this generation counts from them. The receiver subtracts ONLY that proven
+ * over-count from its stored cell, never below the corrected count, and
+ * never from usage the proof does not describe. A source that failed to
+ * read contributes to neither side of the proof, so its stored usage is left
+ * exactly as it was. The subtraction is idempotent and monotone, so it runs
+ * on every submit rather than once: a source that comes back later, or cost
+ * that could only be priced later, heals on the next complete snapshot.
+ *
+ * A non-fullHistory submit still freezes, so a partial scan never corrects
+ * anything, and an empty snapshot keeps the transition pending rather than
+ * establishing a baseline the parser never actually read.
+ */
+const RECOUNT_PROOF_CLIENTS: ReadonlySet<string> = new Set(["devin-cli"]);
+
+/** One (day, model) cell as a parser generation counts it. */
+export interface RecountProofCell {
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    reasoning: number;
+  };
+  cost: number;
+  messages: number;
+}
+
+/** What two parser generations count for one cell from the same local rows. */
+export interface RecountProofEntry {
+  previous: RecountProofCell;
+  corrected: RecountProofCell;
+}
+
+/** `date -> model id -> proof`, keyed like the submitted contributions. */
+export type ClientRecountProof = Record<string, Record<string, RecountProofEntry>>;
 
 const TOKEN_FIELDS = [
   "input",
@@ -128,6 +187,15 @@ export interface ParserHighWaterPlan {
   increments: Record<string, ClientBreakdownData>;
   /** Absolute cells when `mode` is `replace`; omitted otherwise. */
   layoutDays?: Record<string, ClientBreakdownData>;
+  /**
+   * Days whose recount proof agrees with this snapshot. The credited ledger
+   * behind `nextState` already has the proven over-count subtracted on these
+   * days; the route applies `applyRecountProofToCell` to the stored cells of
+   * the same days before adding `increments`.
+   */
+  recountDays?: string[];
+  /** Days whose recount proof disagreed with the snapshot and was ignored. */
+  rejectedRecountDays?: string[];
   nextState?: ParserClientHighWaterState;
   /**
    * Tokens the credited lifetime baseline holds beyond this snapshot. Positive
@@ -393,6 +461,217 @@ function replaceLayoutPlan(args: {
   };
 }
 
+/**
+ * Identity accepted, baseline deferred: the pending state freezes every
+ * older or undeclared submit for this client without crediting anything.
+ */
+function pendingTransitionPlan(version: number): ParserHighWaterPlan {
+  return {
+    mode: "freeze",
+    increments: createSafeRecord<ClientBreakdownData>(),
+    nextState: {
+      stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
+      version,
+      baselineEstablished: false,
+      aggregate: emptyAggregate(),
+      days: createSafeRecord<ClientBreakdownData>(),
+      observedDays: createSafeRecord<ClientBreakdownData>(),
+    },
+  };
+}
+
+const PROOF_TOKEN_FIELDS = TOKEN_FIELDS;
+
+function proofCellIsOrdered(entry: RecountProofEntry): boolean {
+  return (
+    PROOF_TOKEN_FIELDS.every(
+      (field) =>
+        Number.isFinite(entry.previous.tokens[field]) &&
+        Number.isFinite(entry.corrected.tokens[field]) &&
+        entry.previous.tokens[field] >= entry.corrected.tokens[field]
+    ) &&
+    Number.isFinite(entry.previous.cost) &&
+    Number.isFinite(entry.corrected.cost) &&
+    entry.previous.cost >= entry.corrected.cost &&
+    Number.isFinite(entry.previous.messages) &&
+    Number.isFinite(entry.corrected.messages) &&
+    entry.previous.messages >= entry.corrected.messages
+  );
+}
+
+/**
+ * Whether one day's proof describes exactly the snapshot it accompanies.
+ *
+ * The proof's `corrected` side must reproduce the submitted cell, token field
+ * by token field and in message count, for every model either side names.
+ * That is what ties the proof to "the same bytes": a proof for rows the
+ * snapshot does not contain, or a snapshot with rows the proof never saw,
+ * fails here and is ignored for the day. A day the snapshot does not date at
+ * all is an empty cell: the proof may describe it only as rows the corrected
+ * generation drops entirely.
+ *
+ * Cost is tied one-sidedly. Submission zeroes cost it cannot price
+ * authoritatively AFTER the proof is built, so the submitted cell may carry
+ * less cost than the proof's corrected side, never more. A proof whose
+ * corrected cost sits below the snapshot would let the correction floor
+ * stored spend under what this very scan reports, so it is refused.
+ */
+export function recountProofDayMatchesSnapshot(
+  proofDay: Record<string, RecountProofEntry> | undefined,
+  incoming: ClientBreakdownData | undefined
+): boolean {
+  if (!proofDay) return false;
+  const incomingModels = incoming
+    ? modelsForHighWater(incoming)
+    : createSafeRecord<ModelBreakdownData>();
+  const modelIds = new Set([
+    ...Object.keys(proofDay),
+    ...Object.keys(incomingModels),
+  ]);
+  if (modelIds.size === 0) return false;
+  for (const modelId of modelIds) {
+    const entry = ownValue(proofDay, modelId);
+    const model = ownValue(incomingModels, modelId) ?? emptyModel();
+    if (!entry || !proofCellIsOrdered(entry)) return false;
+    if (
+      PROOF_TOKEN_FIELDS.some(
+        (field) => entry.corrected.tokens[field] !== model[field]
+      ) ||
+      entry.corrected.messages !== model.messages ||
+      model.cost - entry.corrected.cost > PROOF_COST_TOLERANCE
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Split a client's recount proof into the days that may be applied against
+ * this snapshot and the days that must be ignored.
+ */
+export function partitionRecountProof(
+  proof: ClientRecountProof | undefined,
+  incomingDays: Record<string, ClientBreakdownData>
+): { accepted: string[]; rejected: string[] } {
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+  for (const date of Object.keys(proof ?? {}).sort()) {
+    if (
+      recountProofDayMatchesSnapshot(
+        ownValue(proof ?? {}, date),
+        ownValue(incomingDays, date)
+      )
+    ) {
+      accepted.push(date);
+    } else {
+      rejected.push(date);
+    }
+  }
+  return { accepted, rejected };
+}
+
+/** Subtract `delta` from `stored`, but never below `floor`. */
+function subtractProven(stored: number, delta: number, floor: number): number {
+  const room = positive(stored - floor);
+  return stored - Math.min(positive(delta), room);
+}
+
+export interface RecountCorrection {
+  cell: ClientBreakdownData;
+  /** What the correction removed from the stored cell. */
+  removed: { tokens: number; cost: number; messages: number };
+}
+
+/**
+ * Apply one day's recount proof to a stored cell.
+ *
+ * Per model and per field the stored value drops by the proven over-count
+ * (`previous - corrected`), but never below the corrected count. The floor is
+ * what makes this safe to run on every submit and against any stored cell:
+ *
+ * - a cell already at the corrected count loses nothing (idempotent);
+ * - a cell carrying usage the proof never saw — a database that failed to
+ *   open, history deleted locally — keeps all of it, because only the proven
+ *   duplicate amount is removed;
+ * - a cell BELOW the corrected count (new usage not yet credited) is left for
+ *   the bounded-growth allocation to raise, never lowered;
+ * - a source that becomes readable again, or cost that becomes priceable
+ *   later, enlarges the proof and the extra over-count comes off then.
+ *
+ * Models the proof does not name are untouched; proof models the cell does
+ * not hold have nothing to correct.
+ */
+export function applyRecountProofToCell(
+  stored: ClientBreakdownData,
+  proofDay: Record<string, RecountProofEntry>
+): RecountCorrection {
+  const models = modelsForHighWater(stored);
+  const removed = { tokens: 0, cost: 0, messages: 0 };
+  for (const [modelId, entry] of Object.entries(proofDay)) {
+    const model = ownValue(models, modelId);
+    if (!model || !proofCellIsOrdered(entry)) continue;
+    const next = { ...model };
+    const priorInclusiveInput = positive(
+      model.inputIncludingCacheRead ?? model.input + model.cacheRead
+    );
+    for (const field of PROOF_TOKEN_FIELDS) {
+      next[field] = subtractProven(
+        model[field],
+        entry.previous.tokens[field] - entry.corrected.tokens[field],
+        entry.corrected.tokens[field]
+      );
+      removed.tokens += model[field] - next[field];
+    }
+    next.inputIncludingCacheRead = positive(
+      priorInclusiveInput -
+        (model.input - next.input) -
+        (model.cacheRead - next.cacheRead)
+    );
+    next.tokens = PROOF_TOKEN_FIELDS.reduce((sum, field) => sum + next[field], 0);
+    next.cost = quantizeCost(
+      subtractProven(
+        model.cost,
+        entry.previous.cost - entry.corrected.cost,
+        entry.corrected.cost
+      )
+    );
+    removed.cost += model.cost - next.cost;
+    next.messages = subtractProven(
+      model.messages,
+      entry.previous.messages - entry.corrected.messages,
+      entry.corrected.messages
+    );
+    removed.messages += model.messages - next.messages;
+    models[modelId] = next;
+  }
+  const cell = breakdownFromModels(models);
+  // Re-derive provenance from the corrected totals, carrying the stored
+  // origin and cost-completeness tags: a correction restates amounts, not
+  // where they came from or whether their cost was fully priced.
+  cell.provenance = deriveClientBreakdownProvenance({
+    ...cell,
+    provenance: stored.provenance,
+  });
+  removed.cost = quantizeCost(removed.cost);
+  return { cell, removed };
+}
+
+function applyRecountProofToDays(
+  days: Record<string, ClientBreakdownData>,
+  proof: ClientRecountProof,
+  dates: readonly string[]
+): Record<string, ClientBreakdownData> {
+  const next = normalizeStateDays(days);
+  for (const date of dates) {
+    const stored = ownValue(next, date);
+    const proofDay = ownValue(proof, date);
+    if (!stored || !proofDay) continue;
+    next[date] = applyRecountProofToCell(stored, proofDay).cell;
+  }
+  return next;
+}
+
 function stateAfterCreditedIncrements(
   version: number,
   previousDays: Record<string, ClientBreakdownData>,
@@ -411,6 +690,13 @@ function stateAfterCreditedIncrements(
 }
 
 const COST_SCALE = 10_000;
+
+/**
+ * Submitted and proof costs are sums of the same per-message prices, so they
+ * agree to floating-point noise; this is the slack allowed before a cost is
+ * treated as a different number (one unit of the stored cost scale).
+ */
+const PROOF_COST_TOLERANCE = 1 / COST_SCALE;
 
 function quantizeCost(value: number): number {
   return Math.round((positive(value) + Number.EPSILON) * COST_SCALE) / COST_SCALE;
@@ -725,6 +1011,12 @@ export function planParserHighWaterSubmission(args: {
   incomingDays: Record<string, ClientBreakdownData>;
   state?: ParserClientHighWaterState;
   persistedVersion?: number;
+  /**
+   * The client's `scanScope.recountProofs` entry. Honored only for
+   * RECOUNT_PROOF_CLIENTS and only on a full-history snapshot that is not
+   * frozen; see `applyRecountProofToCell`.
+   */
+  recountProof?: ClientRecountProof;
 }): ParserHighWaterPlan {
   const supportedVersion = ownValue(SUPPORTED_VERSIONED_PARSERS, args.client);
   // A generation marker without its high-water can exist after an interrupted
@@ -736,11 +1028,19 @@ export function planParserHighWaterSubmission(args: {
   if (args.incomingVersion == null) {
     return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
   }
-  // Amp v1 is the already-released created-time parser. Keep accepting it for
-  // devices that have not transitioned yet, but never let an older CLI rewrite
-  // a v2 timestamp-attributed device after the receiver has established v2.
-  if (args.client === "amp" && args.incomingVersion === 1) {
-    return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
+  // Amp v1 and Devin CLI v1 are already released when their receivers deploy.
+  // Keep accepting them for devices that have not transitioned yet, but never
+  // let an older CLI rewrite a device after the receiver has started the new
+  // generation. This preserves the existing submit behavior during the
+  // server-before-CLI rollout without reopening a completed (or pending)
+  // transition to the old parser.
+  if (
+    (args.client === "amp" || args.client === "devin-cli") &&
+    args.incomingVersion === 1
+  ) {
+    return args.state
+      ? { mode: "freeze", increments: {} }
+      : { mode: "status-quo", increments: {} };
   }
   if (args.incomingVersion !== supportedVersion) {
     return { mode: "freeze", increments: {} };
@@ -768,8 +1068,32 @@ export function planParserHighWaterSubmission(args: {
   if (args.state && !validState(args.state, supportedVersion)) {
     return { mode: "freeze", increments: {} };
   }
+  // A recount proof corrects the credited ledger BEFORE growth is allocated
+  // against it, in both the transition and the incremental branch. The
+  // snapshot then raises any cell the correction left below it, bounded as
+  // ever by provable lifetime growth, so a corrected cell converges on the
+  // truth from either side.
+  const proof = RECOUNT_PROOF_CLIENTS.has(args.client)
+    ? args.recountProof
+    : undefined;
+  const recount = proof
+    ? partitionRecountProof(proof, args.incomingDays)
+    : { accepted: [], rejected: [] };
+  const correctLedger = (
+    days: Record<string, ClientBreakdownData>
+  ): Record<string, ClientBreakdownData> =>
+    proof && recount.accepted.length > 0
+      ? applyRecountProofToDays(days, proof, recount.accepted)
+      : days;
+  const recountFields = {
+    ...(recount.accepted.length > 0 ? { recountDays: recount.accepted } : {}),
+    ...(recount.rejected.length > 0
+      ? { rejectedRecountDays: recount.rejected }
+      : {}),
+  };
   if (args.state == null || args.state.baselineEstablished === false) {
-    const legacyAggregate = aggregateSnapshot(args.existingLegacyDays);
+    const existingLegacyDays = correctLedger(args.existingLegacyDays);
+    const legacyAggregate = aggregateSnapshot(existingLegacyDays);
     const hasLegacy =
       legacyAggregate.tokens > 0 || legacyAggregate.messages > 0;
     if (hasLegacy) {
@@ -785,6 +1109,20 @@ export function planParserHighWaterSubmission(args: {
       });
       if (followed) return followed;
     }
+    // A default all-client scan declares every default parser, including
+    // clients that produced no rows. For a client whose generation only ever
+    // heals through proof, an empty snapshot is not evidence that the parser
+    // read anything, so keep the transition pending rather than baselining
+    // the inflated legacy rows as this generation's ledger. With nothing
+    // stored the same applies: a failed first read must not consume the
+    // transition and freeze the generation-1 submits this device may still
+    // make.
+    if (
+      RECOUNT_PROOF_CLIENTS.has(args.client) &&
+      Object.keys(args.incomingDays).length === 0
+    ) {
+      return pendingTransitionPlan(args.incomingVersion);
+    }
     // At transition, preserving all legacy rows and crediting at most positive
     // lifetime aggregate growth is non-destructive. With deleted old usage D
     // and genuinely new usage N, incoming - legacy = N - D <= N; the existing
@@ -792,8 +1130,8 @@ export function planParserHighWaterSubmission(args: {
     // that provable remainder.
     const increments = hasLegacy
       ? allocateIncrements(
-          args.existingLegacyDays,
-          args.existingLegacyDays,
+          existingLegacyDays,
+          existingLegacyDays,
           args.incomingDays,
           legacyAggregate,
           incomingAggregate
@@ -802,7 +1140,7 @@ export function planParserHighWaterSubmission(args: {
     const nextState = hasLegacy
       ? stateAfterCreditedIncrements(
           supportedVersion,
-          args.existingLegacyDays,
+          existingLegacyDays,
           increments,
           args.incomingDays
         )
@@ -818,18 +1156,23 @@ export function planParserHighWaterSubmission(args: {
       mode: hasLegacy ? "baseline-legacy" : "baseline-new",
       increments,
       nextState,
+      ...recountFields,
     };
   }
   // State written before allocation schema v2 stored every observed cell
   // maximum and advanced its aggregate even when no cell could accept that
   // growth. Rebuild that one-time migration baseline from the rows that were
   // actually credited, otherwise already-suppressed usage remains lost.
-  const previousCreditedDays =
+  const previousCreditedDays = correctLedger(
     args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION
       ? args.state.days
-      : args.existingLegacyDays;
+      : args.existingLegacyDays
+  );
+  // A v2 aggregate must describe exactly the credited cells (see validState),
+  // so once a correction touched them it is re-derived rather than reused.
   const previousAggregate =
-    args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION
+    args.state.stateVersion === PARSER_HIGH_WATER_STATE_VERSION &&
+    recount.accepted.length === 0
       ? args.state.aggregate
       : aggregateSnapshot(previousCreditedDays);
   const previousObservedDays =
@@ -865,6 +1208,7 @@ export function planParserHighWaterSubmission(args: {
       increments,
       args.incomingDays
     ),
+    ...recountFields,
   };
 }
 

@@ -120,6 +120,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl`（Windows 通用 XDG 路径，含 `subagent/<uuid>/` 子代理记录） |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json`（Windows 通用路径；可用 `VIBE_HOME` 覆盖根目录） |
+| <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
 | <img width="48px" src=".github/assets/client-shelley.png" alt="Shelley" /> | [Shelley](https://shelley.dev) | `~/.config/shelley/shelley.db`（迁移位置时用 `scanner.extraScanPaths.shelley` 指定） |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -193,7 +194,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe 和 Shelley 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe 、Proma 和 Shelley 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -1130,7 +1131,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside 和 Mistral Vibe、Shelley）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside 和 Mistral Vibe、Proma、Shelley）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -1553,6 +1554,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 全平台通用 XDG 路径；解析 `session.jsonl` 的 `model_completed` 用量事件及 `subagent/` 记录 |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 按账户读取原生浏览器用量；仅扫描 `messages.jsonl`，排除 artifacts、memory 和 passwords。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（默认：`~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（默认：`%USERPROFILE%\.vibe\logs\session\`） | 全平台通用 `~/.vibe` 根目录；仅读取各会话目录的 `meta.json` 累计 `stats`，不读取 `messages.jsonl` 对话内容 |
+| Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | 优先使用 Pi SDK 用量，避免重复计算界面副本；同时支持旧版 Claude SDK 记录及独立界面日志。详见[统计规则与限制](docs/proma.md)。 |
 | Shelley | `~/.config/shelley/shelley.db` | — | 仅支持 macOS 与 Linux；迁移位置时通过 `scanner.extraScanPaths.shelley` 指定 |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
@@ -1714,7 +1716,11 @@ OpenCode 根据构建时的发布渠道决定数据库文件名：`latest`/`beta
 
 `~/.claude/transcripts/` 下的包装转录文件仅在包含真实 Claude 使用量元数据时才会被统计。包含用户/工具事件但没有 `usage` 块的文件会被跳过，而不会进行估算。
 
-Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claude Desktop 聊天。Claude Desktop 会将应用数据存储在 `~/Library/Application Support/Claude` 等位置，但 Anthropic 并未为消费级桌面聊天或聊天历史导出提供文档化、稳定的本地按消息 Token 账本。当存在 Claude Desktop 数据但只有 Claude Code JSONL 根目录可扫描时，运行 `tokscale clients` 可看到一条诊断信息。`tokscale usage` 可以根据 Claude Code 凭据尽力显示 Claude 订阅配额条，而组织/API 使用量属于 Anthropic 的 Admin Usage 和 Cost API，与本地转录扫描有意分离。
+`claude` 客户端还会在本地读取 Claude Desktop 保留的 Code/Cowork 转录文件及对话缓存中的使用量信息。缓存并非完整的账号历史，已删除或不完整的对话、没有用量计数器的聊天可能存在缺失。Tokscale 不会根据对话文本估算 Token。日期未知的累计余额仅计入全部时间的本地总量，不计入按日期筛选的报告、图表或排行榜提交。根据价格表计算的费用是 API 等价估算值，并非订阅账单。`tokscale usage` 单独显示订阅配额。
+
+**云端/网页会话：** Tokscale 不会自动获取网页版 Claude Code (`claude.ai/code`) 的会话历史。用量仅保存在云端的会话不会计入本地总量、报告、导出、提交或排行榜。本地转录文件和 Desktop 缓存中记录的用量可按上述覆盖范围和日期限制统计。`tokscale clients` 无需查询云端账号即可说明本地收集范围。
+
+Claude 的 [`--teleport <session-id>`](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal) 可以将云端会话带到本地终端。Tokscale 只有在导入的本地记录包含用量元数据时才能统计该历史。仅有对话文本并不足够，teleport 也不保证完整的 Token 历史。默认路径之外的转录文件可通过 `scanner.extraScanPaths` 添加。
 
 ### Codex CLI
 
@@ -1726,6 +1732,10 @@ Tokscale 的 `claude` 客户端统计的是 Claude Code 的 Token，而非 Claud
 ```
 
 同一 rollout 的多个副本只计一次，因此同时存在于两个目录中、或同时有普通文件和压缩文件的会话，其使用量不会被重复计算。
+
+**云端任务：** Tokscale 不会自动获取 Codex cloud (`chatgpt.com/codex`) 的任务历史。没有本地 rollout 的任务不会计入本地总量、报告、导出、提交或排行榜。运行 `tokscale codex activity` 或 `tokscale codex activity --json`，可通过已安装的 Codex app-server 的当前认证查看带有获取时间的账号活动快照。此查询仅在显式运行时进行；`tokscale clients` 只显示本地收集范围。
+
+账号活动可能涵盖本机保留的 rollout 之外的用量，但其 Token 计算方式和日期边界并不保证与本地解析相同。账号值减去本地总量并不能确定云端用量：其他设备、账号差异以及缺失的本地历史也会造成差值。快照与本地总量、报告、导出、提交及排行榜保持分离，费用显示为不可用 (`N/A`)。
 
 ### Copilot CLI
 

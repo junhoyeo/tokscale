@@ -119,6 +119,7 @@
 | <img width="48px" src="https://github.com/meta-models.png" alt="Muse Code" /> | [Muse Code](https://dev.meta.ai/docs/muse-code) | `~/.local/share/muse/sessions/**/session.jsonl` (Windows 포함 전 플랫폼 공통 XDG 경로, `subagent/<uuid>/` 하위 서브에이전트 기록 포함) |
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json` (Windows 포함 전 플랫폼 공통 경로, 루트는 `VIBE_HOME`으로 변경 가능) |
+| <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
 | <img width="48px" src=".github/assets/client-shelley.png" alt="Shelley" /> | [Shelley](https://shelley.dev) | `~/.config/shelley/shelley.db` (경로를 옮겼다면 `scanner.extraScanPaths.shelley`로 지정) |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -193,7 +194,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Shelley 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma, Shelley 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -428,7 +429,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `shelley`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `proma`, `shelley`.
 
 > **Breaking change (v4.0.0):** 클라이언트별 boolean 플래그(`--opencode`, `--claude`, `--codex` 등)는 제거되었으며 이제 오류를 발생시킵니다. 대신 정식 `--client`/`-c` 플래그를 사용하세요 — 예: `tokscale --client opencode,claude`.
 
@@ -1127,7 +1128,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Shelley)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma, Shelley)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1553,6 +1554,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Muse Code | `~/.local/share/muse/sessions/` | `%USERPROFILE%\.local\share\muse\sessions\` | 전 플랫폼 공통 XDG 경로; `session.jsonl`의 `model_completed` 사용량 이벤트와 `subagent/` 기록 파싱 |
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 계정별 네이티브 브라우저 사용량; `messages.jsonl`만 읽고 artifacts, memory, passwords 제외. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (기본값: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (기본값: `%USERPROFILE%\.vibe\logs\session\`) | 전 플랫폼 공통 `~/.vibe` 루트; 각 세션 디렉터리의 `meta.json` 누적 `stats`만 읽고 `messages.jsonl` 대화 내용은 읽지 않음 |
+| Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | Pi SDK 사용량을 표시용 사본보다 우선하며, 이전 Claude SDK 기록과 단독 표시 로그도 지원합니다. [집계 방식과 제한](docs/proma.md)을 참고하세요. |
 | Shelley | `~/.config/shelley/shelley.db` | — | macOS와 Linux만 지원. 경로를 옮겼다면 `scanner.extraScanPaths.shelley`로 지정 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 일부 도구는 크로스 플랫폼 일관성을 위해 Unix 스타일 경로(`.local/share` 등)를 사용하고, Goose를 포함한 다른 도구는 위 표의 Windows 기본 경로(`%APPDATA%` 등)를 사용합니다.
@@ -1714,7 +1716,11 @@ Tokscale의 기본 home-root 위치 밖에 세션을 보관하는 경우, 클라
 
 `~/.claude/transcripts/` 아래의 래퍼 트랜스크립트 파일은 실제 Claude 사용량 메타데이터를 포함할 때만 계산됩니다. 사용자/도구 이벤트는 있지만 `usage` 블록이 없는 파일은 추정하지 않고 건너뜁니다.
 
-Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude Desktop 채팅 회계가 아닙니다. Claude Desktop은 `~/Library/Application Support/Claude` 같은 위치에 앱 데이터를 저장하지만, Anthropic은 소비자용 데스크톱 채팅이나 채팅 기록 내보내기에 대한 안정적인 로컬 메시지별 토큰 원장을 문서화하지 않습니다. Claude Desktop 데이터는 존재하지만 Claude Code JSONL 루트만 스캔 가능한 경우 `tokscale clients`를 실행하면 진단 정보를 볼 수 있습니다. `tokscale usage`는 Claude Code 자격 증명으로부터 best-effort Claude 구독 할당량 막대를 표시할 수 있는 반면, 조직/API 사용량은 Anthropic의 Admin Usage and Cost API에 속하며 로컬 트랜스크립트 스캔과는 의도적으로 분리되어 있습니다.
+`claude` 클라이언트는 Claude Desktop에 남아 있는 Code/Cowork 트랜스크립트와 대화 캐시의 사용량 정보도 로컬에서 읽습니다. 캐시는 전체 계정 이력이 아니므로 삭제되거나 일부만 남은 대화, 사용량 카운터가 없는 채팅은 누락될 수 있습니다. 대화 텍스트로 토큰을 추정하지 않습니다. 날짜를 알 수 없는 누적 잔여량은 전체 기간의 로컬 합계에만 반영하며, 날짜별 보고서·그래프·리더보드 제출에서는 제외합니다. 가격표로 계산한 비용은 API 사용 기준 추정치이며 구독 요금이 아닙니다. `tokscale usage`는 구독 할당량을 별도로 보여줍니다.
+
+**클라우드/웹 세션:** Tokscale은 Claude Code 웹 버전(`claude.ai/code`)의 세션 이력을 자동으로 가져오지 않습니다. 사용량이 클라우드에만 남아 있는 세션은 로컬 합계·보고서·내보내기·제출·리더보드에 포함되지 않습니다. 로컬 트랜스크립트와 Desktop 캐시에 기록된 사용량은 위의 수집 범위와 날짜 제한에 따라 집계할 수 있습니다. `tokscale clients`는 클라우드 계정 조회 없이 이 수집 범위를 안내합니다.
+
+Claude의 [`--teleport <session-id>`](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal)는 클라우드 세션을 로컬 터미널로 가져옵니다. Tokscale이 해당 이력을 집계하려면 가져온 로컬 기록에 사용량 메타데이터가 있어야 합니다. 대화 텍스트만으로는 부족하며, teleport가 완전한 토큰 이력을 보장하지는 않습니다. 기본 경로 밖의 트랜스크립트는 `scanner.extraScanPaths`로 추가할 수 있습니다.
 
 ### Codex CLI
 
@@ -1726,6 +1732,10 @@ Tokscale의 `claude` 클라이언트는 Claude Code 토큰 회계이며, Claude 
 ```
 
 같은 rollout의 사본은 한 번만 집계됩니다. 두 디렉터리에 모두 있거나 일반 파일과 압축 파일로 함께 있는 세션도 사용량이 두 번 잡히지 않습니다.
+
+**클라우드 작업:** Tokscale은 Codex 클라우드(`chatgpt.com/codex`)의 작업 이력을 자동으로 가져오지 않습니다. 로컬 rollout이 없는 작업은 로컬 합계·보고서·내보내기·제출·리더보드에 포함되지 않습니다. `tokscale codex activity` 또는 `tokscale codex activity --json`을 실행하면 설치된 Codex app-server의 현재 인증으로 조회 시각이 표시된 계정 활동 스냅샷을 확인할 수 있습니다. 이 조회는 명시적으로 실행할 때만 이루어지며, `tokscale clients`는 로컬 수집 범위만 안내합니다.
+
+계정 활동에는 이 기기에 남은 rollout 밖의 사용량이 포함될 수 있지만, 토큰 계산 방식과 날짜 경계가 로컬 파싱과 동일하다는 보장은 없습니다. 계정 값에서 로컬 합계를 빼도 클라우드 사용량이 되지는 않습니다. 다른 기기, 계정 차이, 누락된 로컬 이력도 차이를 만들 수 있습니다. 스냅샷은 로컬 합계·보고서·내보내기·제출·리더보드와 분리되며 비용은 확인할 수 없음(`N/A`)으로 표시됩니다.
 
 ### Copilot CLI
 

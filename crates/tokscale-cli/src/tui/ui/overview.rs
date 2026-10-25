@@ -15,6 +15,7 @@ struct ModelRowData {
     color_key: String,
     provider: String,
     workspace_label: Option<String>,
+    machine: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
     tokens_cache_read: u64,
@@ -22,15 +23,24 @@ struct ModelRowData {
     cost: f64,
 }
 
-fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option<&str>) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
-        format!(
+fn overview_model_label(
+    group_by: &GroupBy,
+    model: &str,
+    workspace_label: Option<&str>,
+    machine: Option<&str>,
+) -> String {
+    match group_by {
+        GroupBy::WorkspaceModel => format!(
             "{} / {}",
             workspace_label.unwrap_or("Unknown workspace"),
             model
-        )
-    } else {
-        model.to_string()
+        ),
+        GroupBy::MachineModel => format!(
+            "{} / {}",
+            machine.unwrap_or(tokscale_core::machine_label::DEFAULT_LOCAL_MACHINE_LABEL),
+            model
+        ),
+        _ => model.to_string(),
     }
 }
 
@@ -158,7 +168,12 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         .take(legend_limit)
         .map(|m| {
             (
-                overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
+                overview_model_label(
+                    &group_by,
+                    &m.model,
+                    m.workspace_label.as_deref(),
+                    m.machine.as_deref(),
+                ),
                 app.model_color_for(&m.provider, &m.color_key),
             )
         })
@@ -220,6 +235,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             color_key: m.color_key.clone(),
             provider: m.provider.clone(),
             workspace_label: m.workspace_label.clone(),
+            machine: m.machine.clone(),
             tokens_input: m.tokens.input,
             tokens_output: m.tokens.output,
             tokens_cache_read: m.tokens.cache_read,
@@ -318,8 +334,12 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         };
 
         let model_color = app.model_color_for(&model.provider, &model.color_key);
-        let display_name =
-            overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
+        let display_name = overview_model_label(
+            &group_by,
+            &model.model,
+            model.workspace_label.as_deref(),
+            model.machine.as_deref(),
+        );
         // Measured in cells, not code points: `max_name_width` is derived from
         // `inner.width`, and a workspace path can hold full-width graphemes (a CJK
         // directory name), which a char count calls short at twice the cells it

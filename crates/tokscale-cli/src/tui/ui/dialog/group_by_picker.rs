@@ -70,6 +70,11 @@ impl GroupByPickerDialog {
                 label: tr(lang, MessageKey::GroupByClientSessionLabel),
                 description: tr(lang, MessageKey::GroupByClientSessionDesc),
             },
+            GroupByOption {
+                value: GroupBy::MachineModel,
+                label: tr(lang, MessageKey::GroupByMachineModelLabel),
+                description: tr(lang, MessageKey::GroupByMachineModelDesc),
+            },
         ];
 
         let cursor = options.iter().position(|o| o.value == current).unwrap_or(1);
@@ -95,12 +100,12 @@ impl GroupByPickerDialog {
 
 impl DialogContent for GroupByPickerDialog {
     fn desired_size(&self, viewport: Rect) -> (u16, u16) {
-        // 6 options render as 2 lines each (label + description) = 12 rows,
-        // plus header (1) + divider (1) + hint (1) + borders (2). Cap at 18
+        // 7 options render as 2 lines each (label + description) = 14 rows,
+        // plus header (1) + divider (1) + hint (1) + borders (2). Cap at 20
         // so every option stays visible without scrolling on a typical
-        // terminal; matches source_picker's sizing.
+        // terminal.
         let width = 52u16.min(viewport.width.saturating_sub(4));
-        let height = 18u16.min(viewport.height.saturating_sub(4));
+        let height = 20u16.min(viewport.height.saturating_sub(4));
         (width, height)
     }
 
@@ -224,5 +229,59 @@ impl DialogContent for GroupByPickerDialog {
             }
             _ => DialogResult::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::i18n::TuiLanguage;
+
+    fn picker(current: GroupBy) -> GroupByPickerDialog {
+        GroupByPickerDialog::new(
+            Rc::new(RefCell::new(current)),
+            Rc::new(RefCell::new(false)),
+            TuiLanguage::En,
+        )
+    }
+
+    #[test]
+    fn picker_offers_machine_and_model() {
+        let dialog = picker(GroupBy::Model);
+        let option = dialog
+            .options
+            .iter()
+            .find(|option| option.value == GroupBy::MachineModel)
+            .expect("machine,model is offered");
+        assert_eq!(option.label, "Machine + Model");
+    }
+
+    #[test]
+    fn choosing_machine_and_model_requests_a_reload() {
+        let selected = Rc::new(RefCell::new(GroupBy::Model));
+        let needs_reload = Rc::new(RefCell::new(false));
+        let mut dialog =
+            GroupByPickerDialog::new(selected.clone(), needs_reload.clone(), TuiLanguage::En);
+        dialog.cursor = dialog
+            .options
+            .iter()
+            .position(|option| option.value == GroupBy::MachineModel)
+            .unwrap();
+        dialog.select_current();
+        assert_eq!(*selected.borrow(), GroupBy::MachineModel);
+        assert!(*needs_reload.borrow());
+    }
+
+    #[test]
+    fn every_option_fits_the_dialog_height() {
+        let dialog = picker(GroupBy::MachineModel);
+        let (_, height) = dialog.desired_size(Rect::new(0, 0, 200, 60));
+        // Two lines per option, plus header, divider, hint and borders.
+        assert!(height as usize >= dialog.options.len() * 2 + 5);
+        assert_eq!(
+            dialog.cursor,
+            dialog.options.len() - 1,
+            "the cursor starts on the active grouping"
+        );
     }
 }

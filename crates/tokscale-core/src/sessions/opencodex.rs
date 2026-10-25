@@ -11,6 +11,9 @@ use once_cell::sync::Lazy;
 use super::{CostSource, UnifiedMessage};
 
 const MAX_END_SKEW_MS: u64 = 2_000;
+// Codex can persist its token_count after OpenCodex records the response end.
+// Only allow a wider skew when Codex is late; early events keep the 2s bound.
+const MAX_LATE_END_SKEW_MS: i64 = 30_000;
 const MAX_START_SKEW_MS: u64 = 120_000;
 /// Bounds how far a response's recorded end can sit after its start while a
 /// start-less Codex record is still correlated through its end anchor. Longer
@@ -238,7 +241,7 @@ impl AttributionIndex {
         let back = if message.duration_ms.is_some_and(|duration| duration >= 0) {
             MAX_START_SKEW_MS as i64
         } else {
-            MAX_END_SKEW_MS as i64 + MAX_RESPONSE_DURATION_MS
+            MAX_LATE_END_SKEW_MS + MAX_RESPONSE_DURATION_MS
         };
         let first =
             rows.partition_point(|row| row.timestamp < message.timestamp.saturating_sub(back));
@@ -345,17 +348,19 @@ fn timing_matches(message: &UnifiedMessage, row: &IndexedRow) -> bool {
     }
 
     let row_end = row.timestamp.saturating_add(row.duration_ms);
-    if let Some(duration_ms) = message.duration_ms.filter(|duration| *duration >= 0) {
-        if message.timestamp.abs_diff(row.timestamp) > MAX_START_SKEW_MS {
-            return false;
-        }
-        let message_end = message.timestamp.saturating_add(duration_ms);
-        message_end.abs_diff(row_end) <= MAX_END_SKEW_MS
-    } else {
-        // An unconfirmed `token_usage_record` is timestamped when the response
-        // lands, so its time anchors on the request's end, not its start.
-        message.timestamp.abs_diff(row_end) <= MAX_END_SKEW_MS
-    }
+    let message_end =
+        if let Some(duration_ms) = message.duration_ms.filter(|duration| *duration >= 0) {
+            if message.timestamp.abs_diff(row.timestamp) > MAX_START_SKEW_MS {
+                return false;
+            }
+            message.timestamp.saturating_add(duration_ms)
+        } else {
+            // An unconfirmed `token_usage_record` is timestamped when the response
+            // lands, so its time anchors on the request's end, not its start.
+            message.timestamp
+        };
+    (-(MAX_END_SKEW_MS as i64)..=MAX_LATE_END_SKEW_MS)
+        .contains(&message_end.saturating_sub(row_end))
 }
 
 fn usage_matches(message: &UnifiedMessage, usage: &PersistedUsage) -> bool {
@@ -929,6 +934,77 @@ mod tests {
     }
 
     #[test]
+    fn delayed_codex_usage_is_attributed_with_and_without_duration() {
+        let home = TempDir::new().unwrap();
+        write_ledger(home.path(), &[row(200, 200, Some(usage()))], false);
+
+        for has_duration in [true, false] {
+            let mut message = codex_message();
+            if has_duration {
+                message.duration_ms = Some(DURATION + 25_000);
+            } else {
+                message.timestamp = START + DURATION + 25_000;
+                message.duration_ms = None;
+            }
+            let mut messages = vec![message];
+
+            assert_eq!(
+                attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+                1
+            );
+            assert_eq!(messages[0].model_id, SERVED_MODEL);
+        }
+    }
+
+    #[test]
+    fn delayed_codex_usage_keeps_strict_early_and_late_boundaries() {
+        let home = TempDir::new().unwrap();
+        write_ledger(home.path(), &[row(200, 200, Some(usage()))], false);
+
+        for (skew_ms, expected_count) in [(-2_001, 0), (-2_000, 1), (30_000, 1), (30_001, 0)] {
+            let mut message = codex_message();
+            message.duration_ms = Some(DURATION + skew_ms);
+            let mut messages = vec![message];
+
+            assert_eq!(
+                attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+                expected_count,
+                "unexpected attribution at skew {skew_ms}ms"
+            );
+            assert_eq!(
+                messages[0].model_id,
+                if expected_count == 1 {
+                    SERVED_MODEL
+                } else {
+                    SELECTOR
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn delayed_codex_usage_still_rejects_multiple_candidate_rows() {
+        let home = TempDir::new().unwrap();
+        let mut competing = row_with_served(OTHER_SERVED_MODEL, 200, 200, Some(usage()));
+        competing["timestamp"] = json!(START + ROW_START_OFFSET + 10_000);
+        write_ledger(
+            home.path(),
+            &[row(200, 200, Some(usage())), competing],
+            false,
+        );
+
+        let mut message = codex_message();
+        message.duration_ms = Some(DURATION + 25_000);
+        let mut messages = vec![message];
+
+        assert_eq!(
+            attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+            0
+        );
+        assert_eq!(messages[0].model_id, SELECTOR);
+    }
+
+    #[test]
     fn distant_matching_usage_does_not_attribute() {
         let home = TempDir::new().unwrap();
         let mut distant = row(200, 200, Some(usage()));
@@ -955,6 +1031,22 @@ mod tests {
         );
         assert!(messages.iter().all(|message| message.model_id == SELECTOR));
         assert!(messages.iter().all(|message| message.cost == 7.0));
+    }
+
+    #[test]
+    fn late_usage_does_not_claim_a_row_shared_by_two_codex_messages() {
+        let home = TempDir::new().unwrap();
+        write_ledger(home.path(), &[row(200, 200, Some(usage()))], false);
+        let first = codex_message();
+        let mut second = codex_message();
+        second.timestamp += 8_000;
+        let mut messages = vec![first, second];
+
+        assert_eq!(
+            attribute_codex_messages(home.path().to_str().unwrap(), false, &mut messages),
+            0
+        );
+        assert!(messages.iter().all(|message| message.model_id == SELECTOR));
     }
 
     #[test]

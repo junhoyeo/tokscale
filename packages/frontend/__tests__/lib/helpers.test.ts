@@ -209,6 +209,82 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.foldPreservedClients).toEqual(new Set(["kilo"]));
     });
   });
+
+  describe("suppressDisappearedNotices parameter (#1513 bounded-window noise)", () => {
+    // The flag exists for days a bounded submit dates only through its
+    // declared-complete clients: every other client's absence there is the
+    // date filter, not a disappearance. It must change WARNING OUTPUT ONLY —
+    // the merged bytes and the fold bookkeeping must be identical, or the
+    // flag would silently alter stored history.
+    const cases: Array<[string, Record<string, ClientBreakdownData>, Record<string, ClientBreakdownData>]> = [
+      [
+        "disappeared client with tokens (preserve + derive provenance)",
+        { codex: makeClient(1000, 5, 2), cursor: makeClient(500, 3, 1) },
+        { codex: makeClient(1200, 6, 2) },
+      ],
+      [
+        "disappeared client with zero tokens (cell dropped)",
+        { codex: makeClient(1000, 5, 2), cursor: makeClient(0, 0, 0) },
+        { codex: makeClient(1200, 6, 2) },
+      ],
+      [
+        "token-regression preserve for a present client",
+        { codex: makeClient(1000, 5, 2) },
+        { codex: makeClient(800, 5, 2) },
+      ],
+      ["normal growth", { codex: makeClient(800, 4, 2) }, { codex: makeClient(1000, 5, 2) }],
+    ];
+
+    for (const [name, existing, incoming] of cases) {
+      it(`keeps merged bytes identical: ${name}`, () => {
+        const clients = new Set([...Object.keys(existing), ...Object.keys(incoming)]);
+        const loud = mergeClientBreakdownsWithRegressionGuard(
+          structuredClone(existing),
+          structuredClone(incoming),
+          new Set(clients),
+          undefined,
+          true,
+          false
+        );
+        const suppressed = mergeClientBreakdownsWithRegressionGuard(
+          structuredClone(existing),
+          structuredClone(incoming),
+          new Set(clients),
+          undefined,
+          true,
+          true
+        );
+
+        expect(JSON.stringify(suppressed.merged)).toBe(JSON.stringify(loud.merged));
+        expect(suppressed.foldPreservedClients).toEqual(loud.foldPreservedClients);
+        // Only the disappeared notices are dropped; every other warning stays.
+        expect(suppressed.warnings).toEqual(
+          loud.warnings.filter((warning) => !warning.includes("disappeared"))
+        );
+      });
+    }
+
+    it("still emits non-disappeared warnings while suppressing", () => {
+      const existing = { codex: makeClient(1000, 5, 2), cursor: makeClient(500, 3, 1) };
+      const incoming = { codex: makeClient(800, 5, 2) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(["codex", "cursor"]),
+        undefined,
+        true,
+        true
+      );
+
+      // The codex token-regression preserve still warns; only cursor's
+      // disappeared notice is suppressed.
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("codex");
+      expect(result.warnings[0]).not.toContain("disappeared");
+      expect(result.merged.cursor.tokens).toBe(500);
+    });
+  });
 });
 
 describe("applyCostCompleteness", () => {

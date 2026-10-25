@@ -1,12 +1,13 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::sessions::WORKTREE_SEPARATOR;
-use tokscale_core::ClientId;
+use tokscale_core::{ClientId, GroupBy};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
 use crate::ui_glyphs::Glyphs;
 
@@ -874,6 +875,7 @@ pub fn get_client_color(client: &str) -> Color {
         "prime-agent" => Color::Rgb(108, 99, 255), // #6C63FF Prime violet
         "unsloth" => Color::Rgb(88, 204, 2), // #58CC02 Unsloth green
         "muse" => Color::Rgb(0, 100, 224),   // #0064E0 Muse brand blue
+        "proma" => Color::Rgb(99, 102, 241), // #6366F1
         "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
         "shelley" => Color::Rgb(29, 63, 216), // #1d3fd8 Shelley ballpoint blue
         _ => Color::Rgb(136, 136, 136),      // #888888
@@ -896,6 +898,26 @@ pub fn get_client_display_name(client: &str) -> String {
     registered_client_display_name(client)
         .unwrap_or(client)
         .to_string()
+}
+
+/// Header of the Source column in the time-period views. For `machine,model`
+/// their breakdowns are keyed by machine label, so the column names machines.
+pub fn period_source_header(lang: TuiLanguage, group_by: &GroupBy) -> &'static str {
+    if *group_by == GroupBy::MachineModel {
+        tr(lang, MessageKey::ColMachine)
+    } else {
+        tr(lang, MessageKey::ColSource)
+    }
+}
+
+/// Display text for one key of a time-period breakdown: a machine label as
+/// written for `machine,model`, a client's display name otherwise.
+pub fn period_source_display_name(group_by: &GroupBy, source: &str) -> String {
+    if *group_by == GroupBy::MachineModel {
+        source.to_string()
+    } else {
+        get_client_display_name(source)
+    }
 }
 
 pub fn get_compact_client_display_name(client: &str) -> String {

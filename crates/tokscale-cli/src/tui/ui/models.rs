@@ -43,6 +43,12 @@ fn workspace_column_width(total: u16) -> u16 {
     }
 }
 
+/// Whether `group_by` uses the workspace layout: an extra label column after
+/// Rank (the workspace, or the machine for `machine,model`) and no Cache✕.
+fn uses_label_column(group_by: &GroupBy) -> bool {
+    matches!(group_by, GroupBy::WorkspaceModel | GroupBy::MachineModel)
+}
+
 /// Column indices in the workspace layout, for callers that need a cell's budget.
 const WORKSPACE_COL_WORKSPACE: usize = 1;
 const WORKSPACE_COL_MODEL: usize = 2;
@@ -95,10 +101,15 @@ fn header_labels(
             tr(lang, MessageKey::ColCost),
         ];
     }
-    if *group_by == GroupBy::WorkspaceModel {
+    if uses_label_column(group_by) {
+        let label_column = if *group_by == GroupBy::MachineModel {
+            MessageKey::ColMachine
+        } else {
+            MessageKey::ColWorkspace
+        };
         return vec![
             tr(lang, MessageKey::ColRank),
-            tr(lang, MessageKey::ColWorkspace),
+            tr(lang, label_column),
             tr(lang, MessageKey::ColModel),
             tr(lang, MessageKey::ColProvider),
             tr(lang, MessageKey::ColSource),
@@ -156,7 +167,7 @@ fn header_widths(
             Constraint::Percentage(25),
         ];
     }
-    if *group_by == GroupBy::WorkspaceModel {
+    if uses_label_column(group_by) {
         // Same shape as the default layout, with a wider Workspace column once the
         // row has surplus cells to give it. Model keeps the flexible slot so the
         // workspace column can never widen at Cost's expense. Shared with
@@ -217,14 +228,21 @@ fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
         .unwrap_or("Unknown workspace")
 }
 
+fn machine_label(model: &crate::tui::data::ModelUsage) -> &str {
+    model
+        .machine
+        .as_deref()
+        .unwrap_or(tokscale_core::machine_label::DEFAULT_LOCAL_MACHINE_LABEL)
+}
+
 pub(super) fn model_display_name(
     model: &crate::tui::data::ModelUsage,
     group_by: &GroupBy,
 ) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
-        format!("{} / {}", workspace_label(model), model.model)
-    } else {
-        model.model.clone()
+    match group_by {
+        GroupBy::WorkspaceModel => format!("{} / {}", workspace_label(model), model.model),
+        GroupBy::MachineModel => format!("{} / {}", machine_label(model), model.model),
+        _ => model.model.clone(),
     }
 }
 
@@ -327,7 +345,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Solve the workspace layout once per render, not once per cell: the widths
     // depend only on `inner.width`, so running the solver inside the row loop
     // repeated the same work (and its allocation) twice for every visible row.
-    let workspace_widths = if group_by == GroupBy::WorkspaceModel {
+    let workspace_widths = if uses_label_column(&group_by) {
         workspace_table_widths(inner.width)
     } else {
         Vec::new()
@@ -358,19 +376,23 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
-            } else if group_by == GroupBy::WorkspaceModel {
-                vec![
-                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
+            } else if uses_label_column(&group_by) {
+                let label = if group_by == GroupBy::MachineModel {
+                    truncate_to_width(machine_label(model), granted(WORKSPACE_COL_WORKSPACE))
+                } else {
                     // Not a plain head cut, unlike every other cell: a workspace
                     // label is identified by the ends of each of its segments,
                     // and cutting the tail leaves the prefix every row shares —
                     // which rendered distinct worktrees as identical rows at the
                     // 18 cells this column gets on an ordinary terminal.
-                    Cell::from(fit_workspace_label_to_width(
+                    fit_workspace_label_to_width(
                         workspace_label(model),
                         granted(WORKSPACE_COL_WORKSPACE),
-                    ))
-                    .style(
+                    )
+                };
+                vec![
+                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
+                    Cell::from(label).style(
                         Style::default()
                             .fg(theme_accent)
                             .add_modifier(Modifier::BOLD),
@@ -730,6 +752,7 @@ mod tests {
             workspace_key: Some("/Users/z/devpro/ea/ea-world-service".to_string()),
             // The label the aggregator now produces for a worktree row.
             workspace_label: Some("ea-world-service ⑃ nicole-25-20".to_string()),
+            machine: None,
             tokens: Default::default(),
             cost: 5367.48,
             performance: Default::default(),
@@ -815,6 +838,7 @@ mod tests {
             client: "claude".to_string(),
             workspace_key: Some("/Users/z/tokscale".to_string()),
             workspace_label: Some("tokscale ⑃ main".to_string()),
+            machine: None,
             tokens: Default::default(),
             cost: 12.5,
             performance: Default::default(),
@@ -890,13 +914,15 @@ mod tests {
             // Below and above the surplus threshold, i.e. Workspace at 18 cells
             // and at 44.
             for inner in [WORKSPACE_SURPLUS_MIN_WIDTH - 1, WORKSPACE_SURPLUS_MIN_WIDTH] {
-                assert_header_layout_fits(
-                    &format!("models/wide-workspace(inner={inner})"),
-                    lang,
-                    &header_labels(lang, false, false, &GroupBy::WorkspaceModel),
-                    &header_widths(false, false, &GroupBy::WorkspaceModel, inner),
-                    &WIDE_SORTABLE,
-                );
+                for group_by in [GroupBy::WorkspaceModel, GroupBy::MachineModel] {
+                    assert_header_layout_fits(
+                        &format!("models/wide-label-column(inner={inner},group={group_by:?})"),
+                        lang,
+                        &header_labels(lang, false, false, &group_by),
+                        &header_widths(false, false, &group_by, inner),
+                        &WIDE_SORTABLE,
+                    );
+                }
             }
         }
     }
@@ -908,7 +934,11 @@ mod tests {
     /// this tab never solved, not a localization defect.
     #[test]
     fn every_language_renders_its_full_header_once_the_layout_fits() {
-        for group_by in [GroupBy::Model, GroupBy::WorkspaceModel] {
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::WorkspaceModel,
+            GroupBy::MachineModel,
+        ] {
             // Measured at a width above the Workspace surplus threshold, which is
             // the wider of the two workspace layouts and therefore the binding
             // one; the default layout does not vary with width at all.
@@ -933,5 +963,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `machine,model` reuses the workspace layout with a Machine header in the
+    /// Workspace slot, so its labels stay index-aligned with the widths.
+    #[test]
+    fn machine_layout_names_its_label_column_machine() {
+        for lang in TuiLanguage::ALL {
+            let machine = header_labels(lang, false, false, &GroupBy::MachineModel);
+            let workspace = header_labels(lang, false, false, &GroupBy::WorkspaceModel);
+            assert_eq!(machine.len(), workspace.len());
+            assert_eq!(
+                machine.len(),
+                header_widths(false, false, &GroupBy::MachineModel, 200).len()
+            );
+            assert_eq!(
+                machine[WORKSPACE_COL_WORKSPACE],
+                tr(lang, MessageKey::ColMachine)
+            );
+            for (index, (a, b)) in machine.iter().zip(&workspace).enumerate() {
+                if index != WORKSPACE_COL_WORKSPACE {
+                    assert_eq!(a, b, "column {index} differs in {lang:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn machine_rows_show_the_machine_before_the_model() {
+        use crate::tui::data::ModelUsage;
+        let row = ModelUsage {
+            model: "gpt-5.4".to_string(),
+            color_key: "gpt-5.4".to_string(),
+            provider: "openai".to_string(),
+            client: "codex".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            machine: Some("steven".to_string()),
+            tokens: Default::default(),
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 1,
+            group_key: String::new(),
+            daily: Vec::new(),
+        };
+        assert_eq!(
+            model_display_name(&row, &GroupBy::MachineModel),
+            "steven / gpt-5.4"
+        );
+        assert_eq!(model_display_name(&row, &GroupBy::Model), "gpt-5.4");
     }
 }

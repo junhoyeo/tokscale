@@ -803,7 +803,9 @@ describe("POST /api/submit auth path", () => {
       expect.any(Set),
       expect.any(Map),
       // #1044: submissions that omit the flag are complete.
-      true
+      true,
+      // #1513 follow-up: no scanScope declaration, so no notice suppression.
+      false
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -1187,7 +1189,9 @@ describe("POST /api/submit auth path", () => {
       expect.any(Set),
       expect.any(Map),
       // #1044: submissions that omit the flag are complete.
-      true
+      true,
+      // #1513 follow-up: no scanScope declaration, so no notice suppression.
+      false
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -2055,7 +2059,9 @@ describe("POST /api/submit auth path", () => {
       expect.any(Set),
       expect.any(Map),
       // #1044: submissions that omit the flag are complete.
-      true
+      true,
+      // #1513 follow-up: no scanScope declaration, so no notice suppression.
+      false
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,

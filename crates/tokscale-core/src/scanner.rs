@@ -79,6 +79,27 @@ pub struct ScannerSettings {
     /// An unparseable value degrades to unpinned rather than failing the scan.
     #[serde(default)]
     pub bucket_timezone: Option<String>,
+    /// Machine labels for session folders mirrored from other machines, as
+    /// `{ "<folder>": "<label>" }`.
+    ///
+    /// Every session file under a listed folder is attributed to that label,
+    /// so the `machine,model` grouping can split usage by machine. The longest
+    /// matching folder wins; see [`crate::machine_label`] for the matching
+    /// rules. A malformed value reads as empty instead of failing the load.
+    #[serde(
+        default,
+        deserialize_with = "crate::machine_label::deserialize_machine_labels_lossy",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub machine_labels: BTreeMap<String, String>,
+    /// Label for session files under no `machineLabels` folder. Unset means
+    /// [`crate::machine_label::DEFAULT_LOCAL_MACHINE_LABEL`].
+    #[serde(
+        default,
+        deserialize_with = "crate::machine_label::deserialize_local_machine_label_lossy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub local_machine_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,6 +567,14 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "proma-session" => {
+                    file_name.ends_with(".jsonl")
+                        && file_type.is_file()
+                        && (Path::new(root)
+                            .file_name()
+                            .is_none_or(|n| n != "agent-sessions")
+                            || path.parent() == Some(Path::new(root)))
+                }
                 "prime-agent-session" => {
                     file_name.ends_with(".jsonl") && file_name != "rlm-subagents.jsonl"
                 }
@@ -2153,6 +2182,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::DevinCli
                 | ClientId::Grok
                 | ClientId::PrimeAgent
+                | ClientId::Proma
         ) {
             continue;
         }
@@ -2175,7 +2205,11 @@ fn scan_all_clients_with_env_strategy_inner(
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_lookups) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
-        if client_id == ClientId::DevinCli {
+        if client_id == ClientId::Proma {
+            for root in crate::sessions::proma::session_roots(&path) {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, root);
+            }
+        } else if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
@@ -2523,6 +2557,16 @@ fn scan_all_clients_with_env_strategy_inner(
                 ClientId::OpenClaw,
                 legacy_path,
             );
+        }
+    }
+
+    if enabled.contains(&ClientId::Proma) {
+        for relative in [".proma", ".proma-dev"] {
+            for path in crate::sessions::proma::session_roots(&PathBuf::from(join_native(
+                home_dir, relative,
+            ))) {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Proma, path);
+            }
         }
     }
 

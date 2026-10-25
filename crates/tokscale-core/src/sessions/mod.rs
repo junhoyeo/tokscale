@@ -51,6 +51,7 @@ pub mod opencodereview;
 pub(crate) mod opencodex;
 pub mod pi;
 pub mod prime_agent;
+pub mod proma;
 pub mod qwen;
 pub mod reasonix;
 pub mod roocode;
@@ -183,6 +184,13 @@ pub struct UnifiedMessage {
     /// cache envelope so adding this does not change other clients' wire layout.
     #[serde(skip)]
     pub copilot_context: Option<copilot::CopilotContextProvenance>,
+    /// Machine whose session file this message was read from: the
+    /// `scanner.machineLabels` label of the folder holding the file, else
+    /// `scanner.localMachineLabel` when set. `None` is the default local
+    /// label. Assigned per source file after parsing or a cache load, so it is
+    /// never part of the source-cache layout.
+    #[serde(skip)]
+    pub machine_label: Option<String>,
 }
 
 const fn default_message_count() -> i32 {
@@ -464,6 +472,7 @@ impl UnifiedMessage {
             is_turn_start: false,
             model_attribution_conflicted: false,
             copilot_context: None,
+            machine_label: None,
             billing_identity: BillingIdentity::Unknown,
             pricing_model_id: None,
             estimate_status: EstimateStatus::Unpriced,

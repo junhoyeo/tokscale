@@ -846,6 +846,7 @@ mod tests {
             (GroupBy::WorkspaceModel, WorktreeRollup::Separate),
             (GroupBy::Session, WorktreeRollup::MergeIntoRepo),
             (GroupBy::ClientSession, WorktreeRollup::MergeIntoRepo),
+            (GroupBy::MachineModel, WorktreeRollup::MergeIntoRepo),
         ];
         for (group_by, worktree_rollup) in group_variants {
             let mut app = make_app_on(Tab::Sessions);

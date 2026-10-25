@@ -225,6 +225,13 @@
       "when": 1792076332157,
       "tag": "0031_group_week_start_constraint",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792738098563,
+      "tag": "0032_late_nomad",
+      "breakpoints": true
     }
   ]
 }

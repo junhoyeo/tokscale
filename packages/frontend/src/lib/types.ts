@@ -59,6 +59,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "muse",
   "aside",
   "vibe",
+  "proma",
   "shelley",
 ] as const;
 

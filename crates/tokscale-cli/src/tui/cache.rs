@@ -21,7 +21,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 11;
+const CACHE_SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +153,8 @@ struct CachedModelUsage {
     workspace_key: Option<String>,
     #[serde(default)]
     workspace_label: Option<String>,
+    #[serde(default)]
+    machine: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
     #[serde(default)]
@@ -292,6 +294,7 @@ impl From<&ModelUsage> for CachedModelUsage {
             client: m.client.clone(),
             workspace_key: m.workspace_key.clone(),
             workspace_label: m.workspace_label.clone(),
+            machine: m.machine.clone(),
             tokens: (&m.tokens).into(),
             cost: m.cost,
             performance: m.performance.clone(),
@@ -315,6 +318,7 @@ impl From<CachedModelUsage> for ModelUsage {
             client: m.client,
             workspace_key: m.workspace_key,
             workspace_label: m.workspace_label,
+            machine: m.machine,
             tokens: m.tokens.into(),
             cost: m.cost,
             performance: m.performance,
@@ -1421,7 +1425,7 @@ mod tests {
             &cache_path,
             with_current_generation(
                 r#"{
-  "schemaVersion": 11,
+  "schemaVersion": 12,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
@@ -1700,7 +1704,7 @@ mod tests {
             &cache_path,
             with_current_generation(
                 r#"{
-  "schemaVersion": 11,
+  "schemaVersion": 12,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1949,7 +1953,7 @@ mod tests {
     }
 
     const LEGACY_FALLBACK_PAYLOAD: &str = r#"{
-  "schemaVersion": 11,
+  "schemaVersion": 12,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

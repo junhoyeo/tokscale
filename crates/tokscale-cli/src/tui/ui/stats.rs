@@ -2,7 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::widgets::{
-    format_cost, format_tokens, get_client_color, get_client_display_name, viewport_scrollbar_state,
+    format_cost, format_tokens, get_client_color, period_source_display_name,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ClickAction};
 use crate::tui::data::find_peak_hour;
@@ -711,6 +712,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(app.theme.muted),
             )));
         } else {
+            let group_by = app.group_by.borrow().clone();
             for (client, source_info) in &daily.source_breakdown {
                 let mut models: Vec<_> = source_info.models.values().collect();
                 models.sort_by(|a, b| {
@@ -721,7 +723,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 });
 
                 let client_color = app.theme.color(get_client_color(client));
-                let client_name = get_client_display_name(client);
+                let client_name = period_source_display_name(&group_by, client);
                 let model_count = models.len();
                 let plural = if model_count > 1 { "s" } else { "" };
 

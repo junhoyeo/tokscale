@@ -33,6 +33,58 @@ struct UsageMetadata {
     thoughts_token_count: Option<i64>,
     #[serde(rename = "cachedContentTokenCount")]
     cached_content_token_count: Option<i64>,
+    #[serde(rename = "totalTokenCount")]
+    total_token_count: Option<i64>,
+}
+
+/// Map one Qwen Code `usageMetadata` record onto Tokscale's disjoint buckets.
+///
+/// Qwen Code stores Gemini-shaped usage for every provider, but its fields
+/// overlap. `promptTokenCount` is the whole prompt, cached prefix included:
+/// the OpenAI-compatible and Responses converters copy the provider's
+/// `prompt_tokens` / `input_tokens`, the Anthropic converter adds cache reads
+/// and writes to `input_tokens` unless the provider already counted them
+/// there, and the Gemini API counts cached content inside the prompt too. On
+/// OpenAI-compatible providers `candidatesTokenCount` is `completion_tokens`,
+/// which already contains the reasoning that `thoughtsTokenCount` reports
+/// again. `TokenBreakdown::total()` and `compute_cost` add every bucket, so
+/// each subset is split out once instead of being counted and priced twice.
+fn qwen_token_breakdown(usage: &UsageMetadata) -> TokenBreakdown {
+    let prompt = usage.prompt_token_count.unwrap_or(0).max(0);
+    let candidates = usage.candidates_token_count.unwrap_or(0).max(0);
+    let thoughts = usage.thoughts_token_count.unwrap_or(0).max(0);
+    let cache_read = usage.cached_content_token_count.unwrap_or(0).max(0);
+    let total = usage.total_token_count.unwrap_or(0);
+
+    // A cached count above the prompt cannot be a subset of it, so there is
+    // nothing to split out; keep both as reported.
+    let input = if cache_read <= prompt {
+        prompt - cache_read
+    } else {
+        prompt
+    };
+
+    // Whether the thoughts sit inside the candidates depends on the provider,
+    // and the recorded total tells them apart: OpenAI-compatible providers
+    // report `total_tokens = prompt_tokens + completion_tokens`, while the
+    // Gemini API adds `thoughtsTokenCount` on top of the candidates.
+    let thoughts_in_candidates =
+        thoughts > 0 && total > 0 && total == prompt.saturating_add(candidates);
+    let (output, reasoning) = if thoughts_in_candidates {
+        let reasoning = thoughts.min(candidates);
+        (candidates - reasoning, reasoning)
+    } else {
+        (candidates, thoughts)
+    };
+
+    TokenBreakdown {
+        input,
+        output,
+        cache_read,
+        cache_write: 0, // Qwen CLI doesn't report cache write tokens
+        cache_write_1h: 0,
+        reasoning,
+    }
 }
 
 /// Default model name when not specified
@@ -104,15 +156,10 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
             .and_then(|ts| parse_timestamp_str(&ts))
             .unwrap_or(file_mtime);
 
-        // Extract token counts with defaults
-        let input = usage.prompt_token_count.unwrap_or(0).max(0);
-        let output = usage.candidates_token_count.unwrap_or(0).max(0);
-        let reasoning = usage.thoughts_token_count.unwrap_or(0).max(0);
-        let cache_read = usage.cached_content_token_count.unwrap_or(0).max(0);
-        let cache_write = 0; // Qwen CLI doesn't report cache write tokens
+        let tokens = qwen_token_breakdown(&usage);
 
         // Skip entries with zero tokens
-        if input + output + cache_read + reasoning == 0 {
+        if tokens.total() == 0 {
             return;
         }
 
@@ -132,14 +179,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
             DEFAULT_PROVIDER,
             line_session_id,
             timestamp_ms,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                cache_write_1h: 0,
-                reasoning,
-            },
+            tokens,
             0.0, // Cost calculated later by pricing resolver
             dedup_key,
         );
@@ -239,12 +279,13 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].model_id, "qwen3.5-plus");
-        assert_eq!(messages[0].tokens.input, 100);
+        // promptTokenCount includes the cached tokens.
+        assert_eq!(messages[0].tokens.input, 95);
         assert_eq!(messages[0].tokens.output, 200);
         assert_eq!(messages[0].tokens.reasoning, 10);
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[1].model_id, "qwen3-coder-plus");
-        assert_eq!(messages[1].tokens.input, 300);
+        assert_eq!(messages[1].tokens.input, 290);
         assert_eq!(messages[1].tokens.output, 400);
         assert_eq!(messages[1].tokens.reasoning, 20);
         assert_eq!(messages[1].tokens.cache_read, 10);
@@ -314,8 +355,8 @@ not valid json at all
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[1].tokens.input, 300);
+        assert_eq!(messages[0].tokens.input, 95);
+        assert_eq!(messages[1].tokens.input, 290);
     }
 
     #[test]
@@ -336,11 +377,50 @@ not valid json at all
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 1);
+        // A cached count above the prompt is not a subset of it, so both stay
+        // as reported.
         assert_eq!(messages[0].tokens.input, 1508);
         assert_eq!(messages[0].tokens.output, 205);
         assert_eq!(messages[0].tokens.reasoning, 50);
         assert_eq!(messages[0].tokens.cache_read, 4864);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn test_parse_qwen_counts_cached_and_reasoning_subsets_once() {
+        // OpenAI-compatible providers (Qwen OAuth, DashScope, OpenRouter, ...):
+        // Qwen Code copies `prompt_tokens` and `completion_tokens` verbatim, so
+        // the prompt includes the cached prefix, the candidates include the
+        // reasoning, and the total is prompt + candidates.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 10000, "candidatesTokenCount": 300, "totalTokenCount": 10300, "cachedContentTokenCount": 9000, "thoughtsTokenCount": 120}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.cache_read, 9000);
+        assert_eq!(messages[0].tokens.output, 180);
+        assert_eq!(messages[0].tokens.reasoning, 120);
+        assert_eq!(messages[0].tokens.cache_write, 0);
+        assert_eq!(messages[0].tokens.total(), 10300);
+    }
+
+    #[test]
+    fn test_parse_qwen_keeps_gemini_thoughts_beside_candidates() {
+        // The Gemini API counts the cached prefix inside the prompt too, but
+        // reports thoughts beside the candidates and adds them to the total.
+        let content = r#"{"type": "assistant", "model": "gemini-2.5-pro", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 10000, "candidatesTokenCount": 300, "totalTokenCount": 10420, "cachedContentTokenCount": 9000, "thoughtsTokenCount": 120}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.cache_read, 9000);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_eq!(messages[0].tokens.reasoning, 120);
+        assert_eq!(messages[0].tokens.total(), 10420);
     }
 
     #[test]
@@ -352,7 +432,7 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "unknown");
-        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.input, 95);
     }
 
     #[test]

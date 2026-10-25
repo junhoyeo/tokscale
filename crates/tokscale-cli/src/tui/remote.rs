@@ -89,6 +89,7 @@ impl RemoteStats {
 // Only referenced from App's cfg(not(test)) fetch path — tests never hit the network.
 #[cfg_attr(test, allow(dead_code))]
 pub fn fetch_remote_stats(token: &str, username: &str, api_base_url: &str) -> Result<RemoteStats> {
+    tokscale_core::network::require_online("Remote stats refresh").map_err(anyhow::Error::msg)?;
     let url = format!("{}/api/me/stats", api_base_url.trim_end_matches('/'));
 
     let rt = tokio::runtime::Builder::new_current_thread()

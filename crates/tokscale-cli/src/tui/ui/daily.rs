@@ -2,10 +2,12 @@ use chrono::Local;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+use tokscale_core::GroupBy;
+
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
-    viewport_scrollbar_state,
+    get_provider_display_name, period_source_display_name, period_source_header, total_tokens_cell,
+    truncate_text, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -109,6 +111,7 @@ fn header_widths(
 /// as [`header_labels`].
 fn detail_header_labels(
     lang: TuiLanguage,
+    group_by: &GroupBy,
     is_narrow: bool,
     is_very_narrow: bool,
     with_speed: bool,
@@ -122,7 +125,7 @@ fn detail_header_labels(
     if is_narrow {
         return vec![
             tr(lang, MessageKey::ColModel),
-            tr(lang, MessageKey::ColSource),
+            period_source_header(lang, group_by),
             tr(lang, MessageKey::ColMessages),
             tr(lang, MessageKey::ColTokens),
             tr(lang, MessageKey::ColCost),
@@ -132,7 +135,7 @@ fn detail_header_labels(
         tr(lang, MessageKey::ColRank),
         tr(lang, MessageKey::ColModel),
         tr(lang, MessageKey::ColProvider),
-        tr(lang, MessageKey::ColSource),
+        period_source_header(lang, group_by),
         tr(lang, MessageKey::ColMessages),
         tr(lang, MessageKey::ColInput),
         tr(lang, MessageKey::ColOutput),
@@ -490,7 +493,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
 
     let with_speed = !is_narrow && inner.width.saturating_add(2) >= DETAIL_SPEED_COLUMNS_MIN_WIDTH;
-    let header_cells = detail_header_labels(lang, is_narrow, is_very_narrow, with_speed);
+    let group_by = app.group_by.borrow().clone();
+    let header_cells = detail_header_labels(lang, &group_by, is_narrow, is_very_narrow, with_speed);
     let cost_column = if with_speed { 12 } else { 11 };
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -561,7 +565,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(get_client_display_name(row.source))
+                    Cell::from(period_source_display_name(&group_by, row.source))
                         .style(Style::default().fg(theme_muted)),
                     Cell::from(row.messages.to_string()),
                     total_tokens_cell(row.tokens.total(), &app.theme),
@@ -576,7 +580,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Cell::from(get_provider_display_name(row.provider)),
-                    Cell::from(get_client_display_name(row.source))
+                    Cell::from(period_source_display_name(&group_by, row.source))
                         .style(Style::default().fg(theme_muted)),
                     Cell::from(row.messages.to_string()),
                     Cell::from(format_tokens(row.tokens.input)).style(metric_input_style),
@@ -663,6 +667,10 @@ mod tests {
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeMap;
+
+    /// A grouping whose detail Source column lists clients, and the one that
+    /// lists machines instead.
+    const DETAIL_GROUPINGS: [GroupBy; 2] = [GroupBy::ClientModel, GroupBy::MachineModel];
 
     fn day(date: NaiveDate, cost: f64) -> DailyUsage {
         DailyUsage {
@@ -809,6 +817,26 @@ mod tests {
         assert!(row.contains("$3.00"), "Cost stays visible\n{body}");
     }
 
+    #[test]
+    fn detail_names_machines_for_machine_model() {
+        let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        let mut day = day_with_detail(date, 3.0);
+        let source = day.source_breakdown.remove("claude-code").unwrap();
+        day.source_breakdown.insert("steven".to_string(), source);
+        let mut app = make_app(200);
+        *app.group_by.borrow_mut() = GroupBy::MachineModel;
+        app.data.daily = vec![day];
+        app.selected_daily_detail_date = Some(date);
+
+        let body = render_body(&mut app, 200, 12);
+        let mut lines = body.lines().skip(1);
+        let header = lines.next().unwrap_or_default();
+        assert!(header.contains("Machine"), "header: {header}");
+        assert!(!header.contains("Source"), "header: {header}");
+        let row = lines.next().unwrap_or_default();
+        assert!(row.contains("steven"), "row: {row}");
+    }
+
     /// The rendered header row of the main table.
     fn header_for(lang: TuiLanguage, width: u16, has_turn: bool) -> String {
         let mut app = make_app(width);
@@ -824,9 +852,10 @@ mod tests {
     }
 
     /// The rendered header row of the detail table.
-    fn detail_header_for(lang: TuiLanguage, width: u16) -> String {
+    fn detail_header_for(lang: TuiLanguage, group_by: &GroupBy, width: u16) -> String {
         let mut app = make_app(width);
         app.settings.tui_language = lang;
+        *app.group_by.borrow_mut() = group_by.clone();
         let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
         app.data.daily = vec![day_with_detail(date, 3.0)];
         app.selected_daily_detail_date = Some(date);
@@ -866,27 +895,29 @@ mod tests {
                     );
                 }
             }
-            assert_header_layout_fits(
-                "daily-detail/wide",
-                lang,
-                &detail_header_labels(lang, false, false, true),
-                &detail_header_widths(false, false, true),
-                // Total and Cost carry the arrows in the detail table.
-                &[
-                    false, false, false, false, false, false, false, false, false, false, true,
-                    false, true, false,
-                ],
-            );
-            assert_header_layout_fits(
-                "daily-detail/wide-without-speed",
-                lang,
-                &detail_header_labels(lang, false, false, false),
-                &detail_header_widths(false, false, false),
-                &[
-                    false, false, false, false, false, false, false, false, false, false, true,
-                    true,
-                ],
-            );
+            for group_by in &DETAIL_GROUPINGS {
+                assert_header_layout_fits(
+                    &format!("daily-detail/wide(group={group_by:?})"),
+                    lang,
+                    &detail_header_labels(lang, group_by, false, false, true),
+                    &detail_header_widths(false, false, true),
+                    // Total and Cost carry the arrows in the detail table.
+                    &[
+                        false, false, false, false, false, false, false, false, false, false, true,
+                        false, true, false,
+                    ],
+                );
+                assert_header_layout_fits(
+                    &format!("daily-detail/wide-without-speed(group={group_by:?})"),
+                    lang,
+                    &detail_header_labels(lang, group_by, false, false, false),
+                    &detail_header_widths(false, false, false),
+                    &[
+                        false, false, false, false, false, false, false, false, false, false, true,
+                        true,
+                    ],
+                );
+            }
         }
     }
 
@@ -959,12 +990,14 @@ mod tests {
         ];
         for (with_speed, width) in cases {
             for lang in TuiLanguage::ALL {
-                assert_headers_render_in_full(
-                    &format!("daily-detail(width={width})"),
-                    lang,
-                    &detail_header_for(lang, width),
-                    &detail_header_labels(lang, false, false, with_speed),
-                );
+                for group_by in &DETAIL_GROUPINGS {
+                    assert_headers_render_in_full(
+                        &format!("daily-detail(width={width},group={group_by:?})"),
+                        lang,
+                        &detail_header_for(lang, group_by, width),
+                        &detail_header_labels(lang, group_by, false, false, with_speed),
+                    );
+                }
             }
         }
     }

@@ -12,6 +12,27 @@ export const PROFILE_PERIOD_LABELS: Record<ProfilePeriod, string> = {
 export const GROUP_PERIODS = ["all", "month", "last-month", "week", "last-week"] as const;
 export type GroupPeriod = (typeof GROUP_PERIODS)[number];
 
+export interface ReportDateRange {
+  start: string;
+  end: string;
+}
+
+/** Rolling profile periods and UTC calendar periods, evaluated at one anchor. */
+export function getProfileDateRange(period: ProfilePeriod, anchor: Date): ReportDateRange | null {
+  if (period === "all") return null;
+  if (period === "this-month" || period === "last-month") {
+    return getCalendarDateRange(period === "this-month" ? "month" : period, anchor);
+  }
+  const end = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate()));
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+export function describeRankingWindow(range: ReportDateRange | null | undefined): string {
+  return range ? `Rank uses UTC dates ${range.start} through ${range.end}. Personal totals may include newer local dates.` : "All-time rank";
+}
+
 export function getCalendarDateRange(
   period: Exclude<GroupPeriod, "all">,
   now: Date,
@@ -43,4 +64,15 @@ export function getCalendarDateRange(
 
   // Submitted dates are day buckets, not instants to reproject into this zone.
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+/** Do not let a finite-period HTTP response survive its UTC day boundary. */
+export function finitePeriodCacheControl(startedAt: number, now = Date.now()): string {
+  const started = new Date(startedAt);
+  const midnight = Date.UTC(started.getUTCFullYear(), started.getUTCMonth(), started.getUTCDate() + 1);
+  const remaining = Math.floor((midnight - now) / 1000);
+  if (remaining <= 0) return "no-store";
+  const fresh = Math.min(60, remaining);
+  const stale = Math.min(300, remaining - fresh);
+  return `public, max-age=0, s-maxage=${fresh}, stale-while-revalidate=${stale}`;
 }

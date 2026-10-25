@@ -1,7 +1,7 @@
 mod amp;
 mod antigravity;
 mod auth;
-mod claude_diagnostics;
+mod client_diagnostics;
 mod commands;
 mod cursor;
 mod device;
@@ -34,6 +34,13 @@ struct Cli {
 
     #[arg(short, long)]
     theme: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Use local data and cached pricing without network requests"
+    )]
+    offline: bool,
 
     #[arg(short, long, default_value = "0")]
     refresh: u64,
@@ -93,7 +100,7 @@ struct Cli {
         long,
         value_name = "STRATEGY",
         default_value = "client,model",
-        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
+        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model, machine,model"
     )]
     group_by: String,
 
@@ -125,7 +132,7 @@ enum Commands {
             long,
             value_name = "STRATEGY",
             default_value = "client,model",
-            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
+            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model, machine,model"
         )]
         group_by: String,
         #[arg(
@@ -198,7 +205,7 @@ enum Commands {
     #[command(about = "Show pricing for a model")]
     Pricing {
         #[arg(
-            help = "Model ID, `list-overrides`, `validate-overrides`, or `explain` (local per-message pricing report)"
+            help = "Model ID, `refresh` (download catalogs), `list-overrides`, `validate-overrides`, or `explain` (local per-message pricing report)"
         )]
         model_id: String,
         #[arg(long, help = "Output as JSON")]
@@ -660,10 +667,30 @@ enum HindsightSubcommand {
     },
 }
 
+// A deny-by-default command boundary prevents auth, submission and helper
+// processes from becoming accidental network side effects of --offline.
+fn validate_offline_command(command: Option<&Commands>) -> Result<()> {
+    match command {
+        None | Some(Commands::Models { .. } | Commands::Monthly { .. }
+            | Commands::Hourly { .. } | Commands::Clients { .. } | Commands::Graph { .. }
+            | Commands::Tui { .. } | Commands::TimeMetrics { .. } | Commands::WarmTuiCache
+            | Commands::Wrapped { .. } | Commands::Config { .. }) => Ok(()),
+        Some(Commands::Pricing { model_id, .. }) if !model_id.eq_ignore_ascii_case("refresh") => Ok(()),
+        Some(Commands::Import { submit: false, .. }) => Ok(()),
+        Some(Commands::Report { no_summarize: true, .. }) => Ok(()),
+        Some(Commands::Report { .. }) => anyhow::bail!("--offline report requires --no-summarize; summarizers may launch network-capable helpers"),
+        _ => anyhow::bail!("This command requires online mode; omit --offline. Offline mode supports local reports, TUI, cached pricing and local imports"),
+    }
+}
+
 fn main() -> Result<()> {
     use std::io::IsTerminal;
 
     let cli = Cli::parse();
+    if cli.offline {
+        validate_offline_command(cli.command.as_ref())?;
+        tokscale_core::network::go_offline();
+    }
     // Install user-configured model aliases once, before any report/graph/TUI
     // path runs, so model-name variants fold consistently across every command.
     // Honors the global `--home` override exactly like scanner settings; an
@@ -1198,6 +1225,7 @@ pub enum ClientFilter {
     AntigravityExtension,
     Aside,
     Vibe,
+    Proma,
     Shelley,
     Synthetic,
 }
@@ -1267,6 +1295,7 @@ impl ClientFilter {
             Self::Muse => "muse",
             Self::Aside => "aside",
             Self::Vibe => "vibe",
+            Self::Proma => "proma",
             Self::Shelley => "shelley",
             Self::Synthetic => "synthetic",
         }
@@ -1339,6 +1368,7 @@ impl ClientFilter {
             Self::Muse => Some(ClientId::Muse),
             Self::Aside => Some(ClientId::Aside),
             Self::Vibe => Some(ClientId::Vibe),
+            Self::Proma => Some(ClientId::Proma),
             Self::Shelley => Some(ClientId::Shelley),
             Self::Synthetic => None,
         }
@@ -1407,6 +1437,7 @@ impl ClientFilter {
             ClientId::Muse => Self::Muse,
             ClientId::Aside => Self::Aside,
             ClientId::Vibe => Self::Vibe,
+            ClientId::Proma => Self::Proma,
             ClientId::Shelley => Self::Shelley,
         }
     }
@@ -1786,7 +1817,9 @@ fn should_auto_sync_cursor_for_local_report(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> bool {
-    home_dir.is_none() && client_filter_includes_cursor(clients)
+    !tokscale_core::network::is_offline()
+        && home_dir.is_none()
+        && client_filter_includes_cursor(clients)
 }
 
 fn auto_sync_amp_for_local_report(
@@ -1929,7 +1962,7 @@ fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) 
         .is_some_and(|clients| clients.split(", ").any(|id| id == client))
 }
 
-fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
+fn emit_client_diagnostics(diagnostics: &[client_diagnostics::ClientDiagnostic]) {
     if diagnostics.is_empty() {
         return;
     }
@@ -2398,7 +2431,7 @@ fn run_models_report(
         .effective_home_dir()
         .as_deref()
         .map(|home| {
-            claude_diagnostics::diagnostics_for_empty_explicit_report(
+            client_diagnostics::diagnostics_for_empty_explicit_report(
                 home,
                 context.use_env_roots,
                 &context.clients,
@@ -2421,6 +2454,8 @@ fn run_models_report(
             workspace_label: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             session_id: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            machine: Option<String>,
             model: String,
             provider: String,
             input: i64,
@@ -2451,7 +2486,7 @@ fn run_models_report(
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
-            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
+            diagnostics: Vec<client_diagnostics::ClientDiagnostic>,
         }
 
         let output = ModelReportJson {
@@ -2476,6 +2511,11 @@ fn run_models_report(
                     },
                     session_id: if matches!(group_by, GroupBy::Session | GroupBy::ClientSession) {
                         e.session_id
+                    } else {
+                        None
+                    },
+                    machine: if group_by == GroupBy::MachineModel {
+                        e.machine
                     } else {
                         None
                     },
@@ -2540,6 +2580,22 @@ fn run_models_report(
         table.enforce_styling();
 
         let workspace_name = |label: Option<&str>| label.unwrap_or("Unknown workspace").to_string();
+        // `workspace,model` and `machine,model` share one layout; only the
+        // first column differs.
+        let label_header = if group_by == GroupBy::MachineModel {
+            "Machine"
+        } else {
+            "Workspace"
+        };
+        let row_label = |entry: &tokscale_core::ModelUsage| {
+            if group_by == GroupBy::MachineModel {
+                entry.machine.clone().unwrap_or_else(|| {
+                    tokscale_core::machine_label::DEFAULT_LOCAL_MACHINE_LABEL.to_string()
+                })
+            } else {
+                workspace_name(entry.workspace_label.as_deref())
+            }
+        };
 
         if compact {
             match group_by {
@@ -2759,9 +2815,9 @@ fn run_models_report(
                     );
                     table.add_row(total_row);
                 }
-                GroupBy::WorkspaceModel => {
+                GroupBy::WorkspaceModel | GroupBy::MachineModel => {
                     table.set_header(vec![
-                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new(label_header).fg(Color::Cyan),
                         Cell::new("Model").fg(Color::Cyan),
                         Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
@@ -2769,7 +2825,7 @@ fn run_models_report(
 
                     for entry in &report.entries {
                         table.add_row(vec![
-                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(row_label(entry)),
                             Cell::new(&entry.model),
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
@@ -3074,9 +3130,9 @@ fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     ]);
                 }
-                GroupBy::WorkspaceModel => {
+                GroupBy::WorkspaceModel | GroupBy::MachineModel => {
                     table.set_header(vec![
-                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new(label_header).fg(Color::Cyan),
                         Cell::new("Providers").fg(Color::Cyan),
                         Cell::new("Sources").fg(Color::Cyan),
                         Cell::new("Model").fg(Color::Cyan),
@@ -3104,7 +3160,7 @@ fn run_models_report(
                             .join(", ");
 
                         table.add_row(vec![
-                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(row_label(entry)),
                             Cell::new(crate::tui::ui::widgets::get_provider_display_name(
                                 &entry.provider,
                             ))
@@ -3859,6 +3915,34 @@ fn run_pricing_lookup(
     use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
 
+    if model_id.eq_ignore_ascii_case("refresh") {
+        if provider.is_some() || billing_provider.is_some() || strict {
+            anyhow::bail!(
+                "pricing refresh does not accept model query or override-validation options"
+            );
+        }
+        let report = Runtime::new()?
+            .block_on(PricingService::refresh())
+            .map_err(anyhow::Error::msg)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            for source in &report.sources {
+                if let Some(error) = &source.error {
+                    eprintln!("{}: {}", source.source, error);
+                } else {
+                    println!("{}: cached {} models", source.source, source.models);
+                }
+            }
+        }
+        if !report.succeeded() {
+            anyhow::bail!(
+                "Some pricing catalogs could not be refreshed; previous caches were retained"
+            );
+        }
+        return Ok(());
+    }
+
     // An explicitly supplied invalid channel must not become "no filter".
     // Validate before loading configuration or enumerating local usage rows.
     let billing_provider = billing_provider
@@ -3928,7 +4012,11 @@ fn run_pricing_lookup(
             println!("{}", serde_json::to_string_pretty(&explanations)?);
         } else {
             for row in explanations {
-                println!("{} / {} billing={} {:?}: ${:.8} source={} scope={} matched={} normalized={} base ×{} coverage={}", row.client, row.raw_model_id, row.billing_provider_id.as_deref().unwrap_or("unknown"), row.estimate_status, row.final_estimate, row.price_source.as_deref().unwrap_or("unpriced"), row.scope, row.matched_model_id.as_deref().unwrap_or("none"), row.normalized, row.effective_multiplier, row.coverage);
+                print!("{} / {} billing={} {:?}: ${:.8} source={} scope={} matched={} normalized={} base ×{} coverage={}", row.client, row.raw_model_id, row.billing_provider_id.as_deref().unwrap_or("unknown"), row.estimate_status, row.final_estimate, row.price_source.as_deref().unwrap_or("unpriced"), row.scope, row.matched_model_id.as_deref().unwrap_or("none"), row.normalized, row.effective_multiplier, row.coverage);
+                if !row.coverage && !row.uncovered_buckets.is_empty() {
+                    print!(" uncovered={}", row.uncovered_buckets.join(","));
+                }
+                println!();
             }
         }
         return Ok(());
@@ -4071,13 +4159,21 @@ fn run_pricing_lookup(
                     },
                     matched_provider_id: pricing.matched_provider_id,
                     rate_basis: "base",
-                    missing_rates: [
-                        ("input", pricing.pricing.input_cost_per_token),
-                        ("output", pricing.pricing.output_cost_per_token),
-                    ]
-                    .into_iter()
-                    .filter_map(|(name, value)| value.is_none().then_some(name))
-                    .collect(),
+                    missing_rates: {
+                        let mut missing = Vec::new();
+                        if pricing.pricing.input_cost_per_token.is_none() {
+                            missing.push("input");
+                        }
+                        if pricing.pricing.output_cost_per_token.is_none() {
+                            missing.push("output");
+                        }
+                        if pricing.pricing.cache_read_input_token_cost.is_some()
+                            && pricing.pricing.cache_creation_input_token_cost.is_none()
+                        {
+                            missing.push("cache_creation");
+                        }
+                        missing
+                    },
                     all_rates: pricing.pricing.clone(),
                     matched_key: pricing.matched_key,
                     source: pricing.source,
@@ -4593,7 +4689,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
+        diagnostics: Vec<client_diagnostics::ClientDiagnostic>,
     }
 
     #[derive(serde::Serialize)]
@@ -4638,209 +4734,207 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     let copilot_exporter_path =
         tokscale_core::copilot_exporter_path_with_env_strategy(use_env_roots);
 
-    let clients: Vec<ClientRow> =
-        ClientId::iter()
-            .map(|client| {
-                let prime_agent_roots = (client == ClientId::PrimeAgent).then(|| {
-                    tokscale_core::scanner::prime_agent_session_roots_with_env_strategy(
-                        &home_dir_str,
-                        use_env_roots,
-                    )
+    let clients: Vec<ClientRow> = ClientId::iter()
+        .map(|client| {
+            let prime_agent_roots = (client == ClientId::PrimeAgent).then(|| {
+                tokscale_core::scanner::prime_agent_session_roots_with_env_strategy(
+                    &home_dir_str,
+                    use_env_roots,
+                )
+            });
+            let sessions_path = prime_agent_roots
+                .as_ref()
+                .map(|roots| roots[0].to_string_lossy().into_owned())
+                .unwrap_or_else(|| {
+                    client
+                        .data()
+                        .resolve_path_with_env_strategy(&home_dir_str, use_env_roots)
                 });
-                let sessions_path = prime_agent_roots
-                    .as_ref()
-                    .map(|roots| roots[0].to_string_lossy().into_owned())
-                    .unwrap_or_else(|| {
-                        client
-                            .data()
-                            .resolve_path_with_env_strategy(&home_dir_str, use_env_roots)
-                    });
-                let sessions_path_exists = Path::new(&sessions_path).exists();
-                let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
-                    .iter()
-                    .filter(|(c, _)| *c == client)
-                    .map(|(_, path)| AdditionalPath {
-                        path: path.to_string_lossy().to_string(),
-                        exists: path.exists(),
-                    })
-                    .collect();
-                if let Some(roots) = &prime_agent_roots {
-                    additional_paths.push(AdditionalPath {
-                        path: roots[1].to_string_lossy().into_owned(),
-                        exists: roots[1].exists(),
-                    });
-                }
-                if client == ClientId::Zcode {
-                    let path = home_dir.join(".zcode/cli/db/db.sqlite");
-                    additional_paths.push(AdditionalPath {
-                        path: path.to_string_lossy().to_string(),
-                        exists: path.exists(),
-                    });
-                }
-                if client == ClientId::OpenClaw {
-                    // Current OpenClaw keeps live transcripts in per-agent
-                    // SQLite stores beside the legacy JSONL session dirs.
-                    // List them from every agents root the scanner ingests:
-                    // the default root, the legacy rebrand roots, and the
-                    // configured extra roots.
-                    let mut openclaw_roots: Vec<std::path::PathBuf> =
-                        vec![std::path::PathBuf::from(&sessions_path)];
-                    openclaw_roots.extend(
-                        [".clawdbot/agents", ".moltbot/agents", ".moldbot/agents"]
-                            .iter()
-                            .map(|relative| home_dir.join(relative)),
-                    );
-                    openclaw_roots.extend(
-                        settings_extra_dirs
-                            .iter()
-                            .filter(|(c, _)| *c == ClientId::OpenClaw)
-                            .map(|(_, path)| path.clone()),
-                    );
-                    openclaw_roots.extend(
-                        extra_dirs
-                            .iter()
-                            .filter(|(c, _)| *c == ClientId::OpenClaw)
-                            .map(|(_, path)| std::path::PathBuf::from(path)),
-                    );
-                    let mut seen_openclaw_dbs = std::collections::HashSet::new();
-                    for root in openclaw_roots {
-                        for db_path in tokscale_core::scanner::discover_openclaw_agent_dbs(&root) {
-                            let key =
-                                std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
-                            if seen_openclaw_dbs.insert(key) {
-                                additional_paths.push(AdditionalPath {
-                                    path: db_path.to_string_lossy().to_string(),
-                                    exists: true,
-                                });
-                            }
-                        }
-                    }
-                }
-                if client == ClientId::DevinDesktop {
-                    for root in tokscale_core::scanner::devin_desktop_additional_roots(
-                        &home_dir_str,
-                        use_env_roots,
-                    ) {
-                        let path_str = root.to_string_lossy().to_string();
-                        if !additional_paths.iter().any(|p| p.path == path_str) {
+            let sessions_path_exists = Path::new(&sessions_path).exists();
+            let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
+                .iter()
+                .filter(|(c, _)| *c == client)
+                .map(|(_, path)| AdditionalPath {
+                    path: path.to_string_lossy().to_string(),
+                    exists: path.exists(),
+                })
+                .collect();
+            if let Some(roots) = &prime_agent_roots {
+                additional_paths.push(AdditionalPath {
+                    path: roots[1].to_string_lossy().into_owned(),
+                    exists: roots[1].exists(),
+                });
+            }
+            if client == ClientId::Zcode {
+                let path = home_dir.join(".zcode/cli/db/db.sqlite");
+                additional_paths.push(AdditionalPath {
+                    path: path.to_string_lossy().to_string(),
+                    exists: path.exists(),
+                });
+            }
+            if client == ClientId::OpenClaw {
+                // Current OpenClaw keeps live transcripts in per-agent
+                // SQLite stores beside the legacy JSONL session dirs.
+                // List them from every agents root the scanner ingests:
+                // the default root, the legacy rebrand roots, and the
+                // configured extra roots.
+                let mut openclaw_roots: Vec<std::path::PathBuf> =
+                    vec![std::path::PathBuf::from(&sessions_path)];
+                openclaw_roots.extend(
+                    [".clawdbot/agents", ".moltbot/agents", ".moldbot/agents"]
+                        .iter()
+                        .map(|relative| home_dir.join(relative)),
+                );
+                openclaw_roots.extend(
+                    settings_extra_dirs
+                        .iter()
+                        .filter(|(c, _)| *c == ClientId::OpenClaw)
+                        .map(|(_, path)| path.clone()),
+                );
+                openclaw_roots.extend(
+                    extra_dirs
+                        .iter()
+                        .filter(|(c, _)| *c == ClientId::OpenClaw)
+                        .map(|(_, path)| std::path::PathBuf::from(path)),
+                );
+                let mut seen_openclaw_dbs = std::collections::HashSet::new();
+                for root in openclaw_roots {
+                    for db_path in tokscale_core::scanner::discover_openclaw_agent_dbs(&root) {
+                        let key =
+                            std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+                        if seen_openclaw_dbs.insert(key) {
                             additional_paths.push(AdditionalPath {
-                                path: path_str,
-                                exists: root.exists(),
+                                path: db_path.to_string_lossy().to_string(),
+                                exists: true,
                             });
                         }
                     }
                 }
-                let legacy_paths = if client == ClientId::OpenClaw {
-                    vec![
-                        LegacyPath {
-                            path: home_dir
-                                .join(".clawdbot/agents")
-                                .to_string_lossy()
-                                .to_string(),
-                            exists: home_dir.join(".clawdbot/agents").exists(),
-                        },
-                        LegacyPath {
-                            path: home_dir
-                                .join(".moltbot/agents")
-                                .to_string_lossy()
-                                .to_string(),
-                            exists: home_dir.join(".moltbot/agents").exists(),
-                        },
-                        LegacyPath {
-                            path: home_dir
-                                .join(".moldbot/agents")
-                                .to_string_lossy()
-                                .to_string(),
-                            exists: home_dir.join(".moldbot/agents").exists(),
-                        },
-                    ]
-                } else {
-                    vec![]
-                };
-                let (headless_supported, headless_paths, headless_message_count) =
-                    if client.supports_headless() {
-                        (
-                            true,
-                            headless_roots
-                                .iter()
-                                .map(|root| {
-                                    let path = root.join(client.as_str());
-                                    HeadlessPath {
-                                        path: path.to_string_lossy().to_string(),
-                                        exists: path.exists(),
-                                    }
-                                })
-                                .collect(),
-                            parsed
-                                .messages
-                                .iter()
-                                .filter(|message| {
-                                    matches!(
-                                        message.agent.as_deref(),
-                                        Some("headless" | CODEX_HEADLESS_AGENT)
-                                    ) && message.client == client.as_str()
-                                })
-                                .count() as i32,
-                        )
-                    } else {
-                        (false, vec![], 0)
-                    };
-
-                let label = match client {
-                    ClientId::Claude => "Claude Code",
-                    ClientId::Codex => "Codex CLI",
-                    ClientId::Copilot => "Copilot CLI",
-                    ClientId::Gemini => "Gemini CLI",
-                    ClientId::Cursor => "Cursor IDE",
-                    ClientId::Kimi => "Kimi CLI",
-                    ClientId::AntigravityCli => "Antigravity CLI",
-                    ClientId::AntigravityExtension => "Antigravity IDE Extension",
-                    _ => client_ui::display_name(client),
+            }
+            if client == ClientId::DevinDesktop {
+                for root in tokscale_core::scanner::devin_desktop_additional_roots(
+                    &home_dir_str,
+                    use_env_roots,
+                ) {
+                    let path_str = root.to_string_lossy().to_string();
+                    if !additional_paths.iter().any(|p| p.path == path_str) {
+                        additional_paths.push(AdditionalPath {
+                            path: path_str,
+                            exists: root.exists(),
+                        });
+                    }
                 }
-                .to_string();
+            }
+            let legacy_paths = if client == ClientId::OpenClaw {
+                vec![
+                    LegacyPath {
+                        path: home_dir
+                            .join(".clawdbot/agents")
+                            .to_string_lossy()
+                            .to_string(),
+                        exists: home_dir.join(".clawdbot/agents").exists(),
+                    },
+                    LegacyPath {
+                        path: home_dir
+                            .join(".moltbot/agents")
+                            .to_string_lossy()
+                            .to_string(),
+                        exists: home_dir.join(".moltbot/agents").exists(),
+                    },
+                    LegacyPath {
+                        path: home_dir
+                            .join(".moldbot/agents")
+                            .to_string_lossy()
+                            .to_string(),
+                        exists: home_dir.join(".moldbot/agents").exists(),
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let (headless_supported, headless_paths, headless_message_count) =
+                if client.supports_headless() {
+                    (
+                        true,
+                        headless_roots
+                            .iter()
+                            .map(|root| {
+                                let path = root.join(client.as_str());
+                                HeadlessPath {
+                                    path: path.to_string_lossy().to_string(),
+                                    exists: path.exists(),
+                                }
+                            })
+                            .collect(),
+                        parsed
+                            .messages
+                            .iter()
+                            .filter(|message| {
+                                matches!(
+                                    message.agent.as_deref(),
+                                    Some("headless" | CODEX_HEADLESS_AGENT)
+                                ) && message.client == client.as_str()
+                            })
+                            .count() as i32,
+                    )
+                } else {
+                    (false, vec![], 0)
+                };
 
-                let mut extra_paths: Vec<ExtraPath> = settings_extra_dirs
+            let label = match client {
+                ClientId::Claude => "Claude Code",
+                ClientId::Codex => "Codex CLI",
+                ClientId::Copilot => "Copilot CLI",
+                ClientId::Gemini => "Gemini CLI",
+                ClientId::Cursor => "Cursor IDE",
+                ClientId::Kimi => "Kimi CLI",
+                ClientId::AntigravityCli => "Antigravity CLI",
+                ClientId::AntigravityExtension => "Antigravity IDE Extension",
+                _ => client_ui::display_name(client),
+            }
+            .to_string();
+
+            let mut extra_paths: Vec<ExtraPath> = settings_extra_dirs
+                .iter()
+                .filter(|(c, _)| *c == client)
+                .map(|(_, path)| ExtraPath {
+                    path: path.to_string_lossy().to_string(),
+                    exists: path.exists(),
+                    source: "settings".to_string(),
+                })
+                .collect();
+            extra_paths.extend(
+                extra_dirs
                     .iter()
                     .filter(|(c, _)| *c == client)
                     .map(|(_, path)| ExtraPath {
-                        path: path.to_string_lossy().to_string(),
-                        exists: path.exists(),
-                        source: "settings".to_string(),
-                    })
-                    .collect();
-                extra_paths.extend(extra_dirs.iter().filter(|(c, _)| *c == client).map(
-                    |(_, path)| ExtraPath {
                         path: path.clone(),
                         exists: Path::new(path).exists(),
                         source: "env".to_string(),
-                    },
-                ));
+                    }),
+            );
 
-                let diagnostics = if client == ClientId::Claude {
-                    claude_diagnostics::diagnostics_for_clients_row(&home_dir, use_env_roots)
-                } else {
-                    Vec::new()
-                };
+            let diagnostics =
+                client_diagnostics::diagnostics_for_clients_row(client, &home_dir, use_env_roots);
 
-                ClientRow {
-                    client: client.as_str().to_string(),
-                    label,
-                    sessions_path,
-                    sessions_path_exists,
-                    additional_paths,
-                    legacy_paths,
-                    message_count: parsed.counts.get(client),
-                    headless_supported,
-                    headless_paths,
-                    headless_message_count,
-                    exporter_status: (client == ClientId::Copilot
-                        && copilot_exporter_path.is_some())
+            ClientRow {
+                client: client.as_str().to_string(),
+                label,
+                sessions_path,
+                sessions_path_exists,
+                additional_paths,
+                legacy_paths,
+                message_count: parsed.counts.get(client),
+                headless_supported,
+                headless_paths,
+                headless_message_count,
+                exporter_status: (client == ClientId::Copilot && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
-                    extra_paths,
-                    diagnostics,
-                }
-            })
-            .collect();
+                extra_paths,
+                diagnostics,
+            }
+        })
+        .collect();
 
     if json {
         #[derive(serde::Serialize)]
@@ -5173,6 +5267,54 @@ const AMP_SUBMISSION_PARSER_VERSION: u32 = 2;
 // selected surfaces declare this generation and cover the credited history.
 // This is a submission contract, independent of the on-disk parser cache version.
 const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
+// Devin CLI generation 2 deduplicates `message_nodes` rows by request_id
+// instead of row_id (ea4dd97e, parser cache v3->v4). That generation counts
+// the same history strictly LOWER, which no monotonic receiver ledger can
+// follow on its own. The scan therefore also ships a per-day recount proof
+// (`TsScanScope::recount_proofs`) built from the same rows, and the receiver
+// subtracts only the proven over-count from its stored cells. The receiver
+// accepts generation 1 only until a device starts this transition, then
+// freezes every older submit.
+const DEVIN_CLI_SUBMISSION_PARSER_VERSION: u32 = 2;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TsRecountProofCell {
+    tokens: TsTokenBreakdown,
+    cost: f64,
+    messages: i32,
+}
+
+impl From<&tokscale_core::RecountProofCell> for TsRecountProofCell {
+    fn from(cell: &tokscale_core::RecountProofCell) -> Self {
+        Self {
+            tokens: TsTokenBreakdown {
+                input: cell.tokens.input,
+                output: cell.tokens.output,
+                cache_read: cell.tokens.cache_read,
+                cache_write: cell.tokens.cache_write,
+                reasoning: cell.tokens.reasoning,
+            },
+            cost: cell.cost,
+            messages: cell.messages,
+        }
+    }
+}
+
+/// What the previous and the declared parser generation count for one
+/// (day, model) cell from the same local rows. See `recount_proofs` below.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TsRecountProofEntry {
+    previous: TsRecountProofCell,
+    corrected: TsRecountProofCell,
+}
+
+/// `client -> date -> model id -> proof`.
+type TsRecountProofs = std::collections::BTreeMap<
+    String,
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, TsRecountProofEntry>>,
+>;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5182,6 +5324,115 @@ struct TsScanScope {
     full_history_clients: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retention_floors: Option<std::collections::BTreeMap<String, String>>,
+    /// Per-day correction evidence for clients whose declared generation
+    /// counts the same history LOWER than the one the receiver may have
+    /// stored (Devin CLI's request_id dedup). A generation number alone only
+    /// proves identity; this proves, per cell, how much the older generation
+    /// over-counted from exactly the rows this snapshot was built from, so
+    /// the receiver subtracts that difference instead of replacing the cell.
+    /// Only sent for clients carrying full-history authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recount_proofs: Option<TsRecountProofs>,
+}
+
+/// Strip full-history authority from clients whose history this scan could
+/// only partially read.
+///
+/// `full_history` so far meant "no date filter was passed". A client whose
+/// session sources partly failed to open satisfies that and still reports less
+/// than it has, and on the receiver a full-history snapshot is what may
+/// rewrite or re-baseline stored history. Withholding the bit keeps those
+/// stored rows untouched until a later scan reads everything.
+fn withhold_full_history_for_clients(
+    scope: &mut TsScanScope,
+    incomplete_clients: &std::collections::BTreeSet<String>,
+) {
+    if incomplete_clients.is_empty() {
+        return;
+    }
+    let declared = scope.parser_versions.len();
+    scope
+        .full_history_clients
+        .retain(|client| !incomplete_clients.contains(client));
+    scope.full_history = scope.full_history && scope.full_history_clients.len() == declared;
+}
+
+/// Clients whose discovered session sources were not all readable.
+fn incompletely_read_clients(
+    source_reads: &std::collections::BTreeMap<String, tokscale_core::SourceReadSummary>,
+) -> std::collections::BTreeSet<String> {
+    source_reads
+        .iter()
+        .filter(|(_, summary)| !summary.complete())
+        .map(|(client, _)| client.clone())
+        .collect()
+}
+
+/// True when the corrected side of every model on a proof day is empty: the
+/// previous generation counted rows there that this generation drops
+/// entirely, so the submission has no contribution to date for the day.
+fn recount_proof_day_is_all_duplicates(
+    models: &std::collections::BTreeMap<String, tokscale_core::RecountProofEntry>,
+) -> bool {
+    models.values().all(|entry| {
+        let tokens = &entry.corrected.tokens;
+        tokens.input == 0
+            && tokens.output == 0
+            && tokens.cache_read == 0
+            && tokens.cache_write == 0
+            && tokens.cache_write_1h == 0
+            && tokens.reasoning == 0
+            && entry.corrected.messages == 0
+    })
+}
+
+/// Recount proofs for the clients that carry full-history authority in
+/// `scope`, limited to the days the submission actually dates for them plus
+/// the days whose every row the corrected generation drops: those have no
+/// contribution to date, yet their stored over-count is exactly what the
+/// proof exists to heal.
+fn submission_recount_proofs(
+    graph: &tokscale_core::GraphResultV2,
+    scope: &TsScanScope,
+) -> Option<TsRecountProofs> {
+    let mut proofs = TsRecountProofs::new();
+    for (client, proof) in &graph.recount_proofs {
+        if !scope.full_history && !scope.full_history_clients.iter().any(|c| c == client) {
+            continue;
+        }
+        let submitted_dates: std::collections::BTreeSet<&str> = graph
+            .contributions
+            .iter()
+            .filter(|day| day.clients.iter().any(|s| &s.client == client))
+            .map(|day| day.date.as_str())
+            .collect();
+        let days: std::collections::BTreeMap<_, _> = proof
+            .iter()
+            .filter(|(date, models)| {
+                submitted_dates.contains(date.as_str())
+                    || recount_proof_day_is_all_duplicates(models)
+            })
+            .map(|(date, models)| {
+                let models = models
+                    .iter()
+                    .map(|(model_id, entry)| {
+                        (
+                            model_id.clone(),
+                            TsRecountProofEntry {
+                                previous: (&entry.previous).into(),
+                                corrected: (&entry.corrected).into(),
+                            },
+                        )
+                    })
+                    .collect();
+                (date.clone(), models)
+            })
+            .collect();
+        if !days.is_empty() {
+            proofs.insert(client.clone(), days);
+        }
+    }
+    (!proofs.is_empty()).then_some(proofs)
 }
 
 /// Submission-level provenance (#888): history recovered from an aggregate
@@ -5243,6 +5494,7 @@ fn to_ts_token_contribution_data(
                 scope.retention_floors = Some(floors);
             }
         }
+        scope.recount_proofs = submission_recount_proofs(graph, &scope);
         scope
     });
     TsTokenContributionData {
@@ -5351,9 +5603,52 @@ fn to_ts_token_contribution_data(
     }
 }
 
+/// Atomic source families: the receiver advances them only when every member
+/// arrives in the same snapshot (see MICODE_FAMILY/ANTIGRAVITY_FAMILY in
+/// packages/frontend/src/lib/db/parserHighWater.ts).
+const MICODE_FAMILY: &[&str] = &["micode", "micode-desktop"];
+const ANTIGRAVITY_FAMILY: &[&str] = &["antigravity", "antigravity-cli", "antigravity-extension"];
+
+/// Clients a date-filtered submit still ships complete. The receiver freezes
+/// every versioned parser and atomic source family without full-history
+/// authority, so letting `since`/`until`/`year` scope them would discard
+/// their usage outright instead of narrowing it. Amp additionally needs a
+/// complete thread export before any snapshot of it can claim full coverage.
+/// An atomic-family member is exempted only when the whole family was
+/// selected — otherwise the family plan freezes anyway and the exemption
+/// would bypass the requested date bound without advancing anything.
+fn full_history_exempt_clients<'a>(
+    clients: &'a [String],
+    amp_full_history_safe: bool,
+) -> impl Iterator<Item = String> + 'a {
+    let family_complete = |client: &str| {
+        let family: &[&str] = if MICODE_FAMILY.contains(&client) {
+            MICODE_FAMILY
+        } else if ANTIGRAVITY_FAMILY.contains(&client) {
+            ANTIGRAVITY_FAMILY
+        } else {
+            return true;
+        };
+        family
+            .iter()
+            .all(|member| clients.iter().any(|c| c.as_str() == *member))
+    };
+    clients
+        .iter()
+        .filter(move |client| {
+            tokscale_core::FULL_HISTORY_SUBMIT_CLIENTS.contains(&client.as_str())
+                && (client.as_str() != "amp" || amp_full_history_safe)
+                && family_complete(client.as_str())
+        })
+        .cloned()
+}
+
 /// Parser identity is declared for every scanned client, even for a partial
 /// date range. `full_history` is a separate capability bit: only an unbounded
-/// scan can establish or advance a cumulative rollout high-water.
+/// scan can establish or advance a cumulative rollout high-water. A partial
+/// scan still names the clients whose messages it ships unfiltered — their
+/// snapshot semantics make a partial window unsubmittable, so the graph
+/// exempts them from the date filter (see `FULL_HISTORY_SUBMIT_CLIENTS`).
 fn submit_scan_scope(
     clients: Option<&[String]>,
     full_history: bool,
@@ -5366,20 +5661,21 @@ fn submit_scan_scope(
             let version = match client.as_str() {
                 "amp" => AMP_SUBMISSION_PARSER_VERSION,
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
+                "devin-cli" => DEVIN_CLI_SUBMISSION_PARSER_VERSION,
                 "micode" | "micode-desktop" => MICODE_SUBMISSION_PARSER_VERSION,
                 _ => SUBMISSION_PARSER_VERSION,
             };
             (client.clone(), version)
         })
         .collect();
-    let full_history_clients = if full_history {
+    let full_history_clients: Vec<String> = if full_history {
         clients
             .iter()
             .filter(|client| client.as_str() != "amp" || amp_full_history_safe)
             .cloned()
             .collect()
     } else {
-        Vec::new()
+        full_history_exempt_clients(clients, amp_full_history_safe).collect()
     };
     let every_client_complete = full_history_clients.len() == clients.len();
     Some(TsScanScope {
@@ -5388,6 +5684,7 @@ fn submit_scan_scope(
         full_history: full_history && every_client_complete,
         full_history_clients,
         retention_floors: None,
+        recount_proofs: None,
     })
 }
 
@@ -6627,6 +6924,34 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!();
 }
 
+/// Name the clients whose local session sources this scan could not read in
+/// full, and say what that costs the submission. The payload itself stays
+/// path-free; the paths are only printed here for the person at the prompt.
+fn report_incompletely_read_sources(
+    source_reads: &std::collections::BTreeMap<String, tokscale_core::SourceReadSummary>,
+) {
+    use colored::Colorize;
+
+    for (client, summary) in source_reads {
+        if summary.complete() {
+            continue;
+        }
+        let label = tokscale_core::ClientId::from_str(client)
+            .map(|id| id.display_name().to_string())
+            .unwrap_or_else(|| client.clone());
+        println!(
+            "{}",
+            format!(
+                "  {label}: {} of {} session database{} could not be read; its usage is submitted without full-history authority, so stored history is kept as is.",
+                summary.unreadable,
+                summary.discovered,
+                if summary.discovered == 1 { "" } else { "s" },
+            )
+            .yellow()
+        );
+    }
+}
+
 fn report_unpriced_submission_usage(unpriced: &[tokscale_core::UnpricedSubmissionUsage]) {
     use colored::Colorize;
 
@@ -6930,13 +7255,20 @@ fn run_submit_command(
             .as_ref()
             .and_then(|result| result.warning.as_deref()),
     );
-    let scan_scope = submit_scan_scope(
-        clients.as_deref(),
-        full_history_scan,
-        amp_sync
-            .as_ref()
-            .is_none_or(amp::AutoSyncAmpResult::allows_full_history),
-    );
+    let amp_full_history_safe = amp_sync
+        .as_ref()
+        .is_none_or(amp::AutoSyncAmpResult::allows_full_history);
+    let scan_scope =
+        submit_scan_scope(clients.as_deref(), full_history_scan, amp_full_history_safe);
+    // The receivers freeze these clients without complete coverage, so a
+    // date-bounded submit ships their whole snapshot rather than dropping it.
+    // The same list the scan scope serializes as `fullHistoryClients` is
+    // handed to the graph, so what the payload declares and what it ships
+    // cannot diverge.
+    let full_history_clients: std::collections::BTreeSet<String> = scan_scope
+        .as_ref()
+        .map(|scope| scope.full_history_clients.iter().cloned().collect())
+        .unwrap_or_default();
     if explicit_cursor_filter || explicit_warp_filter || explicit_hindsight_filter {
         let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
         emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -6992,17 +7324,20 @@ fn run_submit_command(
     let rt = Runtime::new()?;
     let mut graph_result = rt
         .block_on(async {
-            generate_submission_graph_v2(ReportOptions {
-                home_dir: None,
-                use_env_roots: true,
-                clients,
-                since,
-                until,
-                year,
-                group_by: GroupBy::default(),
-                worktree_rollup: tokscale_core::WorktreeRollup::default(),
-                scanner_settings: tui::settings::load_scanner_settings(),
-            })
+            generate_submission_graph_v2(
+                ReportOptions {
+                    home_dir: None,
+                    use_env_roots: true,
+                    clients,
+                    since,
+                    until,
+                    year,
+                    group_by: GroupBy::default(),
+                    worktree_rollup: tokscale_core::WorktreeRollup::default(),
+                    scanner_settings: tui::settings::load_scanner_settings(),
+                },
+                &full_history_clients,
+            )
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -7026,6 +7361,16 @@ fn run_submit_command(
     let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
     report_excluded_tokenless_rows(&excluded_rows);
     report_unpriced_submission_usage(&graph_result.unpriced_submission_usage);
+    // A declared parser generation is identity, not proof that every local
+    // source was read. Withhold full-history authority from any client whose
+    // discovered sources partly failed to open, so the receiver keeps its
+    // stored rows instead of treating a half-read history as the whole.
+    let incomplete_source_clients = incompletely_read_clients(&graph_result.source_reads);
+    report_incompletely_read_sources(&graph_result.source_reads);
+    let scan_scope = scan_scope.map(|mut scope| {
+        withhold_full_history_for_clients(&mut scope, &incomplete_source_clients);
+        scope
+    });
 
     println!("{}", "  Data to submit:".white());
     println!(
@@ -8127,6 +8472,7 @@ mod tests {
             workspace_key: None,
             workspace_label: None,
             session_id: None,
+            machine: None,
             model: "gemini-3-pro".to_string(),
             provider: "antigravity".to_string(),
             input: i64::MAX,
@@ -8151,6 +8497,7 @@ mod tests {
             workspace_key: None,
             workspace_label: None,
             session_id: None,
+            machine: None,
             model: "gemini-3-pro".to_string(),
             provider: "antigravity".to_string(),
             input: i64::MAX,
@@ -8243,6 +8590,8 @@ mod tests {
             time_metrics: None,
             unpriced_submission_usage: Vec::new(),
             incomplete_cost_dates: std::collections::BTreeSet::new(),
+            recount_proofs: std::collections::BTreeMap::new(),
+            source_reads: std::collections::BTreeMap::new(),
         }
     }
 
@@ -10121,6 +10470,297 @@ mod tests {
         assert_eq!(scope.parser_versions.get("droid"), Some(&1));
     }
 
+    /// A date-bounded submit still ships the snapshot-integrity clients
+    /// complete: `SUPPORTED_VERSIONED_PARSERS` and the atomic source families
+    /// freeze on a partial snapshot, so scoping them by date would discard
+    /// the window's usage instead of narrowing it. Bounded-growth clients
+    /// stay filtered.
+    #[test]
+    fn submit_scan_scope_names_snapshot_clients_complete_on_a_partial_scan() {
+        let clients = vec![
+            "codex".to_string(),
+            "copilot".to_string(),
+            "droid".to_string(),
+        ];
+        let scope = submit_scan_scope(Some(&clients), false, true).expect("partial scope");
+
+        assert!(!scope.full_history);
+        assert_eq!(
+            scope.full_history_clients,
+            vec!["copilot".to_string(), "droid".to_string()]
+        );
+        assert!(!scope.full_history_clients.contains(&"codex".to_string()));
+    }
+
+    /// Amp only carries full-history authority when its thread export was
+    /// complete; the same gate applies on a partial scan as on a full one.
+    #[test]
+    fn submit_scan_scope_partial_scan_still_gates_amp_on_cache_completeness() {
+        let clients = vec!["amp".to_string(), "droid".to_string()];
+        let incomplete = submit_scan_scope(Some(&clients), false, false).expect("scope");
+        let complete = submit_scan_scope(Some(&clients), false, true).expect("scope");
+
+        assert!(!incomplete.full_history_clients.contains(&"amp".to_string()));
+        assert!(incomplete
+            .full_history_clients
+            .contains(&"droid".to_string()));
+        assert!(complete.full_history_clients.contains(&"amp".to_string()));
+    }
+
+    /// Selecting one member of an atomic family on a bounded scan cannot
+    /// satisfy the receiver's all-members completeness contract, so it must
+    /// not be exempted — its messages stay inside the requested date window.
+    /// With every member selected, the family ships complete as a unit.
+    #[test]
+    fn submit_scan_scope_partial_scan_skips_incomplete_atomic_families() {
+        let solo = submit_scan_scope(Some(&["micode".to_string()]), false, true).expect("scope");
+        assert!(solo.full_history_clients.is_empty());
+
+        let solo_ag = submit_scan_scope(
+            Some(&["antigravity-cli".to_string(), "codex".to_string()]),
+            false,
+            true,
+        )
+        .expect("scope");
+        assert!(solo_ag.full_history_clients.is_empty());
+
+        let family = vec!["micode".to_string(), "micode-desktop".to_string()];
+        let together = submit_scan_scope(Some(&family), false, true).expect("scope");
+        assert_eq!(together.full_history_clients, family);
+    }
+
+    /// The exemption list mirrors the receiver's snapshot-integrity set, which
+    /// registers devin-cli at generation 2: a bounded submit that filtered it
+    /// would freeze on the receiver and discard the window's usage, and its
+    /// recount proof only rides on a declared-complete snapshot.
+    #[test]
+    fn submit_scan_scope_names_devin_cli_complete_on_a_partial_scan() {
+        let clients = vec!["codex".to_string(), "devin-cli".to_string()];
+        let scope = submit_scan_scope(Some(&clients), false, true).expect("scope");
+
+        assert!(!scope.full_history);
+        assert_eq!(scope.full_history_clients, vec!["devin-cli".to_string()]);
+        assert_eq!(scope.parser_versions.get("devin-cli"), Some(&2));
+    }
+
+    /// The blocker class from #1414 applies to the bounded path too: a client
+    /// the scan could only partially read must never be declared complete,
+    /// even though the date-filter exemption already shipped what it could
+    /// read. Withholding the declaration keeps the receiver's stored rows —
+    /// an undeclared versioned parser freezes instead of replacing history.
+    #[test]
+    fn bounded_scan_withholds_declaration_from_partially_read_exempt_clients() {
+        let clients = vec![
+            "codex".to_string(),
+            "devin-cli".to_string(),
+            "droid".to_string(),
+        ];
+        let mut scope = submit_scan_scope(Some(&clients), false, true).expect("scope");
+        assert_eq!(
+            scope.full_history_clients,
+            vec!["devin-cli".to_string(), "droid".to_string()]
+        );
+
+        let mut reads = std::collections::BTreeMap::new();
+        reads.insert(
+            "devin-cli".to_string(),
+            tokscale_core::SourceReadSummary {
+                discovered: 2,
+                unreadable: 1,
+            },
+        );
+        withhold_full_history_for_clients(&mut scope, &incompletely_read_clients(&reads));
+
+        assert!(!scope.full_history);
+        assert_eq!(scope.full_history_clients, vec!["droid".to_string()]);
+        // Identity stays declared; only the completeness authority is gone.
+        assert_eq!(scope.parser_versions.get("devin-cli"), Some(&2));
+    }
+
+    /// Devin CLI generation 2 deduplicates `message_nodes` rows by request_id,
+    /// which lowers the counted total — a recount, not a re-attribution. The
+    /// server accepts the generation via `SUPPORTED_VERSIONED_PARSERS` and
+    /// heals stored cells from the per-day recount proof this CLI ships
+    /// (`RECOUNT_PROOF_CLIENTS`, both in
+    /// packages/frontend/src/lib/db/parserHighWater.ts). Generation 1
+    /// (pre-request_id dedup) freezes once a device transitions, so only a CLI
+    /// declaring this version can heal the inflated rows.
+    #[test]
+    fn submit_scan_scope_declares_the_devin_cli_generation_the_server_registers() {
+        let clients = vec!["devin-cli".to_string()];
+        let scope = submit_scan_scope(Some(&clients), true, true).expect("devin-cli scope");
+
+        assert_eq!(scope.parser_versions.get("devin-cli"), Some(&2));
+        // The desktop surface parses an unrelated ACP stream and is unaffected
+        // by the CLI request_id dedup; it keeps the default generation.
+        let desktop = vec!["devin-desktop".to_string()];
+        let scope = submit_scan_scope(Some(&desktop), true, true).expect("devin-desktop scope");
+        assert_eq!(scope.parser_versions.get("devin-desktop"), Some(&1));
+    }
+
+    fn recount_cell(input: i64, cost: f64, messages: i32) -> tokscale_core::RecountProofCell {
+        tokscale_core::RecountProofCell {
+            tokens: tokscale_core::TokenBreakdown {
+                input,
+                ..Default::default()
+            },
+            cost,
+            messages,
+        }
+    }
+
+    /// The proof rides only on full-history authority and only for days the
+    /// payload actually dates for that client: a bounded scan freezes on the
+    /// receiver anyway, and a proof for a day the submission never covers
+    /// could not be checked against the snapshot it claims to describe. The
+    /// one exception is a day whose corrected side is empty, where "nothing
+    /// submitted" IS the snapshot the proof describes.
+    #[test]
+    fn submit_payload_ships_recount_proofs_only_with_full_history_authority() {
+        let mut graph = graph_result_with_contributions(vec![day_with_clients(
+            "2026-10-08",
+            350,
+            vec![client_contribution(
+                "devin-cli",
+                "swe-2-high",
+                "devin",
+                350,
+                3.5,
+                7,
+            )],
+        )]);
+        let mut proof = tokscale_core::ClientRecountProof::new();
+        proof.entry("2026-10-08".to_string()).or_default().insert(
+            "swe-2-high".to_string(),
+            tokscale_core::RecountProofEntry {
+                previous: recount_cell(400, 4.0, 8),
+                corrected: recount_cell(350, 3.5, 7),
+            },
+        );
+        // Excluded below: a day the contributions no longer carry.
+        proof.entry("2026-10-01".to_string()).or_default().insert(
+            "swe-2-high".to_string(),
+            tokscale_core::RecountProofEntry {
+                previous: recount_cell(10, 0.1, 1),
+                corrected: recount_cell(10, 0.1, 1),
+            },
+        );
+        // Kept below: every row of this day was a request_id duplicate of a
+        // row the corrected generation dated elsewhere, so the day has no
+        // contribution and yet its stored over-count still needs the proof.
+        proof.entry("2026-10-02".to_string()).or_default().insert(
+            "swe-2-high".to_string(),
+            tokscale_core::RecountProofEntry {
+                previous: recount_cell(25, 0.25, 2),
+                corrected: recount_cell(0, 0.0, 0),
+            },
+        );
+        graph.recount_proofs.insert("devin-cli".to_string(), proof);
+        let clients = vec!["devin-cli".to_string()];
+
+        let full = to_ts_token_contribution_data(
+            &graph,
+            None,
+            submit_scan_scope(Some(&clients), true, true),
+        );
+        let json = serde_json::to_value(&full).unwrap();
+        let proofs = &json["scanScope"]["recountProofs"]["devin-cli"];
+        assert_eq!(
+            proofs["2026-10-08"]["swe-2-high"]["previous"]["tokens"]["input"],
+            400
+        );
+        assert_eq!(
+            proofs["2026-10-08"]["swe-2-high"]["previous"]["messages"],
+            8
+        );
+        assert_eq!(
+            proofs["2026-10-08"]["swe-2-high"]["corrected"]["tokens"]["input"],
+            350
+        );
+        assert_eq!(proofs["2026-10-08"]["swe-2-high"]["corrected"]["cost"], 3.5);
+        assert!(proofs.get("2026-10-01").is_none());
+        assert_eq!(
+            proofs["2026-10-02"]["swe-2-high"]["previous"]["tokens"]["input"],
+            25
+        );
+        assert_eq!(
+            proofs["2026-10-02"]["swe-2-high"]["corrected"]["messages"],
+            0
+        );
+
+        // A date-bounded submit still ships devin-cli complete (it is in
+        // `FULL_HISTORY_SUBMIT_CLIENTS`), so the client keeps per-client
+        // full-history authority and its proof rides along: the payload
+        // dates every day the proof describes.
+        let bounded = to_ts_token_contribution_data(
+            &graph,
+            None,
+            submit_scan_scope(Some(&clients), false, true),
+        );
+        let bounded_scope = bounded.scan_scope.as_ref().expect("bounded scope");
+        assert!(!bounded_scope.full_history);
+        assert_eq!(bounded_scope.full_history_clients, clients);
+        let bounded_proofs = bounded_scope
+            .recount_proofs
+            .as_ref()
+            .expect("bounded submit ships the proof for a declared client");
+        assert!(bounded_proofs.contains_key("devin-cli"));
+
+        // Full-history authority withheld for this client withholds its proof.
+        let mut withheld = submit_scan_scope(Some(&clients), true, true).unwrap();
+        withhold_full_history_for_clients(
+            &mut withheld,
+            &["devin-cli".to_string()].into_iter().collect(),
+        );
+        let payload = to_ts_token_contribution_data(&graph, None, Some(withheld));
+        let scope = payload.scan_scope.as_ref().unwrap();
+        assert!(!scope.full_history);
+        assert!(scope.full_history_clients.is_empty());
+        assert!(scope.recount_proofs.is_none());
+    }
+
+    /// `fullHistory` only ever meant "no date filter". A Devin database that
+    /// fails to open yields an empty row set, indistinguishable from no usage,
+    /// so the scan's source-read summary is what demotes the client: it keeps
+    /// its declared generation but loses the authority to rewrite history.
+    #[test]
+    fn unreadable_sources_withhold_full_history_from_that_client_only() {
+        let mut reads = std::collections::BTreeMap::new();
+        reads.insert(
+            "devin-cli".to_string(),
+            tokscale_core::SourceReadSummary {
+                discovered: 2,
+                unreadable: 1,
+            },
+        );
+        reads.insert(
+            "claude".to_string(),
+            tokscale_core::SourceReadSummary {
+                discovered: 3,
+                unreadable: 0,
+            },
+        );
+        let incomplete = incompletely_read_clients(&reads);
+        assert_eq!(incomplete.len(), 1);
+        assert!(incomplete.contains("devin-cli"));
+
+        let clients = vec!["claude".to_string(), "devin-cli".to_string()];
+        let mut scope = submit_scan_scope(Some(&clients), true, true).unwrap();
+        assert!(scope.full_history);
+        withhold_full_history_for_clients(&mut scope, &incomplete);
+        // Fail closed for receivers predating `fullHistoryClients`, but keep
+        // the complete sibling's authority for receivers that read it.
+        assert!(!scope.full_history);
+        assert_eq!(scope.full_history_clients, vec!["claude".to_string()]);
+        assert_eq!(scope.parser_versions.get("devin-cli"), Some(&2));
+
+        // Nothing unreadable leaves the scope untouched.
+        let mut intact = submit_scan_scope(Some(&clients), true, true).unwrap();
+        withhold_full_history_for_clients(&mut intact, &std::collections::BTreeSet::new());
+        assert!(intact.full_history);
+        assert_eq!(intact.full_history_clients.len(), 2);
+    }
+
     /// The tip is advice for a person at a prompt. Autosubmit's stdout is the
     /// scheduler log (`StandardOutPath` in the launchd plist), so printing it
     /// there is pure noise on every scheduled run.
@@ -10667,9 +11307,50 @@ mod tests {
         );
         assert!(!partial_floors.contains_key("amp"));
 
-        let bounded_scope = submit_scan_scope(Some(&clients), false, true);
+        // A bounded submit still ships snapshot-integrity clients complete and
+        // names them in `full_history_clients`, so their floors are populated.
+        // A lone atomic-family member is not exempted — the receiver's family
+        // contract needs every member — so antigravity-cli carries no floor
+        // until the whole trio is selected.
+        let solo_bounded = submit_scan_scope(Some(&clients), false, true);
+        let solo_payload = to_ts_token_contribution_data(&graph, None, solo_bounded);
+        let solo_floors = solo_payload
+            .scan_scope
+            .as_ref()
+            .and_then(|s| s.retention_floors.as_ref())
+            .expect("floor populated for amp on a bounded submit");
+        assert!(!solo_floors.contains_key("antigravity-cli"));
+        assert_eq!(
+            solo_floors.get("amp").map(String::as_str),
+            Some("2026-08-07")
+        );
+
+        let family_clients = vec![
+            "antigravity".to_string(),
+            "antigravity-cli".to_string(),
+            "antigravity-extension".to_string(),
+            "amp".to_string(),
+        ];
+        let bounded_scope = submit_scan_scope(Some(&family_clients), false, true);
         let bounded_payload = to_ts_token_contribution_data(&graph, None, bounded_scope);
-        assert!(bounded_payload
+        let bounded_floors = bounded_payload
+            .scan_scope
+            .as_ref()
+            .and_then(|s| s.retention_floors.as_ref())
+            .expect("floors populated for exempt clients on a bounded submit");
+        assert_eq!(
+            bounded_floors.get("antigravity-cli").map(String::as_str),
+            Some("2026-08-05")
+        );
+        assert_eq!(
+            bounded_floors.get("amp").map(String::as_str),
+            Some("2026-08-07")
+        );
+
+        // A bounded submit of only bounded-growth clients carries no floors.
+        let growth_only = submit_scan_scope(Some(&["codex".to_string()]), false, true);
+        let growth_payload = to_ts_token_contribution_data(&graph, None, growth_only);
+        assert!(growth_payload
             .scan_scope
             .as_ref()
             .and_then(|s| s.retention_floors.as_ref())

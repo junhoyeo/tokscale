@@ -1,3 +1,5 @@
+import { getLeaderboardDateRange } from "./dateRange";
+import type { ReportDateRange } from "@/lib/reportingPeriods";
 import { unstable_cache } from "next/cache";
 import { db, users } from "@/lib/db";
 import {
@@ -24,11 +26,6 @@ export type {
   Period,
   SortBy,
 } from "@/lib/leaderboard/types";
-
-interface PeriodDateRange {
-  start: string;
-  end: string;
-}
 
 type LeaderboardQueryResult = {
   users: unknown;
@@ -59,49 +56,6 @@ type ScopedAllTimeAggregateCachePayload =
   | { kind: "oversized" };
 
 const SCOPED_ALL_TIME_CACHE_MAX_BYTES = 1024 * 1024;
-
-function toUtcDateString(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function getPeriodDateRange(
-  period: Period,
-  now: Date = new Date(),
-  customFrom?: string,
-  customTo?: string,
-): PeriodDateRange | null {
-  if (period === "all") return null;
-  if (period === "custom") {
-    return customFrom && customTo ? { start: customFrom, end: customTo } : null;
-  }
-
-  const end = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  if (period === "week") {
-    const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 6);
-    return { start: toUtcDateString(start), end: toUtcDateString(end) };
-  }
-  if (period === "last-month") {
-    const lastMonthEnd = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0),
-    );
-    const lastMonthStart = new Date(
-      Date.UTC(lastMonthEnd.getUTCFullYear(), lastMonthEnd.getUTCMonth(), 1),
-    );
-    return {
-      start: toUtcDateString(lastMonthStart),
-      end: toUtcDateString(lastMonthEnd),
-    };
-  }
-  return {
-    start: toUtcDateString(
-      new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
-    ),
-    end: toUtcDateString(end),
-  };
-}
 
 function mapLeaderboardUser(row: RankedLeaderboardDbRow): LeaderboardUser {
   return {
@@ -267,10 +221,8 @@ async function fetchPeriodLeaderboardData(
   limit: number,
   sortBy: SortBy,
   search: string,
-  customFrom?: string,
-  customTo?: string,
+  range: ReportDateRange | null,
 ): Promise<LeaderboardData> {
-  const range = getPeriodDateRange(period, new Date(), customFrom, customTo);
   if (!range)
     return buildLeaderboardData(undefined, page, limit, period, sortBy);
   const parsed = parseSearchDirectives(search);
@@ -453,8 +405,7 @@ async function fetchLeaderboardData(
   limit: number,
   sortBy: SortBy,
   search: string,
-  customFrom?: string,
-  customTo?: string,
+  range: ReportDateRange | null,
 ): Promise<LeaderboardData> {
   return period === "all"
     ? fetchAllTimeLeaderboardData(page, limit, sortBy, search)
@@ -464,8 +415,7 @@ async function fetchLeaderboardData(
         limit,
         sortBy,
         search,
-        customFrom,
-        customTo,
+        range,
       );
 }
 
@@ -478,6 +428,8 @@ export function getLeaderboardData(
   customFrom?: string,
   customTo?: string,
 ): Promise<LeaderboardData> {
+  const range = getLeaderboardDateRange(period, new Date(), customFrom, customTo);
+  const rangeKey = range ? `${range.start}:${range.end}` : "all";
   const cacheKey =
     period === "custom"
       ? `leaderboard:custom:${customFrom}:${customTo}:${page}:${limit}:${sortBy}:${search}`
@@ -490,10 +442,9 @@ export function getLeaderboardData(
         limit,
         sortBy,
         search,
-        customFrom,
-        customTo,
+        range,
       ),
-    [cacheKey],
+    [cacheKey, rangeKey],
     { tags: ["leaderboard", `leaderboard:${period}`], revalidate: 300 },
   )();
 }
@@ -502,11 +453,9 @@ async function fetchUserRank(
   username: string,
   period: Period,
   sortBy: SortBy,
-  customFrom?: string,
-  customTo?: string,
+  range: ReportDateRange | null,
 ): Promise<LeaderboardUser | null> {
   if (period !== "all") {
-    const range = getPeriodDateRange(period, new Date(), customFrom, customTo);
     if (!range) return null;
     const base = sql`
       SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
@@ -556,12 +505,14 @@ export function getUserRank(
   customFrom?: string,
   customTo?: string,
 ): Promise<LeaderboardUser | null> {
+  const range = getLeaderboardDateRange(period, new Date(), customFrom, customTo);
+  const rangeKey = range ? `${range.start}:${range.end}` : "all";
   const usernameCacheKey = normalizeUsernameCacheKey(username);
   const periodKey =
     period === "custom" ? `custom:${customFrom}:${customTo}` : period;
   return unstable_cache(
-    () => fetchUserRank(username, period, sortBy, customFrom, customTo),
-    [`user-rank:${usernameCacheKey}:${periodKey}:${sortBy}`],
+    () => fetchUserRank(username, period, sortBy, range),
+    [`user-rank:${usernameCacheKey}:${periodKey}:${sortBy}`, rangeKey],
     {
       tags: ["leaderboard", "user-rank", `user-rank:${usernameCacheKey}`],
       revalidate: 300,

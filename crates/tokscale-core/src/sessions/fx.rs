@@ -353,6 +353,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             pricing_model_id,
             estimate_status: crate::sessions::EstimateStatus::Unpriced,
             copilot_context: None,
+            machine_label: None,
         });
     }
 
@@ -398,6 +399,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
                 pricing_model_id: None,
                 estimate_status: crate::sessions::EstimateStatus::Unpriced,
                 copilot_context: None,
+                machine_label: None,
             });
         }
     }

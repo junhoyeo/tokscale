@@ -240,6 +240,8 @@ describe("POST /api/groups/[slug]/invite", () => {
       invitedBy: "user-1",
       role: "member",
       invitedUsername: null,
+      maxUses: 1,
+      expiresAt: expect.any(Date),
     });
   });
 });

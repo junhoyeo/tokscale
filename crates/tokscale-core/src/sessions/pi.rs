@@ -471,14 +471,23 @@ pub(crate) fn parse_pi_format_file(
     client: &str,
     fallback_provider: &'static str,
 ) -> Vec<UnifiedMessage> {
-    let mut observer = NoopPiFormatObserver;
+    parse_pi_format_file_with_observer(path, client, fallback_provider, &mut NoopPiFormatObserver)
+}
+
+/// Observe standard Pi entries without changing parsing or fork identity.
+pub(crate) fn parse_pi_format_file_with_observer(
+    path: &Path,
+    client: &str,
+    fallback_provider: &'static str,
+    observer: &mut impl PiFormatObserver,
+) -> Vec<UnifiedMessage> {
     parse_pi_format_file_inner(
         path,
         client,
         fallback_provider,
         Some(client),
         PiParseOptions::standard_deduped(),
-        &mut observer,
+        observer,
     )
 }
 
