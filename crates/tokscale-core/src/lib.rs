@@ -62,13 +62,19 @@ static CLAUDE_RESUMED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// commit a write exactly where a live client does: after the scan has read
 /// the database, before the loader decides whether that read was stable.
 #[cfg(test)]
-static AFTER_SQLITE_SCAN_HOOK: Mutex<Option<fn(&Path)>> = Mutex::new(None);
+type PathScopedSqliteScanHook = Option<(PathBuf, fn(&Path))>;
+
+#[cfg(test)]
+static AFTER_SQLITE_SCAN_HOOK: Mutex<PathScopedSqliteScanHook> = Mutex::new(None);
 
 #[cfg(test)]
 fn run_after_sqlite_scan_hook(path: &Path) {
-    let hook = *AFTER_SQLITE_SCAN_HOOK
+    let hook = AFTER_SQLITE_SCAN_HOOK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|(expected_path, _)| expected_path == path)
+        .map(|(_, hook)| *hook);
     if let Some(hook) = hook {
         hook(path);
     }
@@ -25342,10 +25348,11 @@ mod tests {
     struct AfterSqliteScanHook;
 
     impl AfterSqliteScanHook {
-        fn set(hook: fn(&std::path::Path)) -> Self {
+        fn set(path: &std::path::Path, hook: fn(&std::path::Path)) -> Self {
             *crate::AFTER_SQLITE_SCAN_HOOK
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((path.to_path_buf(), hook));
             Self
         }
     }
@@ -25356,6 +25363,35 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
+    }
+
+    static AFTER_SQLITE_SCAN_HOOK_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn count_after_sqlite_scan_hook_call(_: &std::path::Path) {
+        AFTER_SQLITE_SCAN_HOOK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn after_sqlite_scan_hook_runs_only_for_its_database() {
+        AFTER_SQLITE_SCAN_HOOK_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let temp = tempfile::TempDir::new().unwrap();
+        let expected = temp.path().join("expected.db");
+        let other = temp.path().join("other.db");
+        let hook = AfterSqliteScanHook::set(&expected, count_after_sqlite_scan_hook_call);
+
+        crate::run_after_sqlite_scan_hook(&other);
+        assert_eq!(
+            AFTER_SQLITE_SCAN_HOOK_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        crate::run_after_sqlite_scan_hook(&expected);
+        assert_eq!(
+            AFTER_SQLITE_SCAN_HOOK_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        drop(hook);
     }
 
     /// Downgrades the cached entry for `path` to one written before billing
@@ -25411,7 +25447,7 @@ mod tests {
         // Usage recorded after the legacy entry was written, then a scan that
         // OpenCode writes into while it runs.
         insert_timed_opencode_row(&conn, "msg-new", 2_000, 60);
-        let hook = AfterSqliteScanHook::set(commit_opencode_row_during_scan);
+        let hook = AfterSqliteScanHook::set(&db_path, commit_opencode_row_during_scan);
         let raced = scan();
         drop(hook);
         assert_eq!(
@@ -25503,7 +25539,7 @@ mod tests {
         mark_cache_entry_legacy(ClientId::MiMoCode, &db_path);
 
         insert("msg-new", 60);
-        let hook = AfterSqliteScanHook::set(commit_micode_row_during_scan);
+        let hook = AfterSqliteScanHook::set(&db_path, commit_micode_row_during_scan);
         let raced = scan();
         drop(hook);
         assert_eq!(
