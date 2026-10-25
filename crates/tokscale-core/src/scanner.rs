@@ -154,7 +154,8 @@ pub struct ScanResult {
     /// user-configured scan roots.
     pub devin_dbs: Vec<PathBuf>,
     /// VS Code Copilot chat session JSONL files discovered under
-    /// `workspaceStorage/*/chatSessions/*.jsonl`.
+    /// `workspaceStorage/*/chatSessions/*.jsonl`, plus the empty-window
+    /// store at `globalStorage/emptyWindowChatSessions/*.jsonl`.
     pub copilot_vscode_sessions: Vec<PathBuf>,
 }
 
@@ -1975,12 +1976,35 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         home_dir
     )));
 
+    // Chats started in a window with no folder or workspace open live under
+    // User/globalStorage/emptyWindowChatSessions/<sessionId>.jsonl — the same
+    // patch-log format, stored flat without the per-workspace hash and
+    // chatSessions levels. The transient workspaceStorage folder backing such
+    // a window is removed when the window closes, so this directory is the
+    // only durable record of those requests.
+    let mut empty_window_roots: Vec<PathBuf> = Vec::new();
+    empty_window_roots.push(PathBuf::from(format!(
+        "{}/Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions",
+        home_dir
+    )));
+    empty_window_roots.push(PathBuf::from(format!(
+        "{}/.config/Code/User/globalStorage/emptyWindowChatSessions",
+        home_dir
+    )));
+
     if cfg!(target_os = "windows") && use_env_roots {
         if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-            roots.push(PathBuf::from(app_data).join("Code/User/workspaceStorage"));
+            let app_data = PathBuf::from(app_data);
+            roots.push(app_data.join("Code/User/workspaceStorage"));
+            empty_window_roots
+                .push(app_data.join("Code/User/globalStorage/emptyWindowChatSessions"));
         }
     }
     roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Code/User/workspaceStorage"));
+    empty_window_roots.push(
+        PathBuf::from(home_dir)
+            .join("AppData/Roaming/Code/User/globalStorage/emptyWindowChatSessions"),
+    );
 
     let mut files: Vec<PathBuf> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -2012,6 +2036,27 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
                 if seen.insert(key) {
                     files.push(path);
                 }
+            }
+        }
+    }
+
+    for empty_window_root in &empty_window_roots {
+        let entries = match std::fs::read_dir(empty_window_root) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(key) {
+                files.push(path);
             }
         }
     }
@@ -6492,6 +6537,26 @@ mod tests {
         assert_eq!(result.get(ClientId::Copilot).len(), 1);
         assert!(result.get(ClientId::Copilot)[0].ends_with("copilot.jsonl"));
         assert!(result.copilot_session_store_db.is_none());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot_discovers_empty_window_sessions() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let empty_window_dir =
+            home.join("AppData/Roaming/Code/User/globalStorage/emptyWindowChatSessions");
+        fs::create_dir_all(&empty_window_dir).unwrap();
+        let session = empty_window_dir.join("eeeeeeee-0000-0000-0000-000000000000.jsonl");
+        File::create(&session).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.copilot_vscode_sessions, vec![session.clone()]);
+        assert_eq!(result.get(ClientId::Copilot).len(), 0);
     }
 
     #[test]
